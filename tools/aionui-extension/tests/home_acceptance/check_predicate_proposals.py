@@ -699,31 +699,44 @@ def check_fact_specific_mutations(proposals: list[dict[str, Any]]) -> int:
 def check_declared_counterexample_mutations(
     proposals: list[dict[str, Any]],
 ) -> int:
-    """Execute the proposal-local mutation for every declared counterexample."""
+    """Execute each complete, proposal-local semantic counterexample fixture."""
     checked = 0
     for item in proposals:
         predicate = item["canonical_predicate"]
         negative = item["validation"]["adversarial_negatives"][0]
-        mutations = negative.get("observed_mutations")
+        fixture = negative.get("observed_fixture")
         require(
-            isinstance(mutations, list) and mutations,
-            f"{item['id']}: declared counterexample has no executable mutation",
-        )
-        observed = synthesized_observed(predicate)
-        require(
-            evaluate(predicate, observed),
-            f"{item['id']}: declared counterexample positive fixture failed",
+            isinstance(fixture, list) and fixture,
+            f"{item['id']}: declared counterexample has no executable fixture",
         )
         scope_name = "phase" if predicate["kind"] == "state_transition" else "target"
         expected_keys = {scope_name, "path", "value"}
-        for mutation in mutations:
-            exact_keys(mutation, expected_keys, f"{item['id']}.counterexample")
-            key = (mutation[scope_name], mutation["path"])
+        observed: dict[tuple[str, str], Any] = {}
+        for observation in fixture:
+            exact_keys(observation, expected_keys, f"{item['id']}.counterexample")
+            key = (observation[scope_name], observation["path"])
             require(
-                key in observed,
-                f"{item['id']}: counterexample mutates an unasserted observation {key}",
+                key not in observed,
+                f"{item['id']}: counterexample repeats observation key {key}",
             )
-            observed[key] = copy.deepcopy(mutation["value"])
+            encoded = json.dumps(observation["value"], sort_keys=True)
+            require(
+                not any(marker in encoded for marker in (
+                    "declared counterexample:", "__wrong_value__",
+                    "__different__", "__outside_allowlist__",
+                )),
+                f"{item['id']}: counterexample uses a generated filler value",
+            )
+            observed[key] = copy.deepcopy(observation["value"])
+        passing = synthesized_observed(predicate)
+        require(
+            set(observed) == set(passing),
+            f"{item['id']}: counterexample fixture must be a complete observation",
+        )
+        require(
+            any(observed[key] != passing[key] for key in passing),
+            f"{item['id']}: counterexample is identical to the passing fixture",
+        )
         require(
             not evaluate(predicate, observed),
             f"{item['id']}: declared counterexample passed",
@@ -731,6 +744,95 @@ def check_declared_counterexample_mutations(
         checked += 1
     require(checked == 121, "declared counterexample coverage must be 121/121")
     return checked
+
+
+def check_operations_job_result_cases(proposals: list[dict[str, Any]]) -> int:
+    item = next(
+        proposal for proposal in proposals
+        if proposal["id"] == "fleet.operations-job-result"
+    )
+    predicate = item["canonical_predicate"]
+    actions = item["executable_request"]["recorder"]["action"]
+    capture, poll, refresh = actions
+    require(capture["kind"] == "click_response_json", "job result must capture operation response")
+    require(
+        capture["method"] == "POST"
+        and capture["endpoint"] == "/api/config/ops"
+        and capture["pointer"] == "/body/job_id",
+        "job result operation response binding drift",
+    )
+    expected_job_id = next(
+        assertion["value"] for assertion in predicate["assertions"]
+        if assertion.get("path") == "/operation_job_id"
+    )
+    require(
+        isinstance(expected_job_id, str)
+        and re.fullmatch(r"[a-f0-9]{32}", expected_job_id) is not None
+        and expected_job_id != "0" * 32,
+        "job result requires a nonzero fixture job ID",
+    )
+    require(
+        poll == {
+            "kind": "resource_delta",
+            "endpoint": f"/api/config/jobs/{expected_job_id}",
+            "milliseconds": 1100,
+            "path": "/job_poll_count",
+        },
+        "job poll endpoint is not bound to the captured fixture job ID",
+    )
+    require(
+        refresh["kind"] == "resource_delta"
+        and refresh["endpoint"] == "/api/config/seats",
+        "job result must observe the ensuing Fleet refresh",
+    )
+    bindings = item["adapter"].get("fixture_bindings")
+    require(
+        isinstance(bindings, dict)
+        and bindings.get("job_id") == expected_job_id
+        and bindings.get("poll_sequence") == ["running", "succeeded"],
+        "job result fixture binding drift",
+    )
+    fleet_source = FLEET_DASHBOARD.read_text()
+    for fragment in (
+        "const job=await configPost('/api/config/ops'",
+        "`/api/config/jobs/${job.job_id}`",
+        "opsTerminalResult=terminalOpsText(state,job)",
+        "await refreshSeats()",
+    ):
+        require(fragment in fleet_source, f"job result source missing {fragment!r}")
+
+    positive = synthesized_observed(predicate)
+    positive[("before", "/job_output_before")] = (
+        f"Job {expected_job_id} queued\nStreaming output…"
+    )
+    positive[("action", "/operation_job_id")] = expected_job_id
+    positive[("action", "/job_poll_count")] = 1
+    positive[("action", "/fleet_refresh_count")] = 1
+    positive[("after", "/terminal_output")] = (
+        f"Job {expected_job_id}\nOutcome: succeeded\n"
+        "Effect: operation completed; Fleet state refreshed."
+    )
+    require(evaluate(predicate, positive), "correlated terminal job fixture did not pass")
+
+    cases = {
+        "running": {
+            **positive,
+            ("action", "/fleet_refresh_count"): 0,
+            ("after", "/terminal_output"):
+                f"Job {expected_job_id}\nStatus: running\nStreaming output…",
+        },
+        "pre-refresh": {
+            **positive,
+            ("action", "/fleet_refresh_count"): 0,
+        },
+        "stale-terminal": {
+            **positive,
+            ("action", "/operation_job_id"): "b" * 32,
+        },
+    }
+    for label, observed in cases.items():
+        require(not evaluate(predicate, observed), f"job result {label} case passed")
+    return len(cases)
 
 
 def check_causal_browser_regressions(proposals: list[dict[str, Any]]) -> None:
@@ -1293,6 +1395,7 @@ def validate(delta: dict[str, Any]) -> tuple[int, int, int]:
     check_causal_browser_regressions(proposals)
     negative_cases += check_fact_specific_mutations(proposals)
     negative_cases += check_declared_counterexample_mutations(proposals)
+    negative_cases += check_operations_job_result_cases(proposals)
     producer_examples = (
         check_parent_producer_examples(proposals)
         + check_assistant_binding_examples(proposals)

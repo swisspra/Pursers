@@ -557,11 +557,26 @@
           {
             "mutation": "registration requires inherited secrets or a populated env",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/recover_control",
+                "value": "Recover registration"
+              },
+              {
+                "phase": "action",
+                "path": "/mcp_transport",
+                "value": {
+                  "type": "stdio",
+                  "command": "pursers-wait-bridge",
+                  "args": [],
+                  "env": {}
+                }
+              },
               {
                 "phase": "after",
                 "path": "/registration_status",
-                "value": "declared counterexample: registration requires inherited secrets or a populated env"
+                "value": "Registration failed: environment credentials required."
               }
             ]
           },
@@ -747,21 +762,31 @@
           {
             "mutation": "unordered navigation links or a generic Progress heading are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/next_step_control",
+                "value": "Connect project"
+              },
+              {
+                "phase": "action",
+                "path": "/open_connection",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/connect_step",
-                "value": "declared counterexample: unordered navigation links or a generic Progress heading are accepted"
+                "value": "Ready"
               },
               {
                 "phase": "after",
                 "path": "/prepare_step",
-                "value": "declared counterexample: unordered navigation links or a generic Progress heading are accepted"
+                "value": "Connect"
               },
               {
                 "phase": "after",
                 "path": "/ready_step",
-                "value": "declared counterexample: unordered navigation links or a generic Progress heading are accepted"
+                "value": "Prepare Team"
               },
               {
                 "phase": "after",
@@ -970,11 +995,32 @@
           {
             "mutation": "the Codex reviewer or worker context is substituted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/selected_board",
+                "value": "sandbox-board"
+              },
+              {
+                "phase": "action",
+                "path": "/assistant_binding",
+                "value": {
+                  "manifest_id": "pursers-reviewer-codex",
+                  "runtime_id": "ext-pursers-reviewer-codex",
+                  "agent_id": "codex",
+                  "preset_agent_type": "codex",
+                  "context_file": "contexts/reviewer.md",
+                  "context_sha256": "451722de5bb3d3b0b2abf018110edb11a78560a265134e5e904dfeaa5468ce1e",
+                  "manifest_sha256": "aba90f00d74dce49d4f14a69a15b37cc5135bb298f858f8221ac19ba37cd25b8",
+                  "extension_name": "pursers",
+                  "endpoint": "/api/extensions/assistants",
+                  "transport": "same-origin-http"
+                }
+              },
               {
                 "phase": "after",
                 "path": "/selected_board",
-                "value": "declared counterexample: the Codex reviewer or worker context is substituted"
+                "value": "sandbox-board"
               }
             ]
           },
@@ -1141,11 +1187,32 @@
           {
             "mutation": "the Claude reviewer or worker context is substituted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/selected_board",
+                "value": "sandbox-board"
+              },
+              {
+                "phase": "action",
+                "path": "/assistant_binding",
+                "value": {
+                  "manifest_id": "pursers-reviewer-claude",
+                  "runtime_id": "ext-pursers-reviewer-claude",
+                  "agent_id": "claude",
+                  "preset_agent_type": "claude",
+                  "context_file": "contexts/reviewer.md",
+                  "context_sha256": "451722de5bb3d3b0b2abf018110edb11a78560a265134e5e904dfeaa5468ce1e",
+                  "manifest_sha256": "aba90f00d74dce49d4f14a69a15b37cc5135bb298f858f8221ac19ba37cd25b8",
+                  "extension_name": "pursers",
+                  "endpoint": "/api/extensions/assistants",
+                  "transport": "same-origin-http"
+                }
+              },
               {
                 "phase": "after",
                 "path": "/selected_board",
-                "value": "declared counterexample: the Claude reviewer or worker context is substituted"
+                "value": "sandbox-board"
               }
             ]
           },
@@ -1312,11 +1379,32 @@
           {
             "mutation": "the Codex worker or reviewer context is substituted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/selected_board",
+                "value": "sandbox-board"
+              },
+              {
+                "phase": "action",
+                "path": "/assistant_binding",
+                "value": {
+                  "manifest_id": "pursers-reviewer-claude",
+                  "runtime_id": "ext-pursers-reviewer-claude",
+                  "agent_id": "claude",
+                  "preset_agent_type": "claude",
+                  "context_file": "contexts/reviewer.md",
+                  "context_sha256": "451722de5bb3d3b0b2abf018110edb11a78560a265134e5e904dfeaa5468ce1e",
+                  "manifest_sha256": "aba90f00d74dce49d4f14a69a15b37cc5135bb298f858f8221ac19ba37cd25b8",
+                  "extension_name": "pursers",
+                  "endpoint": "/api/extensions/assistants",
+                  "transport": "same-origin-http"
+                }
+              },
               {
                 "phase": "after",
                 "path": "/selected_board",
-                "value": "declared counterexample: the Codex worker or reviewer context is substituted"
+                "value": "sandbox-board"
               }
             ]
           },
@@ -1483,11 +1571,32 @@
           {
             "mutation": "the Claude worker or reviewer context is substituted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/selected_board",
+                "value": "sandbox-board"
+              },
+              {
+                "phase": "action",
+                "path": "/assistant_binding",
+                "value": {
+                  "manifest_id": "pursers-reviewer-codex",
+                  "runtime_id": "ext-pursers-reviewer-codex",
+                  "agent_id": "codex",
+                  "preset_agent_type": "codex",
+                  "context_file": "contexts/reviewer.md",
+                  "context_sha256": "451722de5bb3d3b0b2abf018110edb11a78560a265134e5e904dfeaa5468ce1e",
+                  "manifest_sha256": "aba90f00d74dce49d4f14a69a15b37cc5135bb298f858f8221ac19ba37cd25b8",
+                  "extension_name": "pursers",
+                  "endpoint": "/api/extensions/assistants",
+                  "transport": "same-origin-http"
+                }
+              },
               {
                 "phase": "after",
                 "path": "/selected_board",
-                "value": "declared counterexample: the Claude worker or reviewer context is substituted"
+                "value": "sandbox-board"
               }
             ]
           },
@@ -1649,7 +1758,27 @@
           {
             "mutation": "a later board RPC denial after the registry write or a validation error is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "verifier_api"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 403
+              },
+              {
+                "target": "field",
+                "path": "/error",
+                "value": "admin membership required"
+              },
+              {
+                "target": "field",
+                "path": "/_evidence/outcome",
+                "value": "failed"
+              },
               {
                 "target": "field",
                 "path": "/_evidence/changed",
@@ -1842,16 +1971,26 @@
           {
             "mutation": "Project name is treated as board ID",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_add_project_board_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_add_project_board_action",
+                "value": "submitted"
+              },
               {
                 "phase": "after",
                 "path": "/board_value",
-                "value": "declared counterexample: Project name is treated as board ID"
+                "value": "Sandbox Project"
               },
               {
                 "phase": "after",
                 "path": "/board_error",
-                "value": "declared counterexample: Project name is treated as board ID"
+                "value": "Board ID"
               }
             ]
           },
@@ -2007,16 +2146,26 @@
           {
             "mutation": "a UI success message without clone state is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "browser_ui"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/steps/4/step",
-                "value": "declared counterexample: a UI success message without clone state is accepted"
+                "value": "fleet_clone"
               },
               {
                 "target": "field",
                 "path": "/steps/4/status",
-                "value": "declared counterexample: a UI success message without clone state is accepted"
+                "value": "prepared"
               }
             ]
           },
@@ -2167,7 +2316,17 @@
           {
             "mutation": "already-present step labels are accepted while credentials are reissued",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "verifier_api"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/_evidence/changed",
@@ -2176,22 +2335,25 @@
               {
                 "target": "field",
                 "path": "/_evidence/effect",
-                "value": "declared counterexample: already-present step labels are accepted while credentials are reissued"
+                "value": "project_state_changed"
               },
               {
                 "target": "field",
                 "path": "/doors",
-                "value": "declared counterexample: already-present step labels are accepted while credentials are reissued"
+                "value": {
+                  "worker": "redacted newly issued credential",
+                  "reviewer": "redacted newly issued credential"
+                }
               },
               {
                 "target": "field",
                 "path": "/steps/5/step",
-                "value": "declared counterexample: already-present step labels are accepted while credentials are reissued"
+                "value": "door_credentials"
               },
               {
                 "target": "field",
                 "path": "/steps/5/status",
-                "value": "declared counterexample: already-present step labels are accepted while credentials are reissued"
+                "value": "already present"
               }
             ]
           },
@@ -2391,7 +2553,27 @@
           {
             "mutation": "persistent Doors table metadata is accepted as the secret",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/worker_door_present",
+                "value": 1
+              },
+              {
+                "phase": "before",
+                "path": "/reviewer_door_present",
+                "value": 1
+              },
+              {
+                "phase": "before",
+                "path": "/copy_control_count",
+                "value": 2
+              },
+              {
+                "phase": "action",
+                "path": "/seat_refresh_count",
+                "value": 1
+              },
               {
                 "phase": "after",
                 "path": "/worker_door_retained",
@@ -2405,7 +2587,7 @@
               {
                 "phase": "after",
                 "path": "/door_input_count_after",
-                "value": 1
+                "value": 2
               }
             ]
           },
@@ -2609,11 +2791,21 @@
           {
             "mutation": "generic error text is accepted as partial-step evidence",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_add_project_partial_failure_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_add_project_partial_failure_action",
+                "value": "submitted"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_add_project_partial_failure_failed_step",
-                "value": "declared counterexample: generic error text is accepted as partial-step evidence"
+                "value": "Project creation failed."
               }
             ]
           },
@@ -2753,16 +2945,26 @@
           {
             "mutation": "generic configured text without exact values is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "browser_ui"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/steps/3/step",
-                "value": "declared counterexample: generic configured text without exact values is accepted"
+                "value": "policies"
               },
               {
                 "target": "field",
                 "path": "/steps/3/status",
-                "value": "declared counterexample: generic configured text without exact values is accepted"
+                "value": "configured"
               }
             ]
           },
@@ -2897,16 +3099,26 @@
           {
             "mutation": "two display rows without membership writes are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "browser_ui"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/steps/2/step",
-                "value": "declared counterexample: two display rows without membership writes are accepted"
+                "value": "door_principals"
               },
               {
                 "target": "field",
                 "path": "/steps/2/status",
-                "value": "declared counterexample: two display rows without membership writes are accepted"
+                "value": "created"
               }
             ]
           },
@@ -3041,16 +3253,26 @@
           {
             "mutation": "board creation alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "verifier_api"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/steps/0/step",
-                "value": "declared counterexample: board creation alone is accepted"
+                "value": "board_create"
               },
               {
                 "target": "field",
                 "path": "/steps/0/status",
-                "value": "declared counterexample: board creation alone is accepted"
+                "value": "created"
               }
             ]
           },
@@ -3220,16 +3442,31 @@
           {
             "mutation": "pool busy status alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_agent_current_claims_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_agent_current_claims_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/claim_link_count",
-                "value": 2
+                "value": 0
               },
               {
                 "phase": "after",
                 "path": "/claim_link_text",
-                "value": "declared counterexample: pool busy status alone is accepted"
+                "value": "Busy"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_agent_current_claims_target_hidden",
+                "value": false
               }
             ]
           },
@@ -3444,21 +3681,36 @@
           {
             "mutation": "two indistinguishable cards with the same name and no warning are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_agent_duplicate_names_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_agent_duplicate_names_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/duplicate_cards",
-                "value": 3
+                "value": 2
               },
               {
                 "phase": "after",
                 "path": "/duplicate_warnings",
-                "value": 3
+                "value": 0
               },
               {
                 "phase": "after",
                 "path": "/ambiguous_local_controls",
-                "value": 1
+                "value": 2
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_agent_duplicate_names_target_hidden",
+                "value": false
               }
             ]
           },
@@ -3667,11 +3919,21 @@
           {
             "mutation": "the Show stale filter without retired entries is accepted as the retired/stale drawer",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_agent_retired_stale_drawer_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_agent_retired_stale_drawer_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_agent_retired_stale_drawer_inactive_retired_agents",
-                "value": "declared counterexample: the Show stale filter without retired entries is accepted as the retired/stale drawer"
+                "value": "Show stale"
               }
             ]
           },
@@ -3854,11 +4116,21 @@
           {
             "mutation": "ticket updated timestamps are accepted as activity",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/tickets_tab_active",
+                "value": 1
+              },
+              {
+                "phase": "action",
+                "path": "/open_timeline",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/timeline_tab_active",
-                "value": 2
+                "value": 1
               },
               {
                 "phase": "after",
@@ -3878,7 +4150,7 @@
               {
                 "phase": "after",
                 "path": "/bounded_activity_note",
-                "value": "declared counterexample: ticket updated timestamps are accepted as activity"
+                "value": "Updated 2 minutes ago"
               }
             ]
           },
@@ -4088,16 +4360,31 @@
           {
             "mutation": "board label alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/workspace_card_count",
+                "value": 1
+              },
+              {
+                "phase": "action",
+                "path": "/open_workspace",
+                "value": "clicked"
+              },
+              {
+                "phase": "after",
+                "path": "/detail_visible",
+                "value": false
+              },
               {
                 "phase": "after",
                 "path": "/detail_heading",
-                "value": "declared counterexample: board label alone is accepted"
+                "value": "sandbox-board"
               },
               {
                 "phase": "after",
                 "path": "/detail_board_id",
-                "value": "declared counterexample: board label alone is accepted"
+                "value": ""
               }
             ]
           },
@@ -4273,11 +4560,21 @@
           {
             "mutation": "bounded view badge without counts is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/bounded_workspace_card_count",
+                "value": 1
+              },
+              {
+                "phase": "action",
+                "path": "/open_bounded_workspace",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/ticket_limit_notice",
-                "value": "declared counterexample: bounded view badge without counts is accepted"
+                "value": "Bounded view"
               }
             ]
           },
@@ -4436,11 +4733,21 @@
           {
             "mutation": "direct mutation on submit is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_config_add_update_preview_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_config_add_update_preview_action",
+                "value": "submitted"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_config_add_update_preview_review_before_apply",
-                "value": "declared counterexample: direct mutation on submit is accepted"
+                "value": "Changes applied"
               }
             ]
           },
@@ -4621,21 +4928,36 @@
           {
             "mutation": "installed version alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_config_bridge_versions_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_config_bridge_versions_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_config_bridge_versions_installed",
-                "value": "declared counterexample: installed version alone is accepted"
+                "value": "Installed"
               },
               {
                 "phase": "after",
                 "path": "/fleet_config_bridge_versions_pinned",
-                "value": "declared counterexample: installed version alone is accepted"
+                "value": "\u2014"
               },
               {
                 "phase": "after",
                 "path": "/fleet_config_bridge_versions_pypi_latest",
-                "value": "declared counterexample: installed version alone is accepted"
+                "value": "\u2014"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_bridge_versions_target_hidden",
+                "value": false
               }
             ]
           },
@@ -4837,11 +5159,26 @@
           {
             "mutation": "open-ticket dispatch state is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_config_current_offers_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_config_current_offers_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_config_current_offers_current_offers",
-                "value": "declared counterexample: open-ticket dispatch state is accepted"
+                "value": "Open ticket dispatch"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_current_offers_target_hidden",
+                "value": false
               }
             ]
           },
@@ -5033,21 +5370,36 @@
           {
             "mutation": "all discovered configs are shown as importable",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_config_discovery_import_conflicts_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_config_discovery_import_conflicts_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_config_discovery_import_conflicts_will_import",
-                "value": "declared counterexample: all discovered configs are shown as importable"
+                "value": "Will import"
               },
               {
                 "phase": "after",
                 "path": "/fleet_config_discovery_import_conflicts_conflict",
-                "value": "declared counterexample: all discovered configs are shown as importable"
+                "value": "Will import"
               },
               {
                 "phase": "after",
                 "path": "/fleet_config_discovery_import_conflicts_already_imported",
-                "value": "declared counterexample: all discovered configs are shown as importable"
+                "value": "Will import"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_discovery_import_conflicts_target_hidden",
+                "value": false
               }
             ]
           },
@@ -5261,21 +5613,36 @@
           {
             "mutation": "a generic dispatch status is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_config_dispatch_policy_gaps_history_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_config_dispatch_policy_gaps_history_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_config_dispatch_policy_gaps_history_missing_capabilities",
-                "value": "declared counterexample: a generic dispatch status is accepted"
+                "value": "Dispatch active"
               },
               {
                 "phase": "after",
                 "path": "/fleet_config_dispatch_policy_gaps_history_current_offers",
-                "value": "declared counterexample: a generic dispatch status is accepted"
+                "value": "Dispatch active"
               },
               {
                 "phase": "after",
                 "path": "/fleet_config_dispatch_policy_gaps_history_open_ticket_dispatch_history",
-                "value": "declared counterexample: a generic dispatch status is accepted"
+                "value": "Dispatch active"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_dispatch_policy_gaps_history_target_hidden",
+                "value": false
               }
             ]
           },
@@ -5472,11 +5839,21 @@
           {
             "mutation": "bridge version alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_config_doctor_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_config_doctor_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_config_doctor_doctor",
-                "value": "declared counterexample: bridge version alone is accepted"
+                "value": "Bridge 1.2.3 installed"
               }
             ]
           },
@@ -5640,11 +6017,21 @@
           {
             "mutation": "form submission itself is treated as confirmation",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_config_exact_diff_confirmation_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_config_exact_diff_confirmation_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_config_exact_diff_confirmation_confirm_and_apply",
-                "value": "declared counterexample: form submission itself is treated as confirmation"
+                "value": "Changes applied"
               }
             ]
           },
@@ -5813,11 +6200,26 @@
           {
             "mutation": "seat config path is accepted as registry worktree",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_config_registry_worktrees_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_config_registry_worktrees_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_config_registry_worktrees_fleet_clone",
-                "value": "declared counterexample: seat config path is accepted as registry worktree"
+                "value": "/PATH/TO/worker/.codex/config.toml"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_registry_worktrees_target_hidden",
+                "value": false
               }
             ]
           },
@@ -6015,26 +6417,41 @@
           {
             "mutation": "discovered-only candidates are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_config_seat_inventory_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_config_seat_inventory_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_config_seat_inventory_capabilities",
-                "value": "declared counterexample: discovered-only candidates are accepted"
+                "value": "Discovered candidate"
               },
               {
                 "phase": "after",
                 "path": "/fleet_config_seat_inventory_host_role",
-                "value": "declared counterexample: discovered-only candidates are accepted"
+                "value": "Discovered candidate"
               },
               {
                 "phase": "after",
                 "path": "/fleet_config_seat_inventory_current_offer",
-                "value": "declared counterexample: discovered-only candidates are accepted"
+                "value": "Discovered candidate"
               },
               {
                 "phase": "after",
                 "path": "/fleet_config_seat_inventory_bridge",
-                "value": "declared counterexample: discovered-only candidates are accepted"
+                "value": "Discovered candidate"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_seat_inventory_target_hidden",
+                "value": false
               }
             ]
           },
@@ -6294,21 +6711,56 @@
           {
             "mutation": "role alone is accepted as all capabilities",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/role_before",
+                "value": "worker"
+              },
+              {
+                "phase": "before",
+                "path": "/review_before",
+                "value": false
+              },
+              {
+                "phase": "before",
+                "path": "/work_before",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/selected_role",
+                "value": "reviewer"
+              },
+              {
+                "phase": "action",
+                "path": "/selected_tier",
+                "value": "2"
+              },
+              {
+                "phase": "action",
+                "path": "/entered_skills",
+                "value": "git,browser"
+              },
+              {
+                "phase": "action",
+                "path": "/work_flag_clicked",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/role_after",
-                "value": "declared counterexample: role alone is accepted as all capabilities"
+                "value": "reviewer"
               },
               {
                 "phase": "after",
                 "path": "/tier_after",
-                "value": "declared counterexample: role alone is accepted as all capabilities"
+                "value": "1"
               },
               {
                 "phase": "after",
                 "path": "/skills_after",
-                "value": "declared counterexample: role alone is accepted as all capabilities"
+                "value": ""
               },
               {
                 "phase": "after",
@@ -6318,7 +6770,7 @@
               {
                 "phase": "after",
                 "path": "/work_after",
-                "value": false
+                "value": true
               }
             ]
           },
@@ -6584,11 +7036,26 @@
           {
             "mutation": "first visible central label is assumed without loadCentrals",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_default_central_aliases_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_default_central_aliases_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_default_central_aliases_fleet_overview",
-                "value": "declared counterexample: first visible central label is assumed without loadCentrals"
+                "value": "local-central"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_default_central_aliases_target_hidden",
+                "value": false
               }
             ]
           },
@@ -6774,21 +7241,31 @@
           {
             "mutation": "agent pool membership is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_doors_connected_seats_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_doors_connected_seats_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/connected_seat_count",
-                "value": 3
+                "value": 0
               },
               {
                 "phase": "after",
                 "path": "/connected_seats",
-                "value": "declared counterexample: agent pool membership is accepted"
+                "value": "Agent pool: worker-three"
               },
               {
                 "phase": "after",
-                "path": "/connected_seats",
-                "value": "declared counterexample: agent pool membership is accepted"
+                "path": "/fleet_doors_connected_seats_target_hidden",
+                "value": false
               }
             ]
           },
@@ -6980,11 +7457,21 @@
           {
             "mutation": "copying a key id is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_doors_copy_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_doors_copy_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_doors_copy_door_string_copied_for_sandbox_board_worker",
-                "value": "declared counterexample: copying a key id is accepted"
+                "value": "Key ID copied."
               }
             ]
           },
@@ -7158,11 +7645,41 @@
           {
             "mutation": "a release-operation button or an always-enabled second door row is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/disabled_before",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/clicked",
+                "value": "clicked"
+              },
+              {
+                "phase": "action",
+                "path": "/disabled_while_pending",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/request_settled",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/response_status",
+                "value": 200
+              },
+              {
+                "phase": "action",
+                "path": "/request_error",
+                "value": null
+              },
               {
                 "phase": "after",
                 "path": "/disabled_after",
-                "value": true
+                "value": false
               }
             ]
           },
@@ -7366,11 +7883,21 @@
           {
             "mutation": "raw exception text or an unrelated Add project error is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_doors_error_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_doors_error_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_doors_error_door_action_failed",
-                "value": "declared counterexample: raw exception text or an unrelated Add project error is accepted"
+                "value": "Add project failed: ValueError"
               }
             ]
           },
@@ -7550,16 +8077,31 @@
           {
             "mutation": "key ID is accepted as expiry",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_doors_expiry_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_doors_expiry_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/issued_expiry",
-                "value": "\u2014"
+                "value": "kid-door-1"
               },
               {
                 "phase": "after",
                 "path": "/absent_expiry",
-                "value": "declared counterexample: key ID is accepted as expiry"
+                "value": "kid-door-2"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_doors_expiry_target_hidden",
+                "value": false
               }
             ]
           },
@@ -7766,16 +8308,31 @@
           {
             "mutation": "door string or expiry is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_doors_key_id_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_doors_key_id_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/issued_kid",
-                "value": "declared counterexample: door string or expiry is accepted"
+                "value": "expires 2026-09-12T00:00:00Z"
               },
               {
                 "phase": "after",
                 "path": "/absent_kid",
-                "value": "declared counterexample: door string or expiry is accepted"
+                "value": "\u2014"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_doors_key_id_target_hidden",
+                "value": false
               }
             ]
           },
@@ -7983,21 +8540,36 @@
           {
             "mutation": "one row per project only is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_doors_project_rows_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_doors_project_rows_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_doors_project_rows_sandbox_board",
-                "value": "declared counterexample: one row per project only is accepted"
+                "value": "sandbox-board"
               },
               {
                 "phase": "after",
                 "path": "/fleet_doors_project_rows_worker",
-                "value": "declared counterexample: one row per project only is accepted"
+                "value": "worker"
               },
               {
                 "phase": "after",
                 "path": "/fleet_doors_project_rows_reviewer",
-                "value": "declared counterexample: one row per project only is accepted"
+                "value": "sandbox-board"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_doors_project_rows_target_hidden",
+                "value": false
               }
             ]
           },
@@ -8194,11 +8766,21 @@
           {
             "mutation": "copy success text is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_doors_rotation_warning_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_doors_rotation_warning_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_doors_rotation_warning_credential_changed",
-                "value": "declared counterexample: copy success text is accepted"
+                "value": "Door string copied"
               }
             ]
           },
@@ -8378,11 +8960,26 @@
           {
             "mutation": "the one-time Add project result is treated as the persistent list",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_doors_secret_free_output_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_doors_secret_free_output_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_doors_secret_free_output_copy_door_string",
-                "value": "declared counterexample: the one-time Add project result is treated as the persistent list"
+                "value": "New worker credential issued once"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_doors_secret_free_output_target_hidden",
+                "value": false
               }
             ]
           },
@@ -8562,11 +9159,26 @@
           {
             "mutation": "zero configured doors with no guidance is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_doors_unconfigured_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_doors_unconfigured_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_doors_unconfigured_no_door_credentials_configured",
-                "value": "declared counterexample: zero configured doors with no guidance is accepted"
+                "value": ""
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_doors_unconfigured_target_hidden",
+                "value": false
               }
             ]
           },
@@ -8746,11 +9358,26 @@
           {
             "mutation": "legacy Agent pool section is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_hub_agents_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_hub_agents_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_hub_agents_unified_agent_pool",
-                "value": "declared counterexample: legacy Agent pool section is accepted"
+                "value": "Agent pool"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_hub_agents_target_hidden",
+                "value": false
               }
             ]
           },
@@ -8938,21 +9565,31 @@
           {
             "mutation": "Fleet overview board cards are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/overview_nav_active",
+                "value": 1
+              },
+              {
+                "phase": "action",
+                "path": "/open_boards",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/boards_nav_active",
-                "value": 2
+                "value": 1
               },
               {
                 "phase": "after",
                 "path": "/boards_heading",
-                "value": "declared counterexample: Fleet overview board cards are accepted"
+                "value": "Fleet overview"
               },
               {
                 "phase": "after",
                 "path": "/board_card_count",
-                "value": 0
+                "value": 1
               },
               {
                 "phase": "after",
@@ -9172,26 +9809,41 @@
           {
             "mutation": "Release card alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_hub_operations_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_hub_operations_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_hub_operations_coordinator_policy_overhead_details_and_routes",
-                "value": "declared counterexample: Release card alone is accepted"
+                "value": "Release"
               },
               {
                 "phase": "after",
                 "path": "/fleet_hub_operations_config",
-                "value": "declared counterexample: Release card alone is accepted"
+                "value": "Release"
               },
               {
                 "phase": "after",
                 "path": "/fleet_hub_operations_overhead",
-                "value": "declared counterexample: Release card alone is accepted"
+                "value": "Release"
               },
               {
                 "phase": "after",
                 "path": "/fleet_hub_operations_guardrails",
-                "value": "declared counterexample: Release card alone is accepted"
+                "value": "Release"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_hub_operations_target_hidden",
+                "value": false
               }
             ]
           },
@@ -9415,16 +10067,31 @@
           {
             "mutation": "all actions disabled regardless of configuration",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_operations_disabled_controls_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_operations_disabled_controls_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/publish_disabled",
-                "value": false
+                "value": true
               },
               {
                 "phase": "after",
                 "path": "/stage_disabled",
                 "value": true
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_operations_disabled_controls_target_hidden",
+                "value": false
               }
             ]
           },
@@ -9615,11 +10282,21 @@
           {
             "mutation": "final telemetry alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_operations_job_progress_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_operations_job_progress_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_operations_job_progress_streaming_output",
-                "value": "declared counterexample: final telemetry alone is accepted"
+                "value": "Outcome: succeeded"
               }
             ]
           },
@@ -9733,9 +10410,9 @@
       },
       "causal": {
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an operations job reaches terminal state.",
-        "action": "allow job watcher to refresh",
+        "action": "click the stage operation, capture its returned nonzero job ID, observe the matching job poll, then observe the ensuing seat refresh",
         "expected_transition": "terminal operation output survives Fleet refresh and distinguishes success effect from failure with no success effect",
-        "exact_selection": "require an actual job poll and ensuing Fleet seat refresh, then require the persisted succeeded outcome and its success-only effect",
+        "exact_selection": "require the real POST /api/config/ops job ID to equal the nonzero fixture ID embedded in the exact job-poll endpoint, then require that poll, the ensuing Fleet seat refresh, and persisted succeeded output",
         "negative_counterexample": "terminal output visible only before the immediate refresh or a running job is accepted",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -9755,9 +10432,17 @@
           ],
           "actions": [
             {
+              "kind": "click_response_json",
+              "selector": "[data-ops-action='stage']",
+              "method": "POST",
+              "endpoint": "/api/config/ops",
+              "pointer": "/body/job_id",
+              "path": "/operation_job_id"
+            },
+            {
               "kind": "resource_delta",
-              "endpoint": "/api/config/jobs/00000000000000000000000000000000",
-              "milliseconds": 1500,
+              "endpoint": "/api/config/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "milliseconds": 1100,
               "path": "/job_poll_count"
             },
             {
@@ -9780,9 +10465,18 @@
           "/fleet_refresh_count",
           "/job_output_before",
           "/job_poll_count",
+          "/operation_job_id",
           "/terminal_output"
         ],
-        "semantic_basis": "require an actual job poll and ensuing Fleet seat refresh, then require the persisted succeeded outcome and its success-only effect"
+        "semantic_basis": "require the real POST /api/config/ops job ID to equal the nonzero fixture ID embedded in the exact job-poll endpoint, then require that poll, the ensuing Fleet seat refresh, and persisted succeeded output",
+        "fixture_bindings": {
+          "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "derivation": "the verifier patches the operation job allocator to return this nonzero ID; click_response_json captures it from the real POST /api/config/ops response and resource_delta observes the identical ID in the ensuing GET path",
+          "poll_sequence": [
+            "running",
+            "succeeded"
+          ]
+        }
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -9798,16 +10492,31 @@
           {
             "mutation": "terminal output visible only before the immediate refresh or a running job is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
               {
-                "phase": "after",
-                "path": "/terminal_output",
-                "value": "declared counterexample: terminal output visible only before the immediate refresh or a running job is accepted"
+                "phase": "before",
+                "path": "/job_output_before",
+                "value": "Streaming output"
+              },
+              {
+                "phase": "action",
+                "path": "/operation_job_id",
+                "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              },
+              {
+                "phase": "action",
+                "path": "/job_poll_count",
+                "value": 1
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_refresh_count",
+                "value": 0
               },
               {
                 "phase": "after",
                 "path": "/terminal_output",
-                "value": "declared counterexample: terminal output visible only before the immediate refresh or a running job is accepted"
+                "value": "Command: safe operation\nStatus: running\nStreaming output\u2026"
               }
             ]
           },
@@ -9851,9 +10560,17 @@
           ],
           "action": [
             {
+              "kind": "click_response_json",
+              "selector": "[data-ops-action='stage']",
+              "method": "POST",
+              "endpoint": "/api/config/ops",
+              "pointer": "/body/job_id",
+              "path": "/operation_job_id"
+            },
+            {
               "kind": "resource_delta",
-              "endpoint": "/api/config/jobs/00000000000000000000000000000000",
-              "milliseconds": 1500,
+              "endpoint": "/api/config/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "milliseconds": 1100,
               "path": "/job_poll_count"
             },
             {
@@ -9881,6 +10598,12 @@
             "path": "/job_output_before",
             "op": "contains",
             "value": "Streaming output"
+          },
+          {
+            "phase": "action",
+            "path": "/operation_job_id",
+            "op": "eq",
+            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           },
           {
             "phase": "action",
@@ -9972,21 +10695,33 @@
           {
             "mutation": "primary failure without rollback outcome is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "verifier_api"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/status",
-                "value": "declared counterexample: primary failure without rollback outcome is accepted"
+                "value": "failed"
               },
               {
                 "target": "field",
                 "path": "/error",
-                "value": "declared counterexample: primary failure without rollback outcome is accepted"
+                "value": "Primary operation failed"
               },
               {
                 "target": "field",
                 "path": "/logs",
-                "value": []
+                "value": [
+                  "FAILED: primary operation"
+                ]
               }
             ]
           },
@@ -10154,26 +10889,26 @@
           {
             "mutation": "one generic unavailable banner is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
               {
-                "phase": "after",
-                "path": "/release_services",
-                "value": "declared counterexample: one generic unavailable banner is accepted"
+                "phase": "before",
+                "path": "/fleet_operations_unavailable_services_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_operations_unavailable_services_action",
+                "value": "clicked"
               },
               {
                 "phase": "after",
                 "path": "/release_services",
-                "value": "declared counterexample: one generic unavailable banner is accepted"
+                "value": "Services unavailable"
               },
               {
                 "phase": "after",
-                "path": "/release_services",
-                "value": "declared counterexample: one generic unavailable banner is accepted"
-              },
-              {
-                "phase": "after",
-                "path": "/release_services",
-                "value": "declared counterexample: one generic unavailable banner is accepted"
+                "path": "/fleet_operations_unavailable_services_target_hidden",
+                "value": false
               }
             ]
           },
@@ -10371,16 +11106,26 @@
           {
             "mutation": "Busy, Stale, or a count from another central is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_pool_available_target_nav_class",
+                "value": "nav-item"
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_pool_available_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_pool_available_ready",
-                "value": "declared counterexample: Busy, Stale, or a count from another central is accepted"
+                "value": "Busy"
               },
               {
                 "phase": "after",
                 "path": "/fleet_pool_available_target_nav_class",
-                "value": "declared counterexample: Busy, Stale, or a count from another central is accepted"
+                "value": "active"
               }
             ]
           },
@@ -10560,16 +11305,26 @@
           {
             "mutation": "agent cards with busy status are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_pool_busy_target_nav_class",
+                "value": "nav-item"
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_pool_busy_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_pool_busy_busy",
-                "value": "declared counterexample: agent cards with busy status are accepted"
+                "value": "2 agents working"
               },
               {
                 "phase": "after",
                 "path": "/fleet_pool_busy_target_nav_class",
-                "value": "declared counterexample: agent cards with busy status are accepted"
+                "value": "active"
               }
             ]
           },
@@ -10772,21 +11527,31 @@
           {
             "mutation": "central up or the number of visible non-stale cards is accepted as the online-agent count",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_pool_online_target_nav_class",
+                "value": "nav-item"
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_pool_online_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/online_metric",
-                "value": "declared counterexample: central up or the number of visible non-stale cards is accepted as the online-agent count"
+                "value": "5"
               },
               {
                 "phase": "after",
                 "path": "/central_health",
-                "value": "declared counterexample: central up or the number of visible non-stale cards is accepted as the online-agent count"
+                "value": "central up"
               },
               {
                 "phase": "after",
                 "path": "/fleet_pool_online_target_nav_class",
-                "value": "declared counterexample: central up or the number of visible non-stale cards is accepted as the online-agent count"
+                "value": "active"
               }
             ]
           },
@@ -10982,16 +11747,26 @@
           {
             "mutation": "Show stale toggle state is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_pool_stale_target_nav_class",
+                "value": "nav-item"
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_pool_stale_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_pool_stale_stale",
-                "value": "declared counterexample: Show stale toggle state is accepted"
+                "value": "Show stale: on"
               },
               {
                 "phase": "after",
                 "path": "/fleet_pool_stale_target_nav_class",
-                "value": "declared counterexample: Show stale toggle state is accepted"
+                "value": "active"
               }
             ]
           },
@@ -11172,11 +11947,26 @@
           {
             "mutation": "network failure or global pause is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/paused_status",
+                "value": "Refresh paused while editing"
+              },
+              {
+                "phase": "before",
+                "path": "/pause_pill_count",
+                "value": 1
+              },
+              {
+                "phase": "action",
+                "path": "/resume_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/resumed_status",
-                "value": "declared counterexample: network failure or global pause is accepted"
+                "value": "Network failure"
               },
               {
                 "phase": "after",
@@ -11337,21 +12127,31 @@
           {
             "mutation": "package manifest version is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "verifier_api"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/central_version/live_version",
-                "value": "declared counterexample: package manifest version is accepted"
+                "value": "0.1.0a30"
               },
               {
                 "target": "field",
                 "path": "/central_version/staged_version",
-                "value": "declared counterexample: package manifest version is accepted"
+                "value": "0.1.0a30"
               },
               {
                 "target": "field",
                 "path": "/central_version/status",
-                "value": "declared counterexample: package manifest version is accepted"
+                "value": "manifest version"
               }
             ]
           },
@@ -11490,36 +12290,46 @@
           {
             "mutation": "GitHub Release presence is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "browser_ui"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/ci_status/main/status",
-                "value": "declared counterexample: GitHub Release presence is accepted"
+                "value": "completed"
               },
               {
                 "target": "field",
                 "path": "/ci_status/main/conclusion",
-                "value": "declared counterexample: GitHub Release presence is accepted"
+                "value": "success"
               },
               {
                 "target": "field",
                 "path": "/ci_status/main/url",
-                "value": "declared counterexample: GitHub Release presence is accepted"
+                "value": "https://ci.example/main"
               },
               {
                 "target": "field",
                 "path": "/ci_status/tag/status",
-                "value": "declared counterexample: GitHub Release presence is accepted"
+                "value": "completed"
               },
               {
                 "target": "field",
                 "path": "/ci_status/tag/conclusion",
-                "value": "declared counterexample: GitHub Release presence is accepted"
+                "value": "failure"
               },
               {
                 "target": "field",
                 "path": "/ci_status/tag/url",
-                "value": "declared counterexample: GitHub Release presence is accepted"
+                "value": "https://ci.example/tag"
               }
             ]
           },
@@ -11675,16 +12485,26 @@
           {
             "mutation": "latest tag text is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "browser_ui"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/github_release/present",
-                "value": false
+                "value": true
               },
               {
                 "target": "field",
                 "path": "/github_release/url",
-                "value": "declared counterexample: latest tag text is accepted"
+                "value": "https://github.example/releases/v5.0.0b1"
               }
             ]
           },
@@ -11838,11 +12658,21 @@
           {
             "mutation": "button click directly executes action",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_release_immutable_confirmation_plan_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_release_immutable_confirmation_plan_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_release_immutable_confirmation_plan_plan_digest",
-                "value": "declared counterexample: button click directly executes action"
+                "value": "Running publish operation"
               }
             ]
           },
@@ -11987,51 +12817,61 @@
           {
             "mutation": "package version alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "browser_ui"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/pypi/pursers/availability",
-                "value": "declared counterexample: package version alone is accepted"
+                "value": "present"
               },
               {
                 "target": "field",
                 "path": "/pypi/pursers/present",
-                "value": false
-              },
-              {
-                "target": "field",
-                "path": "/pypi/pursers/status_code",
-                "value": 201
-              },
-              {
-                "target": "field",
-                "path": "/pypi/central/availability",
-                "value": "declared counterexample: package version alone is accepted"
-              },
-              {
-                "target": "field",
-                "path": "/pypi/central/present",
                 "value": true
               },
               {
                 "target": "field",
+                "path": "/pypi/pursers/status_code",
+                "value": 200
+              },
+              {
+                "target": "field",
+                "path": "/pypi/central/availability",
+                "value": "absent"
+              },
+              {
+                "target": "field",
+                "path": "/pypi/central/present",
+                "value": false
+              },
+              {
+                "target": "field",
                 "path": "/pypi/central/status_code",
-                "value": 405
+                "value": 404
               },
               {
                 "target": "field",
                 "path": "/pypi/client/availability",
-                "value": "declared counterexample: package version alone is accepted"
+                "value": "unavailable"
               },
               {
                 "target": "field",
                 "path": "/pypi/client/present",
-                "value": "declared counterexample: package version alone is accepted"
+                "value": null
               },
               {
                 "target": "field",
                 "path": "/pypi/client/error",
-                "value": "declared counterexample: package version alone is accepted"
+                "value": "TimeoutError: bounded request timed out"
               }
             ]
           },
@@ -12214,46 +13054,60 @@
           {
             "mutation": "bridge Installed value is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "target": "action_origin",
+                "path": "",
+                "value": "browser_ui"
+              },
+              {
+                "target": "status",
+                "path": "",
+                "value": 200
+              },
               {
                 "target": "field",
                 "path": "/restart_checklist/0/host",
-                "value": "declared counterexample: bridge Installed value is accepted"
+                "value": "claude-desktop"
               },
               {
                 "target": "field",
                 "path": "/restart_checklist/0/needs_restart",
-                "value": true
-              },
-              {
-                "target": "field",
-                "path": "/restart_checklist/0/reason",
-                "value": "declared counterexample: bridge Installed value is accepted"
-              },
-              {
-                "target": "field",
-                "path": "/restart_checklist/0/running_pids",
-                "value": []
-              },
-              {
-                "target": "field",
-                "path": "/restart_checklist/1/host",
-                "value": "declared counterexample: bridge Installed value is accepted"
-              },
-              {
-                "target": "field",
-                "path": "/restart_checklist/1/needs_restart",
                 "value": false
               },
               {
                 "target": "field",
+                "path": "/restart_checklist/0/reason",
+                "value": "Running current attributed bridge shim"
+              },
+              {
+                "target": "field",
+                "path": "/restart_checklist/0/running_pids",
+                "value": [
+                  202
+                ]
+              },
+              {
+                "target": "field",
+                "path": "/restart_checklist/1/host",
+                "value": "codex"
+              },
+              {
+                "target": "field",
+                "path": "/restart_checklist/1/needs_restart",
+                "value": true
+              },
+              {
+                "target": "field",
                 "path": "/restart_checklist/1/reason",
-                "value": "declared counterexample: bridge Installed value is accepted"
+                "value": "started before shim update"
               },
               {
                 "target": "field",
                 "path": "/restart_checklist/1/running_pids",
-                "value": []
+                "value": [
+                  102
+                ]
               }
             ]
           },
@@ -12454,11 +13308,21 @@
           {
             "mutation": "a board-local No matching tickets row is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_search_no_results_prior_value",
+                "value": ""
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_search_no_results_action",
+                "value": "no-matching-result-probe"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_search_no_results_no_results",
-                "value": "declared counterexample: a board-local No matching tickets row is accepted"
+                "value": "No matching tickets"
               }
             ]
           },
@@ -12623,11 +13487,21 @@
           {
             "mutation": "Timeline rows are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_tab_changes_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_tab_changes_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_tab_changes_status_changes",
-                "value": "declared counterexample: Timeline rows are accepted"
+                "value": "Timeline"
               }
             ]
           },
@@ -12791,11 +13665,21 @@
           {
             "mutation": "raw status counts are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_tab_flow_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_tab_flow_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_tab_flow_ticket_flow",
-                "value": "declared counterexample: raw status counts are accepted"
+                "value": "open 3 \u00b7 claimed 1"
               }
             ]
           },
@@ -12959,11 +13843,21 @@
           {
             "mutation": "Timeline actor data is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_tab_routes_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_tab_routes_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_tab_routes_ticket_provenance_routes",
-                "value": "declared counterexample: Timeline actor data is accepted"
+                "value": "reviewer-three"
               }
             ]
           },
@@ -13127,11 +14021,21 @@
           {
             "mutation": "overview active ticket rows are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_tab_tickets_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_tab_tickets_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_tab_tickets_tickets",
-                "value": "declared counterexample: overview active ticket rows are accepted"
+                "value": "TK-123"
               }
             ]
           },
@@ -13295,11 +14199,21 @@
           {
             "mutation": "Changes summary is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/fleet_tab_timeline_control_disabled",
+                "value": false
+              },
+              {
+                "phase": "action",
+                "path": "/fleet_tab_timeline_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/fleet_tab_timeline_timeline",
-                "value": "declared counterexample: Changes summary is accepted"
+                "value": "Status changes"
               }
             ]
           },
@@ -13476,21 +14390,36 @@
           {
             "mutation": "a JavaScript exception or blank page is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/startup_state",
+                "value": "Connecting"
+              },
+              {
+                "phase": "action",
+                "path": "/route_settle",
+                "value": 250
+              },
+              {
+                "phase": "after",
+                "path": "/overview_visible",
+                "value": true
+              },
               {
                 "phase": "after",
                 "path": "/overview_nav_active_after",
-                "value": 2
+                "value": 0
               },
               {
                 "phase": "after",
                 "path": "/overview_heading",
-                "value": "declared counterexample: a JavaScript exception or blank page is accepted"
+                "value": ""
               },
               {
                 "phase": "after",
                 "path": "/detail_content_count",
-                "value": 1
+                "value": 0
               }
             ]
           },
@@ -13658,26 +14587,26 @@
           {
             "mutation": "a generic UI label is accepted without an actual failed board read",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
               {
                 "target": "field",
                 "path": "/registry_warning",
-                "value": "declared counterexample: a generic UI label is accepted without an actual failed board read"
+                "value": "Fleet data unavailable"
               },
               {
                 "target": "field",
                 "path": "/projects/0/board_id",
-                "value": "declared counterexample: a generic UI label is accepted without an actual failed board read"
+                "value": "sandbox-board"
               },
               {
                 "target": "field",
                 "path": "/projects/1/board_id",
-                "value": "declared counterexample: a generic UI label is accepted without an actual failed board read"
+                "value": "sandbox-unavailable"
               },
               {
                 "target": "field",
                 "path": "/projects/0/status",
-                "value": "declared counterexample: a generic UI label is accepted without an actual failed board read"
+                "value": "active"
               }
             ]
           },
@@ -13812,26 +14741,26 @@
           {
             "mutation": "a Not onboarded label is accepted without proving no join was performed",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
               {
                 "target": "field",
                 "path": "/data_mode",
-                "value": "declared counterexample: a Not onboarded label is accepted without proving no join was performed"
+                "value": "Not onboarded"
               },
               {
                 "target": "field",
                 "path": "/connected",
-                "value": true
-              },
-              {
-                "target": "field",
-                "path": "/stale",
                 "value": false
               },
               {
                 "target": "field",
+                "path": "/stale",
+                "value": true
+              },
+              {
+                "target": "field",
                 "path": "/feed_error",
-                "value": "declared counterexample: a Not onboarded label is accepted without proving no join was performed"
+                "value": "Central unavailable"
               }
             ]
           },
@@ -13997,11 +14926,26 @@
           {
             "mutation": "all 201 events or an arbitrary smaller count is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/activity_view_hidden_before",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/open_activity",
+                "value": "clicked"
+              },
+              {
+                "phase": "after",
+                "path": "/activity_view_hidden_after",
+                "value": false
+              },
               {
                 "phase": "after",
                 "path": "/retained_total",
-                "value": "declared counterexample: all 201 events or an arbitrary smaller count is accepted"
+                "value": "201 retained"
               },
               {
                 "phase": "after",
@@ -14192,11 +15136,26 @@
           {
             "mutation": "snapshot_at or event count is treated as the cursor",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_activity_cursor_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_activity_cursor_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_activity_cursor_cursor_17",
-                "value": "declared counterexample: snapshot_at or event count is treated as the cursor"
+                "value": "Snapshot at 17 \u00b7 17 events"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_activity_cursor_target_hidden",
+                "value": false
               }
             ]
           },
@@ -14376,11 +15335,26 @@
           {
             "mutation": "has_more or resync_notice alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_activity_dropped_events_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_activity_dropped_events_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_activity_dropped_events_2_older_events_were_dropped_from_this_bounded_vi",
-                "value": "declared counterexample: has_more or resync_notice alone is accepted"
+                "value": "More activity is available"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_activity_dropped_events_target_hidden",
+                "value": false
               }
             ]
           },
@@ -14560,11 +15534,26 @@
           {
             "mutation": "an empty container without the state or the Home timeline is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_activity_empty_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_activity_empty_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_activity_empty_no_matching_activity",
-                "value": "declared counterexample: an empty container without the state or the Home timeline is accepted"
+                "value": "No activity observed"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_activity_empty_target_hidden",
+                "value": false
               }
             ]
           },
@@ -14733,11 +15722,21 @@
           {
             "mutation": "the UI clears loaded data or reports a live connection",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_activity_error_local_feed_unavailable",
+                "value": "Local feed unavailable"
+              },
+              {
+                "phase": "action",
+                "path": "/personal_activity_error_action",
+                "value": 1000
+              },
               {
                 "phase": "after",
                 "path": "/personal_activity_error_local_feed_unavailable",
-                "value": "declared counterexample: the UI clears loaded data or reports a live connection"
+                "value": "Connected to the local board"
               }
             ]
           },
@@ -14912,21 +15911,31 @@
           {
             "mutation": "only one of the two independent states is arranged",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
               {
-                "phase": "after",
-                "path": "/load_more_hidden",
+                "phase": "before",
+                "path": "/personal_activity_has_more_resync_target_hidden",
                 "value": true
               },
               {
+                "phase": "action",
+                "path": "/personal_activity_has_more_resync_action",
+                "value": "clicked"
+              },
+              {
                 "phase": "after",
-                "path": "/resync_notice",
-                "value": "declared counterexample: only one of the two independent states is arranged"
+                "path": "/load_more_hidden",
+                "value": false
               },
               {
                 "phase": "after",
                 "path": "/resync_notice",
-                "value": "declared counterexample: only one of the two independent states is arranged"
+                "value": "More activity is available"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_activity_has_more_resync_target_hidden",
+                "value": false
               }
             ]
           },
@@ -15124,16 +16133,26 @@
           {
             "mutation": "a stale live snapshot is relabelled as offline",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/connection_title_before",
+                "value": "Loading board"
+              },
+              {
+                "phase": "action",
+                "path": "/offline_render_wait",
+                "value": 250
+              },
               {
                 "phase": "after",
                 "path": "/offline_title",
-                "value": "declared counterexample: a stale live snapshot is relabelled as offline"
+                "value": "Showing the last known local state"
               },
               {
                 "phase": "after",
                 "path": "/demo_tone_count",
-                "value": 2
+                "value": 1
               }
             ]
           },
@@ -15304,16 +16323,26 @@
           {
             "mutation": "demo or live connection copy is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/stale_title_before",
+                "value": "Loading board"
+              },
+              {
+                "phase": "action",
+                "path": "/stale_render_wait",
+                "value": 250
+              },
               {
                 "phase": "after",
                 "path": "/stale_title",
-                "value": "declared counterexample: demo or live connection copy is accepted"
+                "value": "Connected to the local board"
               },
               {
                 "phase": "after",
                 "path": "/stale_or_error_tone_count",
-                "value": 2
+                "value": 0
               }
             ]
           },
@@ -15488,11 +16517,26 @@
           {
             "mutation": "a linked-work count or current_ticket_id chip alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_agents_current_ticket_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_agents_current_ticket_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_agents_current_ticket_working_on_tk_123_fixture_ticket",
-                "value": "declared counterexample: a linked-work count or current_ticket_id chip alone is accepted"
+                "value": "1 linked work item \u00b7 TK-123"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_agents_current_ticket_target_hidden",
+                "value": false
               }
             ]
           },
@@ -15672,11 +16716,26 @@
           {
             "mutation": "the duplicate_name badge alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_agents_duplicate_identity_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_agents_duplicate_identity_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_agents_duplicate_identity_duplicate_active_name_u2014_pick_a_unique_agent_",
-                "value": "declared counterexample: the duplicate_name badge alone is accepted"
+                "value": "duplicate name"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_agents_duplicate_identity_target_hidden",
+                "value": false
               }
             ]
           },
@@ -15862,16 +16921,31 @@
           {
             "mutation": "duplicate=true identity conflict is accepted instead",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_agents_duplicate_name_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_agents_duplicate_name_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/duplicate_name_badge_count",
-                "value": 2
+                "value": 1
               },
               {
                 "phase": "after",
                 "path": "/duplicate_name_badge_text",
-                "value": "declared counterexample: duplicate=true identity conflict is accepted instead"
+                "value": "duplicate identity"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_agents_duplicate_name_target_hidden",
+                "value": false
               }
             ]
           },
@@ -16062,11 +17136,26 @@
           {
             "mutation": "the Today 'No teammates yet' state is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_agents_empty_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_agents_empty_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_agents_empty_no_agents_yet",
-                "value": "declared counterexample: the Today 'No teammates yet' state is accepted"
+                "value": "No teammates yet"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_agents_empty_target_hidden",
+                "value": false
               }
             ]
           },
@@ -16246,11 +17335,26 @@
           {
             "mutation": "role, platform, or another agent's focus is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_agents_focus_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_agents_focus_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_agents_focus_review_fleet_evidence",
-                "value": "declared counterexample: role, platform, or another agent's focus is accepted"
+                "value": "reviewer \u00b7 codex"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_agents_focus_target_hidden",
+                "value": false
               }
             ]
           },
@@ -16430,11 +17534,26 @@
           {
             "mutation": "a ticket lease badge or idle-only card is treated as agent idle+lease proof",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_agents_idle_lease_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_agents_idle_lease_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_agents_idle_lease_5m_idle",
-                "value": "declared counterexample: a ticket lease badge or idle-only card is treated as agent idle+lease proof"
+                "value": "lease 5m"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_agents_idle_lease_target_hidden",
+                "value": false
               }
             ]
           },
@@ -16614,11 +17733,26 @@
           {
             "mutation": "role or agent name text containing codex is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_agents_platform_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_agents_platform_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_agents_platform_codex",
                 "value": "unknown"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_agents_platform_target_hidden",
+                "value": false
               }
             ]
           },
@@ -16798,11 +17932,26 @@
           {
             "mutation": "status or focus text containing reviewer is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_agents_role_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_agents_role_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_agents_role_reviewer",
                 "value": "worker"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_agents_role_target_hidden",
+                "value": false
               }
             ]
           },
@@ -16982,11 +18131,26 @@
           {
             "mutation": "a fleet pool stale row is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_agents_stale_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_agents_stale_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/stale_agent_card_count",
                 "value": 0
+              },
+              {
+                "phase": "after",
+                "path": "/personal_agents_stale_target_hidden",
+                "value": false
               }
             ]
           },
@@ -17166,11 +18330,26 @@
           {
             "mutation": "array length alone is accepted as both values",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_agents_total_live_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_agents_total_live_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_agents_total_live_2_live_3_total",
-                "value": "declared counterexample: array length alone is accepted as both values"
+                "value": "3 total"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_agents_total_live_target_hidden",
+                "value": false
               }
             ]
           },
@@ -17350,11 +18529,26 @@
           {
             "mutation": "Fleet data unavailable is accepted as an empty registry",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_fleet_empty_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_fleet_empty_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_fleet_empty_no_registered_projects",
-                "value": "declared counterexample: Fleet data unavailable is accepted as an empty registry"
+                "value": "Fleet data unavailable"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_fleet_empty_target_hidden",
+                "value": false
               }
             ]
           },
@@ -17552,26 +18746,41 @@
           {
             "mutation": "pool row statuses or four identical values are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_fleet_online_busy_available_stale_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_fleet_online_busy_available_stale_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_fleet_online_busy_available_stale_9",
-                "value": "declared counterexample: pool row statuses or four identical values are accepted"
+                "value": "online"
               },
               {
                 "phase": "after",
                 "path": "/personal_fleet_online_busy_available_stale_3",
-                "value": "declared counterexample: pool row statuses or four identical values are accepted"
+                "value": "busy"
               },
               {
                 "phase": "after",
                 "path": "/personal_fleet_online_busy_available_stale_4",
-                "value": "declared counterexample: pool row statuses or four identical values are accepted"
+                "value": "available"
               },
               {
                 "phase": "after",
                 "path": "/personal_fleet_online_busy_available_stale_2",
-                "value": "declared counterexample: pool row statuses or four identical values are accepted"
+                "value": "stale"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_fleet_online_busy_available_stale_target_hidden",
+                "value": false
               }
             ]
           },
@@ -17784,11 +18993,26 @@
           {
             "mutation": "the pool status alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_fleet_project_seats_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_fleet_project_seats_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_fleet_project_seats_sandbox_project_tk_123",
-                "value": "declared counterexample: the pool status alone is accepted"
+                "value": "busy"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_fleet_project_seats_target_hidden",
+                "value": false
               }
             ]
           },
@@ -17935,11 +19159,11 @@
           {
             "mutation": "fleet totals or project count is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
               {
                 "target": "field",
                 "path": "/projects/0/board_id",
-                "value": "declared counterexample: fleet totals or project count is accepted"
+                "value": "fleet totals"
               },
               {
                 "target": "field",
@@ -18107,11 +19331,26 @@
           {
             "mutation": "Fleet unavailable fallback is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_fleet_registry_warning_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_fleet_registry_warning_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_fleet_registry_warning_registry",
-                "value": "declared counterexample: Fleet unavailable fallback is accepted"
+                "value": "Fleet data unavailable"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_fleet_registry_warning_target_hidden",
+                "value": false
               }
             ]
           },
@@ -18303,31 +19542,36 @@
           {
             "mutation": "a per-project agent card is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_fleet_shared_pool_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_fleet_shared_pool_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/shared_pool_row_count",
-                "value": 2
+                "value": 0
               },
               {
                 "phase": "after",
                 "path": "/shared_pool_row",
-                "value": "declared counterexample: a per-project agent card is accepted"
-              },
-              {
-                "phase": "after",
-                "path": "/shared_pool_row",
-                "value": "declared counterexample: a per-project agent card is accepted"
-              },
-              {
-                "phase": "after",
-                "path": "/shared_pool_row",
-                "value": "declared counterexample: a per-project agent card is accepted"
+                "value": ""
               },
               {
                 "phase": "after",
                 "path": "/shared_pool_seat_count",
-                "value": 3
+                "value": 0
+              },
+              {
+                "phase": "after",
+                "path": "/personal_fleet_shared_pool_target_hidden",
+                "value": false
               }
             ]
           },
@@ -18541,11 +19785,26 @@
           {
             "mutation": "backend truncation_counts presence without UI disclosure is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_fleet_truncation_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_fleet_truncation_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_fleet_truncation_fleet_snapshot_is_partial",
-                "value": "declared counterexample: backend truncation_counts presence without UI disclosure is accepted"
+                "value": "2 of 3 projects loaded"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_fleet_truncation_target_hidden",
+                "value": false
               }
             ]
           },
@@ -18725,11 +19984,26 @@
           {
             "mutation": "an available empty registry is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_fleet_unavailable_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_fleet_unavailable_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_fleet_unavailable_fleet_data_unavailable",
-                "value": "declared counterexample: an available empty registry is accepted"
+                "value": "No registered projects"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_fleet_unavailable_target_hidden",
+                "value": false
               }
             ]
           },
@@ -18938,26 +20212,41 @@
           {
             "mutation": "backend acceptance of retracts or three rendered kinds is treated as all four",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_links_edge_types_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_links_edge_types_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_links_edge_types_files",
-                "value": "declared counterexample: backend acceptance of retracts or three rendered kinds is treated as all four"
+                "value": "Files"
               },
               {
                 "phase": "after",
                 "path": "/personal_links_edge_types_tags",
-                "value": "declared counterexample: backend acceptance of retracts or three rendered kinds is treated as all four"
+                "value": "Tags"
               },
               {
                 "phase": "after",
                 "path": "/personal_links_edge_types_retracts",
-                "value": "declared counterexample: backend acceptance of retracts or three rendered kinds is treated as all four"
+                "value": "Retracts"
               },
               {
                 "phase": "after",
                 "path": "/personal_links_edge_types_ticket",
-                "value": "declared counterexample: backend acceptance of retracts or three rendered kinds is treated as all four"
+                "value": ""
+              },
+              {
+                "phase": "after",
+                "path": "/personal_links_edge_types_target_hidden",
+                "value": false
               }
             ]
           },
@@ -19170,11 +20459,26 @@
           {
             "mutation": "Links unavailable is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_links_empty_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_links_empty_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_links_empty_no_explicit_links",
-                "value": "declared counterexample: Links unavailable is accepted"
+                "value": "Links unavailable"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_links_empty_target_hidden",
+                "value": false
               }
             ]
           },
@@ -19354,11 +20658,26 @@
           {
             "mutation": "source totals node_count/edge_count or only one count is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_links_node_edge_totals_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_links_node_edge_totals_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_links_node_edge_totals_2_memories_u00b7_3_links",
-                "value": "declared counterexample: source totals node_count/edge_count or only one count is accepted"
+                "value": "2 memories"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_links_node_edge_totals_target_hidden",
+                "value": false
               }
             ]
           },
@@ -19538,11 +20857,26 @@
           {
             "mutation": "an Important pinned Today card is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_links_pinned_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_links_pinned_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_links_pinned_pinned",
-                "value": "declared counterexample: an Important pinned Today card is accepted"
+                "value": "Important"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_links_pinned_target_hidden",
+                "value": false
               }
             ]
           },
@@ -19728,16 +21062,31 @@
           {
             "mutation": "a generic source or authority label without tool name is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_links_source_label_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_links_source_label_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_links_source_label_authoritative_u00b7_memory_graph",
-                "value": "declared counterexample: a generic source or authority label without tool name is accepted"
+                "value": "Authoritative"
               },
               {
                 "phase": "after",
                 "path": "/personal_links_source_label_synthetic_fixture",
-                "value": "declared counterexample: a generic source or authority label without tool name is accepted"
+                "value": "Fixture"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_links_source_label_target_hidden",
+                "value": false
               }
             ]
           },
@@ -19928,11 +21277,26 @@
           {
             "mutation": "the compact #links-total returned counts alone are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_links_truncation_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_links_truncation_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_links_truncation_showing_2_of_3_memories_and_3_of_4_links",
-                "value": "declared counterexample: the compact #links-total returned counts alone are accepted"
+                "value": "2 memories \u00b7 3 links"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_links_truncation_target_hidden",
+                "value": false
               }
             ]
           },
@@ -20108,11 +21472,21 @@
           {
             "mutation": "a zero counter with an empty list is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_search_no_results_prior_value",
+                "value": ""
+              },
+              {
+                "phase": "action",
+                "path": "/personal_search_no_results_action",
+                "value": "no-matching-result-probe"
+              },
               {
                 "phase": "after",
                 "path": "/personal_search_no_results_no_matching_loaded_data",
-                "value": "declared counterexample: a zero counter with an empty list is accepted"
+                "value": "0 results"
               }
             ]
           },
@@ -20280,7 +21654,7 @@
           {
             "mutation": "a board_snapshot call is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
               {
                 "target": "field",
                 "path": "/count",
@@ -20309,7 +21683,7 @@
               {
                 "target": "field",
                 "path": "/error",
-                "value": "declared counterexample: a board_snapshot call is accepted"
+                "value": "board snapshot"
               }
             ]
           },
@@ -20461,16 +21835,16 @@
           {
             "mutation": "board_event_feed or fixture data is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
               {
                 "target": "field",
                 "path": "/board/id",
-                "value": "declared counterexample: board_event_feed or fixture data is accepted"
+                "value": "sandbox-board"
               },
               {
                 "target": "field",
                 "path": "/data_mode",
-                "value": "declared counterexample: board_event_feed or fixture data is accepted"
+                "value": "fixture"
               },
               {
                 "target": "field",
@@ -20620,21 +21994,21 @@
           {
             "mutation": "board_snapshot or fallback fleet data is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
               {
                 "target": "field",
                 "path": "/registry_warning",
-                "value": "declared counterexample: board_snapshot or fallback fleet data is accepted"
+                "value": "Fleet data unavailable"
               },
               {
                 "target": "field",
                 "path": "/projects/0/board_id",
-                "value": "declared counterexample: board_snapshot or fallback fleet data is accepted"
+                "value": "sandbox-board"
               },
               {
                 "target": "field",
                 "path": "/pool/0/agent_name",
-                "value": "declared counterexample: board_snapshot or fallback fleet data is accepted"
+                "value": "worker-three"
               },
               {
                 "target": "field",
@@ -20780,16 +22154,16 @@
           {
             "mutation": "memory_links backend name or fallback links are accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
               {
                 "target": "field",
                 "path": "/source_tool",
-                "value": "declared counterexample: memory_links backend name or fallback links are accepted"
+                "value": "memory_links"
               },
               {
                 "target": "field",
                 "path": "/relationship_authority",
-                "value": "declared counterexample: memory_links backend name or fallback links are accepted"
+                "value": "synthetic"
               },
               {
                 "target": "field",
@@ -20976,21 +22350,36 @@
           {
             "mutation": "the Team grid or total agent count is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/empty_team_heading",
+                "value": "No teammates yet"
+              },
+              {
+                "phase": "before",
+                "path": "/empty_team_count",
+                "value": 1
+              },
+              {
+                "phase": "action",
+                "path": "/personal_today_active_agents_action",
+                "value": 50
+              },
               {
                 "phase": "after",
                 "path": "/active_agent_count",
-                "value": 5
+                "value": 0
               },
               {
                 "phase": "after",
                 "path": "/live_agent_name",
-                "value": "declared counterexample: the Team grid or total agent count is accepted"
+                "value": ""
               },
               {
                 "phase": "after",
                 "path": "/stale_agent_count",
-                "value": 1
+                "value": 0
               },
               {
                 "phase": "after",
@@ -21216,21 +22605,36 @@
           {
             "mutation": "all tickets or the Work view total is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/empty_work_heading",
+                "value": "No current work"
+              },
+              {
+                "phase": "before",
+                "path": "/empty_work_count",
+                "value": 1
+              },
+              {
+                "phase": "action",
+                "path": "/personal_today_current_work_action",
+                "value": 50
+              },
               {
                 "phase": "after",
                 "path": "/active_work_count",
-                "value": 5
+                "value": 0
               },
               {
                 "phase": "after",
                 "path": "/active_work_id",
-                "value": "declared counterexample: all tickets or the Work view total is accepted"
+                "value": ""
               },
               {
                 "phase": "after",
                 "path": "/ended_work_count",
-                "value": 1
+                "value": 0
               },
               {
                 "phase": "after",
@@ -21443,11 +22847,26 @@
           {
             "mutation": "latest_handoff or any pinned link is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_today_important_pinned_note_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_today_important_pinned_note_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_today_important_pinned_note_pinned_fixture_note",
-                "value": "declared counterexample: latest_handoff or any pinned link is accepted"
+                "value": "Latest handoff: fixture"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_today_important_pinned_note_target_hidden",
+                "value": false
               }
             ]
           },
@@ -21627,11 +23046,26 @@
           {
             "mutation": "important_pinned or an activity event is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_today_latest_handoff_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_today_latest_handoff_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_today_latest_handoff_no_handoff_yet",
-                "value": "declared counterexample: important_pinned or an activity event is accepted"
+                "value": "Pinned fixture note"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_today_latest_handoff_target_hidden",
+                "value": false
               }
             ]
           },
@@ -21786,6 +23220,11 @@
               "path": "/personal_today_recent_activity_target_hidden",
               "selector": "#view-home",
               "property": "hidden"
+            },
+            {
+              "path": "/recent_activity_row_count",
+              "selector": "#recent-activity .timeline-item",
+              "property": "count"
             }
           ],
           "settle_milliseconds": 250
@@ -21793,7 +23232,8 @@
         "select_allowlist": [
           "/personal_today_recent_activity_17",
           "/personal_today_recent_activity_action",
-          "/personal_today_recent_activity_target_hidden"
+          "/personal_today_recent_activity_target_hidden",
+          "/recent_activity_row_count"
         ],
         "semantic_basis": "assert exact visible seq list and absence of older rows"
       },
@@ -21811,11 +23251,31 @@
           {
             "mutation": "Activity view ordering without the five-row cap is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_today_recent_activity_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_today_recent_activity_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_today_recent_activity_17",
-                "value": "declared counterexample: Activity view ordering without the five-row cap is accepted"
+                "value": "#17"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_today_recent_activity_target_hidden",
+                "value": false
+              },
+              {
+                "phase": "after",
+                "path": "/recent_activity_row_count",
+                "value": 6
               }
             ]
           },
@@ -21879,6 +23339,11 @@
               "path": "/personal_today_recent_activity_target_hidden",
               "selector": "#view-home",
               "property": "hidden"
+            },
+            {
+              "path": "/recent_activity_row_count",
+              "selector": "#recent-activity .timeline-item",
+              "property": "count"
             }
           ]
         }
@@ -21910,6 +23375,12 @@
             "path": "/personal_today_recent_activity_target_hidden",
             "op": "eq",
             "value": false
+          },
+          {
+            "phase": "after",
+            "path": "/recent_activity_row_count",
+            "op": "lte",
+            "value": 5
           }
         ]
       }
@@ -22007,21 +23478,36 @@
           {
             "mutation": "raw ticket array length or rejected excluded from third metric is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_today_status_metrics_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_today_status_metrics_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_today_status_metrics_3",
-                "value": "declared counterexample: raw ticket array length or rejected excluded from third metric is accepted"
+                "value": "6"
               },
               {
                 "phase": "after",
                 "path": "/personal_today_status_metrics_1",
-                "value": "declared counterexample: raw ticket array length or rejected excluded from third metric is accepted"
+                "value": "6"
               },
               {
                 "phase": "after",
                 "path": "/personal_today_status_metrics_2",
-                "value": "declared counterexample: raw ticket array length or rejected excluded from third metric is accepted"
+                "value": "1"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_today_status_metrics_target_hidden",
+                "value": false
               }
             ]
           },
@@ -22223,11 +23709,26 @@
           {
             "mutation": "rejected status or rejection_count is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_work_abandonment_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_work_abandonment_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_work_abandonment_abandoned_u00d72",
-                "value": "declared counterexample: rejected status or rejection_count is accepted"
+                "value": "rejected \u00d72"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_abandonment_target_hidden",
+                "value": false
               }
             ]
           },
@@ -22407,11 +23908,26 @@
           {
             "mutation": "Today's 'No current work' state is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_work_no_ticket_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_work_no_ticket_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_work_no_ticket_no_tickets_yet",
-                "value": "declared counterexample: Today's 'No current work' state is accepted"
+                "value": "No current work"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_no_ticket_target_hidden",
+                "value": false
               }
             ]
           },
@@ -22597,16 +24113,31 @@
           {
             "mutation": "card-level unprefixed assignee or claimed_agent_id is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_work_ownership_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_work_ownership_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/owner_metadata",
-                "value": "declared counterexample: card-level unprefixed assignee or claimed_agent_id is accepted"
+                "value": "worker-three"
               },
               {
                 "phase": "after",
                 "path": "/owner_pill_count",
-                "value": 4
+                "value": 3
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_ownership_target_hidden",
+                "value": false
               }
             ]
           },
@@ -22746,7 +24277,7 @@
           "before": [
             {
               "path": "/personal_work_priority_critical",
-              "selector": "#work-groups",
+              "selector": "#work-groups .work-card[data-ticket-id='TK-123'] .meta-row .pill:nth-child(1)",
               "property": "text"
             },
             {
@@ -22765,7 +24296,7 @@
           "after": [
             {
               "path": "/personal_work_priority_critical",
-              "selector": "#work-groups",
+              "selector": "#work-groups .work-card[data-ticket-id='TK-123'] .meta-row .pill:nth-child(1)",
               "property": "text"
             },
             {
@@ -22797,11 +24328,26 @@
           {
             "mutation": "a global priority string or status pill is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_work_priority_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_work_priority_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_work_priority_critical",
-                "value": "declared counterexample: a global priority string or status pill is accepted"
+                "value": "claimed"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_priority_target_hidden",
+                "value": false
               }
             ]
           },
@@ -22839,7 +24385,7 @@
           "before": [
             {
               "path": "/personal_work_priority_critical",
-              "selector": "#work-groups",
+              "selector": "#work-groups .work-card[data-ticket-id='TK-123'] .meta-row .pill:nth-child(1)",
               "property": "text"
             },
             {
@@ -22858,7 +24404,7 @@
           "after": [
             {
               "path": "/personal_work_priority_critical",
-              "selector": "#work-groups",
+              "selector": "#work-groups .work-card[data-ticket-id='TK-123'] .meta-row .pill:nth-child(1)",
               "property": "text"
             },
             {
@@ -22888,7 +24434,7 @@
           {
             "phase": "after",
             "path": "/personal_work_priority_critical",
-            "op": "contains",
+            "op": "eq",
             "value": "critical"
           },
           {
@@ -22981,11 +24527,26 @@
           {
             "mutation": "abandoned_count without rejected status is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_work_rejection_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_work_rejection_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_work_rejection_needs_attention",
-                "value": "declared counterexample: abandoned_count without rejected status is accepted"
+                "value": "Working \u00b7 abandoned \u00d72"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_rejection_target_hidden",
+                "value": false
               }
             ]
           },
@@ -23165,11 +24726,26 @@
           {
             "mutation": "the Today submitted metric alone is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_work_review_readiness_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_work_review_readiness_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_work_review_readiness_submitted",
-                "value": "declared counterexample: the Today submitted metric alone is accepted"
+                "value": "3 submissions waiting"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_review_readiness_target_hidden",
+                "value": false
               }
             ]
           },
@@ -23385,41 +24961,56 @@
           {
             "mutation": "toneForStatus colors or partial grouping is accepted",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_work_status_groups_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_work_status_groups_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_work_status_groups_working",
-                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+                "value": "Working Open Submitted"
               },
               {
                 "phase": "after",
                 "path": "/personal_work_status_groups_open",
-                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+                "value": "Working Open Submitted"
               },
               {
                 "phase": "after",
                 "path": "/personal_work_status_groups_submitted",
-                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+                "value": "Working Open Submitted"
               },
               {
                 "phase": "after",
                 "path": "/personal_work_status_groups_needs_attention",
-                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+                "value": "Working Open Submitted"
               },
               {
                 "phase": "after",
                 "path": "/personal_work_status_groups_done",
-                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+                "value": "Working Open Submitted"
               },
               {
                 "phase": "after",
                 "path": "/personal_work_status_groups_ended",
-                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+                "value": "Working Open Submitted"
               },
               {
                 "phase": "after",
                 "path": "/personal_work_status_groups_other",
-                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+                "value": "Working Open Submitted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_status_groups_target_hidden",
+                "value": false
               }
             ]
           },
@@ -23665,11 +25256,26 @@
           {
             "mutation": "loaded array length is accepted as total",
             "expected": "fact-specific nonpass",
-            "observed_mutations": [
+            "observed_fixture": [
+              {
+                "phase": "before",
+                "path": "/personal_work_total_target_hidden",
+                "value": true
+              },
+              {
+                "phase": "action",
+                "path": "/personal_work_total_action",
+                "value": "clicked"
+              },
               {
                 "phase": "after",
                 "path": "/personal_work_total_12_total",
-                "value": "declared counterexample: loaded array length is accepted as total"
+                "value": "3 total"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_total_target_hidden",
+                "value": false
               }
             ]
           },
