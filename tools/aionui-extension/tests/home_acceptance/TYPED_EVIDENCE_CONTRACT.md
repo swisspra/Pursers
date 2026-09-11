@@ -37,6 +37,131 @@ freshness, provenance, correlation, or replay failure. A valid evaluation may
 return `passed: false` when authentic evidence does not satisfy the expected
 conjuncts.
 
+The top-level trust object has these exact keys:
+
+```json
+{
+  "schema_version": 1,
+  "verifier_id": "purser-reviewer-2",
+  "trusted_module_path": "/PATH/TO/VERIFIER/typed_evidence.py",
+  "module_sha256": "...",
+  "candidate_checkout_root": "/PATH/TO/CANDIDATE",
+  "candidate_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "board_id": "sandbox-board",
+  "max_age_seconds": 300,
+  "active_evidence_key": "evidence-key-1",
+  "evidence_keys": {"evidence-key-1": "1111111111111111111111111111111111111111111111111111111111111111"},
+  "http_sources": {},
+  "receipt_sources": {},
+  "log_sources": {},
+  "state_sources": {},
+  "replay_guard": {"path": "/PATH/TO/VERIFIER/replay.log", "consume": true}
+}
+```
+
+Each source object is exact and versioned by its adapter value. Private headers,
+HMAC keys, and paths occur only in verifier trust:
+
+```json
+{
+  "http": {
+    "adapter": "trusted_http_v1",
+    "provenance": "fleet-runtime",
+    "runtime_id": "fleet-runtime-1",
+    "base_url": "http://127.0.0.1:18921",
+    "surface": "fleet",
+    "board_id": "sandbox-board",
+    "candidate_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "methods": ["GET", "POST"],
+    "headers": {},
+    "timeout_seconds": 4,
+    "response_bindings": {
+      "/candidate": "$candidate_commit",
+      "/board": "$board_id",
+      "/surface": "$surface",
+      "/entity": "$entity",
+      "/run": "$run_id",
+      "/action": "$action_id",
+      "/runtime": "fleet-runtime-1"
+    }
+  },
+  "receipt": {
+    "adapter": "hmac_json_v1",
+    "provenance": "personal-runtime-receipt",
+    "runtime_id": "personal-runtime-1",
+    "path": "/PATH/TO/VERIFIER/receipt.json",
+    "hmac_key_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+    "signature_field": "signature",
+    "signed_fields": [
+      "/schema_version", "/issuer", "/runtime_id", "/pid",
+      "/candidate_commit", "/board_id", "/surface", "/entity",
+      "/run_id", "/action_id", "/transport", "/role", "/captured_at"
+    ],
+    "timestamp_pointer": "/captured_at",
+    "max_age_seconds": 300,
+    "required_bindings": {
+      "/candidate_commit": "$candidate_commit",
+      "/board_id": "$board_id",
+      "/surface": "$surface",
+      "/entity": "$entity",
+      "/run_id": "$run_id",
+      "/action_id": "$action_id"
+    },
+    "issuer_pointer": "/issuer",
+    "issuer": "personal-verifier",
+    "runtime_pointer": "/runtime_id",
+    "transport_pointer": "/transport",
+    "transport": "stdio",
+    "process": null
+  },
+  "log": {
+    "adapter": "hmac_jsonl_v1",
+    "provenance": "central-authenticated-stderr",
+    "runtime_id": "central-runtime-1",
+    "path": "/PATH/TO/VERIFIER/central.jsonl",
+    "hmac_key_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+    "signature_field": "signature",
+    "signed_fields": [
+      "/emitter", "/timestamp", "/runtime_id", "/candidate_commit",
+      "/board_id", "/surface", "/entity", "/run_id", "/action_id",
+      "/event", "/outcome"
+    ],
+    "timestamp_pointer": "/timestamp",
+    "max_age_seconds": 300,
+    "required_bindings": {
+      "/candidate_commit": "$candidate_commit",
+      "/board_id": "$board_id",
+      "/surface": "$surface",
+      "/entity": "$entity",
+      "/run_id": "$run_id",
+      "/action_id": "$action_id"
+    },
+    "emitter": "central-runtime",
+    "runtime_pointer": "/runtime_id",
+    "max_bytes": 65536,
+    "process": null
+  },
+  "state": {
+    "adapter": "trusted_http_state_v1",
+    "provenance": "fleet-runtime-state",
+    "runtime_id": "fleet-runtime-1",
+    "http_source_id": "fleet-api"
+  },
+  "process": {
+    "pid_file": "/PATH/TO/VERIFIER/runtime.pid",
+    "argv_prefix": ["python3", "-m", "pursers_personal.cli"],
+    "argv_contains": ["--board-id", "sandbox-board"],
+    "receipt_pid_pointer": "/pid"
+  }
+}
+```
+
+The `http`, `receipt`, `log`, `state`, and `process` labels above are explanatory;
+their values are placed under the corresponding source ID or `process` field.
+Receipt and log HMAC field lists must exactly cover every leaf except the
+signature itself, preventing a valid signature from being reused with an
+unsigned outcome field.
+
 ## Closed common shapes
 
 All objects use exact key equality. Unknown or missing keys fail closed.
