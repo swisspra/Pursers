@@ -15,6 +15,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RELEASE_VERSIONS = ROOT / "tools" / "release_versions.toml"
 CLIENT_PROJECT = ROOT / "packages" / "client"
 BRIDGE_PROJECT = ROOT / "tools" / "wait-bridge"
 LIFECYCLE_COMMANDS = ("ticket-lifecycle", "seat-lifecycle", "team-lifecycle")
@@ -22,6 +23,14 @@ LIFECYCLE_COMMANDS = ("ticket-lifecycle", "seat-lifecycle", "team-lifecycle")
 
 class WheelhouseError(RuntimeError):
     pass
+
+
+def _release_source_date_epoch() -> str:
+    with RELEASE_VERSIONS.open("rb") as stream:
+        value = tomllib.load(stream).get("source_date_epoch")
+    if not isinstance(value, str) or not value.isdigit():
+        raise WheelhouseError("release manifest source_date_epoch is invalid")
+    return value
 
 
 def _run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -100,6 +109,18 @@ def _source_commit(allow_dirty: bool) -> tuple[str, bool]:
     return commit, dirty
 
 
+def _build_environment(python: Path) -> dict[str, str]:
+    environment = {
+        **os.environ,
+        "PYTHONHASHSEED": "0",
+        "SOURCE_DATE_EPOCH": _release_source_date_epoch(),
+        "UV_PYTHON": str(python),
+    }
+    environment.pop("PIP_FIND_LINKS", None)
+    environment.pop("UV_FIND_LINKS", None)
+    return environment
+
+
 def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, object]:
     if not output.is_absolute():
         raise WheelhouseError("--output must be an absolute path")
@@ -127,9 +148,7 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
         projects.mkdir()
         wheelhouse.mkdir()
         wheelhouse.chmod(0o700)
-        build_environment = {**os.environ, "UV_PYTHON": str(python)}
-        build_environment.pop("PIP_FIND_LINKS", None)
-        build_environment.pop("UV_FIND_LINKS", None)
+        build_environment = _build_environment(python)
         staged_projects = []
         for project in (CLIENT_PROJECT, BRIDGE_PROJECT):
             staged_project = projects / project.name

@@ -14,11 +14,32 @@ import zipfile
 
 import pytest
 
+from tools import build_home_runtime_wheelhouse as wheelhouse_builder
 from tools import home_acceptance_handoff as handoff
 
 
 SHA = "a" * 40
 RUNTIME_SHA = "f5a24301262bcbe56d993276362dc74d6f1728ad"
+
+
+def test_wheelhouse_source_builds_use_release_reproducibility_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PIP_FIND_LINKS", "/ambient/pip")
+    monkeypatch.setenv("UV_FIND_LINKS", "/ambient/uv")
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "wrong")
+    python = Path("/verified/python3.12")
+
+    environment = wheelhouse_builder._build_environment(python)
+
+    assert environment["PYTHONHASHSEED"] == "0"
+    assert (
+        environment["SOURCE_DATE_EPOCH"]
+        == wheelhouse_builder._release_source_date_epoch()
+    )
+    assert environment["UV_PYTHON"] == str(python)
+    assert "PIP_FIND_LINKS" not in environment
+    assert "UV_FIND_LINKS" not in environment
 
 
 def _file(path: Path, data: bytes = b"x", executable: bool = False) -> Path:
@@ -191,6 +212,18 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
     if python is None:
         pytest.skip("python3.12 is required")
     root = Path(__file__).resolve().parents[2]
+    client_name, client_version = wheelhouse_builder._project(
+        wheelhouse_builder.CLIENT_PROJECT
+    )
+    bridge_name, bridge_version = wheelhouse_builder._project(
+        wheelhouse_builder.BRIDGE_PROJECT
+    )
+    client_wheel = (
+        f"{client_name.replace('-', '_')}-{client_version}-py3-none-any.whl"
+    )
+    bridge_wheel = (
+        f"{bridge_name.replace('-', '_')}-{bridge_version}-py3-none-any.whl"
+    )
     ambient_wheels = tmp_path / "ambient-wheels"
     ambient_wheels.mkdir()
     with zipfile.ZipFile(
@@ -232,8 +265,8 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
     assert stat.S_IMODE(wheelhouse.stat().st_mode) == 0o700
     assert stat.S_IMODE((wheelhouse / "wheelhouse.json").stat().st_mode) == 0o600
     assert "mcp-2.1.1-py3-none-any.whl" in checksums
-    assert "pursers_client-0.1.0a22-py3-none-any.whl" in checksums
-    assert "pursers_wait_bridge-0.1.0a15-py3-none-any.whl" in checksums
+    assert client_wheel in checksums
+    assert bridge_wheel in checksums
     subprocess.run(
         ["shasum", "-a", "256", "-c", "SHA256SUMS"],
         check=True,
@@ -273,8 +306,8 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
             "--no-index",
             "--find-links",
             str(wheelhouse),
-            str(wheelhouse / "pursers_client-0.1.0a22-py3-none-any.whl"),
-            str(wheelhouse / "pursers_wait_bridge-0.1.0a15-py3-none-any.whl"),
+            str(wheelhouse / client_wheel),
+            str(wheelhouse / bridge_wheel),
         ],
         check=True,
         capture_output=True,
@@ -293,8 +326,8 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
             "--no-index",
             "--no-deps",
             "--force-reinstall",
-            str(wheelhouse / "pursers_client-0.1.0a22-py3-none-any.whl"),
-            str(wheelhouse / "pursers_wait_bridge-0.1.0a15-py3-none-any.whl"),
+            str(wheelhouse / client_wheel),
+            str(wheelhouse / bridge_wheel),
         ],
         check=True,
         capture_output=True,
@@ -344,7 +377,7 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
     handoff_root = Path(handoff.prepare(args)["handoff"])
     manifest = json.loads((handoff_root / "handoff.json").read_text())
     assert manifest["bridge_runtime"]["binary"] == str(bridge.resolve())
-    assert manifest["bridge_runtime"]["version"] == "0.1.0a15"
+    assert manifest["bridge_runtime"]["version"] == bridge_version
     assert manifest["bridge_runtime"]["verified_commands"] == [
         "ticket-lifecycle", "seat-lifecycle", "team-lifecycle",
     ]
