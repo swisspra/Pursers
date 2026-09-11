@@ -49,6 +49,9 @@ from pursers_client import (
     ARCHIVE_EVENT_KINDS,
     CLAIM_TTL_EVENT_KINDS,
     CLAIM_GATE_EVENT_KINDS,
+    COORDINATOR_QUESTION_ASKED,
+    COORDINATOR_QUESTION_ACCEPTED,
+    COORDINATOR_QUESTION_ANSWERED,
     DEPRECATION_EVENT_KINDS,
     DISPATCH_EVENT_KINDS,
     HUMAN_INPUT_REQUESTED,
@@ -390,6 +393,13 @@ HUMAN_REQUEST_SCHEMA_MAX_CHARS = 20_000
 HUMAN_REQUEST_MAX_PROPERTIES = 50
 HUMAN_REQUEST_SNAPSHOT_MESSAGE_CHARS = 500
 HUMAN_REQUEST_KINDS = frozenset({"decision", "deliverable", "approval", "information"})
+# Non-pausing coordinator question/reply sibling of the needs_human path.
+# The pausing semantics of ticket_request_human are deliberately NOT reused:
+# the asker keeps its work lease and the ticket status is never mutated.
+COORDINATOR_QUESTION_MESSAGE_MAX_CHARS = 2_000
+COORDINATOR_QUESTION_KINDS = HUMAN_REQUEST_KINDS
+COORDINATOR_QUESTION_STATES = frozenset({"open", "accepted", "answered"})
+COORDINATOR_QUESTIONS_PER_TICKET_MAX = 50
 
 
 @dataclass(frozen=True)
@@ -8375,6 +8385,303 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         return {
             "ok": True, "ticket": changed["ticket"], "event": event,
             "dispatch_event": dispatch_events[0] if dispatch_events else None,
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+            "scrub_audit": changed["scrub_audit"],
+        }
+
+    def coordinator_question_authorized(
+        document: dict[str, Any], principal: Principal
+    ) -> bool:
+        """True when the principal may accept or answer coordinator questions."""
+        if COORDINATOR_SCOPE in principal.scopes:
+            return True
+        membership = service.resolve_board_context(document, principal.principal_id)
+        return membership.get("role") == "admin"
+
+    def find_coordinator_question(
+        ticket: dict[str, Any], question_id: str
+    ) -> dict[str, Any] | None:
+        for entry in ticket.get("coordinator_questions", []):
+            if entry.get("question_id") == question_id:
+                return entry
+        return None
+
+    @tool()
+    async def ticket_question_ask(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        message: str,
+        kind: str,
+        ctx: Context,
+        message_id: str | None = None,
+        in_reply_to: str | None = None,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Ask the project coordinator a durable question without pausing work."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        coordinate_authorized = COORDINATOR_SCOPE in principal.scopes
+        if kind not in COORDINATOR_QUESTION_KINDS:
+            raise ValueError("kind must be decision, deliverable, approval, or information")
+        now = time.time()
+
+        def ask(document: dict[str, Any]) -> dict[str, Any]:
+            profile = board_scrub_profile(document)
+            allow_counts: dict[str, int] = {}
+            safe_message = clean_text(
+                "message", message, required=True,
+                max_length=COORDINATOR_QUESTION_MESSAGE_MAX_CHARS,
+                scrub_profile=profile, allow_counts=allow_counts,
+            )
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            membership = service.resolve_board_context(
+                document, principal.principal_id
+            )
+            is_holder = (
+                ticket.get("status") in PRE_SUBMISSION_STATES
+                and ticket.get("claimed_by_agent_id") == actor["agent_id"]
+                and ticket.get("claimed_by_principal_id") == principal.principal_id
+            )
+            is_admin = membership.get("role") == "admin"
+            if not (is_holder or is_admin or coordinate_authorized):
+                raise PermissionError(
+                    "coordinator question requires the work lease, board admin, "
+                    "or board:coordinate"
+                )
+            if ticket.get("status") in TERMINAL_TICKET_STATES:
+                raise ValueError(f"ticket is already {ticket['status']}")
+            questions = ticket.setdefault("coordinator_questions", [])
+            # Retry idempotency: the same caller-supplied message_id never
+            # creates a second question and never re-notifies.
+            if message_id is not None:
+                for entry in questions:
+                    if entry.get("message_id") == message_id:
+                        return {
+                            "actor": actor, "question": copy.deepcopy(entry),
+                            "duplicate": True, "recipients": [],
+                            "released": released,
+                            "renewed": [i for i in renewed if i != ticket_id],
+                            "scrub_audit": None,
+                        }
+            if in_reply_to is not None and find_coordinator_question(
+                ticket, in_reply_to
+            ) is None:
+                raise ValueError("in_reply_to does not match a question on this ticket")
+            if len(questions) >= COORDINATOR_QUESTIONS_PER_TICKET_MAX:
+                raise ValueError("ticket has too many coordinator questions")
+            question_id = "CQ-" + secrets.token_hex(8)
+            entry = {
+                "question_id": question_id,
+                "message_id": message_id,
+                "in_reply_to": in_reply_to,
+                "message": safe_message,
+                "kind": kind,
+                "state": "open",
+                "asked_by": {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                },
+                "asked_at": iso_at(now),
+                "accepted_by": None,
+                "accepted_at": None,
+                "answer": None,
+                "answered_at": None,
+            }
+            questions.append(entry)
+            ticket["updated_at"] = iso_at(now)
+            scrub_audit = record_scrub_allows(document, actor, now, allow_counts)
+            return {
+                "actor": actor, "question": copy.deepcopy(entry),
+                "duplicate": False,
+                "recipients": human_request_recipients(document),
+                "released": released,
+                "renewed": [item for item in renewed if item != ticket_id],
+                "scrub_audit": scrub_audit,
+            }
+
+        changed = service.mutate(board_id, ask)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        event = None
+        if not changed["duplicate"]:
+            # The cue rides the existing ticket resource so a coordinator whose
+            # subscription already watches tickets needs no new surface.
+            uri = resource_uri(board_id, "ticket", ticket_id)
+            event = await append_and_publish(
+                board_id, changed["actor"], COORDINATOR_QUESTION_ASKED, uri,
+                changed["recipients"], ctx, ticket_id=ticket_id,
+                question_id=changed["question"]["question_id"],
+            )
+        return {
+            "ok": True, "duplicate": changed["duplicate"],
+            "question_id": changed["question"]["question_id"],
+            "question": changed["question"], "event": event,
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+            "scrub_audit": changed["scrub_audit"],
+        }
+
+    @tool()
+    async def board_question_inbox(
+        board_id: str,
+        agent_name: str,
+        ctx: Context,
+        state: str | None = None,
+        ticket_id: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """List coordinator questions this principal is authorized to answer."""
+        board_id = require_id("board_id", board_id)
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        if state is not None and state not in COORDINATOR_QUESTION_STATES:
+            raise ValueError("state must be open, accepted, or answered")
+        now = time.time()
+
+        def read(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            if not coordinator_question_authorized(document, principal):
+                raise PermissionError(
+                    "coordinator inbox requires board admin or board:coordinate"
+                )
+            items: list[dict[str, Any]] = []
+            for tid, ticket in document["tickets"].items():
+                if ticket_id is not None and tid != ticket_id:
+                    continue
+                for entry in ticket.get("coordinator_questions", []):
+                    if state is not None and entry.get("state") != state:
+                        continue
+                    item = copy.deepcopy(entry)
+                    item["ticket_id"] = tid
+                    items.append(item)
+            items.sort(key=lambda item: item.get("asked_at") or "")
+            return {
+                "actor": actor, "items": items[: max(1, min(limit, 100))],
+                "total": len(items), "released": released, "renewed": renewed,
+            }
+
+        changed = service.mutate(board_id, read)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        return {
+            "ok": True, "questions": changed["items"],
+            "total": changed["total"], "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+        }
+
+    @tool()
+    async def ticket_question_answer(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        question_id: str,
+        ctx: Context,
+        action: str = "answer",
+        message: str | None = None,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Accept or answer a coordinator question without changing ticket state."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        question_id = require_id("question_id", question_id)
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        if action not in {"accept", "answer"}:
+            raise ValueError("action must be accept or answer")
+        if action == "answer" and not message:
+            raise ValueError("answer requires a message")
+        now = time.time()
+
+        def respond(document: dict[str, Any]) -> dict[str, Any]:
+            profile = board_scrub_profile(document)
+            allow_counts: dict[str, int] = {}
+            safe_message = None
+            if message is not None:
+                safe_message = clean_text(
+                    "message", message, required=True,
+                    max_length=COORDINATOR_QUESTION_MESSAGE_MAX_CHARS,
+                    scrub_profile=profile, allow_counts=allow_counts,
+                )
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            if not coordinator_question_authorized(document, principal):
+                raise PermissionError(
+                    "answering a coordinator question requires board admin "
+                    "or board:coordinate"
+                )
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            entry = find_coordinator_question(ticket, question_id)
+            if entry is None:
+                raise ValueError("question not found")
+            if entry.get("state") == "answered":
+                # Idempotent: a retried answer returns the stored one.
+                return {
+                    "actor": actor, "question": copy.deepcopy(entry),
+                    "duplicate": True, "recipients": [], "released": released,
+                    "renewed": renewed, "scrub_audit": None, "kind": None,
+                }
+            if action == "accept":
+                entry["state"] = "accepted"
+                entry["accepted_by"] = {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                }
+                entry["accepted_at"] = iso_at(now)
+                event_kind = COORDINATOR_QUESTION_ACCEPTED
+            else:
+                entry["state"] = "answered"
+                entry["answer"] = safe_message
+                entry["answered_at"] = iso_at(now)
+                entry["answered_by"] = {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                }
+                event_kind = COORDINATOR_QUESTION_ANSWERED
+            ticket["updated_at"] = iso_at(now)
+            scrub_audit = record_scrub_allows(document, actor, now, allow_counts)
+            asked_by = entry.get("asked_by") or {}
+            recipients = [asked_by["agent_id"]] if asked_by.get("agent_id") else []
+            return {
+                "actor": actor, "question": copy.deepcopy(entry),
+                "duplicate": False, "recipients": recipients,
+                "released": released, "renewed": renewed,
+                "scrub_audit": scrub_audit, "kind": event_kind,
+            }
+
+        changed = service.mutate(board_id, respond)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        event = None
+        if not changed["duplicate"]:
+            uri = resource_uri(board_id, "ticket", ticket_id)
+            event = await append_and_publish(
+                board_id, changed["actor"], changed["kind"], uri,
+                changed["recipients"], ctx, ticket_id=ticket_id,
+                question_id=question_id,
+            )
+        return {
+            "ok": True, "duplicate": changed["duplicate"],
+            "question": changed["question"], "event": event,
             "release_events": release_events,
             "implicitly_renewed": changed["renewed"],
             "scrub_audit": changed["scrub_audit"],

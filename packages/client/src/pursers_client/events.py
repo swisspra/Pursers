@@ -15,6 +15,9 @@ REVIEW_OFFERED = "review_offered"
 DISPATCH_UNASSIGNABLE = "dispatch_unassignable"
 HUMAN_INPUT_REQUESTED = "human_input_requested"
 HUMAN_INPUT_RESOLVED = "human_input_resolved"
+COORDINATOR_QUESTION_ASKED = "coordinator_question_asked"
+COORDINATOR_QUESTION_ACCEPTED = "coordinator_question_accepted"
+COORDINATOR_QUESTION_ANSWERED = "coordinator_question_answered"
 TICKET_CLAIM_REFUSED = "ticket_claim_refused"
 REVIEW_CLAIM_REFUSED = "review_claim_refused"
 TICKET_PARKED = "ticket_parked"
@@ -77,6 +80,13 @@ CLAIM_TTL_EVENT_KINDS = frozenset({"board_claim_ttl_changed"})
 REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
 DEPRECATION_EVENT_KINDS = frozenset({"deprecated_tool_warning"})
 AGENT_LIFECYCLE_EVENT_KINDS = frozenset({"agent_lifecycle_changed"})
+COORDINATOR_MESSAGE_EVENT_KINDS = frozenset(
+    {
+        COORDINATOR_QUESTION_ASKED,
+        COORDINATOR_QUESTION_ACCEPTED,
+        COORDINATOR_QUESTION_ANSWERED,
+    }
+)
 
 # Central imports this vocabulary rather than maintaining an independent set.
 CENTRAL_EVENT_KINDS = (
@@ -87,6 +97,7 @@ CENTRAL_EVENT_KINDS = (
     | REVIEW_EVENT_KINDS
     | DEPRECATION_EVENT_KINDS
     | AGENT_LIFECYCLE_EVENT_KINDS
+    | COORDINATOR_MESSAGE_EVENT_KINDS
     | DISPATCH_EVENT_KINDS
     | CLAIM_GATE_EVENT_KINDS
     | PARK_EVENT_KINDS
