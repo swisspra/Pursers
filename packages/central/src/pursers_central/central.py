@@ -6209,7 +6209,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "board_id": board_id,
                     "agent_ids": [item["agent_id"] for item in memberships],
                     "agent_names": [item["agent_name"] for item in memberships],
-                    "roles": sorted({item["role"] for item in memberships}),
+                    # Retired-member compaction intentionally removes the seat
+                    # role from tombstones.  Unknown legacy/corrupt roles are
+                    # also omitted instead of being promoted during discovery.
+                    "roles": sorted(
+                        {
+                            role
+                            for item in memberships
+                            if isinstance((role := item.get("role")), str)
+                            and role in SEAT_ROLES
+                        }
+                    ),
                     "membership_role": board_membership["role"],
                     "scrub_profile": board_scrub_profile(document),
                     "review_policy": board_review_policy(document),

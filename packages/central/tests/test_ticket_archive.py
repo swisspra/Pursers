@@ -643,10 +643,15 @@ class ArchiveTierTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("capabilities", member)
         self.assertNotIn("task_focus", member)
 
-        # Rejoining resurrects the full live record without tombstone markers.
         self.principal = central.Principal(
             "PR-retired", "retired-one", frozenset({"board:read", "board:write"})
         )
+        listed = await self.mcp.call_tool("board_list", {})
+        row = listed.structured_content["boards"][0]
+        self.assertEqual(row["agent_ids"], [member_id])
+        self.assertEqual(row["roles"], [])
+
+        # Rejoining resurrects the full live record without tombstone markers.
         joined = await self.call(
             "board_join",
             agent_name="retired-one",
