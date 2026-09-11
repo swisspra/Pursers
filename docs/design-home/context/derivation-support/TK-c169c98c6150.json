@@ -1,0 +1,1307 @@
+{
+  "schema_version": 1,
+  "ticket_id": "TK-c169c98c6150",
+  "parent_ticket_id": "TK-a565b6635db1",
+  "source_ref": "6368b72279f77e0132888c161e1bac001276dba1",
+  "partition": {
+    "prefixes": [
+      "personal.",
+      "extension."
+    ],
+    "expected_counts": {
+      "personal": 63,
+      "extension": 11,
+      "total": 74
+    },
+    "approved_35_overlap": []
+  },
+  "rows": [
+    {
+      "id": "extension.bounded-errors",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/webui/app.js",
+        "line_start": 55,
+        "line_end": 93,
+        "evidence": "const ERROR_COPY = {"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; helper returns a typed error such as helper_auth_failed.",
+      "action": "submit a request that deterministically returns helper_auth_failed",
+      "expected_state": "the live region shows 'The helper rejected this local access token.'",
+      "proposed_executable_assertion": "#helper-message has the mapped error text and class error",
+      "negative_counterexample": "raw backend text, an unbounded stack, or another error label is shown"
+    },
+    {
+      "id": "extension.environment-free-mcp-registration",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/door/adapter.cjs",
+        "line_start": 214,
+        "line_end": 239,
+        "evidence": "transport: { type: 'stdio', command: 'pursers-wait-bridge', args: [], env: {} }"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; door connect succeeds and importMcp returns imported=false.",
+      "action": "connect the saved seat and inspect the returned MCP definition",
+      "expected_state": "the definition uses stdio pursers-wait-bridge with an empty env object",
+      "proposed_executable_assertion": "result.mcp_definition.transport deep-equals {type:'stdio',command:'pursers-wait-bridge',args:[],env:{}}",
+      "negative_counterexample": "registration requires inherited secrets or a populated env"
+    },
+    {
+      "id": "extension.idempotent-reconnect",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/door/adapter.cjs",
+        "line_start": 242,
+        "line_end": 264,
+        "evidence": "return register(mode, joined, metadata, { ...normalized, seat_name: seatName }, context, mode === 'rotate' ? 'rotated' : 'recovered');"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; status already contains the same board, role, kid, and seat name.",
+      "action": "connect again with the same identity",
+      "expected_state": "the adapter returns recovered through register without issuing a second join",
+      "proposed_executable_assertion": "spy runBridge and assert no join call while outcome is recovered",
+      "negative_counterexample": "the reconnect calls join again or changes identity"
+    },
+    {
+      "id": "extension.join-form",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/webui/index.html",
+        "line_start": 103,
+        "line_end": 143,
+        "evidence": "<form class=\"card form-card\" id=\"connection-form\">"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the Pursers settings tab is loaded.",
+      "action": "navigate to #connection",
+      "expected_state": "the labelled door, seat, role, tier, folder, assistant, model, and connect controls are exposed",
+      "proposed_executable_assertion": "query #connection-form and assert its labelled required controls and #connect-door",
+      "negative_counterexample": "a lifecycle form or generic card is accepted as the project join form"
+    },
+    {
+      "id": "extension.join-progress",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/webui/index.html",
+        "line_start": 65,
+        "line_end": 69,
+        "evidence": "<ol class=\"stepper\" aria-label=\"Setup progress\">"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the settings page is at initial setup.",
+      "action": "inspect the Setup progress ordered list",
+      "expected_state": "Connect, Prepare Team, and Ready appear in order with one current step",
+      "proposed_executable_assertion": "read .stepper li labels and assert exact ordered states plus one .current",
+      "negative_counterexample": "unordered navigation links or a generic Progress heading are accepted"
+    },
+    {
+      "id": "extension.redacted-status-card",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/webui/index.html",
+        "line_start": 146,
+        "line_end": 158,
+        "evidence": "Recovery reuses stored redacted metadata. It never asks for or replays the door."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a saved connection status is returned.",
+      "action": "render #connection-card",
+      "expected_state": "only board, role, seat, push mode, key ID, and expiry are shown, with the redaction notice",
+      "proposed_executable_assertion": "assert the six dt labels and absence of the submitted door/token value in #connection-card",
+      "negative_counterexample": "the door value, helper token, or credential is rendered"
+    },
+    {
+      "id": "extension.reviewer-preset-claude",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/aion-extension.json",
+        "line_start": 53,
+        "line_end": 58,
+        "evidence": "\"id\": \"pursers-reviewer-claude\""
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the extension manifest is loaded.",
+      "action": "enumerate contributes.assistants",
+      "expected_state": "pursers-reviewer-claude uses agentId and presetAgentType claude with contexts/reviewer.md",
+      "proposed_executable_assertion": "deep-match the manifest assistant by exact id and fields",
+      "negative_counterexample": "the Codex reviewer or worker context is substituted"
+    },
+    {
+      "id": "extension.reviewer-preset-codex",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/aion-extension.json",
+        "line_start": 45,
+        "line_end": 50,
+        "evidence": "\"id\": \"pursers-reviewer-codex\""
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the extension manifest is loaded.",
+      "action": "enumerate contributes.assistants",
+      "expected_state": "pursers-reviewer-codex uses agentId and presetAgentType codex with contexts/reviewer.md",
+      "proposed_executable_assertion": "deep-match the manifest assistant by exact id and fields",
+      "negative_counterexample": "the Claude reviewer or worker context is substituted"
+    },
+    {
+      "id": "extension.settings-navigation",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/aion-extension.json",
+        "line_start": 61,
+        "line_end": 70,
+        "evidence": "\"entryPoint\": \"webui/index.html\""
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; AionUi loads the extension manifest.",
+      "action": "inspect contributes.settingsTabs",
+      "expected_state": "the Pursers tab targets webui/index.html after the tools anchor at order 80",
+      "proposed_executable_assertion": "deep-match settingsTabs[?id=pursers] including position and order",
+      "negative_counterexample": "a webui contribution without a settingsTabs route is accepted"
+    },
+    {
+      "id": "extension.worker-preset-claude",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/aion-extension.json",
+        "line_start": 37,
+        "line_end": 42,
+        "evidence": "\"id\": \"pursers-worker-claude\""
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the extension manifest is loaded.",
+      "action": "enumerate contributes.assistants",
+      "expected_state": "pursers-worker-claude uses agentId and presetAgentType claude with contexts/worker.md",
+      "proposed_executable_assertion": "deep-match the manifest assistant by exact id and fields",
+      "negative_counterexample": "the Codex worker or reviewer context is substituted"
+    },
+    {
+      "id": "extension.worker-preset-codex",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "aionui",
+      "source": {
+        "path": "tools/aionui-extension/aion-extension.json",
+        "line_start": 29,
+        "line_end": 34,
+        "evidence": "\"id\": \"pursers-worker-codex\""
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the extension manifest is loaded.",
+      "action": "enumerate contributes.assistants",
+      "expected_state": "pursers-worker-codex uses agentId and presetAgentType codex with contexts/worker.md",
+      "proposed_executable_assertion": "deep-match the manifest assistant by exact id and fields",
+      "negative_counterexample": "the Claude worker or reviewer context is substituted"
+    },
+    {
+      "id": "personal.activity-bounded-feed",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 241,
+        "line_end": 249,
+        "evidence": "const MAX_EVENTS = 200;"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a valid snapshot carries more than 200 events.",
+      "action": "decode and render the snapshot",
+      "expected_state": "only the first 200 decoded events are retained",
+      "proposed_executable_assertion": "inject 201 unique events and assert #activity-total is '200 retained'",
+      "negative_counterexample": "all 201 events or an arbitrary smaller count is accepted"
+    },
+    {
+      "id": "personal.activity-cursor",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1353,
+        "line_end": 1355,
+        "evidence": "Cursor: ${data.event_cursor ?? \"not available\"}."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a live snapshot has event_cursor 17.",
+      "action": "open Settings after rendering",
+      "expected_state": "diagnostics expose 'Cursor: 17.'",
+      "proposed_executable_assertion": "assert #settings-diagnostics-details includes 'Cursor: 17.'",
+      "negative_counterexample": "snapshot_at or event count is treated as the cursor"
+    },
+    {
+      "id": "personal.activity-dropped-events",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1294,
+        "line_end": 1297,
+        "evidence": "older event${data.dropped_events === 1 ? \" was\" : \"s were\"} dropped from this bounded View."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; dropped_events is 2.",
+      "action": "open Activity",
+      "expected_state": "a notice says '2 older events were dropped from this bounded View.'",
+      "proposed_executable_assertion": "assert #activity-notice contains the exact pluralized notice",
+      "negative_counterexample": "has_more or resync_notice alone is accepted"
+    },
+    {
+      "id": "personal.activity-empty",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1304,
+        "line_end": 1306,
+        "evidence": "renderTimeline(byId(\"activity-list\"), filtered, \"No matching activity\", activityEmptyDetail(data));"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the loaded event list or current filters produce zero events.",
+      "action": "open Activity",
+      "expected_state": "the list exposes 'No matching activity' with scope-specific detail",
+      "proposed_executable_assertion": "assert #activity-list contains an .empty-state headed 'No matching activity'",
+      "negative_counterexample": "an empty container without the state or the Home timeline is accepted"
+    },
+    {
+      "id": "personal.activity-error",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1611,
+        "line_end": 1614,
+        "evidence": "render(failureSnapshot(\"Local feed unavailable\"));"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; board_event_feed rejects.",
+      "action": "allow refreshFeed to handle the rejection",
+      "expected_state": "the last-known snapshot is rendered with feed_error 'Local feed unavailable'",
+      "proposed_executable_assertion": "stub callServerTool to reject and assert connection error treatment retains prior rows",
+      "negative_counterexample": "the UI clears loaded data or reports a live connection"
+    },
+    {
+      "id": "personal.activity-has-more-resync",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1288,
+        "line_end": 1306,
+        "evidence": "if (data.resync_notice)"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a snapshot has resync_notice and has_more=true.",
+      "action": "open Activity",
+      "expected_state": "the resync notice is visible and Load more is not hidden",
+      "proposed_executable_assertion": "assert notice text and #load-more-btn.hidden === false",
+      "negative_counterexample": "only one of the two independent states is arranged"
+    },
+    {
+      "id": "personal.activity-offline",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 655,
+        "line_end": 669,
+        "evidence": "Demo data — Central unavailable"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the Host bridge is not connected and fallback demo is rendered.",
+      "action": "inspect the connection banner",
+      "expected_state": "the banner identifies demo data and Central unavailable",
+      "proposed_executable_assertion": "assert #connection-title equals 'Demo data — Central unavailable' and tone demo",
+      "negative_counterexample": "a stale live snapshot is relabelled as offline"
+    },
+    {
+      "id": "personal.activity-scope",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 684,
+        "line_end": 695,
+        "evidence": "Activity observed by this local MCP process; it is bounded and not a complete audit log."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; activity_scope is local-model-tools.",
+      "action": "render any live snapshot",
+      "expected_state": "scope copy identifies this MCP process and the bounded non-audit-log limit",
+      "proposed_executable_assertion": "assert #activity-scope-copy equals the exact local-model-tools copy",
+      "negative_counterexample": "synthetic preview copy is accepted for live activity"
+    },
+    {
+      "id": "personal.activity-stale",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 670,
+        "line_end": 674,
+        "evidence": "Showing the last known local state"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; data_mode is stale with stale=true.",
+      "action": "render the snapshot",
+      "expected_state": "the connection banner says 'Showing the last known local state'",
+      "proposed_executable_assertion": "assert #connection-title exact text and tone stale or error",
+      "negative_counterexample": "demo or live connection copy is accepted"
+    },
+    {
+      "id": "personal.agents-current-ticket",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 977,
+        "line_end": 981,
+        "evidence": "Working on ${agent.current_ticket.id}: ${agent.current_ticket.title}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; one agent carries a current_ticket object.",
+      "action": "open Team",
+      "expected_state": "the agent card says exactly which ticket it is working on",
+      "proposed_executable_assertion": "assert the matching .agent-card includes 'Working on <id>: <title>'",
+      "negative_counterexample": "a linked-work count or current_ticket_id chip alone is accepted"
+    },
+    {
+      "id": "personal.agents-duplicate-identity",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 968,
+        "line_end": 975,
+        "evidence": "Duplicate active name — pick a unique agent name."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an agent has duplicate=true.",
+      "action": "open Team",
+      "expected_state": "its card contains the duplicate-identity warning and does not hide the conflict",
+      "proposed_executable_assertion": "assert that agent card has a warning notice with exact copy",
+      "negative_counterexample": "the duplicate_name badge alone is accepted"
+    },
+    {
+      "id": "personal.agents-duplicate-name",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 953,
+        "line_end": 956,
+        "evidence": "duplicate display name"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an agent has duplicate_name=true.",
+      "action": "open Team",
+      "expected_state": "its state badges include 'duplicate name' titled 'duplicate display name'",
+      "proposed_executable_assertion": "assert badge text and title in that exact card",
+      "negative_counterexample": "duplicate=true identity conflict is accepted instead"
+    },
+    {
+      "id": "personal.agents-empty",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 985,
+        "line_end": 985,
+        "evidence": "No agents yet"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; agents is empty.",
+      "action": "open Team",
+      "expected_state": "the agents grid shows 'No agents yet'",
+      "proposed_executable_assertion": "assert #agents-grid empty-state heading exact text",
+      "negative_counterexample": "the Today 'No teammates yet' state is accepted"
+    },
+    {
+      "id": "personal.agents-focus",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 959,
+        "line_end": 963,
+        "evidence": "if (agent.focus) card.append(element(\"p\", \"muted\", agent.focus));"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an agent has a unique focus string.",
+      "action": "open Team",
+      "expected_state": "that focus appears inside the matching agent card",
+      "proposed_executable_assertion": "assert matching .agent-card contains the exact focus string",
+      "negative_counterexample": "role, platform, or another agent's focus is accepted"
+    },
+    {
+      "id": "personal.agents-idle-lease",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 21,
+        "line_end": 24,
+        "evidence": "lease_expires_at: string | null;"
+      },
+      "derivation_kind": "observed_gap",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an agent has both idle_minutes and lease_expires_at.",
+      "action": "open Team",
+      "expected_state": "the same agent card must distinguish idle duration from lease expiry",
+      "proposed_executable_assertion": "BLOCKED: source renders idle_minutes but no agent lease badge; no passing assertion exists",
+      "negative_counterexample": "a ticket lease badge or idle-only card is treated as agent idle+lease proof",
+      "gap": {
+        "owner": "Personal UI owner",
+        "exact_action": "Render leaseBadge(agent.lease_expires_at) in each agent card beside the existing idle_minutes pill, then add a DOM assertion covering both values."
+      }
+    },
+    {
+      "id": "personal.agents-platform",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 961,
+        "line_end": 966,
+        "evidence": "if (agent.platform) meta.append(pill(agent.platform));"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an agent has platform='codex'.",
+      "action": "open Team",
+      "expected_state": "the matching agent card exposes a codex platform pill",
+      "proposed_executable_assertion": "assert the card meta contains an exact 'codex' pill",
+      "negative_counterexample": "role or agent name text containing codex is accepted"
+    },
+    {
+      "id": "personal.agents-role",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 961,
+        "line_end": 963,
+        "evidence": "if (agent.role) meta.append(pill(agent.role));"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an agent has role='reviewer'.",
+      "action": "open Team",
+      "expected_state": "the matching agent card exposes a reviewer role pill",
+      "proposed_executable_assertion": "assert the card meta contains an exact 'reviewer' pill",
+      "negative_counterexample": "status or focus text containing reviewer is accepted"
+    },
+    {
+      "id": "personal.agents-stale",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 943,
+        "line_end": 952,
+        "evidence": "if (agent.stale) states.append(pill(\"stale\"));"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an agent has stale=true.",
+      "action": "open Team",
+      "expected_state": "its card is ordered as stale and includes the exact stale badge",
+      "proposed_executable_assertion": "assert data-stale='true' and exact stale pill on that card",
+      "negative_counterexample": "a fleet pool stale row is accepted"
+    },
+    {
+      "id": "personal.agents-total-live",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 933,
+        "line_end": 935,
+        "evidence": "${data.agents_live} live / ${data.agent_total} total"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; agents_live and agent_total differ.",
+      "action": "open Team",
+      "expected_state": "the total reads '<live> live / <total> total'",
+      "proposed_executable_assertion": "assert #agents-total exact text for distinct numbers such as '2 live / 3 total'",
+      "negative_counterexample": "array length alone is accepted as both values"
+    },
+    {
+      "id": "personal.board-identity",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1394,
+        "line_end": 1396,
+        "evidence": "byId(\"board-id\").textContent = data.board.id;"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the snapshot board name and id are unique.",
+      "action": "render the snapshot",
+      "expected_state": "both #name and #board-id match the snapshot",
+      "proposed_executable_assertion": "assert exact text of both nodes",
+      "negative_counterexample": "only the board name or a synthetic fallback identity is accepted"
+    },
+    {
+      "id": "personal.connection-banner",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 655,
+        "line_end": 681,
+        "evidence": "function renderConnection(data: Snapshot): void {"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; each valid data mode can be injected.",
+      "action": "render live, stale, demo, and demo-error snapshots",
+      "expected_state": "banner title, detail, and data-tone change according to the actual mode",
+      "proposed_executable_assertion": "table-test exact title/tone pairs for all four branches",
+      "negative_counterexample": "a single generic Connected/Unavailable label is accepted"
+    },
+    {
+      "id": "personal.data-provenance",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1359,
+        "line_end": 1364,
+        "evidence": "Live local Central · authorized projection"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; render live, stale, demo, and demo-error modes.",
+      "action": "inspect #source",
+      "expected_state": "provenance text is mode-specific and never presents synthetic data as project data",
+      "proposed_executable_assertion": "assert all four sourceFor outputs against exact modes",
+      "negative_counterexample": "fixture_provenance alone or a generic source label is accepted"
+    },
+    {
+      "id": "personal.fleet-empty",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1056,
+        "line_end": 1061,
+        "evidence": "No registered projects"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; fleet snapshot is available with zero projects.",
+      "action": "open Projects",
+      "expected_state": "the project area says 'No registered projects' and explains where projects appear",
+      "proposed_executable_assertion": "assert #fleet-projects empty-state exact heading",
+      "negative_counterexample": "Fleet data unavailable is accepted as an empty registry"
+    },
+    {
+      "id": "personal.fleet-online-busy-available-stale",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1027,
+        "line_end": 1033,
+        "evidence": "byId(\"fleet-stale\").textContent = fleetValue(totals?.stale ?? null);"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; fleet totals contain distinct agents, busy, available, and stale values.",
+      "action": "open Projects",
+      "expected_state": "the four metric nodes reproduce their corresponding totals",
+      "proposed_executable_assertion": "assert #fleet-agents/#fleet-busy/#fleet-available/#fleet-stale against 9/3/4/2",
+      "negative_counterexample": "pool row statuses or four identical values are accepted"
+    },
+    {
+      "id": "personal.fleet-project-seats",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1101,
+        "line_end": 1107,
+        "evidence": "const chip = pill(`${project}:${ticket}`, seat.live === false ? \"warning\" : undefined);"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a pool entry has seats across two projects with distinct tickets/live states.",
+      "action": "open Projects",
+      "expected_state": "each seat is rendered as project:short-ticket and non-live seats are warning toned",
+      "proposed_executable_assertion": "assert exact chips and board title on the matching pool row",
+      "negative_counterexample": "the pool status alone is accepted"
+    },
+    {
+      "id": "personal.fleet-project-ticket-counts",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1063,
+        "line_end": 1073,
+        "evidence": "fleetTable([\"Name\", \"Board\", \"Status\", \"Open\", \"Claimed\", \"Submitted\"])"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; two projects have distinct open, claimed, and submitted counts.",
+      "action": "open Projects",
+      "expected_state": "the project table exposes all three counts in the correct row",
+      "proposed_executable_assertion": "assert column headers and cell values keyed by board id",
+      "negative_counterexample": "fleet totals or project count is accepted"
+    },
+    {
+      "id": "personal.fleet-projects",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1047,
+        "line_end": 1055,
+        "evidence": "${data.projects.length} project${data.projects.length === 1 ? \"\" : \"s\"}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; fleet snapshot has two projects and no filter.",
+      "action": "open Projects",
+      "expected_state": "fleet total and navigation count both report two projects",
+      "proposed_executable_assertion": "assert #fleet-total '2 projects' and nav count '2'",
+      "negative_counterexample": "number of pool entries is accepted"
+    },
+    {
+      "id": "personal.fleet-registry-warning",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1035,
+        "line_end": 1044,
+        "evidence": "const warningText = unavailable"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; fleet data is available with registry_warning='registry test warning'.",
+      "action": "open Projects",
+      "expected_state": "the exact registry warning is rendered in a warning notice",
+      "proposed_executable_assertion": "assert #fleet-warning text and data-tone warning",
+      "negative_counterexample": "Fleet unavailable fallback is accepted"
+    },
+    {
+      "id": "personal.fleet-shared-pool",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1080,
+        "line_end": 1118,
+        "evidence": "fleetTable([\"Agent\", \"Pool status\", \"Seats\"])"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; fleet pool has a principal spanning multiple seats.",
+      "action": "open Projects",
+      "expected_state": "one row exposes agent, principal, pool status, and all seat chips",
+      "proposed_executable_assertion": "assert the keyed row's four semantic parts",
+      "negative_counterexample": "a per-project agent card is accepted"
+    },
+    {
+      "id": "personal.fleet-truncation",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "packages/personal/src/pursers_personal/apps_server.py",
+        "line_start": 939,
+        "line_end": 957,
+        "evidence": "\"truncation_counts\": truncation_counts"
+      },
+      "derivation_kind": "observed_gap",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; fleet response has non-zero truncation_counts.",
+      "action": "open Projects",
+      "expected_state": "the UI must disclose fleet truncation without conflating it with registry warnings",
+      "proposed_executable_assertion": "BLOCKED: FleetSnapshot decoding/rendering drops truncation_counts; no passing DOM assertion exists",
+      "negative_counterexample": "backend truncation_counts presence without UI disclosure is accepted",
+      "gap": {
+        "owner": "Personal UI owner",
+        "exact_action": "Add truncation_counts to FleetSnapshot/decodeFleetSnapshot and render a dedicated Projects warning; add a DOM assertion for a non-zero field."
+      }
+    },
+    {
+      "id": "personal.fleet-unavailable",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1035,
+        "line_end": 1061,
+        "evidence": "Fleet snapshot is unavailable on this server."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; fleet_snapshot fails or decodes invalid.",
+      "action": "open Projects",
+      "expected_state": "metrics show em dashes and the page exposes Fleet data unavailable",
+      "proposed_executable_assertion": "assert #fleet-warning and #fleet-projects unavailable copy plus #fleet-total 'Unavailable'",
+      "negative_counterexample": "an available empty registry is accepted"
+    },
+    {
+      "id": "personal.health",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 704,
+        "line_end": 746,
+        "evidence": "function renderHealth(data: Snapshot): void {"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; prepare snapshots covering demo-error, demo, stale, attention, submitted, working, open, and clear.",
+      "action": "render Today for each case",
+      "expected_state": "health mode, title, detail, and tone match the first applicable branch",
+      "proposed_executable_assertion": "table-test all branch predicates with exact titles and tones",
+      "negative_counterexample": "one healthy live state is treated as coverage of Health"
+    },
+    {
+      "id": "personal.keyboard-tabs",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1634,
+        "line_end": 1644,
+        "evidence": "[\"ArrowUp\", \"ArrowDown\", \"ArrowLeft\", \"ArrowRight\", \"Home\", \"End\"]"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a primary navigation tab has focus.",
+      "action": "press each supported navigation key",
+      "expected_state": "selection wraps or jumps and focus follows the selected tab",
+      "proposed_executable_assertion": "dispatch keyboard events and assert aria-selected/tabIndex/focus transitions",
+      "negative_counterexample": "mouse click navigation or Activity sub-tabs alone is accepted"
+    },
+    {
+      "id": "personal.links-edge-types",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "packages/personal/src/pursers_personal/apps_server.py",
+        "line_start": 997,
+        "line_end": 1018,
+        "evidence": "kind not in {\"ticket\", \"file\", \"tag\", \"retracts\"}"
+      },
+      "derivation_kind": "observed_gap",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; link_snapshot contains ticket, file, tag, and retracts edges.",
+      "action": "open Activity > Links",
+      "expected_state": "all four authoritative edge kinds must have distinguishable UI evidence",
+      "proposed_executable_assertion": "BLOCKED: backend accepts retracts but renderLinks only renders ticket/file/tag; no complete assertion exists",
+      "negative_counterexample": "backend acceptance of retracts or three rendered kinds is treated as all four",
+      "gap": {
+        "owner": "Personal UI owner",
+        "exact_action": "Render retracts edges with a distinct label/target in renderLinks and add a four-kind DOM assertion."
+      }
+    },
+    {
+      "id": "personal.links-empty",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1240,
+        "line_end": 1242,
+        "evidence": "No explicit links"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; link snapshot is available with zero nodes and edges.",
+      "action": "open Activity > Links",
+      "expected_state": "the links area shows 'No explicit links'",
+      "proposed_executable_assertion": "assert #links-groups empty-state exact heading",
+      "negative_counterexample": "Links unavailable is accepted"
+    },
+    {
+      "id": "personal.links-node-edge-totals",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1165,
+        "line_end": 1168,
+        "evidence": "${data.returned_node_count} memories · ${data.returned_edge_count} links"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; returned node and edge counts are distinct.",
+      "action": "open Activity > Links",
+      "expected_state": "#links-total exposes both returned counts",
+      "proposed_executable_assertion": "assert exact text such as '2 memories · 3 links'",
+      "negative_counterexample": "source totals node_count/edge_count or only one count is accepted"
+    },
+    {
+      "id": "personal.links-pinned",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1211,
+        "line_end": 1214,
+        "evidence": "if (node.pinned) meta.append(pill(\"Pinned\", \"warning\"));"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; one link node has pinned=true and another false.",
+      "action": "open Activity > Links",
+      "expected_state": "only the pinned memory row has a warning-toned 'Pinned' pill",
+      "proposed_executable_assertion": "assert pinned row badge presence and unpinned row absence",
+      "negative_counterexample": "an Important pinned Today card is accepted"
+    },
+    {
+      "id": "personal.links-source-label",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1165,
+        "line_end": 1168,
+        "evidence": "const authorityLabel = synthetic ? \"Synthetic fixture\" : \"Authoritative\";"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; render memory_links and synthetic-memory-links snapshots.",
+      "action": "open Activity > Links",
+      "expected_state": "#links-source distinguishes Authoritative from Synthetic fixture and includes source_tool",
+      "proposed_executable_assertion": "assert exact label for both source_tool variants",
+      "negative_counterexample": "a generic source or authority label without tool name is accepted"
+    },
+    {
+      "id": "personal.links-truncation",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1169,
+        "line_end": 1173,
+        "evidence": "Showing ${data.returned_node_count} of ${data.node_count} memories"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; link snapshot has truncated=true and differing returned/source counts.",
+      "action": "open Activity > Links",
+      "expected_state": "a warning discloses both memory and link returned/total counts",
+      "proposed_executable_assertion": "assert #links-notice exact interpolated warning",
+      "negative_counterexample": "the compact #links-total returned counts alone are accepted"
+    },
+    {
+      "id": "personal.links-unavailable",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1154,
+        "line_end": 1162,
+        "evidence": "Links unavailable"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; link_snapshot fails or is invalid.",
+      "action": "open Activity > Links",
+      "expected_state": "the links total is an em dash and empty state says Links unavailable",
+      "proposed_executable_assertion": "assert both #links-total and #links-groups states",
+      "negative_counterexample": "an available empty link snapshot is accepted"
+    },
+    {
+      "id": "personal.refresh",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1656,
+        "line_end": 1658,
+        "evidence": "Promise.all([refreshSnapshot(), refreshFleet(), refreshLinks()])"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the MCP App is connected and all three tools are stubbed.",
+      "action": "activate Refresh",
+      "expected_state": "board, fleet, and link refreshes start together",
+      "proposed_executable_assertion": "click #refresh and assert one call each to board_snapshot, fleet_snapshot, and link_snapshot",
+      "negative_counterexample": "background board_event_feed alone is accepted"
+    },
+    {
+      "id": "personal.search-no-results",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1465,
+        "line_end": 1465,
+        "evidence": "No matching loaded data"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the search query matches no corpus item.",
+      "action": "type the query",
+      "expected_state": "search panel shows 'No matching loaded data' and the suggestion detail",
+      "proposed_executable_assertion": "assert visible #search-results and exact empty-state heading",
+      "negative_counterexample": "a zero counter with an empty list is accepted"
+    },
+    {
+      "id": "personal.search-results",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1409,
+        "line_end": 1464,
+        "evidence": "while (hits.length < 40"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; corpus has multiple kinds and more than 40 matching records.",
+      "action": "search for a common unique token",
+      "expected_state": "results are interleaved by kind, capped at 40, and route to their target views",
+      "proposed_executable_assertion": "assert count copy, <=40 buttons, kind diversity, and dataset target fields",
+      "negative_counterexample": "uncapped results or one source kind is accepted"
+    },
+    {
+      "id": "personal.source-board-event-feed",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1597,
+        "line_end": 1604,
+        "evidence": "name: \"board_event_feed\""
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the app is connected and visible.",
+      "action": "allow scheduled feed refresh",
+      "expected_state": "callServerTool invokes board_event_feed with empty arguments and decodes a Snapshot",
+      "proposed_executable_assertion": "spy exact tool name/arguments and successful render",
+      "negative_counterexample": "a board_snapshot call is accepted"
+    },
+    {
+      "id": "personal.source-board-snapshot",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1512,
+        "line_end": 1519,
+        "evidence": "name: \"board_snapshot\""
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the app is connected.",
+      "action": "activate snapshot refresh",
+      "expected_state": "callServerTool invokes board_snapshot with empty arguments",
+      "proposed_executable_assertion": "spy exact tool name/arguments and resulting board identity",
+      "negative_counterexample": "board_event_feed or fixture data is accepted"
+    },
+    {
+      "id": "personal.source-fleet-snapshot",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1534,
+        "line_end": 1547,
+        "evidence": "name: \"fleet_snapshot\""
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the app is connected.",
+      "action": "open Projects or activate refresh",
+      "expected_state": "callServerTool invokes fleet_snapshot and invalid data enters unavailable state",
+      "proposed_executable_assertion": "spy exact tool name/arguments across success and invalid response",
+      "negative_counterexample": "board_snapshot or fallback fleet data is accepted"
+    },
+    {
+      "id": "personal.source-link-snapshot",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1562,
+        "line_end": 1575,
+        "evidence": "name: \"link_snapshot\""
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the app is connected.",
+      "action": "open Links or activate refresh",
+      "expected_state": "callServerTool invokes link_snapshot and invalid data enters unavailable state",
+      "proposed_executable_assertion": "spy exact tool name/arguments across success and invalid response",
+      "negative_counterexample": "memory_links backend name or fallback links are accepted"
+    },
+    {
+      "id": "personal.theme",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 1621,
+        "line_end": 1631,
+        "evidence": "if (context.theme) applyDocumentTheme(context.theme);"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; Host context supplies theme, style variables, fonts, and safe-area insets.",
+      "action": "dispatch hostcontextchanged",
+      "expected_state": "document theme/styles/fonts apply and safe areas are clamped to non-negative px",
+      "proposed_executable_assertion": "spy SDK helpers and assert four CSS safe-area properties",
+      "negative_counterexample": "CSS prefers-color-scheme alone is accepted"
+    },
+    {
+      "id": "personal.today-active-agents",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 772,
+        "line_end": 779,
+        "evidence": "No teammates yet"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; one live and one stale agent are loaded.",
+      "action": "open Today",
+      "expected_state": "only non-stale agents appear, capped to four; empty state is distinct",
+      "proposed_executable_assertion": "assert live name present, stale name absent, and empty fixture heading when none live",
+      "negative_counterexample": "the Team grid or total agent count is accepted"
+    },
+    {
+      "id": "personal.today-current-work",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 769,
+        "line_end": 770,
+        "evidence": "No current work"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; tickets include active and ended statuses.",
+      "action": "open Today",
+      "expected_state": "only non-closed/non-canceled/non-terminated work appears, capped to four",
+      "proposed_executable_assertion": "assert active IDs present, ended IDs absent, and exact empty state when none",
+      "negative_counterexample": "all tickets or the Work view total is accepted"
+    },
+    {
+      "id": "personal.today-important-pinned-note",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 821,
+        "line_end": 822,
+        "evidence": "No decision or warning in the loaded pinned digest"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; important_pinned is present, then null.",
+      "action": "open Today",
+      "expected_state": "the highlight renders when present and the specific pinned-digest empty state renders when absent",
+      "proposed_executable_assertion": "assert #important-pinned title in both scenarios",
+      "negative_counterexample": "latest_handoff or any pinned link is accepted"
+    },
+    {
+      "id": "personal.today-latest-handoff",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 821,
+        "line_end": 821,
+        "evidence": "No handoff yet"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; latest_handoff is present, then null.",
+      "action": "open Today",
+      "expected_state": "the handoff renders when present and 'No handoff yet' renders when absent",
+      "proposed_executable_assertion": "assert #latest-handoff title in both scenarios",
+      "negative_counterexample": "important_pinned or an activity event is accepted"
+    },
+    {
+      "id": "personal.today-recent-activity",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 823,
+        "line_end": 823,
+        "evidence": "newestEvents(data.events).slice(0, 5)"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; more than five events have distinct seq values.",
+      "action": "open Today",
+      "expected_state": "the five newest events are shown in descending seq order",
+      "proposed_executable_assertion": "assert exact visible seq list and absence of older rows",
+      "negative_counterexample": "Activity view ordering without the five-row cap is accepted"
+    },
+    {
+      "id": "personal.today-status-metrics",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 762,
+        "line_end": 767,
+        "evidence": "byId(\"metric-submitted\").textContent = String(counts.submitted + counts.attention);"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; status counts have distinct open, working, submitted, and rejected values.",
+      "action": "open Today",
+      "expected_state": "the three metrics show open, working, and submitted-plus-attention",
+      "proposed_executable_assertion": "assert exact #metric-open/#metric-working/#metric-submitted values",
+      "negative_counterexample": "raw ticket array length or rejected excluded from third metric is accepted"
+    },
+    {
+      "id": "personal.work-abandonment",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 886,
+        "line_end": 891,
+        "evidence": "abandoned ×${ticket.abandoned_count}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a ticket has abandoned_count=2.",
+      "action": "open Work",
+      "expected_state": "its card exposes 'abandoned ×2' with attention tone",
+      "proposed_executable_assertion": "assert exact pill in the keyed ticket card",
+      "negative_counterexample": "rejected status or rejection_count is accepted"
+    },
+    {
+      "id": "personal.work-lease",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 627,
+        "line_end": 641,
+        "evidence": "item.dataset.leaseExpiresAt = value;"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a ticket has a future lease_expires_at.",
+      "action": "open Work and advance time",
+      "expected_state": "a warning-toned lease countdown is present and updates from the stored expiry",
+      "proposed_executable_assertion": "assert data-lease-expires-at and deterministic lease text under a fake clock",
+      "negative_counterexample": "agent idle minutes or an overdue unrelated lease is accepted"
+    },
+    {
+      "id": "personal.work-no-ticket",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 897,
+        "line_end": 899,
+        "evidence": "No tickets yet"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the ticket list is empty.",
+      "action": "open Work",
+      "expected_state": "work groups show 'No tickets yet'",
+      "proposed_executable_assertion": "assert #work-groups empty-state exact heading",
+      "negative_counterexample": "Today's 'No current work' state is accepted"
+    },
+    {
+      "id": "personal.work-ownership",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 914,
+        "line_end": 919,
+        "evidence": "owner ${ticket.assigned_to}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a selected ticket has assigned_to='worker-three'.",
+      "action": "open its Work detail",
+      "expected_state": "detail metadata exposes exact owner worker-three",
+      "proposed_executable_assertion": "assert #detail-body has an exact owner pill",
+      "negative_counterexample": "card-level unprefixed assignee or claimed_agent_id is accepted"
+    },
+    {
+      "id": "personal.work-priority",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 882,
+        "line_end": 889,
+        "evidence": "meta.append(pill(ticket.priority), pill(ticket.status, toneForStatus(ticket.status)));"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; two tickets have distinct priorities and statuses.",
+      "action": "open Work",
+      "expected_state": "each keyed card exposes its own priority separately from status",
+      "proposed_executable_assertion": "assert exact pills within each data-ticket-id card",
+      "negative_counterexample": "a global priority string or status pill is accepted"
+    },
+    {
+      "id": "personal.work-rejection",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 847,
+        "line_end": 853,
+        "evidence": "{ title: \"Needs attention\", statuses: [\"rejected\"] }"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a ticket has status rejected.",
+      "action": "open Work",
+      "expected_state": "it is grouped under Needs attention with rejected tone",
+      "proposed_executable_assertion": "assert the rejected ticket is inside the Needs attention section",
+      "negative_counterexample": "abandoned_count without rejected status is accepted"
+    },
+    {
+      "id": "personal.work-review-readiness",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 847,
+        "line_end": 851,
+        "evidence": "{ title: \"Submitted\", statuses: [\"submitted\", \"reviewing\", \"in_review\"] }"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; tickets cover submitted, reviewing, and in_review.",
+      "action": "open Work",
+      "expected_state": "all three are grouped under Submitted",
+      "proposed_executable_assertion": "assert all keyed cards are within the Submitted section and not Working",
+      "negative_counterexample": "the Today submitted metric alone is accepted"
+    },
+    {
+      "id": "personal.work-status-groups",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 847,
+        "line_end": 867,
+        "evidence": "const WORK_GROUPS: Array<{ title: string; statuses: string[] }> = ["
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; tickets cover every known status plus an unknown status.",
+      "action": "open Work",
+      "expected_state": "Open, Working, Submitted, Needs attention, Done, Ended, and Other group titles match their status sets",
+      "proposed_executable_assertion": "table-test each status-to-section mapping",
+      "negative_counterexample": "toneForStatus colors or partial grouping is accepted"
+    },
+    {
+      "id": "personal.work-total",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "personal",
+      "source": {
+        "path": "tools/dashboard-ui/src/dashboard.ts",
+        "line_start": 856,
+        "line_end": 857,
+        "evidence": "${data.ticket_total || data.tickets.length} total"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; ticket_total differs from loaded ticket count.",
+      "action": "open Work",
+      "expected_state": "#work-total reports the full ticket_total",
+      "proposed_executable_assertion": "assert exact text such as '12 total' with only two loaded cards",
+      "negative_counterexample": "loaded array length is accepted as total"
+    }
+  ],
+  "observed_gaps": [
+    {
+      "id": "personal.agents-idle-lease",
+      "owner": "Personal UI owner",
+      "exact_action": "Render leaseBadge(agent.lease_expires_at) in each agent card beside the existing idle_minutes pill, then add a DOM assertion covering both values."
+    },
+    {
+      "id": "personal.fleet-truncation",
+      "owner": "Personal UI owner",
+      "exact_action": "Add truncation_counts to FleetSnapshot/decodeFleetSnapshot and render a dedicated Projects warning; add a DOM assertion for a non-zero field."
+    },
+    {
+      "id": "personal.links-edge-types",
+      "owner": "Personal UI owner",
+      "exact_action": "Render retracts edges with a distinct label/target in renderLinks and add a four-kind DOM assertion."
+    }
+  ]
+}
