@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
+from urllib.request import ProxyHandler, Request, build_opener
 
 import pytest
 
@@ -1496,6 +1498,28 @@ def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
             observation_id="fleet.attention-state", action_id="save-attention",
             entity="TK-123", candidate_commit=candidate,
         )
+        rejected_request = Request(
+            base_url + "/api/attention",
+            data=_json_bytes(action),
+            headers={
+                "Content-Type": "application/json",
+                "Host": "evil.example",
+                "X-Pursers-Observation-Id": context["observation_id"],
+                "X-Pursers-Run-Id": context["run_id"],
+                "X-Pursers-Action-Id": "rejected-before-operation",
+                "X-Pursers-Entity-Id": context["entity"],
+                "X-Pursers-Action-SHA256": "0" * 64,
+            },
+            method="POST",
+        )
+        with pytest.raises(HTTPError) as rejected:
+            build_opener(ProxyHandler({})).open(rejected_request, timeout=2)
+        assert rejected.value.code == 403
+        assert "_evidence" not in json.loads(rejected.value.read())
+        assert rejected.value.headers.get("X-Pursers-Run-Id") is None
+        assert not trace_path.exists()
+        assert not (state_dir / "attention-state.json").exists()
+
         evidence = record_evidence(
             _request(
                 "log_assertion",
@@ -1527,6 +1551,20 @@ def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
         assert json.loads(
             (state_dir / "attention-state.json").read_text(encoding="utf-8")
         ) == action
+        forged = copy.deepcopy(evidence)
+        forged["record"]["entry"]["outcome"] = "failed"
+        forged["record"]["action_response"]["selected"][
+            "/_evidence/outcome"
+        ] = "failed"
+        _resign_evidence(forged)
+        with pytest.raises(TypedEvidenceError, match="outcome is inconsistent"):
+            evaluate_evidence(
+                forged,
+                _expected(forged, [
+                    {"path": "/outcome", "op": "eq", "value": "failed"},
+                ]),
+                trust,
+            )
     finally:
         if process.poll() is None:
             process.terminate()
