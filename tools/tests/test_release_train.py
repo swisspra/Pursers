@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from tools import release_train
 from tools.release_versions import load_versions
@@ -67,7 +70,18 @@ def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
 
 
 def test_next_patch_alpha_advances_every_component() -> None:
-    current = load_versions(ROOT / "tools/release_versions.toml")
+    current = replace(
+        load_versions(ROOT / "tools/release_versions.toml"),
+        product="5.0.0a26",
+        packages={
+            "pursers": "5.0.0a26",
+            "central": "0.1.0a30",
+            "client": "0.1.0a23",
+            "personal": "5.0.0a26",
+            "import": "5.0.0a3",
+            "wait_bridge": "0.1.0a16",
+        },
+    )
     target = release_train.bumped_versions(current, (), "patch-alpha")
     assert target.product == "5.0.0a27"
     assert target.packages == {
@@ -78,6 +92,12 @@ def test_next_patch_alpha_advances_every_component() -> None:
         "import": "5.0.0a4",
         "wait_bridge": "0.1.0a17",
     }
+
+
+def test_next_patch_alpha_rejects_beta_manifest() -> None:
+    current = load_versions(ROOT / "tools/release_versions.toml")
+    with pytest.raises(release_train.ReleaseTrainError, match="cannot apply patch-alpha"):
+        release_train.bumped_versions(current, (), "patch-alpha")
 
 
 def test_check_detects_fixture_dependency_drift(tmp_path: Path) -> None:

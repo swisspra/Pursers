@@ -41,11 +41,11 @@
   <header>
     <p class="eyebrow">What's new · a8 through a25</p>
     <h1>From a shared board to<br>a governed agent fleet.</h1>
-    <p class="lead">A continuous record from 5.0.0a8 through the 5.0.0a26 stopping point. The current released component set is listed exactly below.</p>
+    <p class="lead">A continuous record from 5.0.0a8 through the 5.0.0b1 stopping point. The current released component set is listed exactly below.</p>
   </header>
 
   <nav aria-label="Contents"><div>
-    <a href="#unreleased">5.0.0a26 release</a>
+    <a href="#unreleased">5.0.0b1 release</a>
     <a href="#timeline">a8–a25 timeline</a>
     <a href="#operator-map">Operator feature map</a>
     <a href="#behavior">Behavior</a>
@@ -57,24 +57,24 @@
 
   <main>
     <section id="unreleased">
-      <p class="eyebrow">Released · 5.0.0a26</p>
-      <h2>What shipped in 5.0.0a26</h2>
-      <p class="note"><strong>Release boundary:</strong> these capabilities are part of 5.0.0a26. Verify the approved tag, manifest, component versions, and artifact hashes before deployment.</p>
+      <p class="eyebrow">Released · 5.0.0b1</p>
+      <h2>What shipped in 5.0.0b1</h2>
+      <p class="note"><strong>Release boundary:</strong> these capabilities are part of 5.0.0b1. Verify the approved tag, manifest, component versions, and artifact hashes before deployment.</p>
       <div class="grid">
         <article class="card"><strong>Fleet Dashboard doors</strong><p>The new Doors panel issues, copies, rotates, and revokes per-board worker and reviewer doors, while Add project performs the registry, board, membership, policy, and fleet-clone setup as one idempotent action. Door values remain same-origin, admin-only, uncached, and absent from logs and listings.</p></article>
         <article class="card"><strong>Stable registry seats</strong><p>Client 0.1.0a22, wait bridge 0.1.0a15, and the seat kit re-take a seat's own stable name after restart, reuse board identities inside a process, report all-skipped waits as failures, and resume from Central's reset cursor after journal compaction.</p></article>
         <article class="card"><strong>Hermetic dashboard tests</strong><p>Fleet Dashboard tests isolate the Pursers state root, inject process inspection, create worker directories only on first private write, and report unavailable process inspection without touching the operator's real state or invoking a real process listing.</p></article>
         <article class="card"><strong>Automatic board bloat control</strong><p>Central 0.1.0a29 archives older terminal tickets, caches parsed documents, bounds inline histories, runs automatic archive and journal-compaction sweeps, and reports hot-document size, archived-ticket counts, and recent load and save activity through healthz.</p></article>
         <article class="card"><strong>Door authorization</strong><p>Door endpoints require Central's authoritative admin membership projection before reading or changing door material, and dashboard tests inject temporary worker roots and process probes for replay inside restricted workspaces.</p></article>
-        <article class="card"><strong>Release-aligned packaging</strong><p>Pursers and Personal 5.0.0a26 pin Central 0.1.0a29 and Client 0.1.0a22, refresh the documentation and dashboard asset attestations, and regenerate the deterministic component lock. Personal Import remains at 5.0.0a3.</p></article>
+        <article class="card"><strong>Release-aligned packaging</strong><p>Pursers and Personal 5.0.0b1 pin Central 0.1.0a29 and Client 0.1.0a22, refresh the documentation and dashboard asset attestations, and regenerate the deterministic component lock. Personal Import remains at 5.0.0a3.</p></article>
       </div>
     </section>
 
     <section id="timeline">
       <p class="eyebrow">Released history</p>
       <h2>Continuous release timeline: a8 through a25</h2>
-      <p><strong>Current released set (5.0.0a26, 2026-09-08):</strong> <code>pursers-central 0.1.0a29</code>, <code>pursers-client 0.1.0a22</code>, <code>pursers-wait-bridge 0.1.0a15</code>, <code>pursers-personal 5.0.0a26</code>, <code>pursers 5.0.0a26</code>, and <code>pursers-personal-import 5.0.0a3</code>.</p>
-      <h3>5.0.0a26 · 2026-09-08</h3>
+      <p><strong>Current released set (5.0.0b1, 2026-09-08):</strong> <code>pursers-central 0.1.0a29</code>, <code>pursers-client 0.1.0a22</code>, <code>pursers-wait-bridge 0.1.0a15</code>, <code>pursers-personal 5.0.0b1</code>, <code>pursers 5.0.0b1</code>, and <code>pursers-personal-import 5.0.0a3</code>.</p>
+      <h3>5.0.0b1 · 2026-09-08</h3>
       <p>Added the Fleet Dashboard Doors panel and idempotent Add project flow, restored stable registry seats after restart and journal compaction, made dashboard tests hermetic for state and process inspection, and added Central's archive tier, parsed-document cache, automatic bloat sweeps, bounded histories, and storage health metrics.</p>
       <h3>5.0.0a24 · 2026-09-07</h3>
       <p>Added <code>pursers-door</code> credential issuance and one-string door join to the wait bridge and seat-kit, bounded bridge HTTP traffic and Central listen streams to end connection storms, shipped the v0.1 AionUi extension with an eleventh CI suite, tightened seat waits to holder-targeted updates with labeled wakes and verified-broadcast claiming, made coordinator journal watchers join before subscribing, and replaced coordinator hard ticket pins with soft <code>prefer_agents</code> hints that Central can clear or release.</p>

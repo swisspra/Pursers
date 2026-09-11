@@ -43,3 +43,37 @@ and the Personal component lock are consumers. Do not edit those pins by hand.
 
 PyPI versions are immutable. If verification fails after a version has been
 published, advance the affected version instead of rebuilding that release.
+
+## GitHub prerelease handoff
+
+The release workflow validates that the tag is canonical PEP 440 and exactly
+matches `tools/release_versions.toml`. It also requires the six wheel filenames
+to match the manifest versions before it creates `SHA256SUMS.txt`. Alpha, beta,
+and release-candidate tags use `--prerelease --latest=false` on both the create
+and existing-release paths. Stable tags remain the latest release.
+
+For `v5.0.0b1`, the coordinator and operator must replace `<APPROVED_SHA>` below
+with the same exact candidate that passed source review, all test suites,
+browser/201-behavior evidence, CI, and CodeQL. The preparation branch is not a
+tag candidate by itself.
+
+```sh
+TAG=v5.0.0b1
+CANDIDATE=<APPROVED_SHA>
+test "$(git rev-parse "$CANDIDATE^{commit}")" = "$CANDIDATE"
+git tag -s "$TAG" "$CANDIDATE"
+git push origin "refs/tags/$TAG"
+gh run watch --repo swisspra/Pursers --workflow release
+gh release view "$TAG" --repo swisspra/Pursers \
+  --json tagName,isPrerelease,isLatest,assets
+gh release download "$TAG" --repo swisspra/Pursers --dir dist-release
+(cd dist-release && shasum -a 256 -c SHA256SUMS.txt)
+```
+
+Expected artifacts are the six manifest-bound wheels plus `SHA256SUMS.txt`.
+This beta train authorizes no PyPI publication or production cutover. If the
+tag, release state, cohort, or checksum is wrong, stop without installing or
+deploying it. Do not move the tag or replace assets under the same version;
+correct the source and advance to a new prerelease version. Because no service
+cutover is authorized here, rollback is limited to continuing to use the prior
+approved release.

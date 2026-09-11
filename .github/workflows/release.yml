@@ -73,6 +73,18 @@ jobs:
           print(f"build_toolchain={actual}")
           PY
 
+      - name: Validate tag against release manifest
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          python - <<'PY'
+          import os
+          from tools.release_versions import release_version_from_tag
+
+          version = release_version_from_tag(os.environ["TAG"])
+          print(f"release_version={version}; prerelease={version.is_prerelease}")
+          PY
+
       - name: Build all six wheels
         run: |
           set -euo pipefail
@@ -85,11 +97,16 @@ jobs:
             --wheel-dir dist packages/pursers tools/wait-bridge
           python - <<'PY'
           from pathlib import Path
+          from tools.release_versions import expected_wheel_filenames
 
-          wheels = sorted(Path("dist").glob("*.whl"))
-          if len(wheels) != 6:
-              raise SystemExit(f"expected 6 wheels, found {len(wheels)}: {wheels}")
-          print("release_wheels=" + ",".join(wheel.name for wheel in wheels))
+          actual = {wheel.name for wheel in Path("dist").glob("*.whl")}
+          expected = set(expected_wheel_filenames())
+          if actual != expected:
+              raise SystemExit(
+                  f"release wheel cohort mismatch: actual={sorted(actual)!r}; "
+                  f"expected={sorted(expected)!r}"
+              )
+          print("release_wheels=" + ",".join(sorted(actual)))
           PY
           (cd dist && sha256sum -- ./*.whl > SHA256SUMS.txt)
 
@@ -108,6 +125,7 @@ jobs:
           set -euo pipefail
           assets=(dist/*.whl dist/SHA256SUMS.txt)
           if gh release view "$TAG" >/dev/null 2>&1; then
+            mapfile -t release_flags < <(python tools/release_publish.py "$TAG" edit)
             declare -A uploaded=()
             while IFS= read -r name; do
               uploaded["$name"]=1
@@ -123,12 +141,12 @@ jobs:
             gh release edit "$TAG" \
               --title "Pursers $VERSION" \
               --notes-file release-notes.md \
-              --prerelease=false \
-              --latest
+              "${release_flags[@]}"
           else
+            mapfile -t release_flags < <(python tools/release_publish.py "$TAG" create)
             gh release create "$TAG" "${assets[@]}" \
               --verify-tag \
               --title "Pursers $VERSION" \
               --notes-file release-notes.md \
-              --latest
+              "${release_flags[@]}"
           fi

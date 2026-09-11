@@ -7,8 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0b1] - 2026-09-11
+
+This release includes `pursers-central==0.1.0a30`,
+`pursers-client==0.1.0a23`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0b1`, `pursers==5.0.0b1`, and
+`pursers-wait-bridge==0.1.0a16`.
+
 ### Changed
 
+- Beta release boundary: prepare the reviewed Home integration for final
+  exact-candidate source, browser, 201-behavior, CI, and CodeQL verification.
+  GitHub release create and edit paths now preserve prerelease status and
+  prevent beta tags from becoming the stable latest release.
 - Client and seat kit: project-registry entries may declare an exact,
   board-scoped HTTPS `repository_url` for ticket routing. Generated seats fail
   before claim or verification when URL, checkout, board, or operator-ownership
