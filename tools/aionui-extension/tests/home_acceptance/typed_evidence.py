@@ -886,9 +886,24 @@ def _require_context_bindings(bindings: dict[str, Any], fields: set[str], label:
         raise TypedEvidenceError(f"{label} lacks required context bindings")
 
 
+def _lsof_executable(unavailable_message: str) -> str:
+    executable = next(
+        (
+            candidate
+            for candidate in ("/usr/sbin/lsof", "/usr/bin/lsof")
+            if Path(candidate).is_file() and os.access(candidate, os.X_OK)
+        ),
+        None,
+    )
+    if executable is None:
+        raise TypedEvidenceError(unavailable_message)
+    return executable
+
+
 def _process_cwd(pid: int, label: str) -> Path:
+    lsof = _lsof_executable(f"{label} working directory is unavailable")
     completed = subprocess.run(
-        ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+        [lsof, "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
         text=True, capture_output=True, check=False, timeout=5,
         env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
     )
@@ -937,7 +952,7 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
     ):
         raise TypedEvidenceError("trusted process contract is invalid")
     completed = subprocess.run(
-        ["/bin/ps", "-p", str(pid), "-o", "command="], text=True,
+        ["/bin/ps", "-ww", "-p", str(pid), "-o", "command="], text=True,
         capture_output=True, check=False, timeout=5,
         env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
     )
@@ -1062,7 +1077,7 @@ def _runtime_check(runtime: Any, trust: dict[str, Any], base_url: str) -> dict[s
     except (OSError, ValueError):
         raise TypedEvidenceError("HTTP runtime PID is invalid") from None
     completed = subprocess.run(
-        ["/bin/ps", "-p", str(pid), "-o", "command="],
+        ["/bin/ps", "-ww", "-p", str(pid), "-o", "command="],
         text=True, capture_output=True, check=False, timeout=5,
         env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
     )
@@ -1104,8 +1119,9 @@ def _runtime_check(runtime: Any, trust: dict[str, Any], base_url: str) -> dict[s
     port = urlsplit(base_url).port
     if runtime["listener_port"] != port or not isinstance(port, int):
         raise TypedEvidenceError("HTTP runtime listener port changed")
+    lsof = _lsof_executable("HTTP runtime listener ownership is unavailable")
     listener = subprocess.run(
-        ["/usr/sbin/lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+        [lsof, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
         text=True, capture_output=True, check=False, timeout=5,
         env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
     )
@@ -1827,7 +1843,7 @@ def _mcp_process_record(
     pid: int, source: dict[str, Any]
 ) -> dict[str, Any]:
     completed = subprocess.run(
-        ["/bin/ps", "-p", str(pid), "-o", "command="],
+        ["/bin/ps", "-ww", "-p", str(pid), "-o", "command="],
         text=True, capture_output=True, check=False, timeout=5,
         env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
     )

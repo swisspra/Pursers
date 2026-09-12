@@ -366,7 +366,7 @@ def _trust(tmp_path: Path, http_server: str, **changes: Any) -> dict[str, Any]:
     pid_file.write_text(str(process.pid), encoding="utf-8")
     pid_file.chmod(0o600)
     command = subprocess.check_output(
-        ["/bin/ps", "-p", str(process.pid), "-o", "command="], text=True
+        ["/bin/ps", "-ww", "-p", str(process.pid), "-o", "command="], text=True
     ).strip()
     start_time = subprocess.check_output(
         ["/bin/ps", "-p", str(process.pid), "-o", "lstart="], text=True
@@ -1069,7 +1069,7 @@ def test_http_rejects_unrelated_echo_service_even_with_matching_body(
     _wait_for_port(decoy, port)
     try:
         command = subprocess.check_output(
-            ["/bin/ps", "-p", str(decoy.pid), "-o", "command="], text=True
+            ["/bin/ps", "-ww", "-p", str(decoy.pid), "-o", "command="], text=True
         ).strip()
         started = subprocess.check_output(
             ["/bin/ps", "-p", str(decoy.pid), "-o", "lstart="], text=True
@@ -1145,7 +1145,7 @@ ThreadingHTTPServer(('127.0.0.1',int(sys.argv[2])),H).serve_forever()
     _wait_for_port(decoy, port)
     try:
         command = subprocess.check_output(
-            ["/bin/ps", "-p", str(decoy.pid), "-o", "command="], text=True
+            ["/bin/ps", "-ww", "-p", str(decoy.pid), "-o", "command="], text=True
         ).strip()
         started = subprocess.check_output(
             ["/bin/ps", "-p", str(decoy.pid), "-o", "lstart="], text=True
@@ -1406,7 +1406,7 @@ def test_receipt_rejects_decoy_pid(tmp_path: Path, http_server: str) -> None:
     try:
         threading.Event().wait(0.05)
         command = subprocess.check_output(
-            ["/bin/ps", "-p", str(process.pid), "-o", "command="], text=True
+            ["/bin/ps", "-ww", "-p", str(process.pid), "-o", "command="], text=True
         ).strip()
         live_executable = Path(command.split()[0]).resolve()
         pid_file = tmp_path / "runtime.pid"
@@ -1620,7 +1620,7 @@ def test_personal_receipt_real_producer_capture_adapter(
             _stdout, stderr = process.communicate(timeout=3)
             raise AssertionError(f"Personal MCP did not write receipt: {stderr[-1000:]}")
         live_command = subprocess.check_output(
-            ["/bin/ps", "-p", str(process.pid), "-o", "command="], text=True
+            ["/bin/ps", "-ww", "-p", str(process.pid), "-o", "command="], text=True
         ).strip()
         live_executable = Path(live_command.split()[0]).resolve()
         pid_file = tmp_path / "personal-runtime.pid"
@@ -1902,7 +1902,7 @@ def log_emitter(tmp_path: Path, request: pytest.FixtureRequest) -> Any:
             threading.Event().wait(0.01)
         assert log_path.exists()
         live_command = subprocess.check_output(
-            ["/bin/ps", "-p", str(process.pid), "-o", "command="], text=True
+            ["/bin/ps", "-ww", "-p", str(process.pid), "-o", "command="], text=True
         ).strip()
         live_executable = Path(live_command.split()[0]).resolve()
         pid_file = tmp_path / f"emitter-{index}.pid"
@@ -2472,7 +2472,7 @@ def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
         pid_path.write_text(str(process.pid), encoding="utf-8")
         pid_path.chmod(0o600)
         command = subprocess.check_output(
-            ["/bin/ps", "-p", str(process.pid), "-o", "command="], text=True
+            ["/bin/ps", "-ww", "-p", str(process.pid), "-o", "command="], text=True
         ).strip()
         start_time = subprocess.check_output(
             ["/bin/ps", "-p", str(process.pid), "-o", "lstart="], text=True
