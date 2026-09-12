@@ -42,6 +42,18 @@ RELEASE_VERSIONS = tomllib.loads(
     (REPOSITORY / "tools/release_versions.toml").read_text(encoding="utf-8")
 )
 PERSONAL_VERSION = RELEASE_VERSIONS["packages"]["personal"]
+BUILD_TOOLCHAIN_WHEEL_SHA256 = {
+    "build-1.3.0-py3-none-any.whl":
+        "7145f0b5061ba90a1500d60bd1b13ca0a8a4cebdd0cc16ed8adf1c0e739f43b4",
+    "packaging-25.0-py3-none-any.whl":
+        "29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484",
+    "pyproject_hooks-1.2.0-py3-none-any.whl":
+        "9e5c6bfa8dcc30091c74b0cf803c81fdd29d94f01992a7707bc97babb1141913",
+    "setuptools-80.9.0-py3-none-any.whl":
+        "062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922",
+    "wheel-0.45.1-py3-none-any.whl":
+        "708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248",
+}
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -57,6 +69,46 @@ def _sign(document: dict[str, Any], fields: list[str], key_hex: str, signature_f
     document[signature_field] = hmac.new(
         bytes.fromhex(key_hex), _json_bytes(document), hashlib.sha256
     ).hexdigest()
+
+
+def _run_checked(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        **kwargs,
+    )
+    if result.returncode:
+        pytest.fail(
+            f"command failed ({result.returncode}): {' '.join(command)}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            pytrace=False,
+        )
+    return result
+
+
+def _prepare_build_toolchain_wheelhouse(destination: Path) -> list[Path]:
+    destination.mkdir()
+    requirements = [
+        f"{name}=={version}"
+        for name, version in RELEASE_VERSIONS["build_toolchain"].items()
+    ]
+    _run_checked(
+        [
+            sys.executable, "-m", "pip", "download",
+            "--disable-pip-version-check", "--no-cache-dir",
+            "--only-binary=:all:", "--no-deps", "--dest", str(destination),
+            *requirements,
+        ]
+    )
+    wheels = sorted(destination.glob("*.whl"))
+    actual = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in wheels
+    }
+    assert actual == BUILD_TOOLCHAIN_WHEEL_SHA256
+    return wheels
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -1432,6 +1484,9 @@ def test_personal_receipt_real_producer_capture_adapter(
     build_sources = tmp_path / "build-sources"
     wheel_dir = tmp_path / "wheels"
     wheel_dir.mkdir()
+    toolchain_wheels = _prepare_build_toolchain_wheelhouse(
+        tmp_path / "build-toolchain-wheelhouse"
+    )
     for project_name in ("client", "central", "personal"):
         shutil.copytree(
             candidate_checkout / "packages" / project_name,
@@ -1439,22 +1494,29 @@ def test_personal_receipt_real_producer_capture_adapter(
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "build", "*.egg-info"),
         )
     build_runtime = tmp_path / "build-venv"
-    subprocess.run(
+    _run_checked(
         ["uv", "venv", "--python", sys.executable, str(build_runtime)],
-        check=True, capture_output=True, text=True,
     )
     build_python = build_runtime / "bin/python"
-    build_requirements = [
-        f"{name}=={version}"
-        for name, version in RELEASE_VERSIONS["build_toolchain"].items()
-    ]
-    subprocess.run(
+    uv_cache = tmp_path / "empty-uv-cache"
+    _run_checked(
         [
-            "uv", "pip", "install", "--offline", "--python",
-            str(build_python), *build_requirements,
+            "uv", "pip", "install", "--offline", "--no-cache", "--no-deps",
+            "--python", str(build_python), *[str(path) for path in toolchain_wheels],
         ],
-        check=True, capture_output=True, text=True,
+        env={**os.environ, "UV_CACHE_DIR": str(uv_cache)},
     )
+    installed_toolchain = json.loads(_run_checked(
+        [
+            str(build_python), "-I", "-c",
+            (
+                "import importlib.metadata as m,json; "
+                "print(json.dumps({name: m.version(name) for name in "
+                f"{list(RELEASE_VERSIONS['build_toolchain'])!r}}}))"
+            ),
+        ]
+    ).stdout)
+    assert installed_toolchain == RELEASE_VERSIONS["build_toolchain"]
     build_environment = {
         **os.environ,
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -1462,28 +1524,41 @@ def test_personal_receipt_real_producer_capture_adapter(
         "SOURCE_DATE_EPOCH": RELEASE_VERSIONS["source_date_epoch"],
     }
     for project_name in ("client", "central", "personal"):
-        subprocess.run(
+        _run_checked(
             [
                 "uv", "build", "--offline", "--wheel", "--no-build-isolation",
                 "--python", str(build_python), "--out-dir", str(wheel_dir),
                 str(build_sources / project_name),
             ],
-            check=True, capture_output=True, text=True, env=build_environment,
+            env={**build_environment, "UV_CACHE_DIR": str(uv_cache)},
         )
+    source_wheels = sorted(wheel_dir.glob("*.whl"))
+    runtime_wheelhouse = tmp_path / "runtime-wheelhouse"
+    runtime_wheelhouse.mkdir()
+    _run_checked(
+        [
+            sys.executable, "-m", "pip", "download",
+            "--disable-pip-version-check", "--no-cache-dir",
+            "--only-binary=:all:", "--dest", str(runtime_wheelhouse),
+            *[str(path) for path in source_wheels],
+        ]
+    )
     runtime = tmp_path / "personal-venv"
-    subprocess.run(
+    _run_checked(
         ["uv", "venv", "--python", sys.executable, str(runtime)],
-        check=True, capture_output=True, text=True,
     )
     runtime_python = runtime / "bin/python"
-    subprocess.run(
+    _run_checked(
         [
-            "uv", "pip", "install", "--offline", "--python",
-            str(runtime_python),
-            *[str(path) for path in sorted(wheel_dir.glob("*.whl"))],
+            "uv", "pip", "install", "--offline", "--no-cache", "--python",
+            str(runtime_python), "--find-links", str(runtime_wheelhouse),
+            *[str(path) for path in source_wheels],
         ],
-        check=True, capture_output=True, text=True,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        env={
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "UV_CACHE_DIR": str(uv_cache),
+        },
     )
     site_packages = Path(subprocess.check_output(
         [
