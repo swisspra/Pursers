@@ -55,9 +55,11 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t build_toolchain < <(python - <<'PY'
-          from tools.regenerate_component_lock import BUILD_TOOLCHAIN
+          import tomllib
 
-          for name, version in BUILD_TOOLCHAIN:
+          with open("tools/release_versions.toml", "rb") as stream:
+              build_toolchain = tomllib.load(stream)["build_toolchain"]
+          for name, version in build_toolchain.items():
               print(f"{name}=={version}")
           PY
           )
