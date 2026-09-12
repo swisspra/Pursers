@@ -1067,29 +1067,35 @@ if (responseAction) {
         }
         return current
       }
-      const capture = { original, values: [], error: null, wrapper: null, timer: null }
-      const wrapper = async function(input, init = {}) {
-        const response = await original.call(this, input, init)
-        const requestUrl = typeof input === 'string' ? input : input.url
-        const requestMethod = String(init.method || input.method || 'GET').toUpperCase()
-        let parsed = null
-        try { parsed = new URL(requestUrl, window.location.href) } catch (_error) {}
-        let requestToken = ''
-        try { requestToken = new Headers(init.headers).get('x-pursers-home-token') || '' }
-        catch (_error) {}
-        const trustedHelperRequest = parsed && parsed.origin === helperOrigin
-          && parsed.pathname === endpoint && !parsed.search && !parsed.hash
-          && init.credentials === 'omit' && init.cache === 'no-store'
-          && init.referrerPolicy === 'no-referrer' && requestToken === helperToken
-        if (requestMethod === method && trustedHelperRequest) {
-          try {
-            const body = await response.clone().json()
-            capture.values.push(selectJson({ status: response.status, body }))
-          } catch (error) {
-            capture.error = String(error && error.message ? error.message : error)
+      const capture = {
+        original, values: [], pending: [], error: null, wrapper: null, timer: null
+      }
+      const wrapper = function(input, init = {}) {
+        const task = (async () => {
+          const response = await original.call(this, input, init)
+          const requestUrl = typeof input === 'string' ? input : input.url
+          const requestMethod = String(init.method || input.method || 'GET').toUpperCase()
+          let parsed = null
+          try { parsed = new URL(requestUrl, window.location.href) } catch (_error) {}
+          let requestToken = ''
+          try { requestToken = new Headers(init.headers).get('x-pursers-home-token') || '' }
+          catch (_error) {}
+          const trustedHelperRequest = parsed && parsed.origin === helperOrigin
+            && parsed.pathname === endpoint && !parsed.search && !parsed.hash
+            && init.credentials === 'omit' && init.cache === 'no-store'
+            && init.referrerPolicy === 'no-referrer' && requestToken === helperToken
+          if (requestMethod === method && trustedHelperRequest) {
+            try {
+              const body = await response.clone().json()
+              capture.values.push(selectJson({ status: response.status, body }))
+            } catch (error) {
+              capture.error = String(error && error.message ? error.message : error)
+            }
           }
-        }
-        return response
+          return response
+        })()
+        capture.pending.push(task)
+        return task
       }
       capture.wrapper = wrapper
       window.fetch = wrapper
@@ -1531,15 +1537,25 @@ const binding = bindingResult && bindingResult.result ? bindingResult.result.val
 if (!transition || !binding) throw new Error('transition result unavailable')
 if (responseAction) {
   const captured = await cdp('Runtime.evaluate', {
-    expression: `(() => {
+    expression: `(async () => {
       const key = ${JSON.stringify(responseCaptureKey)}
       const state = window[key]
       if (!state) return null
+      const pending = Array.isArray(state.pending) ? state.pending : []
+      let pendingTimeout = null
+      await Promise.race([
+        Promise.allSettled(pending),
+        new Promise(resolve => {
+          pendingTimeout = window.setTimeout(resolve, 30000)
+        })
+      ])
+      if (pendingTimeout) window.clearTimeout(pendingTimeout)
       window.clearTimeout(state.timer)
       if (window.fetch === state.wrapper) window.fetch = state.original
       delete window[key]
       return { values: state.values, error: state.error }
     })()`,
+    awaitPromise: true,
     returnByValue: true
   })
   const value = captured && captured.result ? captured.result.value : null
