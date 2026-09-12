@@ -73,7 +73,8 @@ def synthetic_door(*, role: str = "worker") -> str:
 
     compact = (
         f"{segment({'alg': 'RS256', 'kid': 'seat-test'})}."
-        f"{segment({'exp': 2_000_000_000})}.synthetic-signature"
+        f"{segment({'exp': 2_000_000_000})}."
+        f"{base64.urlsafe_b64encode(b'synthetic-signature').decode().rstrip('=')}"
     )
     return f"prs1.{segment({'u': 'http://127.0.0.1:8766/mcp', 'b': 'sandbox', 'r': role, 't': compact})}"
 
