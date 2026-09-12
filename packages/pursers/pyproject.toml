@@ -9,6 +9,7 @@ description = "Dependency-only installer for the Pursers local agent work board"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = [
   "pursers-central==0.1.0a30",
   "pursers-client==0.1.0a23",

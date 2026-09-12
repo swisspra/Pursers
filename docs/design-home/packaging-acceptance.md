@@ -11,12 +11,13 @@
 
 ### 2.1 AionUI extension ZIP
 
-`tools/aionui-extension/build.py` creates `pursers-aionui-0.1.0.zip`. Its allowlist contains exactly these 26 members:
+`tools/aionui-extension/build.py` creates `pursers-aionui-0.1.0.zip`. Its allowlist contains exactly these 27 members:
 
 | ZIP member | Runtime purpose |
 | --- | --- |
 | `aion-extension.json` | Extension manifest |
 | `IMPORT_PROVENANCE.md` | Provenance of imported runtime sources |
+| `LICENSE` | Apache License 2.0 text for standalone redistribution |
 | `README.md` | Operator documentation |
 | `contexts/reviewer.md` | Reviewer conversation context |
 | `contexts/worker.md` | Worker conversation context |
@@ -196,11 +197,12 @@ from zipfile import ZipFile
 path = Path(__import__("os").environ["GATE_ROOT"]) / "pursers-aionui-0.1.0.zip"
 with ZipFile(path) as archive:
     names = archive.namelist()
-    assert len(names) == 26
+    assert len(names) == 27
     member_bytes = sum(item.file_size for item in archive.infolist())
     documentation = {
         "README.md",
         "IMPORT_PROVENANCE.md",
+        "LICENSE",
         "door/DOOR_ONBOARDING_CONTRACT.md",
         "host/HELPER_CONTRACT.md",
         "result_visibility/FEATURE_CONTRACT.md",

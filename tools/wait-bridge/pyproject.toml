@@ -8,6 +8,7 @@ version = "0.1.0a16"
 description = "Blocking wait-for-work MCP bridge for Pursers"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = [
   "pursers-client==0.1.0a23",
   "PyJWT[crypto]>=2.10,<3",

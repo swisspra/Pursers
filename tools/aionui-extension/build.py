@@ -13,6 +13,7 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 PACKAGE_FILES = (
     "aion-extension.json",
     "IMPORT_PROVENANCE.md",
+    "LICENSE",
     "README.md",
     "contexts/reviewer.md",
     "contexts/worker.md",
