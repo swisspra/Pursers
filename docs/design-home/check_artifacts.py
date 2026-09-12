@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,11 @@ BASELINE_SHA = "c2ebac5de803a0f7a00468ec4d3cdf06e4719096"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DESIGN_HOME = REPO_ROOT / "docs" / "design-home"
 MANIFEST_PATH = DESIGN_HOME / "context" / "source-manifest.json"
+ACCEPTANCE_FACTS_PATH = DESIGN_HOME / "context" / "acceptance-facts.json"
+TYPED_PREDICATE_DELTA_PATH = (
+    DESIGN_HOME / "context" / "typed-predicate-integration-delta.json"
+)
+TYPED_PREDICATE_BASE = "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c"
 
 
 def fail(message: str) -> None:
@@ -50,6 +56,327 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         fail(f"JSON root must be an object: {path}")
     return value
+
+
+def normalized_fact(value: str) -> str:
+    """Case- and whitespace-normalised form used for every fact comparison."""
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value)).strip().casefold()
+
+
+# Exhaustive key sets. AN-000000000360 authorises behaviour predicates for IDs that
+# name behaviour rather than a rendered label, and prior_state for the transitions
+# ground C requires. Every shape below is checked with set equality, never a subset
+# test, so an unknown key can never pass unnoticed.
+CONJUNCT_KEYS: dict[str, set[str]] = {
+    "ax_name_contains": {"kind", "path", "expected"},
+    "http_response": {"kind", "request", "status", "body_contains"},
+    "mcp_tool_response": {"kind", "tool", "field", "expected"},
+    "state_transition": {"kind", "from", "to", "via"},
+    "receipt_field": {"kind", "receipt", "field", "expected"},
+    "log_assertion": {"kind", "stream", "expected"},
+    "prior_state": {"kind", "observation", "expected"},
+}
+FIELDED_CONJUNCT_KEYS: dict[str, set[str]] = {
+    "http_response": {"kind", "source_id", "assertions"},
+    "mcp_tool_response": {"kind", "source_id", "assertions"},
+    "state_transition": {"kind", "source_id", "assertions"},
+    "receipt_field": {"kind", "source_id", "assertions"},
+    "log_assertion": {"kind", "source_id", "assertions"},
+}
+FIELDED_ASSERTION_KEYS: dict[str, set[str]] = {
+    "http_response": {"target", "path", "op", "value"},
+    "mcp_tool_response": {"path", "op", "value"},
+    "state_transition": {"phase", "path", "op", "value"},
+    "receipt_field": {"path", "op", "value"},
+    "log_assertion": {"path", "op", "value"},
+}
+TYPED_OPERATORS = {"eq", "ne", "contains", "in", "gt", "gte", "lt", "lte"}
+DERIVATION_KEYS: dict[str, set[str]] = {
+    "literal": {"kind", "source_quote"},
+    "identifier": {"kind", "symbol"},
+    # AN-000000000368 keeps the three failures apart. A missing evidence collector is
+    # not a missing behaviour, and neither is a missing permission. Both gap kinds
+    # block acceptance; only the owner and the fix differ.
+    "collector_gap": {"kind", "owner", "action"},
+    "observed_gap": {"kind", "owner", "action"},
+    "typed_predicate": {
+        "kind", "proposal_id", "source_commit", "source_lines",
+    },
+}
+BLOCKING_DERIVATIONS = {"collector_gap", "observed_gap"}
+
+
+def conjunct_signature(identifier: str, conjunct: Any) -> tuple[str, ...]:
+    """Validate one conjunct exhaustively and return its canonical signature."""
+    if not isinstance(conjunct, dict) or conjunct.get("kind") not in CONJUNCT_KEYS:
+        fail(f"acceptance fact {identifier} has an unknown predicate conjunct kind")
+    kind = conjunct["kind"]
+    if kind in FIELDED_CONJUNCT_KEYS and set(conjunct) == FIELDED_CONJUNCT_KEYS[kind]:
+        source_id = conjunct["source_id"]
+        assertions = conjunct["assertions"]
+        if not isinstance(source_id, str) or not source_id.strip():
+            fail(f"acceptance fact {identifier} {kind} source_id is empty")
+        if not isinstance(assertions, list) or not 1 <= len(assertions) <= 64:
+            fail(f"acceptance fact {identifier} {kind} assertions are empty or unbounded")
+        signatures: list[str] = []
+        for assertion in assertions:
+            if not isinstance(assertion, dict) or set(assertion) != FIELDED_ASSERTION_KEYS[kind]:
+                fail(f"acceptance fact {identifier} {kind} assertion fields do not match schema")
+            path = assertion["path"]
+            op = assertion["op"]
+            if not isinstance(path, str) or not isinstance(op, str) or op not in TYPED_OPERATORS:
+                fail(f"acceptance fact {identifier} {kind} assertion path/operator is invalid")
+            if kind == "http_response":
+                target = assertion["target"]
+                if target not in {"status", "action_origin", "field"}:
+                    fail(f"acceptance fact {identifier} http_response target is invalid")
+                if (target == "field") != path.startswith("/") or (target != "field" and path):
+                    fail(f"acceptance fact {identifier} http_response assertion path is invalid")
+            elif kind == "state_transition":
+                if assertion["phase"] not in {"before", "action", "after"}:
+                    fail(f"acceptance fact {identifier} state_transition phase is invalid")
+                if path != "/status" and not path.startswith("/"):
+                    fail(f"acceptance fact {identifier} state_transition path is invalid")
+            elif not path.startswith("/"):
+                fail(f"acceptance fact {identifier} {kind} assertion path is invalid")
+            try:
+                encoded = json.dumps(assertion, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            except (TypeError, ValueError):
+                fail(f"acceptance fact {identifier} {kind} assertion value is not JSON")
+            signatures.append(encoded)
+        if len(signatures) != len(set(signatures)):
+            fail(f"acceptance fact {identifier} repeats one {kind} assertion")
+        return (kind, normalized_fact(source_id), *sorted(signatures))
+    if set(conjunct) != CONJUNCT_KEYS[kind]:
+        fail(f"acceptance fact {identifier} {kind} conjunct fields do not match schema")
+    for key, value in conjunct.items():
+        if key == "status":
+            continue
+        if not isinstance(value, (str, list)) or not value:
+            fail(f"acceptance fact {identifier} {kind} conjunct field {key} is empty")
+    if kind == "ax_name_contains":
+        if conjunct["path"] != ["nodes"]:
+            fail(f"acceptance fact {identifier} accessibility conjunct path is not nodes")
+        return (kind, normalized_fact(conjunct["expected"]))
+    if kind == "http_response":
+        if not isinstance(conjunct["status"], int) or not 100 <= conjunct["status"] <= 599:
+            fail(f"acceptance fact {identifier} http_response status is not an HTTP code")
+        return (
+            kind,
+            normalized_fact(conjunct["request"]),
+            str(conjunct["status"]),
+            normalized_fact(conjunct["body_contains"]),
+        )
+    if kind == "mcp_tool_response":
+        return (
+            kind,
+            normalized_fact(conjunct["tool"]),
+            normalized_fact(conjunct["field"]),
+            normalized_fact(conjunct["expected"]),
+        )
+    if kind == "state_transition":
+        if normalized_fact(conjunct["from"]) == normalized_fact(conjunct["to"]):
+            fail(f"acceptance fact {identifier} state_transition does not change state")
+        return (
+            kind,
+            normalized_fact(conjunct["from"]),
+            normalized_fact(conjunct["to"]),
+            normalized_fact(conjunct["via"]),
+        )
+    if kind == "receipt_field":
+        return (
+            kind,
+            normalized_fact(conjunct["receipt"]),
+            normalized_fact(conjunct["field"]),
+            normalized_fact(conjunct["expected"]),
+        )
+    if kind == "log_assertion":
+        return (
+            kind,
+            normalized_fact(conjunct["stream"]),
+            normalized_fact(conjunct["expected"]),
+        )
+    return (kind, conjunct["observation"], normalized_fact(conjunct["expected"]))
+
+
+def predicate_signature(identifier: str, predicate: Any) -> tuple[tuple[str, ...], ...]:
+    """Validate a predicate in either allowed shape and return its uniqueness key.
+
+    The simple shape is the approved 35-ID contract, preserved byte-for-byte in
+    meaning. The all_of shape carries one or more conjuncts and is the only place a
+    prior_state may appear, because a prior state alone identifies nothing.
+    """
+    if not isinstance(predicate, dict):
+        fail(f"acceptance fact {identifier} predicate is not an object")
+    if predicate.get("name") != f"required fact: {identifier}":
+        fail(f"acceptance fact {identifier} predicate name is not bound to its ID")
+    if predicate.get("operator") == "all_of":
+        if set(predicate) != {"name", "operator", "conjuncts"}:
+            fail(f"acceptance fact {identifier} all_of predicate fields do not match schema")
+        conjuncts = predicate["conjuncts"]
+        if not isinstance(conjuncts, list) or not conjuncts:
+            fail(f"acceptance fact {identifier} all_of predicate has no conjunct")
+        signatures = [conjunct_signature(identifier, item) for item in conjuncts]
+        if len(set(signatures)) != len(signatures):
+            fail(f"acceptance fact {identifier} repeats one conjunct")
+        if all(item[0] == "prior_state" for item in signatures):
+            fail(f"acceptance fact {identifier} asserts only a prior state")
+        return tuple(sorted(signatures))
+    if (
+        set(predicate) != {"name", "path", "operator", "expected"}
+        or predicate["path"] != ["nodes"]
+        or predicate["operator"] != "ax_name_contains"
+        or not isinstance(predicate["expected"], str)
+        or not predicate["expected"].strip()
+    ):
+        fail(f"acceptance fact {identifier} predicate is not state-specific")
+    return (("ax_name_contains", normalized_fact(predicate["expected"])),)
+
+
+def validate_derivation(identifier: str, derivation: Any) -> str:
+    """Validate the declared derivation kind exhaustively and return that kind."""
+    if not isinstance(derivation, dict) or derivation.get("kind") not in DERIVATION_KEYS:
+        fail(f"acceptance fact {identifier} has an unknown derivation kind")
+    kind = derivation["kind"]
+    if set(derivation) != DERIVATION_KEYS[kind]:
+        fail(f"acceptance fact {identifier} {kind} derivation fields do not match schema")
+    if kind == "typed_predicate":
+        for key in ("kind", "proposal_id", "source_commit"):
+            value = derivation[key]
+            if not isinstance(value, str) or not value.strip():
+                fail(f"acceptance fact {identifier} derivation field {key} is empty")
+        if derivation["proposal_id"] != identifier:
+            fail(f"acceptance fact {identifier} typed proposal ID is not self-bound")
+        if re.fullmatch(r"[0-9a-f]{40}", derivation["source_commit"]) is None:
+            fail(f"acceptance fact {identifier} typed source commit is not immutable")
+        lines = derivation["source_lines"]
+        if (
+            not isinstance(lines, list)
+            or len(lines) != 2
+            or not all(isinstance(line, int) and line > 0 for line in lines)
+            or lines[0] > lines[1]
+        ):
+            fail(f"acceptance fact {identifier} typed source lines are invalid")
+        return kind
+    for key, value in derivation.items():
+        if not isinstance(value, str) or not value.strip():
+            fail(f"acceptance fact {identifier} derivation field {key} is empty")
+    return kind
+
+
+def load_acceptance_contract(
+    design_home: Path = DESIGN_HOME,
+) -> dict[str, Any]:
+    """Load and validate the one canonical acceptance ID/fact declaration."""
+    facts = read_json(design_home / "context" / "acceptance-facts.json")
+    if set(facts) != {
+        "schema_version", "approved_35", "sequence", "inventory", "final_gates"
+    } or facts["schema_version"] != 1:
+        fail("acceptance facts fields do not match schema")
+    expected_counts = {"approved_35": 35, "sequence": 9, "inventory": 189, "final_gates": 3}
+    rows_by_group: dict[str, list[dict[str, Any]]] = {}
+    # Global across every group: AN-000000000356 makes uniqueness span all 201 rows,
+    # and the key is the whole canonical conjunct tuple, not one expected string.
+    signature_owner: dict[tuple[tuple[str, ...], ...], str] = {}
+    declared_gaps: list[dict[str, str]] = []
+    duplicate_signatures: list[tuple[str, str]] = []
+    prior_state_refs: list[tuple[str, str]] = []
+    for group, expected_count in expected_counts.items():
+        rows = facts[group]
+        if group == "approved_35":
+            if (
+                not isinstance(rows, list)
+                or len(rows) != expected_count
+                or len(rows) != len(set(rows))
+                or not all(isinstance(item, str) and item for item in rows)
+            ):
+                fail("approved_35 must preserve 35 unique IDs")
+            continue
+        if not isinstance(rows, list) or len(rows) != expected_count:
+            fail(f"acceptance facts {group} must contain exactly {expected_count} rows")
+        identifiers: set[str] = set()
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {
+                "id", "surface", "status", "precondition", "action",
+                "expected_fact", "predicate", "evidence_source", "derivation"
+            }:
+                fail(f"acceptance fact row fields do not match schema in {group}")
+            identifier = row["id"]
+            if not isinstance(identifier, str) or not identifier or identifier in identifiers:
+                fail(f"acceptance fact IDs must be unique in {group}")
+            identifiers.add(identifier)
+            if row["surface"] not in {"aionui", "fleet", "personal"}:
+                fail(f"acceptance fact {identifier} has invalid surface")
+            if row["status"] not in {"normative", "measured-gap"}:
+                fail(f"acceptance fact {identifier} lacks normative/measured status")
+            for field in ("precondition", "action", "expected_fact", "evidence_source"):
+                if not isinstance(row[field], str) or not row[field].strip():
+                    fail(f"acceptance fact {identifier} lacks {field}")
+            signature = predicate_signature(identifier, row["predicate"])
+            owner = signature_owner.get(signature)
+            if owner is not None:
+                # Semantic, not structural. A repeated canonical fact BLOCKS acceptance
+                # but must not stop the contract loading, because the harness derives
+                # its whole inventory from here and would otherwise be unable to run at
+                # all. Reported by validate_acceptance_derivations instead.
+                duplicate_signatures.append((identifier, owner))
+            else:
+                signature_owner[signature] = identifier
+            for conjunct in row["predicate"].get("conjuncts", []):
+                if conjunct.get("kind") == "prior_state":
+                    prior_state_refs.append((identifier, conjunct["observation"]))
+            derivation_kind = validate_derivation(identifier, row["derivation"])
+            if derivation_kind in BLOCKING_DERIVATIONS:
+                if row["status"] != "measured-gap":
+                    fail(f"acceptance fact {identifier} hides a declared gap as normative")
+                declared_gaps.append(
+                    {
+                        "id": identifier,
+                        "kind": derivation_kind,
+                        "owner": row["derivation"]["owner"],
+                        "action": row["derivation"]["action"],
+                    }
+                )
+            elif row["status"] != "normative":
+                fail(f"acceptance fact {identifier} is measured-gap without a declared gap")
+            normalized.append(row)
+        rows_by_group[group] = normalized
+    inventory_ids = [row["id"] for row in rows_by_group["inventory"]]
+    if not set(facts["approved_35"]).issubset(inventory_ids):
+        fail("approved_35 meanings were not preserved in expanded inventory")
+    # A prior_state may only name another canonical observation. The harness enforces
+    # the rest of the operator's condition, that the referenced observation is present
+    # in the same report and has independently passed its own validation.
+    known_ids = {
+        row["id"]
+        for group in ("sequence", "inventory", "final_gates")
+        for row in rows_by_group[group]
+    }
+    for identifier, referenced in prior_state_refs:
+        if referenced == identifier:
+            fail(f"acceptance fact {identifier} names itself as its prior state")
+        if referenced not in known_ids:
+            fail(
+                f"acceptance fact {identifier} names unknown prior observation {referenced}"
+            )
+    manifest = read_json(design_home / "context" / "source-manifest.json")
+    if manifest.get("acceptanceFacts") != "docs/design-home/context/acceptance-facts.json":
+        fail("source-manifest acceptanceFacts path mismatch")
+    if manifest.get("acceptanceInventoryIds") != inventory_ids:
+        fail("source-manifest inventory IDs differ from canonical facts")
+    return {
+        "sequence": tuple(row["id"] for row in rows_by_group["sequence"]),
+        "inventory": tuple(inventory_ids),
+        "final_gates": tuple(row["id"] for row in rows_by_group["final_gates"]),
+        "gaps": tuple(declared_gaps),
+        "duplicates": tuple(duplicate_signatures),
+        "facts": {
+            row["id"]: row
+            for group in ("sequence", "inventory", "final_gates")
+            for row in rows_by_group[group]
+        },
+    }
 
 
 def git_source(relative: str) -> bytes:
@@ -466,28 +793,21 @@ def validate_acceptance_inventory(
     design_home: Path,
     manifest: dict[str, Any],
 ) -> list[str]:
+    try:
+        contract = load_acceptance_contract(design_home)
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return [str(exc)]
     inventory = (design_home / "inventory.md").read_text(encoding="utf-8")
-    documented = re.findall(
-        r"^\| `((?:dashboard-ui|fleet-dashboard|extension-join|personal-mcp)\.[a-z0-9.-]+)` \|",
-        inventory,
-        flags=re.MULTILINE,
+    section = markdown_section(
+        inventory, "<!-- acceptance-facts:start -->", "<!-- acceptance-facts:end -->"
     )
-    expected = manifest.get("acceptanceInventoryIds")
-    if not isinstance(expected, list) or not all(
-        isinstance(item, str) and item for item in expected
-    ):
-        return ["acceptanceInventoryIds must be a non-empty string array"]
+    documented = re.findall(r"^\| `([a-z0-9._-]+)` \|", section, flags=re.MULTILINE)
+    expected = [*contract["inventory"], *contract["final_gates"]]
     errors: list[str] = []
     if len(documented) != len(set(documented)):
-        errors.append("acceptance inventory contains duplicate IDs")
-    if len(expected) != len(set(expected)):
-        errors.append("acceptanceInventoryIds contains duplicate IDs")
-    missing = sorted(set(expected) - set(documented))
-    extra = sorted(set(documented) - set(expected))
-    if missing or extra:
-        errors.append(
-            f"acceptance inventory mismatch: missing={missing}, extra={extra}"
-        )
+        errors.append("acceptance fact catalog contains duplicate IDs")
+    if documented != expected:
+        errors.append("acceptance fact catalog IDs differ from canonical facts")
     return errors
 
 
@@ -570,6 +890,199 @@ def validate_no_stale_labels(design_home: Path) -> list[str]:
     return errors
 
 
+def predicate_expected_values(predicate: dict[str, Any]) -> list[str]:
+    """Every string a predicate claims will be observed, across both shapes."""
+    if predicate.get("operator") != "all_of":
+        return [predicate["expected"]]
+    values: list[str] = []
+    for conjunct in predicate["conjuncts"]:
+        if "assertions" in conjunct:
+            values.extend(
+                assertion["value"]
+                for assertion in conjunct["assertions"]
+                if isinstance(assertion.get("value"), str)
+            )
+            continue
+        if conjunct["kind"] in {
+            "ax_name_contains", "mcp_tool_response", "receipt_field",
+            "log_assertion",
+        }:
+            values.append(conjunct["expected"])
+        elif conjunct["kind"] == "http_response":
+            values.append(conjunct["body_contains"])
+        elif conjunct["kind"] == "state_transition":
+            values.extend([conjunct["from"], conjunct["to"], conjunct["via"]])
+    return values
+
+
+def validate_acceptance_derivations(design_home: Path) -> list[str]:
+    """Every canonical fact must trace to its named source, or block acceptance.
+
+    literal      the quoted source text must exist in the evidence source, and every
+                 value the predicate expects must appear inside that quote
+    identifier   the named symbol must exist in the evidence source, because the
+                 observed value is produced at runtime rather than written literally
+    observed_gap the behaviour is undefined; per AN-000000000356 amendment one this
+                 does NOT pass, it blocks, and it carries an owner and an action
+    """
+    errors: list[str] = []
+    contract = load_acceptance_contract(design_home)
+    delta = read_json(
+        design_home / "context" / TYPED_PREDICATE_DELTA_PATH.name
+    )
+    proposals = delta.get("proposals")
+    partition = delta.get("partition")
+    if (
+        delta.get("schema_version") != 1
+        or delta.get("base_commit") != TYPED_PREDICATE_BASE
+        or not isinstance(proposals, list)
+        or not isinstance(partition, dict)
+        or not isinstance(partition.get("owned_ids"), list)
+    ):
+        fail("typed predicate delta identity or partition is invalid")
+    proposal_by_id = {
+        proposal.get("id"): proposal
+        for proposal in proposals
+        if isinstance(proposal, dict) and isinstance(proposal.get("id"), str)
+    }
+    owned_ids = partition["owned_ids"]
+    if (
+        len(proposal_by_id) != 121
+        or len(owned_ids) != 121
+        or len(set(owned_ids)) != 121
+        or set(proposal_by_id) != set(owned_ids)
+    ):
+        fail("typed predicate delta must contain the exact 121-ID owned partition")
+    typed_ids = {
+        identifier
+        for identifier, row in contract["facts"].items()
+        if row["derivation"]["kind"] == "typed_predicate"
+    }
+    if typed_ids != set(owned_ids):
+        fail("canonical typed predicates do not consume the exact delta partition")
+    for identifier, owner in contract["duplicates"]:
+        errors.append(
+            f"acceptance fact {identifier} repeats the canonical fact of {owner} and "
+            "blocks acceptance; bind it to its distinguishing state instead of "
+            "rewording it"
+        )
+    cache: dict[str, str | None] = {}
+    for identifier, row in contract["facts"].items():
+        relative = row["evidence_source"]
+        if relative not in cache:
+            path = REPO_ROOT / relative
+            cache[relative] = (
+                path.read_text(encoding="utf-8", errors="replace")
+                if path.is_file()
+                else None
+            )
+        source = cache[relative]
+        derivation = row["derivation"]
+        kind = derivation["kind"]
+        if kind in BLOCKING_DERIVATIONS:
+            reason = (
+                "no evidence collector can observe it"
+                if kind == "collector_gap"
+                else "the behaviour itself is undefined"
+            )
+            errors.append(
+                f"acceptance fact {identifier} is a {kind} and blocks acceptance because "
+                f"{reason}: owner={derivation['owner']}, action={derivation['action']}"
+            )
+            continue
+        if kind == "typed_predicate":
+            proposal = proposal_by_id[identifier]
+            proposal_source = proposal.get("source")
+            causal = proposal.get("causal")
+            canonical = proposal.get("canonical_predicate")
+            if (
+                proposal.get("status") != "executable_proposal"
+                or not isinstance(proposal_source, dict)
+                or not isinstance(causal, dict)
+                or not isinstance(canonical, dict)
+            ):
+                errors.append(f"acceptance fact {identifier} has an invalid typed proposal")
+                continue
+            if row["evidence_source"] != proposal_source.get("path"):
+                errors.append(
+                    f"acceptance fact {identifier} evidence source differs from its typed proposal"
+                )
+            if derivation != {
+                "kind": "typed_predicate",
+                "proposal_id": identifier,
+                "source_commit": proposal_source.get("commit"),
+                "source_lines": proposal_source.get("lines"),
+            }:
+                errors.append(
+                    f"acceptance fact {identifier} derivation differs from its typed proposal"
+                )
+            expected_fields = {
+                "precondition": causal.get("precondition"),
+                "action": causal.get("action"),
+                "expected_fact": causal.get("expected_transition"),
+            }
+            for field, expected in expected_fields.items():
+                if row[field] != expected:
+                    errors.append(
+                        f"acceptance fact {identifier} {field} differs from its typed proposal"
+                    )
+            expected_predicate = {
+                "name": f"required fact: {identifier}",
+                "operator": "all_of",
+                "conjuncts": [canonical],
+            }
+            if row["predicate"] != expected_predicate:
+                errors.append(
+                    f"acceptance fact {identifier} predicate differs from its typed proposal"
+                )
+            commit = derivation["source_commit"]
+            start, end = derivation["source_lines"]
+            try:
+                anchored = subprocess.check_output(
+                    ["git", "show", f"{commit}:{row['evidence_source']}"],
+                    cwd=REPO_ROOT,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                ).splitlines()
+            except subprocess.CalledProcessError as exc:
+                errors.append(
+                    f"acceptance fact {identifier} typed source anchor is unavailable: "
+                    f"{exc.output.strip()}"
+                )
+            else:
+                if not 1 <= start <= end <= len(anchored):
+                    errors.append(
+                        f"acceptance fact {identifier} typed source lines are out of range"
+                    )
+            continue
+        if source is None:
+            errors.append(
+                f"acceptance fact {identifier} names a missing evidence source {relative}"
+            )
+            continue
+        if kind == "identifier":
+            if derivation["symbol"] not in source:
+                errors.append(
+                    f"acceptance fact {identifier} names symbol {derivation['symbol']!r} "
+                    f"that does not exist in {relative}"
+                )
+            continue
+        quote = derivation["source_quote"]
+        if normalized_fact(quote) not in normalized_fact(source):
+            errors.append(
+                f"acceptance fact {identifier} quotes text absent from {relative}"
+            )
+            continue
+        quoted = normalized_fact(quote)
+        for value in predicate_expected_values(row["predicate"]):
+            if normalized_fact(value) not in quoted:
+                errors.append(
+                    f"acceptance fact {identifier} expects {value!r}, which its own "
+                    f"quoted source text does not contain"
+                )
+    return errors
+
+
 def validate(design_home: Path = DESIGN_HOME) -> tuple[list[str], tuple[int, int]]:
     try:
         manifest = load_manifest(design_home)
@@ -581,6 +1094,7 @@ def validate(design_home: Path = DESIGN_HOME) -> tuple[list[str], tuple[int, int
         errors.extend(validate_route_matrices(design_home, sources))
         errors.extend(validate_source_counts(design_home, manifest, sources))
         errors.extend(validate_acceptance_inventory(design_home, manifest))
+        errors.extend(validate_acceptance_derivations(design_home))
         errors.extend(validate_no_stale_labels(design_home))
         manifest_errors, total = validate_artifact_manifest(design_home, manifest)
         errors.extend(manifest_errors)
@@ -694,6 +1208,47 @@ def run_negative_probes() -> None:
         )
 
         shutil.copy2(DESIGN_HOME / "context" / "source-manifest.json", manifest_path)
+        facts_path = disposable / "context" / "acceptance-facts.json"
+        facts = read_json(facts_path)
+        facts["inventory"][0]["predicate"] = facts["inventory"][1]["predicate"]
+        facts_path.write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        fact_errors, _ = validate(disposable)
+        assert_probe(
+            "fact-id-predicate",
+            fact_errors,
+            "predicate name is not bound to its ID",
+        )
+
+        shutil.copy2(DESIGN_HOME / "context" / "acceptance-facts.json", facts_path)
+        facts = read_json(facts_path)
+        typed_row = next(
+            row
+            for group in ("sequence", "inventory", "final_gates")
+            for row in facts[group]
+            if row["derivation"]["kind"] == "typed_predicate"
+        )
+        typed_row["derivation"]["source_commit"] = "main"
+        facts_path.write_text(json.dumps(facts, indent=2) + "\n", encoding="utf-8")
+        anchor_errors, _ = validate(disposable)
+        assert_probe(
+            "typed-source-anchor",
+            anchor_errors,
+            "typed source commit is not immutable",
+        )
+
+        shutil.copy2(DESIGN_HOME / "context" / "acceptance-facts.json", facts_path)
+        delta_path = disposable / "context" / TYPED_PREDICATE_DELTA_PATH.name
+        delta = read_json(delta_path)
+        delta["proposals"][0]["canonical_predicate"]["source_id"] += "-probe"
+        delta_path.write_text(json.dumps(delta, indent=2) + "\n", encoding="utf-8")
+        proposal_errors, _ = validate(disposable)
+        assert_probe(
+            "typed-proposal-binding",
+            proposal_errors,
+            "predicate differs from its typed proposal",
+        )
+
+        shutil.copy2(TYPED_PREDICATE_DELTA_PATH, delta_path)
         restored_errors, _ = validate(disposable)
         if restored_errors:
             fail(f"restored disposable copy did not pass: {restored_errors}")

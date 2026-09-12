@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import inspect
 import json
 import os
@@ -117,6 +118,12 @@ BRANCH_RE = re.compile(
 BRANCH_VALUE_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+"
 )
+SUBMIT_BRANCH_COMMIT_RE = re.compile(
+    r"(?im)^\s*branch_and_commit:\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+)"
+    r"\s*@\s*([0-9a-fA-F]{40})\s*$"
+)
+SUBMIT_BRANCH_LABEL_RE = re.compile(r"(?im)^\s*branch_and_commit\s*:")
 SYNTHETIC_VALUE_RE = (
     r"(?:placeholder|redacted|example|sample|dummy|synthetic|your)"
     r"(?:[-_](?:access|auth|bearer|credential|key|secret|token|value|here|local))*"
@@ -293,7 +300,23 @@ def _operator_marker_patterns() -> tuple[list[re.Pattern[str]], Path]:
 
 
 def _leak_scan(text: str) -> tuple[list[str], int]:
-    rules = [name for name, pattern in LEAK_PATTERNS.items() if pattern.search(text)]
+    rules = [
+        name
+        for name, pattern in LEAK_PATTERNS.items()
+        if name != "jwt" and pattern.search(text)
+    ]
+    for match in LEAK_PATTERNS["jwt"].finditer(text):
+        encoded_header = match.group(0).split(".", 1)[0]
+        try:
+            padding = "=" * (-len(encoded_header) % 4)
+            header = json.loads(
+                base64.urlsafe_b64decode(encoded_header + padding).decode("utf-8")
+            )
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(header, dict) and isinstance(header.get("alg"), str):
+            rules.append("jwt")
+            break
     operator_patterns, _marker_path = _operator_marker_patterns()
     if any(pattern.search(text) for pattern in operator_patterns):
         rules.append("operator-marker")
@@ -371,7 +394,135 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     )
 
 
-def _suite_commands(ticket: dict[str, Any], submission: dict[str, Any]) -> list[list[str]]:
+def _required_field_names(ticket: dict[str, Any]) -> set[str]:
+    required = ticket.get("required_fields", [])
+    if isinstance(required, dict):
+        return {str(name) for name in required}
+    if isinstance(required, (list, tuple, set)):
+        return {str(name) for name in required if isinstance(name, str)}
+    return set()
+
+
+def _submit_source_repo(
+    ticket: dict[str, Any], *, routed: str | None, operator_dir: str | None,
+    route_error: dict[str, str] | None, seat_repo: Path, repo_leaf: str | None,
+) -> Path:
+    if route_error is not None:
+        raise ValueError(
+            "submission preflight could not resolve the routed repository: "
+            + route_error["message"]
+        )
+    if routed:
+        source_repo = Path(routed)
+        if operator_dir and source_repo.resolve() == Path(operator_dir).resolve():
+            raise RuntimeError("operator checkout is read-only for seats")
+        if not (source_repo / ".git").exists():
+            raise ValueError(
+                "submission preflight requires the routed target to be a git checkout"
+            )
+        return source_repo
+    target_project = str(ticket.get("target_url", "")).split("/", 1)[0].casefold()
+    if (
+        repo_leaf and target_project == repo_leaf.casefold()
+        and (seat_repo / ".git").exists()
+    ):
+        return seat_repo
+    raise ValueError(
+        "submission preflight has no git checkout for the ticket target; "
+        "fix its project route instead of using an unrelated seat clone"
+    )
+
+
+def _submit_preflight(
+    ticket: dict[str, Any], repo: Path, *, summary: str, notes: str
+) -> dict[str, str] | None:
+    if "branch_and_commit" not in _required_field_names(ticket):
+        return None
+    if not (repo / ".git").exists():
+        raise ValueError(
+            "submission preflight requires the routed git seat clone; "
+            "research-only tickets must omit branch_and_commit from required_fields"
+        )
+    evidence = f"{summary}\n{notes}"
+    matches = list(SUBMIT_BRANCH_COMMIT_RE.finditer(evidence))
+    labels = list(SUBMIT_BRANCH_LABEL_RE.finditer(evidence))
+    if len(labels) != 1 or len(matches) != 1:
+        raise ValueError(
+            "submission preflight requires exactly one "
+            "'branch_and_commit: platform/branch @ <full-40-hex-sha>' line"
+        )
+    branch, submitted_sha = matches[0].groups()
+    submitted_sha = submitted_sha.lower()
+    if subprocess.run(
+        ["git", "check-ref-format", "--branch", branch],
+        check=False, text=True, capture_output=True,
+    ).returncode != 0:
+        raise ValueError(f"submission preflight rejected invalid branch name: {branch}")
+    try:
+        origin = _git(repo, "remote", "get-url", "origin").stdout.strip()
+        if not origin:
+            raise ValueError("submission preflight requires a configured origin remote")
+        _git(
+            repo, "fetch", "--prune", "origin",
+            f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"submission preflight could not fetch origin/{branch}; "
+            "confirm the branch was pushed and the configured origin is reachable"
+        ) from exc
+    resolved = _git(
+        repo, "rev-parse", "--verify", f"{submitted_sha}^{{commit}}", check=False
+    )
+    if resolved.returncode != 0:
+        raise ValueError(
+            f"submission preflight rejected nonexistent commit {submitted_sha}; "
+            "copy the full SHA from git rev-parse HEAD"
+        )
+    exact_sha = resolved.stdout.strip().lower()
+    remote_ref = f"refs/remotes/origin/{branch}"
+    remote = _git(repo, "rev-parse", "--verify", f"{remote_ref}^{{commit}}", check=False)
+    if remote.returncode != 0:
+        raise ValueError(
+            f"submission preflight could not resolve origin/{branch}; push the branch first"
+        )
+    remote_tip = remote.stdout.strip().lower()
+    if exact_sha != submitted_sha:
+        raise ValueError(
+            f"submission preflight rejected non-exact commit {submitted_sha}; "
+            f"Git resolved {exact_sha}"
+        )
+    if remote_tip != submitted_sha:
+        raise ValueError(
+            f"submission preflight rejected moved or mismatched origin/{branch}: "
+            f"submitted {submitted_sha}, remote tip {remote_tip}; refresh evidence and retry"
+        )
+    return {
+        "branch": branch,
+        "commit": exact_sha,
+        "remote_ref": f"origin/{branch}",
+        "remote_tip": remote_tip,
+    }
+
+
+def _canonical_submit_notes(notes: str, preflight: dict[str, str]) -> str:
+    remainder = SUBMIT_BRANCH_COMMIT_RE.sub("", notes).lstrip("\r\n")
+    lines = [
+        f"branch_and_commit: {preflight['branch']} @ {preflight['commit']}",
+        (
+            "submission_preflight: "
+            f"remote_ref={preflight['remote_ref']} "
+            f"remote_tip={preflight['remote_tip']}"
+        ),
+    ]
+    if remainder:
+        lines.append(remainder)
+    return "\n".join(lines)
+
+
+def _suite_commands(
+    ticket: dict[str, Any], submission: dict[str, Any], repo: Path
+) -> list[dict[str, Any]]:
     def hint_text(value: Any) -> str:
         if isinstance(value, dict):
             return "\n".join(hint_text(item) for item in value.values())
@@ -388,28 +539,260 @@ def _suite_commands(ticket: dict[str, Any], submission: dict[str, Any]) -> list[
             submission.get("test_hints"), submission.get("test_output"),
         )
     )
-    commands: list[list[str]] = []
+    commands: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    repo_root = repo.resolve()
     for raw in text.splitlines():
         line = raw.strip().removeprefix("-").strip().strip("`")
-        line = re.sub(
-            r"^(?:tests?|test[_ -]?commands?|suites?):\s*", "", line,
+        label = re.match(
+            r"^(?:tests?|test[_ -]?commands?|suites?):\s*", line,
             flags=re.IGNORECASE,
         )
-        if not line or any(token in line for token in (";", "&&", "||", "|", ">", "<")):
+        if label:
+            line = line[label.end():]
+        candidate = bool(label) or bool(
+            re.match(
+                r"^(?:PYTHONPATH=\S+\s+)?"
+                r"(?:pytest|py\.test|python3?\s+-m\s+(?:pytest|unittest))(?:\s|$)",
+                line,
+            )
+        )
+        if not line or not candidate:
             continue
+        if any(
+            token in line
+            for token in ("$", "`", ";", "&&", "||", "|", ">", "<", "&")
+        ):
+            raise ValueError(
+                "unsupported verification suite command: shell substitutions, separators, "
+                "and redirects are not allowed"
+            )
         try:
             parts = shlex.split(line)
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise ValueError(
+                "unsupported verification suite command: invalid quoting"
+            ) from exc
+        pythonpath = ""
+        if parts and "=" in parts[0]:
+            name, value = parts.pop(0).split("=", 1)
+            if name != "PYTHONPATH":
+                raise ValueError(
+                    "unsupported verification suite command: only PYTHONPATH may be assigned"
+                )
+            entries = value.split(os.pathsep)
+            if not value or any(not entry for entry in entries):
+                raise ValueError(
+                    "unsupported verification suite command: PYTHONPATH entries must be non-empty"
+                )
+            for entry in entries:
+                path = Path(entry)
+                resolved = (repo_root / path).resolve()
+                if path.is_absolute() or not resolved.is_relative_to(repo_root):
+                    raise ValueError(
+                        "unsupported verification suite command: PYTHONPATH must stay "
+                        "inside the worktree"
+                    )
+            pythonpath = value
+        if any(re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", part) for part in parts):
+            raise ValueError(
+                "unsupported verification suite command: arbitrary environment "
+                "assignments are not allowed"
+            )
         allowed = (
             parts[:1] in (["pytest"], ["py.test"])
             or len(parts) >= 3
             and parts[0] in {"python", "python3"}
             and parts[1:3] in (["-m", "pytest"], ["-m", "unittest"])
         )
-        if allowed and parts not in commands:
-            commands.append(parts)
+        if not allowed:
+            raise ValueError(
+                "unsupported verification suite command: expected pytest, py.test, "
+                "or python -m pytest/unittest"
+            )
+        is_pytest = parts[0] in {"pytest", "py.test"} or parts[2] == "pytest"
+        if is_pytest:
+            if any(argument.startswith("@") for argument in parts[1:]):
+                raise ValueError(
+                    "unsupported verification suite command: pytest argument files "
+                    "are not allowed"
+                )
+            escape_options = {
+                "--pyargs", "-p", "-c", "--rootdir", "--confcutdir",
+                "-o", "--override-ini",
+            }
+            for argument in parts[1:]:
+                option = argument.split("=", 1)[0]
+                if option in escape_options or (
+                    any(
+                        argument.startswith(prefix) and argument != prefix
+                        for prefix in ("-p", "-c", "-o")
+                    )
+                ):
+                    raise ValueError(
+                        "unsupported verification suite command: pytest module, plugin, "
+                        "and config escape options are not allowed"
+                    )
+            pytest_args = parts[1:] if parts[0] in {"pytest", "py.test"} else parts[3:]
+            flag_options = {
+                "-q", "--quiet", "-v", "--verbose", "-s", "-x", "--exitfirst",
+                "--disable-warnings", "--strict-markers", "--strict-config",
+                "--cache-clear", "--collect-only", "--co", "--keep-duplicates",
+                "--stepwise", "--sw", "--stepwise-skip", "--no-header",
+                "--no-summary", "--showlocals", "-l",
+            }
+            value_options = {
+                "-k", "-m", "--tb", "--capture", "--color", "--maxfail",
+                "--durations", "--durations-min", "--verbosity", "--log-level",
+                "--log-cli-level",
+            }
+            path_options = {
+                "--junitxml", "--basetemp", "--ignore", "--ignore-glob",
+                "--deselect",
+            }
+
+            def contained_path(value: str) -> None:
+                path_value = value.split("::", 1)[0]
+                if not path_value:
+                    raise ValueError(
+                        "unsupported verification suite command: suite path is empty"
+                    )
+                path = Path(path_value)
+                if (
+                    path.is_absolute()
+                    or re.match(r"^[A-Za-z]:[\\/]", path_value)
+                    or ".." in path.parts
+                ):
+                    raise ValueError(
+                        "unsupported verification suite command: suite paths must stay "
+                        "inside the worktree"
+                    )
+                try:
+                    resolved = (repo_root / path).resolve(strict=False)
+                except RuntimeError:
+                    raise ValueError(
+                        "unsupported verification suite command: suite paths must stay "
+                        "inside the worktree"
+                    ) from None
+                if not resolved.is_relative_to(repo_root):
+                    raise ValueError(
+                        "unsupported verification suite command: suite paths must stay "
+                        "inside the worktree"
+                    )
+
+            index = 0
+            while index < len(pytest_args):
+                argument = pytest_args[index]
+                if argument == "--":
+                    for positional in pytest_args[index + 1:]:
+                        contained_path(positional)
+                    break
+                option, separator, value = argument.partition("=")
+                if option in path_options:
+                    if not separator:
+                        index += 1
+                        if index >= len(pytest_args):
+                            raise ValueError(
+                                "unsupported verification suite command: pytest path "
+                                "option requires a value"
+                            )
+                        value = pytest_args[index]
+                    contained_path(value)
+                elif option in value_options:
+                    if not separator:
+                        index += 1
+                        if index >= len(pytest_args) or not pytest_args[index]:
+                            raise ValueError(
+                                "unsupported verification suite command: pytest option "
+                                "requires a value"
+                            )
+                elif argument in flag_options or re.fullmatch(r"-r[aAfsxXEpP]*", argument):
+                    pass
+                elif re.match(r"^-[km].+", argument):
+                    pass
+                elif argument.startswith("-"):
+                    raise ValueError(
+                        "unsupported verification suite command: pytest option is not "
+                        "allow-listed"
+                    )
+                else:
+                    contained_path(argument)
+                index += 1
+        else:
+            if parts[3:4] != ["discover"]:
+                raise ValueError(
+                    "unsupported verification suite command: unittest replay requires "
+                    "discover with worktree-contained paths"
+                )
+            if any(
+                argument.startswith(prefix) and argument != prefix
+                for argument in parts[4:]
+                for prefix in ("-s", "-t")
+            ):
+                raise ValueError(
+                    "unsupported verification suite command: unittest discovery paths "
+                    "must use separate worktree-contained arguments"
+                )
+            for argument in parts[4:]:
+                path_value = argument.split("=", 1)[-1].split("::", 1)[0]
+                if not path_value or path_value.startswith("-"):
+                    continue
+                path = Path(path_value)
+                if (
+                    path.is_absolute()
+                    or re.match(r"^[A-Za-z]:[\\/]", path_value)
+                    or ".." in path.parts
+                    or not (repo_root / path).resolve(strict=False).is_relative_to(repo_root)
+                ):
+                    raise ValueError(
+                        "unsupported verification suite command: suite paths must stay "
+                        "inside the worktree"
+                    )
+        key = (pythonpath, tuple(parts))
+        if key not in seen:
+            seen.add(key)
+            display = ([f"PYTHONPATH={pythonpath}"] if pythonpath else []) + parts
+            commands.append({
+                "argv": parts, "pythonpath": pythonpath, "display": display,
+            })
     return commands[:8]
+
+
+def _suite_environment(command: dict[str, Any]) -> dict[str, str]:
+    """Build a minimal runner environment without inherited execution controls."""
+    environment = {
+        name: value
+        for name in ("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC")
+        if (value := os.environ.get(name))
+    }
+    environment.update({
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    })
+    if command["pythonpath"]:
+        environment["PYTHONPATH"] = command["pythonpath"]
+    return environment
+
+
+def _suite_argv(
+    command: dict[str, Any], repo: Path, pytest_config: Path | None
+) -> list[str]:
+    """Use the verifier interpreter and a verifier-owned pytest configuration."""
+    submitted = list(command["argv"])
+    is_pytest = submitted[0] in {"pytest", "py.test"} or submitted[2] == "pytest"
+    if not is_pytest:
+        return [sys.executable, "-m", "unittest", *submitted[3:]]
+    if pytest_config is None:
+        raise ValueError("verifier pytest configuration is unavailable")
+    arguments = submitted[1:] if submitted[0] in {"pytest", "py.test"} else submitted[3:]
+    return [
+        sys.executable, "-m", "pytest",
+        "-c", str(pytest_config),
+        "--rootdir", str(repo),
+        "--confcutdir", str(repo),
+        *arguments,
+    ]
 
 
 def _verify_ticket(
@@ -458,21 +841,48 @@ def _verify_ticket(
     print(leak_line)
     suites: list[dict[str, Any]] = []
     if run_suites:
-        commands = _suite_commands(ticket, submission)
+        commands = _suite_commands(ticket, submission, repo)
         if not commands:
             raise ValueError("no allow-listed pytest/unittest command found in ticket evidence")
-        for command in commands:
-            completed = subprocess.run(
-                command, cwd=repo, check=False, text=True, capture_output=True
-            )
-            lines = (completed.stdout + completed.stderr).splitlines()
-            tail = lines[-8:]
-            print("suite: " + shlex.join(command))
-            for line in tail:
-                print(line)
-            suites.append({"command": command, "returncode": completed.returncode, "tail": tail})
-            if completed.returncode != 0:
-                raise ValueError("verification suite failed: " + shlex.join(command))
+        pytest_config: Path | None = None
+        if any(
+            command["argv"][0] in {"pytest", "py.test"}
+            or command["argv"][2] == "pytest"
+            for command in commands
+        ):
+            git_dir = repo / ".git"
+            if not git_dir.is_dir():
+                raise ValueError("verify suite replay requires a standalone git clone")
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=git_dir,
+                prefix="pursers-verify-", suffix=".ini", delete=False,
+            ) as handle:
+                handle.write("[pytest]\n")
+                pytest_config = Path(handle.name)
+        try:
+            for command in commands:
+                environment = _suite_environment(command)
+                completed = subprocess.run(
+                    _suite_argv(command, repo, pytest_config),
+                    cwd=repo, env=environment,
+                    check=False, text=True, capture_output=True
+                )
+                lines = (completed.stdout + completed.stderr).splitlines()
+                tail = lines[-8:]
+                display = shlex.join(command["display"])
+                print("suite: " + display)
+                for line in tail:
+                    print(line)
+                suites.append({
+                    "command": command["display"],
+                    "returncode": completed.returncode,
+                    "tail": tail,
+                })
+                if completed.returncode != 0:
+                    raise ValueError("verification suite failed: " + display)
+        finally:
+            if pytest_config is not None:
+                pytest_config.unlink(missing_ok=True)
     failures = []
     if only_actual or only_submitted:
         failures.append("files_changed mismatch")
@@ -1170,7 +1580,29 @@ async def _execute(args: argparse.Namespace) -> None:
                     files = [item.strip() for item in args.files_csv.split(",") if item.strip()]
                     if not files:
                         raise ValueError("files-csv must contain at least one path")
-                    notes, truncation = _truncate_submit_notes(args.notes)
+                    ticket_result = await target.ticket_get(args.ticket_id)
+                    ticket = ticket_result.get("ticket", {})
+                    if not isinstance(ticket, dict):
+                        raise ValueError("submission preflight requires a valid ticket response")
+                    routed, operator_dir, route_error = ticket_route(ticket_result)
+                    needs_git = "branch_and_commit" in _required_field_names(ticket)
+                    source_repo = seat_repo
+                    if needs_git:
+                        source_repo = _submit_source_repo(
+                            ticket,
+                            routed=routed,
+                            operator_dir=operator_dir,
+                            route_error=route_error,
+                            seat_repo=seat_repo,
+                            repo_leaf=REPO_LEAF,
+                        )
+                    preflight = _submit_preflight(
+                        ticket, source_repo, summary=args.summary, notes=args.notes
+                    )
+                    submit_notes = args.notes
+                    if preflight is not None:
+                        submit_notes = _canonical_submit_notes(args.notes, preflight)
+                    notes, truncation = _truncate_submit_notes(submit_notes)
                     if truncation is not None:
                         print(
                             "board.sh: warning: ticket_submit notes exceeded 5000 "
@@ -1184,6 +1616,8 @@ async def _execute(args: argparse.Namespace) -> None:
                     )
                     if truncation is not None:
                         result["input_truncation"] = {"notes": truncation}
+                    if preflight is not None:
+                        result["submission_preflight"] = preflight
                     emit(result)
                     return
             else:
@@ -1506,9 +1940,9 @@ bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>
 2. **UNDERSTAND** -- Use the offer's `ticket_id`, `board_id`, and registered fleet clone `work_dir`; never guess or use the operator checkout.
 3. **CLAIM** -- Claim a ticket offered to this seat. A work broadcast is also claimable only when GET confirms an open ticket with `dispatch_state.state=broadcast` and no live offer; Central resolves the race. Never claim a ticket offered to another seat. If the offer expired, was revoked, or belongs to another seat, go back to WAIT.
 4. **DO** -- Work only in the returned fleet clone (or this seat's own clone). The operator checkout is read-only for seats. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
-5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Notes are capped at 5000 characters; trim test tails to the evidence needed. The helper truncates oversized notes at a line boundary and reports it.
-6. **AWAIT REVIEW** -- Keep the same ticket slot occupied. WAIT, then GET that ticket after a cue. If rejected, follow fix instructions and resubmit; if approved/closed, release the slot.
-7. **RE-ARM** -- Return to WAIT for the next ticket only after approval/closure.
+5. **SUBMIT** -- Push the candidate, put exactly one `branch_and_commit: platform/branch @ <full-40-hex-sha>` line in code-ticket notes, then run `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Preflight verifies the exact remote tip before `ticket_submit` and adds machine-derived metadata. Correct any preflight error and retry. Normal `board_join` may renew an already-held lease. Notes are capped at 5000 characters.
+6. **RE-ARM** -- After a successful submit, leave its branch immutable and return immediately to WAIT for the next eligible ticket; do not wait for review.
+7. **RETRY CUES** -- On a later rejection cue, GET the ticket, follow its fix instructions in a fresh candidate branch, resubmit, then re-arm again.
 
 Never poll `bin/board.sh list` in a loop. Polling exists only behind the explicit `wait --poll` fallback. The default wait blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
     else:

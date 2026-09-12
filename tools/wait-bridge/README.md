@@ -118,6 +118,18 @@ Use `--role reviewer` for the reviewer door. A named lead credential uses
 RSA-2048 keys are stored under `--keys-dir` with mode `0600`; the JWKS contains
 only public keys and non-secret listing metadata.
 
+Every credential issued by `pursers-door` contains a signed `pursers_board`
+claim. Central carries that verified restriction into the authenticated
+principal and checks it before join, onboard, board read/write, board listing,
+or resource subscription. The requested board in the `prs1.…` envelope remains
+a routing hint, not an authorization decision. Existing claimless door tokens
+are still confined by the trusted `pursers_door.board` metadata on their JWKS
+key. Only legacy operator keys that have neither a signed board claim nor door
+metadata remain intentionally unbound for documented multi-board operation;
+`pursers-door` does not create such keys. An administrator must create a board
+and provision its membership before a board-bound worker or reviewer joins, so
+a worker door cannot bootstrap a new board and acquire administrator access.
+
 Rotation creates the next versioned key and removes the prior public key in one
 atomic JWKS replacement:
 

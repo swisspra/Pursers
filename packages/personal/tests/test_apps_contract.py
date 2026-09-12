@@ -69,10 +69,10 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "33eee21b40c3cf8fab8588b6af5b7b411967497bdd18d9c68310e70f40461122"
-    assert len(payload) == 404280
+    expected = "a9e4b104da8855c6a04f731e0e610115b605d98f2155a4551b48995d39785980"
+    assert len(payload) == 447810
     assert hashlib.sha256(payload).hexdigest() == expected
-    assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a26"
+    assert lock["product_version"] == PRODUCT_VERSION == "5.0.0b1"
     assert lock["view"] == {
         "resource": "pursers_personal/resources/dashboard.html",
         "size_bytes": len(payload),
@@ -98,6 +98,53 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     assert "The candidate remains" not in readme
     for forbidden in ("uv tool install", "--apply", "--activate"):
         assert forbidden not in readme
+
+
+def test_primary_vertical_tabs_move_selection_and_focus_with_up_down() -> None:
+    repository = Path(__file__).resolve().parents[3]
+    entry = (repository / "tools/dashboard-ui/dashboard-entry.html").read_text(
+        encoding="utf-8"
+    )
+    source = (repository / "tools/dashboard-ui/src/dashboard.ts").read_text(
+        encoding="utf-8"
+    )
+    handler_start = source.index(
+        'document.querySelectorAll<HTMLButtonElement>("[role=tab][data-view]")'
+    )
+    handler_end = source.index(
+        'document.querySelectorAll<HTMLButtonElement>("[data-go-view]")',
+        handler_start,
+    )
+    handler = source[handler_start:handler_end]
+    select_start = source.index("function selectView(")
+    select_end = source.index("function setLoading(", select_start)
+    select_view = source[select_start:select_end]
+
+    assert 'aria-orientation="vertical"' in entry
+    assert '"ArrowUp"' in handler
+    assert '"ArrowDown"' in handler
+    assert 'event.key === "ArrowDown" || event.key === "ArrowRight"' in handler
+    assert "selectView(order[next], true)" in handler
+    assert 'tab.setAttribute("aria-selected", String(selected))' in select_view
+    assert "tab.tabIndex = selected ? 0 : -1" in select_view
+    assert "if (focusTab) tab.focus()" in select_view
+
+
+def test_dashboard_renders_agent_lease_fleet_truncation_and_retracts() -> None:
+    repository = Path(__file__).resolve().parents[3]
+    source = (repository / "tools/dashboard-ui/src/dashboard.ts").read_text(
+        encoding="utf-8"
+    )
+
+    assert "const lease = leaseBadge(agent.lease_expires_at);" in source
+    assert "if (lease) meta.append(lease);" in source
+    assert "const truncation = record(value.truncation_counts)" in source
+    assert 'notice.setAttribute("aria-label", "Fleet data truncation")' in source
+    assert "Fleet snapshot is partial: ${detail}." in source
+    assert 'boards: "board snapshots truncated"' in source
+    assert 'edge.kind === "retracts"' in source
+    assert 'element("strong", undefined, "Retracts")' in source
+    assert 'copyButton("Copy retracted memory ID", edge.to)' in source
 
 
 @pytest.fixture
@@ -203,6 +250,20 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
                 "Copy path",
             ):
                 assert link_marker in html.text
+            for guided_home_marker in (
+                'data-view="home"',
+                'data-view="projects"',
+                'data-view="team"',
+                'data-view="approvals"',
+                'data-view="settings"',
+                'id="next-action-card"',
+                'id="work-detail"',
+                'id="activity-feed-panel"',
+                'id="links-panel"',
+                "Actions stay in agent chat",
+                "Door and bearer values are never rendered",
+            ):
+                assert guided_home_marker in html.text
             assert verified == [None]
 
             model_calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
@@ -395,6 +456,75 @@ def test_run_entrypoint_builds_then_runs(monkeypatch: pytest.MonkeyPatch) -> Non
     result = apps_server.run_personal_mcp(profile_path, "codex", "session")
     assert result is None
     assert calls == [(profile_path, "codex", "session"), "run"]
+
+
+def test_acceptance_runtime_receipt_binds_exact_process_source_and_board(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "a" * 40
+    source = Path(apps_server.__file__).resolve()
+    monkeypatch.setattr(
+        apps_server.subprocess,
+        "check_output",
+        lambda command, **_kwargs: commit + "\n" if command[-2:] == ["rev-parse", "HEAD"] else "",
+    )
+    receipt = tmp_path / "private" / "runtime.json"
+    state = SimpleNamespace(config=SimpleNamespace(board_id="sandbox-personal"))
+    apps_server._write_acceptance_runtime_receipt(
+        receipt,
+        state=state,
+        candidate_source=source,
+        candidate_commit=commit,
+        board_id="sandbox-personal",
+    )
+    value = json.loads(receipt.read_text())
+    assert value["product"] == "Pursers Personal"
+    assert value["version"] == PRODUCT_VERSION
+    assert value["build"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert value["candidate_commit"] == commit
+    assert value["board_id"] == "sandbox-personal"
+    assert value["pid"] == os.getpid()
+    assert receipt.stat().st_mode & 0o077 == 0
+
+
+def test_acceptance_runtime_receipt_rejects_wrong_profile_board(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "b" * 40
+    monkeypatch.setattr(
+        apps_server.subprocess,
+        "check_output",
+        lambda command, **_kwargs: commit + "\n" if command[-2:] == ["rev-parse", "HEAD"] else "",
+    )
+    with pytest.raises(ValueError, match="sandbox profile"):
+        apps_server._write_acceptance_runtime_receipt(
+            tmp_path / "runtime.json",
+            state=SimpleNamespace(config=SimpleNamespace(board_id="sandbox-a")),
+            candidate_source=Path(apps_server.__file__),
+            candidate_commit=commit,
+            board_id="sandbox-b",
+        )
+
+
+def test_acceptance_runtime_receipt_refuses_public_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "c" * 40
+    monkeypatch.setattr(
+        apps_server.subprocess,
+        "check_output",
+        lambda command, **_kwargs: commit + "\n" if command[-2:] == ["rev-parse", "HEAD"] else "",
+    )
+    public = tmp_path / "public"
+    public.mkdir(mode=0o755)
+    with pytest.raises(ValueError, match="private and outside"):
+        apps_server._write_acceptance_runtime_receipt(
+            public / "runtime.json",
+            state=SimpleNamespace(config=SimpleNamespace(board_id="sandbox-personal")),
+            candidate_source=Path(apps_server.__file__),
+            candidate_commit=commit,
+            board_id="sandbox-personal",
+        )
 
 
 @pytest.mark.anyio

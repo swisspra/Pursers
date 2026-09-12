@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -75,6 +76,9 @@ from seat_config import (  # noqa: I001
 )
 from release_ops import ReleaseOpsManager
 import runtime_environment
+from warm_home import apply_warm_guided_home
+from result_visibility import project_ticket_result
+from evidence_trace import CORRELATION_HEADERS, EvidenceTrace, EvidenceTraceConfigError
 
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -121,6 +125,9 @@ GIT_TIMEOUT_SECONDS = 120
 GIT_ERROR_TAIL_CHARS = 2_000
 CONFIG_STATE_DIR = runtime_environment.dashboard_state_dir()
 MAX_REVIEW_STATE_BYTES = 4_096
+PROJECT_EVIDENCE_MAX_BYTES = 65_536
+PROJECT_EVIDENCE_MAX_KEY_FILES = 512
+PROJECT_EVIDENCE_MAX_KEY_BYTES = 65_536
 REVIEW_STATE_SUFFIX = ".review-state.json"
 WORKER_NAME_RE = re.compile(r"^[a-z0-9-]{2,32}$")
 WORKER_KEYCHAIN_SERVICE = "pursers-worker"
@@ -177,6 +184,12 @@ def _default_config_state_dir() -> Path:
 
 BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 CENTRAL_LABEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+DASHBOARD_AGENT_NAME_RE = re.compile(
+    r"^fleet-dashboard-session-[a-z0-9][a-z0-9-]{0,39}$"
+)
+DASHBOARD_AGENT_PLATFORM = "pursers-fleet-dashboard"
+DASHBOARD_TASK_FOCUS = "dashboard-session-owner-v1"
+DASHBOARD_CAPABILITIES = {"can_work": False, "can_review": False}
 ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 SUBMITTED_STATES = frozenset({"submitted", "reviewing", "in_review"})
 TERMINAL_STATES = frozenset({"closed", "rejected", "canceled", "terminated"})
@@ -233,6 +246,27 @@ def _board_redact(value: str) -> str:
 
 class ConfigConflictError(RuntimeError):
     """The dashboard form was based on missing or superseded state."""
+
+
+class AddProjectPartialFailure(RuntimeError):
+    """Bounded add-project progress for a failure after zero or more steps."""
+
+    def __init__(
+        self,
+        completed_steps: list[dict[str, Any]],
+        failed_step: str,
+        status_code: int = 409,
+    ) -> None:
+        self.completed_steps = [
+            {
+                "step": str(item.get("step", ""))[:32],
+                "status": str(item.get("status", ""))[:32],
+            }
+            for item in completed_steps[:8]
+        ]
+        self.failed_step = failed_step[:32]
+        self.status_code = status_code
+        super().__init__("add project could not complete")
 
 
 class IntakeRateLimitError(RuntimeError):
@@ -1190,6 +1224,110 @@ def _time_sort_value(value: Any) -> float:
 
 def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _bounded_evidence_digest(value: Any, label: str) -> str:
+    """Digest one bounded state value without exposing its contents."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    if len(encoded) > PROJECT_EVIDENCE_MAX_BYTES:
+        raise ValueError(f"{label} exceeds evidence byte cap")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _door_evidence_digests(config: Config, board_id: str) -> dict[str, str]:
+    """Digest board-scoped public credentials and the bounded key store."""
+    keys_dir = config.doors_keys_dir
+    jwks_path = config.jwks_path
+    if keys_dir is None or jwks_path is None:
+        raise ValueError("door credential storage is not configured")
+    resolved_keys = Path(keys_dir).expanduser().resolve()
+    resolved_jwks = Path(jwks_path).expanduser().resolve()
+    if resolved_jwks.exists():
+        info = resolved_jwks.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > PROJECT_EVIDENCE_MAX_BYTES:
+            raise ValueError("door credential JWKS is not a bounded regular file")
+        document = json.loads(resolved_jwks.read_text(encoding="utf-8"))
+    else:
+        document = {"keys": []}
+    if not isinstance(document, dict) or not isinstance(document.get("keys"), list):
+        raise ValueError("door credential JWKS is invalid")
+    scoped_credentials = [
+        item
+        for item in document["keys"]
+        if isinstance(item, dict)
+        and isinstance(item.get(door_admin.METADATA_KEY), dict)
+        and item[door_admin.METADATA_KEY].get("board") == board_id
+    ]
+
+    key_inventory: list[dict[str, Any]] = []
+    if resolved_keys.exists():
+        key_paths = sorted(resolved_keys.iterdir(), key=lambda item: item.name)
+        if len(key_paths) > PROJECT_EVIDENCE_MAX_KEY_FILES:
+            raise ValueError("door key inventory exceeds evidence file cap")
+        for path in key_paths:
+            info = path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_size > PROJECT_EVIDENCE_MAX_KEY_BYTES
+                or path.parent != resolved_keys
+            ):
+                raise ValueError("door key inventory contains an unsafe file")
+            key_inventory.append({
+                "name_sha256": hashlib.sha256(path.name.encode()).hexdigest(),
+                "content_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            })
+    return {
+        "credentials": _bounded_evidence_digest(
+            scoped_credentials, "door credential state"
+        ),
+        "keys": _bounded_evidence_digest(key_inventory, "door key state"),
+    }
+
+
+def _door_material_digest(config: Config, board_id: str) -> str:
+    """Hash exact persisted door material without returning its bytes or paths."""
+    keys_dir = config.doors_keys_dir
+    jwks_path = config.jwks_path
+    if keys_dir is None or jwks_path is None:
+        raise ValueError("door credential storage is not configured")
+    resolved_keys = Path(keys_dir).expanduser().resolve()
+    resolved_jwks = Path(jwks_path).expanduser().resolve()
+    document = (
+        json.loads(resolved_jwks.read_text(encoding="utf-8"))
+        if resolved_jwks.exists()
+        else {"keys": []}
+    )
+    if not isinstance(document, dict) or not isinstance(document.get("keys"), list):
+        raise ValueError("door credential JWKS is invalid")
+    material: list[dict[str, Any]] = []
+    for item in document["keys"]:
+        metadata = item.get(door_admin.METADATA_KEY) if isinstance(item, dict) else None
+        kid = item.get("kid") if isinstance(item, dict) else None
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("board") != board_id
+            or metadata.get("role") not in door_admin.VALID_ROLES
+            or not isinstance(kid, str)
+            or not door_admin.KID_RE.fullmatch(kid)
+        ):
+            continue
+        key_path = resolved_keys / f"{kid}.pem"
+        info = key_path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or key_path.parent != resolved_keys
+        ):
+            raise ValueError("door credential key is not a private regular file")
+        material.append({
+            "kid": kid,
+            "role": metadata["role"],
+            "public_jwk": item,
+            "private_key_sha256": hashlib.sha256(key_path.read_bytes()).hexdigest(),
+        })
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def bridge_stats_path() -> Path:
@@ -2151,6 +2289,7 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
             MAX_SUBMISSION_CHARS,
         )
         or None,
+        "result": project_ticket_result(ticket),
         "review_label": _clip(ticket.get("review_label"), MAX_LABEL_CHARS) or None,
         "annotations": annotations,
         "annotation_count": max(
@@ -3107,6 +3246,176 @@ async def _client_call(client: Any, name: str, arguments: dict[str, Any]) -> Any
     raise AttributeError(f"Client {type(client).__name__} does not support {name}")
 
 
+class _FleetAsyncRuntime:
+    """One process-wide event loop for bounded persistent Central sessions."""
+
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self.ready = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run,
+            name="fleet-dashboard-central-sessions",
+            daemon=True,
+        )
+        self.thread.start()
+        self.ready.wait()
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self.loop)
+        self.ready.set()
+        self.loop.run_forever()
+
+    def submit(self, awaitable: Any) -> Any:
+        return asyncio.run_coroutine_threadsafe(awaitable, self.loop)
+
+
+_FLEET_RUNTIME: _FleetAsyncRuntime | None = None
+_FLEET_RUNTIME_LOCK = threading.Lock()
+
+
+def _fleet_runtime() -> _FleetAsyncRuntime:
+    global _FLEET_RUNTIME
+    with _FLEET_RUNTIME_LOCK:
+        if _FLEET_RUNTIME is None:
+            _FLEET_RUNTIME = _FleetAsyncRuntime()
+        return _FLEET_RUNTIME
+
+
+@dataclass
+class _FleetBoardSession:
+    manager: Any
+    client: Any
+    lock: asyncio.Lock
+
+
+def _reconnectable_client_error(exc: BaseException) -> bool:
+    if isinstance(exc, (ConnectionError, EOFError, TimeoutError)):
+        return True
+    if isinstance(exc, BoardClientError):
+        return False
+    message = str(exc).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "connection closed",
+            "client is closed",
+            "server disconnected",
+            "session terminated",
+            "stream ended",
+        )
+    )
+
+
+class _FleetClientPool:
+    """Keep one serialized BoardClient session per board and reconnect once."""
+
+    def __init__(self, config: Config, client_factory: Callable[..., Any]) -> None:
+        self.config = config
+        self.client_factory = client_factory
+        self._sessions: dict[str, _FleetBoardSession] = {}
+        self._lock: asyncio.Lock | None = None
+        self._closed = False
+
+    def options(self) -> dict[str, Any]:
+        return {
+            "agent_name": self.config.agent_name,
+            "role": "worker",
+            "capabilities": dict(DASHBOARD_CAPABILITIES),
+            "agent_platform": DASHBOARD_AGENT_PLATFORM,
+            "task_focus": DASHBOARD_TASK_FOCUS,
+            "allow_matching_takeover": True,
+        }
+
+    async def _session(self, board_id: str) -> _FleetBoardSession:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("fleet dashboard Central session pool is closed")
+            session = self._sessions.get(board_id)
+            if session is not None:
+                return session
+            manager = self.client_factory(
+                self.config.url,
+                self.config.token,
+                board_id,
+                **self.options(),
+            )
+            client = await manager.__aenter__()
+            session = _FleetBoardSession(manager, client, asyncio.Lock())
+            self._sessions[board_id] = session
+            return session
+
+    async def _drop(
+        self, board_id: str, expected: _FleetBoardSession | None = None
+    ) -> None:
+        if self._lock is None:
+            return
+        async with self._lock:
+            session = self._sessions.get(board_id)
+            if session is None or (expected is not None and session is not expected):
+                return
+            self._sessions.pop(board_id, None)
+        await session.manager.__aexit__(None, None, None)
+
+    async def call(
+        self, board_id: str, method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Any:
+        session = await self._session(board_id)
+        async with session.lock:
+            try:
+                return await getattr(session.client, method_name)(*args, **kwargs)
+            except BaseException as exc:
+                if not _reconnectable_client_error(exc):
+                    raise
+                await self._drop(board_id, session)
+        replacement = await self._session(board_id)
+        async with replacement.lock:
+            return await getattr(replacement.client, method_name)(*args, **kwargs)
+
+    async def _close(self) -> None:
+        if self._lock is None:
+            self._closed = True
+            return
+        async with self._lock:
+            self._closed = True
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for session in sessions:
+            await session.manager.__aexit__(None, None, None)
+
+    def close(self) -> None:
+        _fleet_runtime().submit(self._close()).result(timeout=15)
+
+
+class _FleetClientProxy:
+    def __init__(self, pool: _FleetClientPool, board_id: str) -> None:
+        self.pool = pool
+        self.board_id = board_id
+        self.agent_name = pool.config.agent_name
+        self.role = "worker"
+        self.capabilities = dict(DASHBOARD_CAPABILITIES)
+        self.agent_platform = DASHBOARD_AGENT_PLATFORM
+        self.task_focus = DASHBOARD_TASK_FOCUS
+        self.allow_takeover = False
+        self.allow_matching_takeover = True
+
+    async def __aenter__(self) -> _FleetClientProxy:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+    def __getattr__(self, method_name: str) -> Callable[..., Awaitable[Any]]:
+        async def forwarded(*args: Any, **kwargs: Any) -> Any:
+            future = _fleet_runtime().submit(
+                self.pool.call(self.board_id, method_name, args, kwargs)
+            )
+            return await asyncio.wrap_future(future)
+
+        return forwarded
+
+
 class FleetFetcher:
     def __init__(
         self,
@@ -3120,15 +3429,13 @@ class FleetFetcher:
         self._intake_write_lock = threading.Lock()
         self._intake_submissions: dict[str, list[tuple[str, datetime]]] = {}
         self._board_work_dirs: dict[str, str | None] = {}
+        self._client_pool = _FleetClientPool(config, client_factory)
 
     def _client(self, board_id: str) -> Any:
-        return self.client_factory(
-            self.config.url,
-            self.config.token,
-            board_id,
-            agent_name=self.config.agent_name,
-            capabilities={"can_work": False, "can_review": False},
-        )
+        return _FleetClientProxy(self._client_pool, board_id)
+
+    def close(self) -> None:
+        self._client_pool.close()
 
     async def _boards(self) -> list[tuple[str, str]]:
         async with self._client(self.config.home_board) as client:
@@ -3154,6 +3461,47 @@ class FleetFetcher:
         return {
             "registry": registry,
             "expected_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        }
+
+    async def project_evidence_state(
+        self, project_name: str, board_id: str
+    ) -> dict[str, Any]:
+        """Read bounded project/board state for a traced Add project action."""
+        payload = await self.fetch_project_registry()
+        registry = payload["registry"]
+        projects = registry.get("projects") if isinstance(registry, dict) else None
+        if not isinstance(projects, dict):
+            raise ValueError("project registry has no projects mapping")
+        project_entry = copy.deepcopy(projects.get(project_name))
+
+        async with self._client(self.config.home_board) as home_client:
+            listed = await _client_call(home_client, "board_list", {})
+        boards = listed.get("boards") if isinstance(listed, dict) else None
+        if not isinstance(boards, list):
+            raise ValueError("board list has no boards array")
+        board_rows = [
+            copy.deepcopy(row)
+            for row in boards
+            if isinstance(row, dict)
+            and row.get("board_id") in {self.config.home_board, board_id}
+        ]
+        target_present = any(row.get("board_id") == board_id for row in board_rows)
+        target_state: dict[str, Any] | None = None
+        if target_present:
+            async with self._client(board_id) as target_client:
+                members = await _client_call(target_client, "board_members", {})
+                status = await _client_call(target_client, "board_status", {})
+            target_state = {"members": members, "status": status}
+
+        return {
+            "registry": _bounded_evidence_digest(
+                {"project": project_entry}, "project registry state"
+            ),
+            "board": _bounded_evidence_digest(
+                {"board_rows": board_rows, "target": target_state},
+                "project board state",
+            ),
+            "project_entry": project_entry,
         }
 
     async def save_project_registry(
@@ -4128,6 +4476,42 @@ class FleetFetcher:
         integration_ref: str = "main",
         seats_manager: Any = None,
     ) -> dict[str, Any]:
+        progress: dict[str, Any] = {}
+        try:
+            return await self._add_project_steps(
+                project_name=project_name,
+                board_id=board_id,
+                work_dir=work_dir,
+                integration_ref=integration_ref,
+                seats_manager=seats_manager,
+                progress=progress,
+            )
+        except asyncio.CancelledError:
+            raise
+        except AddProjectPartialFailure:
+            raise
+        except Exception as exc:
+            if not progress.get("started"):
+                raise
+            status_code = 403 if isinstance(exc, PermissionError) else 409
+            if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
+                status_code = 400
+            raise AddProjectPartialFailure(
+                progress.get("steps", []),
+                str(progress.get("failed_step", "unknown")),
+                status_code,
+            ) from exc
+
+    async def _add_project_steps(
+        self,
+        *,
+        project_name: str,
+        board_id: str,
+        work_dir: str,
+        integration_ref: str = "main",
+        seats_manager: Any = None,
+        progress: dict[str, Any],
+    ) -> dict[str, Any]:
         keys_dir, jwks_path = self._require_doors_config()
         if not isinstance(project_name, str) or not project_name.strip():
             raise ValueError("project name must be a non-empty string")
@@ -4144,7 +4528,12 @@ class FleetFetcher:
             raise ValueError("integration_ref must be a valid git reference")
         integration_ref = integration_ref.strip()
 
+        # Authorize the control-plane action before reading or mutating the
+        # registry, boards, credentials, or clone state.
+        await self._require_board_admin(self.config.home_board)
+
         steps: list[dict[str, Any]] = []
+        progress.update(started=True, steps=steps, failed_step="registry_admin")
 
         # Step a: registry_admin add (schema v1)
         reg_payload = await self.fetch_project_registry()
@@ -4186,6 +4575,7 @@ class FleetFetcher:
             })
 
         # Step b: board create + first board_onboard as admin (or detect existing)
+        progress["failed_step"] = "board_create"
         board_already_present = False
         try:
             async with self._client(self.config.home_board) as home_client:
@@ -4215,6 +4605,7 @@ class FleetFetcher:
                 })
 
             # Step c: board_member_add for worker and reviewer door principals
+            progress["failed_step"] = "door_principals"
             worker_pid = door_principal_id(board_id, "worker", self.config.url)
             reviewer_pid = door_principal_id(board_id, "reviewer", self.config.url)
             existing_members = {}
@@ -4264,6 +4655,7 @@ class FleetFetcher:
                 })
 
             # Step d: dispatch policy defaults and review policy default
+            progress["failed_step"] = "policies"
             status = await _client_call(client, "board_status", {})
             board_obj = (
                 status.get("board", {})
@@ -4310,6 +4702,7 @@ class FleetFetcher:
                 })
 
         # Step e: fleet clone prepare (existing prepare_fleet_clone path)
+        progress["failed_step"] = "fleet_clone"
         if seats_manager is not None and hasattr(seats_manager, "prepare_fleet_clone"):
             reg_payload = await self.fetch_project_registry()
             reg_entry = reg_payload["registry"]["projects"].get(project_name, {})
@@ -4348,31 +4741,40 @@ class FleetFetcher:
                 "message": "Fleet clone step skipped (no seats manager).",
             })
 
-        # Issue door strings
-        worker_door = door_admin.issue_credential(
-            board=board_id,
-            role="worker",
-            central_url=self.config.url,
-            jwks_path=jwks_path,
-            keys_dir=keys_dir,
-            rotate=False,
-        )
-        reviewer_door = door_admin.issue_credential(
-            board=board_id,
-            role="reviewer",
-            central_url=self.config.url,
-            jwks_path=jwks_path,
-            keys_dir=keys_dir,
-            rotate=False,
-        )
+        # Issue only missing door strings. Re-running Add project must not
+        # silently mint fresh JWTs or rewrite otherwise unchanged key state.
+        progress["failed_step"] = "door_credentials"
+        existing_doors = {
+            (str(item.get("board")), str(item.get("role")))
+            for item in door_admin.list_doors(jwks_path)
+        }
+        issued_doors: dict[str, str] = {}
+        for role in ("worker", "reviewer"):
+            if (board_id, role) in existing_doors:
+                continue
+            credential = door_admin.issue_credential(
+                board=board_id,
+                role=role,
+                central_url=self.config.url,
+                jwks_path=jwks_path,
+                keys_dir=keys_dir,
+                rotate=False,
+            )
+            issued_doors[role] = credential.door_string
+        steps.append({
+            "step": "door_credentials",
+            "status": "created" if issued_doors else "already present",
+            "message": (
+                "Missing door credentials issued."
+                if issued_doors
+                else "Door credentials already present; no credentials changed."
+            ),
+        })
 
         return {
             "ok": True,
             "steps": steps,
-            "doors": {
-                "worker": worker_door.door_string,
-                "reviewer": reviewer_door.door_string,
-            },
+            "doors": issued_doors or None,
         }
 
 
@@ -4445,6 +4847,7 @@ class SeatConfigManager:
         self._active_ops: set[str] = set()
         self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._attention_lock = threading.RLock()
 
     def release_status(self) -> dict[str, Any]:
         return self.release_ops.release_card_status()
@@ -4635,6 +5038,56 @@ class SeatConfigManager:
         return {"schema_version": 1, "overall": overall, "checks": checks}
 
     @staticmethod
+    def _redact_sensitive_assignments(value: str) -> str:
+        redacted: list[str] = []
+        line_endings = (
+            "\r\n", "\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e",
+            "\x85", "\u2028", "\u2029",
+        )
+        for line in value.splitlines(keepends=True):
+            ending = next(
+                (candidate for candidate in line_endings if line.endswith(candidate)),
+                "",
+            )
+            content = line[:-len(ending)] if ending else line
+            colon = content.find(":")
+            equals = content.find("=")
+            delimiters = [index for index in (colon, equals) if index >= 0]
+            if not delimiters:
+                redacted.append(line)
+                continue
+            delimiter = min(delimiters)
+            key = content[:delimiter].casefold()
+            if (
+                not any(
+                    word in key
+                    for word in (
+                        "token",
+                        "authorization",
+                        "secret",
+                        "password",
+                        "apikey",
+                        "api_key",
+                        "api-key",
+                        "bearer",
+                    )
+                )
+                or "file" in key
+                or "path" in key
+                or "env_var" in key
+            ):
+                redacted.append(line)
+                continue
+            separator_end = delimiter + 1
+            while (
+                separator_end < len(content)
+                and content[separator_end].isspace()
+            ):
+                separator_end += 1
+            redacted.append(f"{content[:separator_end]}[REDACTED]{ending}")
+        return "".join(redacted)
+
+    @staticmethod
     def _clean_text(value: str) -> str:
         value = re.sub(
             r"\b([a-z][a-z0-9+.-]*://[^:\s/@]+):[^@\s/]+@",
@@ -4655,7 +5108,7 @@ class SeatConfigManager:
         )
         value = re.sub(
             r"(?i)\b(token|authorization|secret|password|api[_-]?key)"
-            r"(\s*[:=]\s*)[^\s,;]+",
+            r"([ \t]*[:=][ \t]*)[^\s,;]+",
             r"\1\2[REDACTED]",
             value,
         )
@@ -4666,25 +5119,7 @@ class SeatConfigManager:
             r"C:\\Users\\[REDACTED:WINDOWS_HOME]",
             value,
         )
-        # Linear-time key/separator/value split. The keyword test runs in
-        # Python instead of nested stars around the alternation, which
-        # backtracked polynomially on repeated whitespace
-        # (CodeQL py/polynomial-redos).
-        sensitive = re.compile(r"(?im)^([^:=\n]*)([:=]\s*)(.*)$")
-        keyword = re.compile(
-            r"(?i)token|authorization|secret|password|api[_-]?key|bearer"
-        )
-
-        def redact(match: re.Match[str]) -> str:
-            if keyword.search(match.group(1)) is None:
-                return match.group(0)
-            key = match.group(1).lower()
-            if "file" in key or "path" in key or "env_var" in key:
-                return match.group(0)
-            return f"{match.group(1)}{match.group(2)}[REDACTED]"
-
-        value = sensitive.sub(redact, value)
-        return value
+        return SeatConfigManager._redact_sensitive_assignments(value)
 
     @classmethod
     def _diff(cls, change: Any) -> str:
@@ -4711,7 +5146,7 @@ class SeatConfigManager:
         with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, sort_keys=True) + "\n")
 
-    def attention_state(self) -> dict[str, Any]:
+    def _attention_state_unlocked(self) -> dict[str, Any]:
         path = self.state_dir / "attention-state.json"
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
@@ -4719,7 +5154,11 @@ class SeatConfigManager:
             value = {}
         return {"items": value if isinstance(value, dict) else {}}
 
-    def save_attention_state(self, value: Any) -> dict[str, Any]:
+    def attention_state(self) -> dict[str, Any]:
+        with self._attention_lock:
+            return self._attention_state_unlocked()
+
+    def _save_attention_state_unlocked(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict) or len(value) > 500:
             raise ValueError("attention state must be an object with at most 500 items")
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -4741,6 +5180,24 @@ class SeatConfigManager:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         return {"items": value}
+
+    def save_attention_state(self, value: Any) -> dict[str, Any]:
+        with self._attention_lock:
+            return self._save_attention_state_unlocked(value)
+
+    def observe_attention_action(
+        self, value: Any,
+    ) -> tuple[
+        dict[str, Any], dict[str, Any] | None, dict[str, Any], Exception | None,
+    ]:
+        """Run one attention save and snapshot its causal state under one lock."""
+        with self._attention_lock:
+            before = self._attention_state_unlocked()
+            try:
+                result = self._save_attention_state_unlocked(value)
+            except Exception as exc:  # noqa: BLE001 - handler preserves API mapping.
+                return before, None, self._attention_state_unlocked(), exc
+            return before, result, result, None
 
     def _bridge_inspection(self) -> dict[str, Any]:
         status = dict(self.bridge_installer.inspect())
@@ -5182,6 +5639,26 @@ class SeatConfigManager:
             "behind": behind,
         }
 
+    def project_clone_evidence_state(
+        self,
+        project_name: str,
+        project_entry: Any,
+        integration_ref: str,
+    ) -> str:
+        """Digest the intended fleet clone without exposing its local path."""
+        entry = project_entry if isinstance(project_entry, dict) else {}
+        target = Path(
+            entry.get("fleet_clone_dir") or self._fleet_clone_default(project_name)
+        ).expanduser().resolve()
+        state = self._clone_state(target, integration_ref)
+        state.pop("path", None)
+        if target.exists() and state.get("status") != "invalid":
+            head = self._git(target, "rev-parse", "HEAD")
+            state["head"] = head.stdout.strip() if head.returncode == 0 else None
+        else:
+            state["head"] = None
+        return _bounded_evidence_digest(state, "fleet clone state")
+
     def prepare_fleet_clone(
         self, registry_payload: Any, project_name: Any
     ) -> dict[str, Any]:
@@ -5613,6 +6090,10 @@ class DashboardCache:
         self._detail_lock = threading.Lock()
         self._details: dict[tuple[str, str], TimedCache] = {}
 
+    def close(self) -> None:
+        for fetcher in self.fetchers.values():
+            fetcher.close()
+
     def labels(self) -> list[str]:
         return list(self.fetchers)
 
@@ -5673,6 +6154,17 @@ class DashboardCache:
         label = self.resolve_central(central)
         return self._labeled(
             asyncio.run(self.fetchers[label].fetch_project_registry()), label
+        )
+
+    def get_project_evidence_state(
+        self,
+        project_name: str,
+        board_id: str,
+        central: str | None = None,
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return asyncio.run(
+            self.fetchers[label].project_evidence_state(project_name, board_id)
         )
 
     def save_project_registry(
@@ -6032,7 +6524,7 @@ function attentionRow(x){const link=x.ticket_id?`<a class="id" href="${ticketHre
 function humanRequestRows(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const h of b.human_requests||[]){rows.push({central,board:b,h})}}}return rows}
 function humanUrlHost(url){try{return new URL(url).host}catch(_error){return String(url)}}
 function renderWaitingForYou(){const rows=humanRequestRows();return `<div class="section-title"><h3>Waiting for you</h3><span class="status">${rows.length} pending</span></div><section class="attention-card">${rows.map(humanRequestCard).join('')||'<p class="empty">No tickets are waiting for a human answer.</p>'}</section>`}
-function renderAttentionOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=numberCount((b.counts||{})[k]);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const surfaced=reconcileAttention().sort((a,b)=>(b.level==='critical')-(a.level==='critical')||(b.age||0)-(a.age||0)),attention=surfaced.slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section>${renderWaitingForYou()}<div class="section-title"><h3>Needs attention</h3><span class="status">${surfaced.length} surfaced</span></div><section class="attention-card">${attention.map(attentionRow).join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
+function renderAttentionOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=numberCount((b.counts||{})[k]);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Online<b>${esc(s.online||0)}</b></span><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const surfaced=reconcileAttention().sort((a,b)=>(b.level==='critical')-(a.level==='critical')||(b.age||0)-(a.age||0)),attention=surfaced.slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section>${renderWaitingForYou()}<div class="section-title"><h3>Needs attention</h3><span class="status">${surfaced.length} surfaced</span></div><section class="attention-card">${attention.map(attentionRow).join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
 function renderAttentionBoardsHub(){const cards=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[]){const total=Object.values(b.counts||{}).reduce((sum,v)=>sum+numberCount(v),0),tr=b.snapshot_truncation,info=tr&&tr.total>tr.returned?`<span class="status">snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets</span>`:'';cards.push(`<article class="board-card"><div><p class="eyebrow">${esc(central)}</p><h3>${esc(b.label)}</h3><span class="meta">${esc(b.board_id)} · ${esc(total)} visible tickets</span> ${info}</div><div class="counts">${Object.entries(b.counts||{}).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))} <b>${esc(v)}</b></span>`).join('')}</div><div class="card-actions"><a class="primary-action" href="${boardHref(central,b.board_id)}">Workspace</a><a href="${boardHref(central,b.board_id,'flow')}">Flow</a><a href="${boardHref(central,b.board_id,'timeline')}">Timeline</a><a href="${boardHref(central,b.board_id,'changes')}">Changes</a><a href="${boardHref(central,b.board_id,'routes')}">Routes</a></div></article>`)}return `${pageHead('Boards','Board workspaces','Open one board, then move through tickets, findings, intake, flow, timeline, changes, and routes.')}<section class="boards-list">${cards.join('')||'<div class="skeleton"></div>'}</section>`}
 function humanEnumOptions(prop){const p=prop&&typeof prop==='object'?prop:{};const source=p.type==='array'&&p.items&&typeof p.items==='object'?p.items:p;const options=[];if(Array.isArray(source.enum)){for(const value of source.enum)options.push({value:String(value),title:String(value)})}else if(Array.isArray(source.oneOf)){for(const arm of source.oneOf){if(arm&&typeof arm==='object'&&'const' in arm)options.push({value:String(arm.const),title:String(arm.title??arm.const)});else if(arm&&typeof arm==='object'&&Array.isArray(arm.enum))for(const value of arm.enum)options.push({value:String(value),title:String(value)})}}return options}
 function humanFormField(name,prop,required=false){const p=prop&&typeof prop==='object'?prop:{};const title=esc(String(p.title||name))+(required?' *':'');const requiredAttr=required?' required aria-required="true"':'';const enumOptions=humanEnumOptions(p);if(enumOptions.length){if(p.type==='array'){const defaults=Array.isArray(p.default)?p.default.map(String):[];const minItems=Math.max(Number.isInteger(p.minItems)?p.minItems:0,required?1:0);return `<fieldset class="human-field" data-human-group="${esc(name)}" data-human-required="${required?'true':'false'}" data-human-min-items="${minItems}"><legend>${title}</legend><span>${enumOptions.map(option=>`<label class="human-multi"><input type="checkbox" data-human-field="${esc(name)}" data-human-type="multi-enum" value="${esc(option.value)}" ${defaults.includes(option.value)?'checked':''}> ${esc(option.title)}</label>`).join('')}</span></fieldset>`}const defaultValue=p.default===undefined?'':String(p.default);return `<label class="human-field"><span>${title}</span><select data-human-field="${esc(name)}" data-human-type="enum"${requiredAttr}><option value="">—</option>${enumOptions.map(option=>`<option value="${esc(option.value)}" ${option.value===defaultValue?'selected':''}>${esc(option.title)}</option>`).join('')}</select></label>`}if(p.type==='boolean'){return `<label class="human-field"><input type="checkbox" data-human-field="${esc(name)}" data-human-type="boolean" data-human-required="${required?'true':'false'}" ${p.default===true?'checked':''}> <span>${title}</span></label>`}if(p.type==='number'||p.type==='integer'){return `<label class="human-field"><span>${title}</span><input type="number" step="${p.type==='integer'?'1':'any'}" data-human-field="${esc(name)}" data-human-type="${p.type}" value="${p.default!==undefined?esc(String(p.default)):''}"${requiredAttr}></label>`}return `<label class="human-field"><span>${title}</span><input type="text" data-human-field="${esc(name)}" data-human-type="string" value="${p.default!==undefined?esc(String(p.default)):''}"${requiredAttr}></label>`}
@@ -6115,11 +6607,15 @@ function numberCount(value){const parsed=Number(String(value??0).replace('>=',''
 function renderOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=(b.counts||{})[k]||0;return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const findings=[],starved=[],pressure=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const f of b.coordinator_findings?.items||[])findings.push({...f,central,board:b});for(const t of b.tickets||[]){const age=Date.now()-new Date(t.updated_at||Date.now()).getTime();if(t.status==='open'&&age>1800000)starved.push({...t,central,board:b,age})}}for(const p of hubOverhead[central]?.sessions||[])if(p.pressure!=='ok')pressure.push({...p,central})}findings.sort((a,b)=>(b.level==='critical')-(a.level==='critical'));starved.sort((a,b)=>b.age-a.age);pressure.sort((a,b)=>(b.pressure_rank||0)-(a.pressure_rank||0));const attention=[...findings.slice(0,5).map(f=>`<div class="finding-row"><span class="severity ${esc(f.level)}"></span><div><b>${esc(f.kind)}</b><p>${esc(f.text)}</p><span class="meta">${esc(f.central)} · ${esc(f.board.label)}</span></div>${f.ticket_id?`<a class="id" href="${ticketHref(f.central,f.board.board_id,f.ticket_id)}">${esc(f.ticket_id)}</a>`:''}</div>`),...pressure.slice(0,4).map(p=>`<div class="finding-row"><span class="severity ${p.pressure==='compact'?'critical':''}"></span><div><b>Context ${esc(p.pressure)}</b><p>${esc(p.agent_name)} · ${esc(p.latest_estimated_tokens)} tokens / poll</p></div><a href="${centralHref(p.central,'overhead')}">Inspect</a></div>`),...starved.slice(0,5).map(t=>`<div class="finding-row"><span class="severity"></span><div><b>Starved ticket</b><p>${esc(t.title)}</p><span class="meta">${esc(t.central)} · ${esc(t.board.label)}</span></div><a class="id" href="${ticketHref(t.central,t.board.board_id,t.id)}">${esc(t.id)}</a></div>`)].slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section><div class="section-title"><h3>Needs attention</h3><span class="status">${attention.length} surfaced</span></div><section class="attention-card">${attention.join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
 function renderBoardsHub(){const cards=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[]){const total=Object.values(b.counts||{}).reduce((sum,v)=>sum+numberCount(v),0);cards.push(`<article class="board-card"><div><p class="eyebrow">${esc(central)}</p><h3>${esc(b.label)}</h3><span class="meta">${esc(b.board_id)} · ${esc(total)} visible tickets</span></div><div class="counts">${Object.entries(b.counts||{}).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))} <b>${esc(v)}</b></span>`).join('')}</div><div class="card-actions"><a class="primary-action" href="${boardHref(central,b.board_id)}">Workspace</a><a href="${boardHref(central,b.board_id,'flow')}">Flow</a><a href="${boardHref(central,b.board_id,'timeline')}">Timeline</a><a href="${boardHref(central,b.board_id,'changes')}">Changes</a><a href="${boardHref(central,b.board_id,'routes')}">Routes</a></div></article>`)}return `${pageHead('Boards','Board workspaces','Open one board, then move through tickets, findings, intake, flow, timeline, changes, and routes.')}<section class="boards-list">${cards.join('')||'<div class="skeleton"></div>'}</section>`}
 function workerByName(central,name){return (hubWorkers[central]?.workers||[]).find(w=>w.name===name)}
+function agentIdentity(a){return String(a.principal_id||a.agent_id||a.name||a.agent_name||'unknown')}
+function agentIdentityLabel(a){const value=agentIdentity(a);return value.length>12?'…'+value.slice(-12):value}
+function workerForAgent(central,a){const workers=hubWorkers[central]?.workers||[],identity=agentIdentity(a),exact=workers.find(w=>agentIdentity(w)===identity);if(exact)return exact;const matches=workers.filter(w=>w.name===a.agent_name),liveMatches=(fleetData[central]?.agents||[]).filter(live=>live.agent_name===a.agent_name);return matches.length===1&&liveMatches.length===1?matches[0]:null}
 function renderRoleChips(seats,fallback){const roles=[];for(const s of seats||[]){if(!s.role||!s.board_id)continue;roles.push({board_id:s.board_id,role:s.role})}if(!roles.length)return esc(fallback||'worker');const unique=new Set(roles.map(r=>r.role));if(unique.size===1){const role=roles[0].role,boards=roles.map(r=>esc(r.board_id)).join(', ');return '<span class="role-chip" title="'+esc(role)+' on '+boards+'">'+esc(role)+' (all boards)</span>'}return roles.map(r=>'<span class="role-chip" title="'+esc(r.board_id)+': '+esc(r.role)+'"><span class="chip-board">'+esc(r.board_id)+'</span>: <span class="chip-role">'+esc(r.role)+'</span></span>').join('')}
-function liveAgentCard(central,a){const managed=workerByName(central,a.agent_name),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[],work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))];return `<article class="agent-card"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||'worker')}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', '))}</span></div><div class="agent-card-state"><span class="status">${esc(a.pool_status)}</span><span class="meta">${esc(relativeAge(a.last_seen))}</span></div></div>${work.length?work.map(s=>`<div class="work-row"><span class="severity"></span><div>${agentTicketLink(central,s)}<span class="meta">${esc(s.project||`${s.role||managed?.role||'worker'} · ${s.board_id}`)}</span></div></div>`).join(''):'<p class="empty">ว่าง/idle</p>'}${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`}
+function liveAgentCard(central,a){const managed=workerForAgent(central,a),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[],work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))],identity=agentIdentityLabel(a),duplicate=a.duplicate_name?`<span class="warning">Duplicate name · identity ${esc(identity)}</span>`:`<span class="meta">Identity ${esc(identity)}</span>`;return `<article class="agent-card" data-agent-identity="${esc(agentIdentity(a))}"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||'worker')}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', '))}</span>${duplicate}</div><div class="agent-card-state"><span class="status">${esc(a.pool_status)}</span><span class="meta">${esc(relativeAge(a.last_seen))}</span></div></div>${work.length?work.map(s=>`<div class="work-row"><span class="severity"></span><div>${agentTicketLink(central,s)}<span class="meta">${esc(s.project||`${s.role||managed?.role||'worker'} · ${s.board_id}`)}</span></div></div>`).join(''):'<p class="empty">ว่าง/idle</p>'}${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`}
 function managedControls(central,w,includeWork=true){const p=w.pressure,work=w.current_work||[],logs=w.log_tail||[];return `<div class="pressure-line">${p?pressureBadge(p):'<span class="status">pressure unavailable</span>'}<span class="meta">${p?`${esc(p.latest_estimated_tokens)} tokens / poll`:'No local sample'}</span></div>${includeWork?work.map(x=>`<div class="work-row"><span class="severity"></span><div><b>${esc(x.ticket_title||x.ticket_id)}</b><span class="meta">${esc(x.role||w.role)} · ${esc(x.board_id)}</span></div><span class="id">${esc(x.ticket_id)}</span></div>`).join(''):''}<div class="agent-actions"><button data-hub-agent-action="test" data-central="${esc(central)}" data-name="${esc(w.name)}">Test</button><button data-hub-agent-action="start" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'disabled':''}>Start</button><button data-hub-agent-action="stop" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'':'disabled'}>Stop</button><button data-hub-agent-action="restart" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'':'disabled'}>Restart</button>${w.seat_exists?'':`<button data-hub-copy="${esc(w.seat_admin_command)}">Copy seat command</button>`}</div><details><summary>Log tail · last 20 lines</summary><pre class="log-tail">${esc(logs.join('\n')||'No log output yet.')}</pre></details>`}
 function renderGuide(){if(!hubGuide)return'';return `<section class="card pool"><div class="section-title"><h3>Finish ${esc(hubGuide.name)}</h3><span class="status">2 steps</span></div><div class="guide"><div class="guide-step"><b>1 · Provision seat</b><p class="muted">Run once, copy it, then Refresh to auto-detect.</p><code>${esc(hubGuide.seat_admin_command||'Seat already detected.')}</code>${hubGuide.seat_exists?'':'<button type="button" class="button" data-hub-copy="'+esc(hubGuide.seat_admin_command)+'">Copy command</button>'}</div><div class="guide-step"><b>2 · Start agent</b><p class="muted">Start unlocks after the seat and token are detected.</p><button type="button" class="primary-action" data-hub-agent-action="start" data-central="${esc(hubGuide.central)}" data-name="${esc(hubGuide.name)}" ${hubGuide.seat_exists?'':'disabled'}>Start</button></div></div></section>`}
-function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){records.push({central,agent:a});seen.add(`${central}/${a.agent_name}`)}for(const w of hubWorkers[central]?.workers||[])if(!seen.has(`${central}/${w.name}`)){const work=w.current_work||[];records.push({central,agent:{agent_name:w.name,pool_status:work.length?'busy':w.running?'available':'stale',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null}})}}const cards=records.filter(x=>showStaleAgents||x.agent.pool_status==='busy'||x.agent.pool_status==='available').sort((a,b)=>compareAgents(a.agent,b.agent)||a.central.localeCompare(b.central)).map(x=>liveAgentCard(x.central,x.agent)),action=`<div class="agent-actions">${agentVisibilityToggle()}<button id="new-agent" class="primary-action" type="button">+ New agent</button></div>`;return `${pageHead('Agents','Unified agent pool','Live workers, reviewers, local API agents, claims, pressure, controls, and bounded logs.',action)}${renderGuide()}<p id="hub-agent-status" class="muted"></p><section class="agent-grid">${cards.join('')||`<p class="empty">${showStaleAgents?'No agents available.':'No active agents available.'}</p>`}</section>`}
+function inactiveAgentDrawer(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const a of d.inactive_agents||[])rows.push({central,agent:a});if(!rows.length)return'';return `<details id="inactive-agent-drawer" class="card pool"><summary>Retired / inactive agents · ${rows.length}</summary><div class="table-scroll"><table><thead><tr><th>Name</th><th>Lifecycle</th><th>Board</th><th>Stable identity</th><th>Last seen</th></tr></thead><tbody>${rows.sort((x,y)=>x.agent.agent_name.localeCompare(y.agent.agent_name)||agentIdentity(x.agent).localeCompare(agentIdentity(y.agent))).map(x=>`<tr><td><b>${esc(x.agent.agent_name)}</b><div class="meta">${esc(x.central)}</div></td><td><span class="status">${esc(x.agent.lifecycle_status||'inactive')}</span></td><td>${esc(x.agent.board_id||'—')}</td><td class="id">${esc(agentIdentityLabel(x.agent))}</td><td>${esc(relativeAge(x.agent.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`}
+function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){const key=`${central}/${agentIdentity(a)}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}for(const w of hubWorkers[central]?.workers||[]){const stable=Boolean(w.principal_id||w.agent_id),liveMatches=(d.agents||[]).filter(a=>a.agent_name===w.name);if(!stable&&liveMatches.length)continue;const key=`${central}/${agentIdentity(w)}`;if(!seen.has(key)){const work=w.current_work||[];records.push({central,agent:{agent_name:w.name,agent_id:w.agent_id,principal_id:w.principal_id,pool_status:work.length?'busy':w.running?'available':'stale',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null}});seen.add(key)}}}const cards=records.filter(x=>showStaleAgents||x.agent.pool_status==='busy'||x.agent.pool_status==='available').sort((a,b)=>compareAgents(a.agent,b.agent)||a.central.localeCompare(b.central)||agentIdentity(a.agent).localeCompare(agentIdentity(b.agent))).map(x=>liveAgentCard(x.central,x.agent)),action=`<div class="agent-actions">${agentVisibilityToggle()}<button id="new-agent" class="primary-action" type="button">+ New agent</button></div>`;return `${pageHead('Agents','Unified agent pool','Live workers, reviewers, local API agents, claims, pressure, controls, and bounded logs.',action)}${renderGuide()}<p id="hub-agent-status" class="muted"></p><section class="agent-grid">${cards.join('')||`<p class="empty">${showStaleAgents?'No agents available.':'No active agents available.'}</p>`}</section>${inactiveAgentDrawer()}`}
 function renderOperationsHub(){const cards=centralLabels.map(central=>{const d=fleetData[central],routes=(d?.boards||[]).map(b=>`<a href="${boardHref(central,b.board_id,'routes')}">${esc(b.label)} routes</a>`).join('');return `<article class="ops-card"><p class="eyebrow">${esc(central)}</p><h3>Control plane</h3><p class="muted">Policy, protocol pressure, and provenance routes.</p><div class="card-actions"><a class="primary-action" href="${centralHref(central,'config')}">Config</a><a href="${centralHref(central,'overhead')}">Overhead</a></div><div class="route-links">${routes||'<span class="empty">Boards loading…</span>'}</div></article>`}).join('');return `${pageHead('Operations','Operations','Coordinator policy, overhead details, and routes—without expanding the board write surface.')}<section class="ops-grid">${cards||'<div class="skeleton"></div>'}</section><section class="card pool"><h3>Guardrails</h3><p class="muted">Board writes remain exactly <code>coordinator_config</code> and <code>coordinator_intake</code>. Agent actions stay local under <code>/api/workers</code>.</p></section>`}
 function renderHub(){const host=document.querySelector('#central-sections'),kind=navKind();if(!['overview','boards','agents','operations'].includes(kind))return;host.innerHTML=kind==='boards'?renderBoardsHub():kind==='agents'?renderAgentsHub():kind==='operations'?renderOperationsHub():renderOverview();const newest=Object.values(fleetData).map(d=>d.generated_at).sort().at(-1);document.querySelector('#state').textContent=newest?`Updated ${fmt(newest)}`:'Connecting to centrals…';bindInteractive(host);bindHub();renderSearchResults();syncNav()}
 renderFleet=renderHub;
@@ -6163,7 +6659,7 @@ function seatPayload(form){const f=new FormData(form);return{host:f.get('host'),
 function seatForm(record={}){return `<form id="seat-wizard" class="seat-form"><label>Host<select name="host">${['codex','codex-cli','goose','claude-code','claude-desktop','headless'].map(x=>`<option ${record.host===x?'selected':''}>${esc(x)}</option>`).join('')}</select></label><label>Role<select name="role"><option ${record.role==='worker'?'selected':''}>worker</option><option ${record.role==='reviewer'?'selected':''}>reviewer</option><option ${record.role==='orchestrator'?'selected':''}>orchestrator</option></select></label><label>Name<input name="name" value="${esc(record.name||'')}" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" required></label><label>Home board <span class="muted">(blank = any registry board)</span><input name="home_board" value="${esc(record.home_board||'')}" placeholder="blank = any project; a name = dedicated"></label><label class="wide">Central URL<input name="central_url" type="url" value="${esc(record.central_url||'http://127.0.0.1:8766/mcp')}" required></label><label class="wide">Token file path · token never enters this page<input name="token_file" value="${esc(record.token_file||'')}" required></label><label class="wide">CA file path <span class="muted">(optional, remote TLS only)</span><input name="ca_file" value="${esc(record.ca_file||'')}"></label><label class="wide">Bridge command<input name="bridge_command" value="${esc(record.bridge_command||seatBridge.command||'pursers-wait-bridge')}" required></label><label class="wide">Host config path<input name="config_path" value="${esc(record.config_path||'')}" required></label><label>Seat directory (Goose)<input name="seat_dir" value="${esc(record.seat_dir||'')}"></label><label>Repository (optional)<input name="repository" value="${esc(record.repository||'')}"></label><button class="primary-action wide" type="submit">Preview exact changes</button><p id="seat-form-status" class="muted wide">Paths are checked locally; token contents are never read into the browser.</p></form>`}
 function seatRows(){const configured=(seatData.seats||[]).map(s=>`<tr><td><b>${esc(s.host)}</b><div class="meta">${esc(s.role)}</div></td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.principal_label)}</div></td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(s.bridge_version||seatBridge.pinned_version||'unknown')}</div></td><td>${esc(s.profile?.host_timeout_s||'—')}s / ${esc(s.profile?.block_s||'—')}s<div class="meta">push ${s.push_mode===null?'unknown':s.push_mode?'yes':'no'}</div></td><td><span class="status">${esc(s.doctor_status||'not run')}</span>${s.needs_restart?'<div class="restart-badge">NEEDS RESTART</div>':''}</td><td><div class="seat-actions"><button data-seat-action="doctor" data-name="${esc(s.name)}">Doctor</button><button data-seat-action="fix" data-name="${esc(s.name)}">Fix</button><button data-seat-action="prompt" data-name="${esc(s.name)}">Copy prompt</button><button data-seat-action="upgrade">Upgrade bridge</button>${s.host==='goose'?`<button data-seat-action="goose" data-name="${esc(s.name)}">Regenerate Goose</button>`:''}</div></td></tr>`).join('');const discovered=(seatData.discovered_configs||[]).map(s=>`<tr><td><b>${esc(s.host)}</b><div class="meta">discovered</div></td><td><span class="muted">Not inventoried</span><div class="meta">${esc(s.config_path)}</div></td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(seatBridge.pinned_version||'unknown')}</div></td><td>—</td><td><span class="status">setup needed</span></td><td><button data-seat-action="discover" data-host="${esc(s.host)}" data-path="${esc(s.config_path)}">Use in wizard</button></td></tr>`).join('');return configured+discovered}
 function renderSeats(){const installed=seatBridge.installed_version||'not installed',latest=seatBridge.latest_pypi_version||'unavailable',source=seatBridge.resolution_source||'unresolved',bridgeStatus=seatBridge.status||'unknown',bridgeMessage=seatBridge.message||'';return `${pageHead('Config','Seats and host setup','Configure local seats, verify push-wait health, and upgrade the pinned bridge.','<div class="seat-toolbar"><button data-seat-global="doctor">Doctor all</button><button data-seat-global="install">Install / upgrade bridge</button><button data-seat-global="upgrade-all">Upgrade all seats</button></div>')}${seatActionMessage?`<p class="status">${esc(seatActionMessage)} ${seatSessionPrompt?'<button id="copy-session-prompt">Copy session prompt</button>':''}</p>`:''}<div class="seat-layout"><div class="seat-stack"><section class="card pool"><div class="section-title"><h3>Seat inventory</h3><span class="status">${(seatData.seats||[]).length} configured</span></div><div class="table-scroll"><table><thead><tr><th>Host / role</th><th>Name / principal</th><th>Bridge</th><th>Profile / push</th><th>Doctor</th><th>Actions</th></tr></thead><tbody>${seatRows()||'<tr><td colspan="6" class="empty">No configured seats. Use the wizard.</td></tr>'}</tbody></table></div></section><section class="card pool"><h3>Add or update seat</h3>${seatForm()}</section><section id="seat-plan" class="card pool" ${seatPlan?'':'hidden'}><h3>Confirm changes</h3><p class="muted">Review the diff before applying. Existing files are backed up first.</p><pre class="seat-diff">${esc((seatPlan?.changes||[]).map(c=>`${c.description}\n${c.diff||c.action}`).join('\n')||'No changes required.')}</pre><button id="seat-apply" class="primary-action" ${seatPlan?'':'disabled'}>Confirm and apply</button></section></div><aside class="seat-stack"><section class="card pool"><h3>Wait bridge</h3><p><span class="status">${esc(bridgeStatus)}</span>${bridgeMessage?` ${esc(bridgeMessage)}`:''}</p><p>Installed <b>${esc(installed)}</b></p><p class="meta">Pinned ${esc(seatBridge.pinned_version||'unknown')} · PyPI latest ${esc(latest)}</p><p class="meta">Resolved via ${esc(source)}</p><p class="meta">Private CA ${seatBridge.private_ca_active?'active':'not active'}</p></section><section class="card pool"><h3>Doctor</h3><div id="seat-doctor">${seatDoctorResult?doctorResult(seatDoctorResult):'<p class="muted">Run one seat or all seats for config, timeout, token/CA path, bridge, live push, and restart checks.</p>'}</div></section><section class="card pool"><h3>Registry coverage</h3>${(seatRegistry.boards||[]).map(b=>`<div class="doctor-check"><span>${esc(b.label||b.board_id)}</span><span class="status">${esc(b.seat_coverage)}/${esc(b.configured_seats)}</span></div>`).join('')||'<p class="muted">No boards loaded.</p>'}<p class="meta">Read-only registry view.</p></section></aside></div>`}
-async function configPost(path,payload={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),body=await response.json();if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);return body}
+async function configPost(path,payload={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),body=await response.json();if(!response.ok){const error=new Error(body.error||`HTTP ${response.status}`);error.details=body;throw error}return body}
 async function refreshSeats(){try{const [inventory,bridge]=await Promise.all([fetchJson('/api/config/seats'),fetchJson('/api/config/bridge')]);seatData=inventory;seatBridge=bridge;if(navKind()==='seats'&&!refreshPaused())renderHub();const central=centralLabels[0];if(central)try{seatRegistry=await fetchJson(`/api/config/registry?${apiCentral(central)}`)}catch(_error){seatRegistry={boards:[],unavailable:true}}if(navKind()==='seats'&&!refreshPaused())renderHub()}catch(e){if(navKind()==='seats'&&!refreshPaused())document.querySelector('#central-sections').innerHTML=`<p class="error">Config unavailable: ${esc(e.message)}</p>`}}
 function findSeat(name){return (seatData.seats||[]).find(s=>s.name===name)}
 function doctorResult(result){if(!result?.seats)return `<pre class="seat-diff">${esc(JSON.stringify(result,null,2))}</pre>`;return result.seats.map(s=>`<div><b>${esc(s.seat)} · ${esc(s.overall)}</b>${(s.checks||[]).map(c=>`<div class="doctor-check"><span>${esc(c.check)}<span class="meta">${esc(c.message)}</span></span><span class="status">${esc(c.status)}</span></div>`).join('')}${s.overall==='PASS'?'':'<p class="muted">Fix hint: open this seat with Fix, review the plan, then apply and restart the host if prompted.</p>'}</div>`).join('')}
@@ -6183,7 +6679,7 @@ HTML = HTML.replace(
     "</script></body>",
     r"""
 </script><script>
-let dispatchData={},initialSeatsRefreshPending=true,releaseData=null;
+let dispatchData={},initialSeatsRefreshPending=true,releaseData=null,opsTerminalResult=null;
 function renderReleaseOps(){
   if(!releaseData) return '<section class="card pool" id="release-ops-card"><h3>Release & Operations</h3><p class="muted">Loading release telemetry…</p></section>';
   const v = releaseData.versions || {};
@@ -6210,8 +6706,9 @@ function renderReleaseOps(){
   const commands = releaseData.commands || {};
   const opsButton = (action,label,key,cls='') => { const command=commands[key]; return `<button type="button" class="${cls}" data-ops-action="${action}" ${command?`data-cmd="${esc(command)}"`:'disabled title="Required trusted configuration is unavailable"'}>${label}</button>` };
 
-  return `<section class="card pool" id="release-ops-card"><div class="section-title"><h3>Release & Operations</h3><span class="status">${esc(v.product ? 'Product ' + v.product : 'Release')}</span></div><div class="ops-grid-2"><div><h4>Release card</h4><p class="meta">Latest tag: <b>${esc(tag)}</b> · GitHub Release: ${ghBadge}</p><p class="meta">CI: main ${ciMain} · tag ${ciTag}</p><p class="meta">Central: live <b>${esc(cv.live_version||'unreachable')}</b> · staged <b>${esc(cv.staged_version||'none')}</b> · ${cvBadge}</p><div class="table-scroll" style="margin-top:8px"><table><thead><tr><th>Package</th><th>Version</th><th>PyPI</th></tr></thead><tbody>${pkgRows||'<tr><td colspan="3" class="empty">No packages</td></tr>'}</tbody></table></div></div><div><h4>Operations</h4><p class="muted">Guarded loopback operator actions with explicit confirmation.</p><div class="ops-button-group">${opsButton('publish','Publish from tag','publish_from_tag','approve')}${opsButton('stage','Stage Central','stage_central')}${opsButton('kickstart','Kickstart Central','kickstart_central')}${opsButton('restart-dash','Restart dashboard','restart_dashboard')}</div><pre class="ops-output" id="ops-output">Ready.</pre></div></div><div style="margin-top:16px"><h4>Seat restart checklist</h4><p class="muted">Hosts running bridge processes older than the installed shim version requiring restart.</p><div class="table-scroll"><table><thead><tr><th>Host</th><th>Restart status</th><th>Reason</th><th>Running PIDs</th></tr></thead><tbody>${checklistRows||'<tr><td colspan="4" class="empty">No seats configured.</td></tr>'}</tbody></table></div></div></section>`;
+  return `<section class="card pool" id="release-ops-card"><div class="section-title"><h3>Release & Operations</h3><span class="status">${esc(v.product ? 'Product ' + v.product : 'Release')}</span></div><div class="ops-grid-2"><div><h4>Release card</h4><p class="meta">Latest tag: <b>${esc(tag)}</b> · GitHub Release: ${ghBadge}</p><p class="meta">CI: main ${ciMain} · tag ${ciTag}</p><p class="meta">Central: live <b>${esc(cv.live_version||'unreachable')}</b> · staged <b>${esc(cv.staged_version||'none')}</b> · ${cvBadge}</p><div class="table-scroll" style="margin-top:8px"><table><thead><tr><th>Package</th><th>Version</th><th>PyPI</th></tr></thead><tbody>${pkgRows||'<tr><td colspan="3" class="empty">No packages</td></tr>'}</tbody></table></div></div><div><h4>Operations</h4><p class="muted">Guarded loopback operator actions with explicit confirmation.</p><div class="ops-button-group">${opsButton('publish','Publish from tag','publish_from_tag','approve')}${opsButton('stage','Stage Central','stage_central')}${opsButton('kickstart','Kickstart Central','kickstart_central')}${opsButton('restart-dash','Restart dashboard','restart_dashboard')}</div><pre class="ops-output" id="ops-output">${esc(opsTerminalResult||'Ready.')}</pre></div></div><div style="margin-top:16px"><h4>Seat restart checklist</h4><p class="muted">Hosts running bridge processes older than the installed shim version requiring restart.</p><div class="table-scroll"><table><thead><tr><th>Host</th><th>Restart status</th><th>Reason</th><th>Running PIDs</th></tr></thead><tbody>${checklistRows||'<tr><td colspan="4" class="empty">No seats configured.</td></tr>'}</tbody></table></div></div></section>`;
 }
+function terminalOpsText(state,job){const succeeded=state.status==='succeeded',logs=Array.isArray(state.logs)?state.logs.slice(-20).join('\n'):'';return `Job ${job.job_id}\nCommand: ${state.command||job.command}\nOutcome: ${state.status}\nEffect: ${succeeded?'operation completed; Fleet state refreshed.':'operation failed; no success effect was applied.'}${logs?`\n\n${logs}`:''}`}
 seatPayload=function(form){const f=new FormData(form);return{host:f.get('host'),role:f.get('role'),name:f.get('name'),central_url:f.get('central_url'),home_board:f.get('home_board'),token_file:f.get('token_file'),ca_file:f.get('ca_file'),bridge_command:f.get('bridge_command'),config_path:f.get('config_path'),seat_dir:f.get('seat_dir')||null,repository:f.get('repository')||null,tier_max:Number(f.get('tier_max')),skills:String(f.get('skills')||'').split(',').map(x=>x.trim()).filter(Boolean),can_review:f.get('can_review')==='on',can_work:f.get('can_work')==='on',model:f.get('model')||null,provider:f.get('provider')||null}}
 seatForm=function(record={}){const role=record.role||'worker',tier=record.tier_max||2,review=record.can_review??(role==='reviewer'),work=record.can_work??(role==='worker');return `<form id="seat-wizard" class="seat-form"><label>Host<select name="host">${['codex','codex-cli','goose','claude-code','claude-desktop','headless'].map(x=>`<option ${record.host===x?'selected':''}>${esc(x)}</option>`).join('')}</select></label><label>Role<select name="role"><option ${role==='worker'?'selected':''}>worker</option><option ${role==='reviewer'?'selected':''}>reviewer</option><option ${role==='orchestrator'?'selected':''}>orchestrator</option><option ${role==='coordinator'?'selected':''}>coordinator</option></select></label><label>Name<input name="name" value="${esc(record.name||'')}" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" required></label><label>Home board <span class="muted">(blank = any registry board)</span><input name="home_board" value="${esc(record.home_board||'')}" placeholder="blank = any project; a name = dedicated"></label><label>Tier max<select name="tier_max">${[1,2,3].map(x=>`<option value="${x}" ${tier===x?'selected':''}>${x}</option>`).join('')}</select></label><label>Skills · comma separated<input name="skills" value="${esc((record.skills||[]).join(','))}" placeholder="git,browser"></label><label><span>Review work</span><input name="can_review" type="checkbox" ${review?'checked':''}></label><label><span>Execute work</span><input name="can_work" type="checkbox" ${work?'checked':''}></label><label>Model<input name="model" value="${esc(record.model||'')}" maxlength="200"></label><label>Provider<input name="provider" value="${esc(record.provider||'')}" maxlength="200"></label><button type="button" data-seat-suggest>Suggest skills from connectors</button><span id="seat-suggestions" class="meta"></span><label class="wide">Central URL<input name="central_url" type="url" value="${esc(record.central_url||'http://127.0.0.1:8766/mcp')}" required></label><label class="wide">Token file path · token never enters this page<input name="token_file" value="${esc(record.token_file||'')}" required></label><label class="wide">CA file path <span class="muted">(optional, remote TLS only)</span><input name="ca_file" value="${esc(record.ca_file||'')}"></label><label class="wide">Bridge command<input name="bridge_command" value="${esc(record.bridge_command||seatBridge.command||'pursers-wait-bridge')}" required></label><label class="wide">Host config path<input name="config_path" value="${esc(record.config_path||'')}" required></label><label>Seat directory (Goose)<input name="seat_dir" value="${esc(record.seat_dir||'')}"></label><label>Repository (optional)<input name="repository" value="${esc(record.repository||'')}"></label><button class="primary-action wide" type="submit">Preview exact changes</button><p id="seat-form-status" class="muted wide">Capabilities are generated in every host's managed environment block. Runtime consumption requires Dispatch Part 2, which is not yet merged.</p></form>`}
 seatRows=function(){const configured=(seatData.seats||[]).map(s=>{const live=seatRegistry.seats?.[s.name]||{},offer=live.current_offer;return `<tr><td><b>${esc(s.host)}</b><div class="meta">${esc(s.role)}</div></td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.principal_label)}</div></td><td>tier ${esc(s.tier_max||2)} · review ${s.can_review?'yes':'no'} · work ${s.can_work===false?'no':'yes'}<div class="meta">${esc((s.skills||[]).join(', ')||'no skills')}</div></td><td><span class="status">${esc(live.status||'unknown')}</span></td><td>${offer?`<span class="id">${esc(offer.ticket_id)}</span><div class="meta">expires ${esc(fmt(offer.expires_at))}</div>`:'—'}</td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(s.bridge_version||seatBridge.pinned_version||'unknown')}</div></td><td><div class="seat-actions"><button data-seat-action="doctor" data-name="${esc(s.name)}">Doctor</button><button data-seat-action="fix" data-name="${esc(s.name)}">Fix</button><button data-seat-action="prompt" data-name="${esc(s.name)}">Copy prompt</button><button data-seat-action="upgrade">Upgrade bridge</button>${s.host==='goose'?`<button data-seat-action="goose" data-name="${esc(s.name)}">Regenerate Goose</button>`:''}</div></td></tr>`}).join('');const discovered=(seatData.discovered_configs||[]).map(s=>`<tr><td><b>${esc(s.host)}</b><div class="meta">discovered</div></td><td><span class="muted">Not inventoried</span><div class="meta">${esc(s.config_path)}</div></td><td>—</td><td>setup needed</td><td>—</td><td>${esc(seatBridge.installed_version||'not installed')}</td><td><button data-seat-action="discover" data-host="${esc(s.host)}" data-path="${esc(s.config_path)}">Use in wizard</button></td></tr>`).join('');return configured+discovered}
@@ -6229,7 +6726,7 @@ refreshSeats=async function(){try{const [inventory,bridge,release]=await Promise
 const refreshCentralBeforeSeats=refreshCentral;refreshCentral=async function(...args){await refreshCentralBeforeSeats(...args);if(initialSeatsRefreshPending&&navKind()==='seats'&&centralLabels.length&&!refreshPaused())await refreshSeats()}
 async function suggestSeatSkills(){const form=document.querySelector('#seat-wizard'),status=document.querySelector('#seat-suggestions');try{const result=await configPost('/api/config/suggestions',seatPayload(form)),input=form.elements.skills,current=String(input.value||'').split(',').map(x=>x.trim()).filter(Boolean);input.value=[...new Set([...current,...result.skills])].join(',');status.textContent=result.skills.length?`Suggested: ${result.skills.join(', ')}`:'No mapped connectors found.'}catch(e){status.textContent=`Suggestions failed: ${e.message}`}}
 async function saveDispatch(event){event.preventDefault();const form=event.target,central=centralLabels[0],board=form.dataset.board,status=form.querySelector('.dispatch-status')||form.nextElementSibling;try{dispatchData[board]=await configPost(`/api/dispatch?${apiCentral(central)}`,{board_id:board,policy:{claim_ttl_s:Number(form.elements.claim_ttl_s.value),offer_ttl_s:Number(form.elements.offer_ttl_s.value),broadcast_reoffer_s:Number(form.elements.broadcast_reoffer_s.value),second_opinion:form.elements.second_opinion.checked,fallback_broadcast:form.elements.fallback_broadcast.checked}});status.textContent='Policy saved.';await refreshSeats()}catch(e){status.textContent=`Save failed: ${e.message}`}}
-bindSeats=function(){const wizard=document.querySelector('#seat-wizard');wizard?.addEventListener('submit',seatSubmit);if(wizard){const review=wizard.elements.can_review,work=wizard.elements.can_work,sync=()=>{const role=wizard.elements.role.value;if(!review.dataset.touched)review.checked=role==='reviewer';if(!work.dataset.touched)work.checked=role==='worker'};review.addEventListener('input',()=>review.dataset.touched='true');work.addEventListener('input',()=>work.dataset.touched='true');wizard.elements.role.addEventListener('change',sync)}document.querySelector('[data-seat-suggest]')?.addEventListener('click',suggestSeatSkills);document.querySelector('#seat-apply')?.addEventListener('click',applySeat);document.querySelector('#copy-session-prompt')?.addEventListener('click',async event=>{await navigator.clipboard.writeText(seatSessionPrompt);event.target.textContent='Copied'});document.querySelectorAll('.dispatch-form').forEach(form=>form.addEventListener('submit',saveDispatch));document.querySelectorAll('[data-ops-action]').forEach(btn=>{btn.addEventListener('click',async()=>{const action=btn.dataset.opsAction;const out=document.querySelector('#ops-output');btn.disabled=true;try{let request={action};if(action==='publish')request={action:'publish_from_tag',tag:releaseData?.latest_tag};else if(action==='stage')request={action:'stage_central'};else if(action==='kickstart')request={action:'kickstart_central'};else if(action==='restart-dash')request={action:'restart_dashboard'};if(out)out.textContent=`Resolving immutable ${action} plan…`;const plan=await configPost('/api/config/ops/plan',request);if(!confirm(`Run command:\n${plan.command}\n\nPlan digest: ${plan.digest}\nExpires in ${plan.expires_in_s}s. Are you sure?`)){btn.disabled=false;return}if(out)out.textContent=`Confirmed plan ${plan.plan_id}\nCommand: ${plan.command}\n`;const job=await configPost('/api/config/ops',{plan_id:plan.plan_id,digest:plan.digest});if(out)out.textContent=`Job ${job.job_id} queued:\n${job.command}\n\nStreaming output…\n`;const timer=setInterval(async()=>{try{const state=await fetchJson(`/api/config/jobs/${job.job_id}`);if(out&&state.logs){out.textContent=`Command: ${state.command||job.command}\nStatus: ${state.status}\n\n${state.logs.join('\n')}`}if(state.status==='succeeded'||state.status==='failed'){clearInterval(timer);btn.disabled=false;await refreshSeats()}}catch(e){clearInterval(timer);btn.disabled=false;if(out)out.textContent+=`\nPolling error: ${e.message}`}},1000)}catch(err){btn.disabled=false;if(out)out.textContent=`Request error: ${err.message}`}})});const host=document.querySelector('#central-sections');host.onclick=seatClick;host.querySelector('.page-head')?.addEventListener('click',seatGlobal)}
+bindSeats=function(){const wizard=document.querySelector('#seat-wizard');wizard?.addEventListener('submit',seatSubmit);if(wizard){const review=wizard.elements.can_review,work=wizard.elements.can_work,sync=()=>{const role=wizard.elements.role.value;if(!review.dataset.touched)review.checked=role==='reviewer';if(!work.dataset.touched)work.checked=role==='worker'};review.addEventListener('input',()=>review.dataset.touched='true');work.addEventListener('input',()=>work.dataset.touched='true');wizard.elements.role.addEventListener('change',sync)}document.querySelector('[data-seat-suggest]')?.addEventListener('click',suggestSeatSkills);document.querySelector('#seat-apply')?.addEventListener('click',applySeat);document.querySelector('#copy-session-prompt')?.addEventListener('click',async event=>{await navigator.clipboard.writeText(seatSessionPrompt);event.target.textContent='Copied'});document.querySelectorAll('.dispatch-form').forEach(form=>form.addEventListener('submit',saveDispatch));document.querySelectorAll('[data-ops-action]').forEach(btn=>{btn.addEventListener('click',async()=>{const action=btn.dataset.opsAction;const out=document.querySelector('#ops-output');btn.disabled=true;try{let request={action};if(action==='publish')request={action:'publish_from_tag',tag:releaseData?.latest_tag};else if(action==='stage')request={action:'stage_central'};else if(action==='kickstart')request={action:'kickstart_central'};else if(action==='restart-dash')request={action:'restart_dashboard'};if(out)out.textContent=`Resolving immutable ${action} plan…`;const plan=await configPost('/api/config/ops/plan',request);if(!confirm(`Run command:\n${plan.command}\n\nPlan digest: ${plan.digest}\nExpires in ${plan.expires_in_s}s. Are you sure?`)){btn.disabled=false;return}if(out)out.textContent=`Confirmed plan ${plan.plan_id}\nCommand: ${plan.command}\n`;const job=await configPost('/api/config/ops',{plan_id:plan.plan_id,digest:plan.digest});if(out)out.textContent=`Job ${job.job_id} queued:\n${job.command}\n\nStreaming output…\n`;const timer=setInterval(async()=>{try{const state=await fetchJson(`/api/config/jobs/${job.job_id}`);if(out&&state.logs){out.textContent=`Command: ${state.command||job.command}\nStatus: ${state.status}\n\n${state.logs.join('\n')}`}if(state.status==='succeeded'||state.status==='failed'){clearInterval(timer);btn.disabled=false;opsTerminalResult=terminalOpsText(state,job);if(out)out.textContent=opsTerminalResult;await refreshSeats()}}catch(e){clearInterval(timer);btn.disabled=false;if(out)out.textContent+='\nPolling failed. Retry or inspect bounded server logs.'}},1000)}catch(err){btn.disabled=false;if(out)out.textContent='Request failed. Retry or inspect bounded server logs.'}})});const host=document.querySelector('#central-sections');host.onclick=seatClick;host.querySelector('.page-head')?.addEventListener('click',seatGlobal)}
 const seatClickImportV1=seatClick;
 seatClick=async function(event){const action=event.target.closest('[data-seat-action]')?.dataset.seatAction;if(action!=='import')return seatClickImportV1(event);try{const result=await configPost('/api/config/import',{});seatActionMessage=`Imported ${(result.imported||[]).length} seat(s); Doctor started.`;await refreshSeats();if(result.doctor_job)watchConfigJob(result.doctor_job)}catch(e){seatActionMessage=`Import failed: ${e.message}`;renderHub()}}
 renderOverview=renderAttentionOverview;
@@ -6249,7 +6746,7 @@ if(navKind()==='overview')renderHub();
     "</script></body>",
     r"""
 </script><script>
-let doorsData = {doors: []};
+let doorsData = {doors: []}, doorRotateOutcome = '';
 function doorsPanel() {
   const doors = doorsData.doors || [];
   return `<section class="card pool" id="doors-panel">
@@ -6258,8 +6755,9 @@ function doorsPanel() {
       <span class="status">${doors.length} door keys</span>
     </div>
     <p class="muted">Per-project door credentials for worker and reviewer seats. Copy door string to onboard a seat, or Rotate to generate a new key.</p>
-    <div id="door-rotate-warning" class="warning" style="display:none;margin-bottom:10px;"></div>
+    <div id="door-rotate-warning" class="warning" style="display:${doorRotateOutcome?'block':'none'};margin-bottom:10px;">${esc(doorRotateOutcome)}</div>
     <div id="door-copy-status" class="status pass" style="display:none;margin-bottom:10px;"></div>
+    <div id="door-action-status" class="error" role="alert" style="display:none;margin-bottom:10px;"></div>
     <div class="table-scroll">
       <table>
         <thead>
@@ -6331,15 +6829,27 @@ refreshSeats = async function() {
 };
 
 const seatClickBeforeDoors = seatClick;
+function showDoorActionFailure(credentialChanged=false) {
+  const failure = document.querySelector('#door-action-status');
+  if (failure) {
+    failure.textContent = credentialChanged
+      ? 'Door rotated, but follow-up delivery or refresh failed. The credential was changed; refresh Fleet state and recover the new door.'
+      : 'Door action failed. No credential was changed; retry or inspect bounded server logs.';
+    failure.style.display = 'block';
+  }
+}
 seatClick = async function(event) {
   const doorBtn = event.target.closest('[data-door-action]');
   if (doorBtn) {
     const action = doorBtn.dataset.doorAction;
     const board = doorBtn.dataset.board;
     const role = doorBtn.dataset.role;
+    let credentialChanged = false;
     doorBtn.disabled = true;
     const central = centralLabels[0];
     try {
+      const failure = document.querySelector('#door-action-status');
+      if (failure) failure.style.display = 'none';
       if (action === 'copy') {
         const res = await configPost(`/api/doors/copy?${apiCentral(central)}`, {board, role});
         if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -6353,19 +6863,27 @@ seatClick = async function(event) {
         }
       } else if (action === 'rotate') {
         const res = await configPost(`/api/doors/rotate?${apiCentral(central)}`, {board, role});
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(res.door_string);
+        credentialChanged = true;
+        let copyFailed = false;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(res.door_string);
+          else copyFailed = true;
+        } catch (_clipboardError) {
+          copyFailed = true;
         }
+        doorRotateOutcome = copyFailed
+          ? `Rotated ${board} (${role}) to key ${res.kid}. Credential changed, but clipboard copy failed; use Copy door string to recover it.`
+          : `Rotated ${board} (${role}) to key ${res.kid}. Warning: ${res.warning}`;
         const warn = document.querySelector('#door-rotate-warning');
         if (warn) {
-          warn.textContent = `Rotated ${board} (${role}) to key ${res.kid}. Warning: ${res.warning}`;
+          warn.textContent = doorRotateOutcome;
           warn.style.display = 'block';
         }
         await refreshSeats();
         renderHub();
       }
     } catch (e) {
-      alert(`Door action failed: ${e.message}`);
+      showDoorActionFailure(credentialChanged);
     } finally {
       doorBtn.disabled = false;
     }
@@ -6418,13 +6936,24 @@ bindSeats = function() {
         out += '</ul>';
         if (res.doors) {
           out += '<h4>Door strings (returned once, copy now):</h4>';
-          out += `<div style="margin:6px 0"><b>Worker door:</b> <input type="password" value="${esc(res.doors.worker)}" id="new-worker-door" readonly style="width:300px"> <button type="button" data-copy-input="new-worker-door">Copy</button></div>`;
-          out += `<div style="margin:6px 0"><b>Reviewer door:</b> <input type="password" value="${esc(res.doors.reviewer)}" id="new-reviewer-door" readonly style="width:300px"> <button type="button" data-copy-input="new-reviewer-door">Copy</button></div>`;
+          for (const role of ['worker', 'reviewer']) if (res.doors[role]) {
+            const inputId = `new-${role}-door`;
+            out += `<div style="margin:6px 0"><b>${esc(role[0].toUpperCase()+role.slice(1))} door:</b> <input type="password" value="${esc(res.doors[role])}" id="${inputId}" readonly style="width:300px"> <button type="button" data-copy-input="${inputId}">Copy</button></div>`;
+          }
         }
         if (resultDiv) resultDiv.innerHTML = out;
         await refreshSeats();
       } catch (err) {
-        if (resultDiv) resultDiv.innerHTML = `<p class="error">Add project failed: ${esc(err.message)}</p>`;
+        const completed = Array.isArray(err.details?.completed_steps) ? err.details.completed_steps.slice(0, 8) : [];
+        const failedStep = typeof err.details?.failed_step === 'string' ? err.details.failed_step : null;
+        let out = `<p class="error">Add project failed: ${esc(err.message)}</p>`;
+        if (failedStep) out += `<p><b>Failed step:</b> ${esc(failedStep)}</p>`;
+        if (completed.length) {
+          out += '<h4>Completed before failure:</h4><ul style="list-style:none;padding-left:0">';
+          for (const step of completed) out += `<li><b>${esc(step.step)}:</b> <span class="status pass">${esc(step.status)}</span></li>`;
+          out += '</ul>';
+        }
+        if (resultDiv) resultDiv.innerHTML = out;
       } finally {
         if (btn) btn.disabled = false;
       }
@@ -6435,18 +6964,22 @@ bindSeats = function() {
     1,
 )
 
+HTML = apply_warm_guided_home(HTML)
+
 
 def make_handler(
     cache: DashboardCache,
     stats_path: str | Path | None = None,
     worker_manager: WorkerManager | None = None,
     seat_manager: SeatConfigManager | None = None,
+    evidence_trace: EvidenceTrace | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     selected_stats_path = (
         bridge_stats_path() if stats_path is None else Path(stats_path)
     )
     workers = worker_manager or WorkerManager()
     seats = seat_manager or SeatConfigManager()
+    project_operation_lock = threading.RLock()
 
     def requested_central(path: str) -> str | None:
         values = parse_qs(urlsplit(path).query, keep_blank_values=True).get("central")
@@ -6544,7 +7077,143 @@ def make_handler(
         return str(resolver(central))
 
     class Handler(BaseHTTPRequestHandler):
+        def _prepare_evidence(
+            self, method: str, route: str, raw_request: bytes | None = None
+        ) -> None:
+            self._evidence_context = None
+            self._evidence_before = None
+            self._evidence_after = None
+            self._project_authorization_denied = False
+            self._project_evidence_request = None
+            if evidence_trace is None:
+                return
+            context = evidence_trace.context(self.headers, method, route)
+            if context is None:
+                return
+            if method == "POST" and (
+                raw_request is None
+                or hashlib.sha256(raw_request).hexdigest() != context.action_sha256
+            ):
+                return
+            self._evidence_context = context
+
+        def _prepare_project_evidence(
+            self, request: Any, central: str | None
+        ) -> dict[str, Any] | None:
+            context = getattr(self, "_evidence_context", None)
+            if (
+                evidence_trace is None
+                or context is None
+                or not isinstance(request, dict)
+                or request.get("name") != context.entity
+                or request.get("board_id") != evidence_trace.board_id
+            ):
+                self._evidence_context = None
+                return None
+            try:
+                state = cache_call(
+                    "get_project_evidence_state",
+                    request["name"],
+                    request["board_id"],
+                    central=central,
+                )
+                label = cache.resolve_central(central)
+                fetcher = cache.fetchers[label]
+                door_state = _door_evidence_digests(
+                    fetcher.config, request["board_id"]
+                )
+                clone_state = seats.project_clone_evidence_state(
+                    request["name"],
+                    state.pop("project_entry", None),
+                    request.get("integration_ref", "main"),
+                )
+                snapshot = {
+                    "registry": state["registry"],
+                    "board": state["board"],
+                    **door_state,
+                    "clone": clone_state,
+                }
+                if set(snapshot) != {
+                    "registry", "board", "credentials", "keys", "clone"
+                } or any(
+                    not isinstance(value, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", value)
+                    for value in snapshot.values()
+                ):
+                    raise ValueError("project evidence snapshot is invalid")
+                self._project_evidence_request = {
+                    "project": request["name"],
+                    "board_id": request["board_id"],
+                    "action_sha256": context.action_sha256,
+                }
+                return {
+                    domain: digest for domain, digest in snapshot.items()
+                }
+            except Exception:  # noqa: BLE001 - tracing must stay fail-passive.
+                self._evidence_context = None
+                return None
+
         def _send(self, status: int, content_type: str, body: bytes) -> None:
+            evidence_headers: dict[str, str] = {}
+            context = getattr(self, "_evidence_context", None)
+            before = getattr(self, "_evidence_before", None)
+            after = getattr(self, "_evidence_after", None)
+            if (
+                evidence_trace is not None
+                and context is not None
+                and before is not None
+                and after is not None
+                and content_type.startswith("application/json")
+            ):
+                try:
+                    if (
+                        status == 403
+                        and getattr(self, "_project_authorization_denied", False)
+                        and isinstance(before, dict)
+                        and isinstance(after, dict)
+                        and set(before) == set(after)
+                        == {"registry", "board", "credentials", "keys", "clone"}
+                        and isinstance(
+                            getattr(self, "_project_evidence_request", None), dict
+                        )
+                    ):
+                        document = json.loads(body)
+                        if isinstance(document, dict):
+                            document["_project_preflight"] = {
+                                "schema_version": 1,
+                                "request": self._project_evidence_request,
+                                "result": {
+                                    "status": status,
+                                    "decision": "denied",
+                                },
+                                "domains": {
+                                    domain: {
+                                        "before_sha256": before[domain],
+                                        "after_sha256": after[domain],
+                                    }
+                                    for domain in sorted(before)
+                                },
+                            }
+                            body = _json_bytes(document)
+                    metadata, _emitted = evidence_trace.observe(
+                        context=context,
+                        method=self.command,
+                        route=urlsplit(self.path).path,
+                        status=status,
+                        before=before,
+                        after=after,
+                        result_body=body,
+                    )
+                    document = json.loads(body)
+                    if metadata is not None and isinstance(document, dict):
+                        document["_evidence"] = metadata
+                        body = _json_bytes(document)
+                        evidence_headers = {
+                            header: getattr(context, key)
+                            for key, header in CORRELATION_HEADERS.items()
+                        }
+                except Exception:  # noqa: BLE001 - observability is fail-passive.
+                    pass
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -6554,6 +7223,8 @@ def make_handler(
                 "Content-Security-Policy",
                 "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
             )
+            for header, value in evidence_headers.items():
+                self.send_header(header, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -6588,6 +7259,7 @@ def make_handler(
 
         def do_GET(self) -> None:
             route = urlsplit(self.path).path
+            self._prepare_evidence("GET", route)
             if route == "/":
                 self._send(200, "text/html; charset=utf-8", HTML.encode("utf-8"))
                 return
@@ -6620,19 +7292,30 @@ def make_handler(
                     else:
                         payload = seats.job(config_job.group(1))
                 except KeyError:
+                    payload = {"error": "job not found"}
+                    if getattr(self, "_evidence_context", None) is not None:
+                        self._evidence_before = payload
+                        self._evidence_after = payload
                     self._send(
                         404,
                         "application/json; charset=utf-8",
-                        b'{"error":"job not found"}',
+                        _json_bytes(payload),
                     )
                     return
                 except Exception as exc:  # noqa: BLE001 - bounded type only.
+                    payload = {"error": type(exc).__name__}
+                    if getattr(self, "_evidence_context", None) is not None:
+                        self._evidence_before = payload
+                        self._evidence_after = payload
                     self._send(
                         503,
                         "application/json; charset=utf-8",
-                        _json_bytes({"error": type(exc).__name__}),
+                        _json_bytes(payload),
                     )
                     return
+                if getattr(self, "_evidence_context", None) is not None:
+                    self._evidence_before = payload
+                    self._evidence_after = payload
                 self._send(200, "application/json; charset=utf-8", _json_bytes(payload))
                 return
             try:
@@ -6893,6 +7576,8 @@ def make_handler(
 
         def do_POST(self) -> None:
             route = urlsplit(self.path).path
+            self._evidence_context = None
+            self._evidence_before = None
             config_routes = {
                 "/api/config/plan",
                 "/api/config/suggestions",
@@ -6963,6 +7648,7 @@ def make_handler(
                 CONFIG_API_MAX_BYTES if route in config_routes else WORKER_API_MAX_BYTES
             )
             if not 1 <= length <= body_limit:
+                self._evidence_context = None
                 self._send(
                     400,
                     "application/json; charset=utf-8",
@@ -6970,7 +7656,9 @@ def make_handler(
                 )
                 return
             try:
-                request = json.loads(self.rfile.read(length))
+                raw_request = self.rfile.read(length)
+                self._prepare_evidence("POST", route, raw_request)
+                request = json.loads(raw_request)
                 if route == "/api/config/plan":
                     body = _json_bytes(seats.plan(request))
                 elif route == "/api/config/suggestions":
@@ -7074,7 +7762,17 @@ def make_handler(
                         )
                     )
                 elif route == "/api/attention":
-                    body = _json_bytes(seats.save_attention_state(request))
+                    if getattr(self, "_evidence_context", None) is None:
+                        body = _json_bytes(seats.save_attention_state(request))
+                    else:
+                        before, result, after, error = (
+                            seats.observe_attention_action(request)
+                        )
+                        self._evidence_before = before
+                        self._evidence_after = after
+                        if error is not None:
+                            raise error
+                        body = _json_bytes(result)
                 elif route == "/api/human/resolve":
                     if not isinstance(request, dict):
                         raise ValueError("request must be an object")
@@ -7102,25 +7800,37 @@ def make_handler(
                 elif route == "/api/doors/copy":
                     if not isinstance(request, dict) or set(request) != {"board", "role"}:
                         raise ValueError("request must contain only board and role")
-                    body = _json_bytes(
-                        cache_call(
-                            "copy_door",
-                            request["board"],
-                            request["role"],
-                            central=central,
-                        )
+                    lock = (
+                        project_operation_lock
+                        if evidence_trace is not None
+                        else nullcontext()
                     )
+                    with lock:
+                        body = _json_bytes(
+                            cache_call(
+                                "copy_door",
+                                request["board"],
+                                request["role"],
+                                central=central,
+                            )
+                        )
                 elif route == "/api/doors/rotate":
                     if not isinstance(request, dict) or set(request) != {"board", "role"}:
                         raise ValueError("request must contain only board and role")
-                    body = _json_bytes(
-                        cache_call(
-                            "rotate_door",
-                            request["board"],
-                            request["role"],
-                            central=central,
-                        )
+                    lock = (
+                        project_operation_lock
+                        if evidence_trace is not None
+                        else nullcontext()
                     )
+                    with lock:
+                        body = _json_bytes(
+                            cache_call(
+                                "rotate_door",
+                                request["board"],
+                                request["role"],
+                                central=central,
+                            )
+                        )
                 elif route == "/api/projects/add":
                     if not isinstance(request, dict):
                         raise ValueError("request must be an object")
@@ -7132,17 +7842,45 @@ def make_handler(
                         raise ValueError(
                             f"request must contain {', '.join(sorted(req_fields))} and optionally integration_ref"
                         )
-                    body = _json_bytes(
-                        cache_call(
-                            "add_project",
-                            request["name"],
-                            request["board_id"],
-                            request["work_dir"],
-                            request.get("integration_ref", "main"),
-                            seats,
-                            central=central,
+                    with (
+                        project_operation_lock
+                        if evidence_trace is not None
+                        else nullcontext()
+                    ):
+                        self._evidence_before = self._prepare_project_evidence(
+                            request, central
                         )
-                    )
+                        try:
+                            result = cache_call(
+                                "add_project",
+                                request["name"],
+                                request["board_id"],
+                                request["work_dir"],
+                                request.get("integration_ref", "main"),
+                                seats,
+                                central=central,
+                            )
+                        except PermissionError:
+                            if self._evidence_context is not None:
+                                self._evidence_after = self._prepare_project_evidence(
+                                    request, central
+                                )
+                                self._project_authorization_denied = (
+                                    self._evidence_context is not None
+                                    and self._evidence_after is not None
+                                )
+                            raise
+                        except Exception:
+                            if self._evidence_context is not None:
+                                self._evidence_after = self._prepare_project_evidence(
+                                    request, central
+                                )
+                            raise
+                        if self._evidence_context is not None:
+                            self._evidence_after = self._prepare_project_evidence(
+                                request, central
+                            )
+                        body = _json_bytes(result)
                 elif route == "/api/workers":
                     body = _json_bytes(
                         {
@@ -7220,6 +7958,20 @@ def make_handler(
                         raise ValueError(
                             "intake request must be a new ask or approve/decline decision"
                         )
+            except AddProjectPartialFailure as exc:
+                self._send(
+                    exc.status_code,
+                    "application/json; charset=utf-8",
+                    _json_bytes(
+                        {
+                            "error": "Add project could not complete.",
+                            "completed_steps": exc.completed_steps,
+                            "failed_step": exc.failed_step,
+                            "central": label,
+                        }
+                    ),
+                )
+                return
             except KeyError:
                 if route in config_routes:
                     self._send(
@@ -7463,7 +8215,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--home-board", default=DEFAULT_HOME_BOARD)
-    parser.add_argument("--agent-name", default="fleet-dashboard-viewer")
+    parser.add_argument(
+        "--agent-name",
+        default="fleet-dashboard-session-default",
+        help="Reserved dashboard session identity (fleet-dashboard-session-*)",
+    )
     parser.add_argument("--stale-seconds", type=int, default=300)
     parser.add_argument("--cache-seconds", type=float, default=5.0)
     parser.add_argument(
@@ -7478,6 +8234,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--worker-script", default=str(DEFAULT_WORKER_SCRIPT), help=argparse.SUPPRESS
     )
+    parser.add_argument(
+        "--evidence-trace-config",
+        help="Verifier-owned 0600 config for bounded Fleet evidence tracing",
+    )
     args = parser.parse_args(argv)
     if args.host != "127.0.0.1":
         parser.error("--host must be 127.0.0.1; non-loopback binding is refused")
@@ -7485,6 +8245,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--port must be between 1 and 65535")
     if args.stale_seconds < 1 or args.cache_seconds <= 0:
         parser.error("stale and cache intervals must be positive")
+    if not DASHBOARD_AGENT_NAME_RE.fullmatch(args.agent_name):
+        parser.error(
+            "--agent-name must use the reserved fleet-dashboard-session-* namespace"
+        )
     return args
 
 
@@ -7499,9 +8263,23 @@ def main(argv: list[str] | None = None) -> None:
     seat_manager = SeatConfigManager(
         seat_state_dir / "seats.json", state_dir=seat_state_dir
     )
+    try:
+        trace = (
+            EvidenceTrace.from_config(args.evidence_trace_config, Path(__file__))
+            if args.evidence_trace_config
+            else None
+        )
+    except EvidenceTraceConfigError as exc:
+        raise SystemExit(f"invalid evidence trace config: {exc}") from exc
     server = ThreadingHTTPServer(
         (args.host, args.port),
-        make_handler(cache, bridge_stats_path(), worker_manager, seat_manager),
+        make_handler(
+            cache,
+            bridge_stats_path(),
+            worker_manager,
+            seat_manager,
+            evidence_trace=trace,
+        ),
     )
     print(f"Fleet Dashboard: http://{args.host}:{args.port}", flush=True)
     try:
@@ -7510,6 +8288,7 @@ def main(argv: list[str] | None = None) -> None:
         pass
     finally:
         server.server_close()
+        cache.close()
 
 
 if __name__ == "__main__":

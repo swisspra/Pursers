@@ -1,0 +1,642 @@
+# Typed evidence recorder contract
+
+Version 1 implements the closed non-visual evidence kinds authorized by AN360 and
+bounded by AN366. It does not replace the screenshot and normalized
+accessibility-tree evidence required for every acceptance observation. It also
+does not decide report-level `prior_state` graph validity; the returned
+correlation block exposes the fields the parent integrator needs for that check.
+
+## Trust boundary
+
+Install `typed_evidence.py` in a verifier-owned private directory outside the
+candidate checkout. The verifier creates its own least-privilege `trust.json`
+and pins both that installed path and its SHA-256. Candidate-authored config,
+credentials, receipt keys, source identity strings, action inputs, or evidence
+are not trusted. `candidate_checkout_root` is also pinned; recording fails if
+the running module is inside it.
+
+```sh
+python3 /PATH/TO/CANDIDATE/typed_evidence.py install --dir /PATH/TO/VERIFIER
+/PATH/TO/VERIFIER/typed_evidence.py record \
+  --request /PATH/TO/request.json --trust /PATH/TO/trust.json \
+  --output /PATH/TO/evidence.json
+/PATH/TO/VERIFIER/typed_evidence.py evaluate \
+  --evidence /PATH/TO/evidence.json --expected /PATH/TO/expected.json \
+  --trust /PATH/TO/trust.json --output /PATH/TO/result.json
+/PATH/TO/VERIFIER/typed_evidence.py evaluate-parent \
+  --trust /PATH/TO/trust.json < /PATH/TO/parent-request.json
+```
+
+Callable integration uses:
+
+```python
+evidence = record_evidence(request, verifier_trust)
+result = evaluate_evidence(evidence, expected, verifier_trust)
+```
+
+Both functions raise `TypedEvidenceError` on schema, trust, authenticity,
+freshness, provenance, correlation, or replay failure. A valid evaluation may
+return `passed: false` when authentic evidence does not satisfy the expected
+conjuncts.
+
+The top-level trust object has these exact keys:
+
+```json
+{
+  "schema_version": 1,
+  "verifier_id": "purser-reviewer-2",
+  "trusted_module_path": "/PATH/TO/VERIFIER/typed_evidence.py",
+  "module_sha256": "...",
+  "candidate_checkout_root": "/PATH/TO/CANDIDATE",
+  "candidate_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "board_id": "sandbox-board",
+  "max_age_seconds": 300,
+  "active_evidence_key": "evidence-key-1",
+  "evidence_keys": {"evidence-key-1": "1111111111111111111111111111111111111111111111111111111111111111"},
+  "http_sources": {},
+  "mcp_sources": {},
+  "receipt_sources": {},
+  "log_sources": {},
+  "state_sources": {},
+  "replay_guard": {"path": "/PATH/TO/VERIFIER/replay.log", "consume": true}
+}
+```
+
+`mcp_tool_response` is distinct from `http_response`: it records an actual
+`stdio` MCP invocation and never invents an HTTP method, status, path, or
+headers. A `trusted_mcp_stdio_v1` source pins the Python executable and digest,
+effective `-m pursers_personal.cli mcp` selector, complete argv/environment,
+clean candidate checkout and `apps_server.py` digest, sandbox board, private
+challenge key, exact tool/arguments, and result selector allowlist. The recorder
+starts that process, verifies `acceptance_runtime_attest` from the same PID, and
+then invokes the allowlisted tool. This proves the verifier-created stdio tool
+execution; it does not replace the browser capture's independent challenge of
+the active AionUi/Personal transport and does not prove an unobserved UI action.
+
+`trusted_browser_state_v1` is a `state_transition` adapter. Its external private
+trust pins the installed `browser_observer.py` plus `observer.json`, surface,
+origin, page, candidate, board, and a closed recipe. Recipes allow only bounded
+DOM reads (`text`, `value`, `checked`, `disabled`, `count`, `class`, `hidden`)
+and the explicit actions `observe`, `click`, `set_value`, `select`, `submit`,
+the closed navigation-key action `press_key`, `wait`, bounded same-origin
+`resource_delta`, same-origin `fetch`, and
+same-origin `fetch_json`. The latter selects one required RFC 6901 JSON pointer
+from the real `{status, body}` response envelope and fails if it is absent;
+this permits exact structured action-result assertions without retaining a
+whole response or request credential. Arbitrary script expressions and
+arbitrary key strings are not accepted.
+
+`resource_delta` waits at most ten seconds and counts resource-timing entries
+started during that exact window whose origin is the loaded page origin and
+whose pathname exactly matches the configured endpoint. It records only the
+integer count, never URLs, headers, request bodies, or response bodies. This
+supports causal pause/resume evidence: a paused window must record zero matching
+refreshes, followed by a post-resume window with at least one matching refresh.
+
+For a page-owned cross-origin helper request, `click_response_json` clicks one
+real control, temporarily observes the single matching method/path response
+that the page sends to the exact configured HTTP loopback helper origin with
+its in-memory authentication and closed request policy, and selects one
+required JSON pointer from the same bounded envelope. It never records request
+headers, the helper URL, or the helper token, and restores the page's original
+`fetch` function immediately after the action (with a bounded safety timeout).
+The observer executes the recipe in its isolated browser world and returns the
+actual correlated before/action/after selections.
+
+`aionui_assistant_binding_v1` is the closed preset variant. Its only action is
+`assistant_binding {endpoint:"/api/extensions/assistants", assistant_id, path}`.
+The browser performs a credential-preserving same-origin GET and selects the
+single runtime row whose ID is `ext-<assistant_id>`. The verifier separately
+pins `candidate_manifest` and its SHA-256 in a clean candidate checkout, then
+requires `installed_manifest` outside that checkout plus the referenced context
+file to be byte-for-byte identical. The runtime row must exactly match the
+manifest name, description, `agentId`, extension identity, preset flags, and the
+resolved UTF-8 context bytes. Persisted evidence contains only a compact binding
+(`manifest_id`, runtime ID, agent/preset type, context path and digest, manifest
+digest, extension, endpoint, and `same-origin-http` transport); raw context and
+private installation paths do not leave the verifier process.
+
+`click_pending_state` captures an in-flight control state without modifying the
+product DOM. Before the click, the verifier installs one exact same-origin
+`POST /api/doors/copy` or `/api/doors/rotate` fetch wrapper in the page world.
+The wrapper forwards the real request immediately and delays only delivery of
+its real response to page code for a verifier-declared 100-2000 ms window. The
+isolated verifier world clicks the exact selector and records its `disabled`
+property during that window; the normal after phase runs only after the hold.
+The wrapper must observe exactly one matching request, preserves the original
+response or error for page code, hashes a clone of the real response body, and
+is restored on success or by a 30-second safety cleanup. Evidence exposes
+separate paths for clicked, disabled-while-pending, settled, HTTP status,
+response-body SHA-256, and null error, so canonical assertions can require the
+causal state and settled response without retaining a door credential or body.
+
+The Fleet `POST /api/projects/add` result projection is likewise credential
+safe. It exposes only allowlisted step names/statuses, including exact
+`/steps/5/{step,status}`. The exact `/doors` pointer is retained only when the
+real response value is `null`; a first-run credential mapping is omitted before
+the signed record is built. Nested door selectors are never allowlisted. This
+lets an idempotent rerun prove `door_credentials` / `already present` and
+credential absence while the correlated response digest and Fleet trace bind
+the result to the real operation.
+
+Each source object is exact and versioned by its adapter value. Private headers,
+HMAC keys, and paths occur only in verifier trust:
+
+```json
+{
+  "http": {
+    "adapter": "trusted_http_v1",
+    "provenance": "fleet-runtime",
+    "runtime_id": "fleet-runtime-1",
+    "base_url": "http://127.0.0.1:18921",
+    "surface": "fleet",
+    "board_id": "sandbox-board",
+    "candidate_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "methods": ["GET", "POST"],
+    "headers": {},
+    "timeout_seconds": 4,
+    "select_allowlist": ["/status", "/result/id"],
+    "response_bindings": {
+      "/candidate": "$candidate_commit",
+      "/board": "$board_id",
+      "/surface": "$surface",
+      "/entity": "$entity",
+      "/run": "$run_id",
+      "/action": "$action_id",
+      "/runtime": "fleet-runtime-1"
+    },
+    "runtime": {
+      "pid_file": "/PATH/TO/VERIFIER/runtime.pid",
+      "command_sha256": "...",
+      "start_time": "Thu Sep 11 05:00:00 2026",
+      "executable": "/usr/bin/python3",
+      "cwd": "/PATH/TO/CANDIDATE",
+      "artifact_path": "/PATH/TO/CANDIDATE/server.py",
+      "artifact_sha256": "...",
+      "listener_port": 18921
+    }
+  },
+  "receipt": {
+    "adapter": "hmac_json_v1",
+    "provenance": "personal-runtime-receipt",
+    "runtime_id": "personal-runtime-1",
+    "path": "/PATH/TO/VERIFIER/receipt.json",
+    "hmac_key_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+    "signature_field": "signature",
+    "document_keys": [
+      "schema_version", "issuer", "runtime_id", "pid",
+      "candidate_commit", "board_id", "surface", "entity",
+      "run_id", "action_id", "transport", "role", "captured_at"
+    ],
+    "timestamp_pointer": "/captured_at",
+    "max_age_seconds": 300,
+    "required_bindings": {
+      "/candidate_commit": "$candidate_commit",
+      "/board_id": "$board_id",
+      "/surface": "$surface",
+      "/entity": "$entity",
+      "/run_id": "$run_id",
+      "/action_id": "$action_id"
+    },
+    "issuer_pointer": "/issuer",
+    "issuer": "personal-verifier",
+    "runtime_pointer": "/runtime_id",
+    "transport_pointer": "/transport",
+    "transport": "stdio",
+    "process": null
+  },
+  "log": {
+    "adapter": "process_captured_jsonl_v1",
+    "provenance": "verifier-captured-emitter",
+    "runtime_id": "central-runtime-1",
+    "path": "/PATH/TO/VERIFIER/central.jsonl",
+    "document_keys": [
+      "emitter", "timestamp", "runtime_id", "candidate_commit",
+      "board_id", "surface", "entity", "run_id", "action_id",
+      "event", "outcome", "action_sha256"
+    ],
+    "timestamp_pointer": "/timestamp",
+    "max_age_seconds": 300,
+    "required_bindings": {
+      "/candidate_commit": "$candidate_commit",
+      "/board_id": "$board_id",
+      "/surface": "$surface",
+      "/entity": "$entity",
+      "/run_id": "$run_id",
+      "/action_id": "$action_id"
+    },
+    "emitter": "central-runtime",
+    "runtime_pointer": "/runtime_id",
+    "max_bytes": 65536,
+    "action_input_path": "/PATH/TO/VERIFIER/action.json",
+    "action_input_sha256": "...",
+    "action_digest_pointer": "/action_sha256",
+    "process": {
+      "pid_file": "/PATH/TO/VERIFIER/emitter.pid",
+      "argv0_names": ["python3", "Python"],
+      "executable": "/PATH/TO/PYTHON",
+      "executable_sha256": "...",
+      "argv_prefix": ["/PATH/TO/CANDIDATE/emitter.py"],
+      "argv_contains": [],
+      "required_arguments": {
+        "--action-input": "/PATH/TO/VERIFIER/action.json",
+        "--output": "/PATH/TO/VERIFIER/central.jsonl"
+      },
+      "cwd": "/PATH/TO/CANDIDATE",
+      "artifact_path": "/PATH/TO/CANDIDATE/emitter.py",
+      "artifact_sha256": "...",
+      "entrypoint": {
+        "kind": "script",
+        "module": "",
+        "path": "/PATH/TO/CANDIDATE/emitter.py",
+        "sha256": "...",
+        "resolver": "",
+        "resolver_sha256": ""
+      },
+      "receipt_pid_pointer": "/pid"
+    }
+  },
+  "state": {
+    "adapter": "trusted_http_state_v1",
+    "provenance": "fleet-runtime-state",
+    "runtime_id": "fleet-runtime-1",
+    "http_source_id": "fleet-api",
+    "http_source_config_sha256": "..."
+  },
+  "process": {
+    "pid_file": "/PATH/TO/VERIFIER/runtime.pid",
+    "argv0_names": ["python3", "Python"],
+    "executable": "/PATH/TO/PYTHON",
+    "executable_sha256": "...",
+    "argv_prefix": ["-I", "-m", "pursers_personal.cli", "mcp"],
+    "argv_contains": [],
+    "required_arguments": {
+      "--candidate-source": "/PATH/TO/CANDIDATE/apps_server.py",
+      "--candidate-commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "--board-id": "sandbox-board",
+      "--acceptance-runtime-receipt": "/PATH/TO/VERIFIER/receipt.json"
+    },
+    "cwd": "/PATH/TO/CANDIDATE",
+    "artifact_path": "/PATH/TO/CANDIDATE/apps_server.py",
+    "artifact_sha256": "...",
+    "entrypoint": {
+      "kind": "isolated_module",
+      "module": "pursers_personal.cli",
+      "path": "/PATH/TO/CANDIDATE/pursers_personal/cli.py",
+      "sha256": "...",
+      "resolver": "/PATH/TO/ISOLATED/PYTHON",
+      "resolver_sha256": "..."
+    },
+    "receipt_pid_pointer": "/pid"
+  }
+}
+```
+
+The `http`, `receipt`, `log`, `state`, and `process` labels above are explanatory;
+their values are placed under the corresponding source ID or `process` field.
+Receipt and log `document_keys` are exact top-level schemas. Receipt HMAC covers
+the canonical complete document after removing only the signature member.
+Unknown, missing, or wrong-typed nested data fails closed, including empty
+containers.
+`personal_runtime_receipt_v1` is the non-HMAC adapter for the actual Personal
+runtime receipt. It requires the exact schema-version-1 document and pinned
+Personal version, and pins the candidate checkout HEAD, source path and digest,
+build, product/server identity, board, transport, private receipt file, and live
+producer PID/argv/cwd. Process trust checks each required CLI flag/value exactly
+once, pins the live executable bytes, and requires either the pinned script at
+argv position one or an isolated `-I -m` invocation whose resolver selects the
+pinned module bytes. A candidate path used only as an unrelated data argument
+does not bind the entrypoint.
+
+## Closed common shapes
+
+All objects use exact key equality. Unknown or missing keys fail closed.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "http_response|receipt_field|log_assertion|state_transition",
+  "context": {
+    "observation_id": "fleet.ticket-row",
+    "run_id": "run-1",
+    "action_id": "read-status",
+    "entity": "TK-123",
+    "surface": "aionui|fleet|personal",
+    "board_id": "sandbox-board",
+    "candidate_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "issued_at": "2026-09-11T05:00:00Z",
+    "causal_index": 3
+  },
+  "recorder": {}
+}
+```
+
+The expected predicate repeats the exact context and uses the parent-authorized
+`all_of` shape:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "http_response",
+  "context": {},
+  "all_of": []
+}
+```
+
+Operators are closed to `eq`, `ne`, `contains`, `in`, `gt`, `gte`, `lt`, and
+`lte`. Comparisons are type-aware and case-sensitive. No expression or regular
+expression evaluation exists.
+
+The parent canonical fact uses the same exact assertions, adds the trusted
+`source_id`, and omits report-controlled context. The harness supplies the
+observation/run/action/entity/surface/board/candidate/causal context itself:
+
+```json
+{
+  "kind": "state_transition",
+  "source_id": "fleet-state",
+  "assertions": [
+    {"phase":"before","path":"/state","op":"eq","value":"idle"},
+    {"phase":"action","path":"/status","op":"eq","value":202},
+    {"phase":"after","path":"/state","op":"eq","value":"busy"}
+  ]
+}
+```
+
+For `http_response`, assertion fields are exactly `target`, `path`, `op`, and
+`value`; `target` is `status`, `action_origin`, or `field`. The first two use an
+empty path and `field` uses a JSON pointer. `receipt_field` and `log_assertion`
+assertions have exactly `path`, `op`, and `value`. `state_transition` assertions
+have exactly `phase`, `path`, `op`, and `value`. Unknown sources, fields,
+operators, phases, paths, or assertion members fail closed. The older bounded
+single-value parent forms remain readable for the already-authored facts, but
+bulk behavior conversion must use this fielded form instead of forcing a prose
+outcome through substring matching.
+
+Authenticated evidence has this exact envelope:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "http_response",
+  "context": {},
+  "captured_at": "2026-09-11T05:00:01Z",
+  "source": {
+    "source_id": "fleet-api",
+    "adapter": "trusted_http_v1",
+    "provenance": "fleet-runtime",
+    "runtime_id": "fleet-runtime-1",
+    "module_sha256": "...",
+    "source_config_sha256": "..."
+  },
+  "record": {},
+  "payload_sha256": "...",
+  "auth": {"key_id": "verifier-key", "hmac_sha256": "..."}
+}
+```
+
+Evidence is HMAC-authenticated by a verifier-owned evidence key. Selected data
+is bounded and rejects token-like values, sensitive keys, and private home
+paths. Evidence contains source IDs and digests, never source paths or trust
+secrets. Successful evaluation can atomically consume the evidence ID in a
+private replay journal.
+
+The result is exact and report-friendly:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "state_transition",
+  "observation_id": "fleet.ticket-row",
+  "passed": true,
+  "checks": [],
+  "correlation": {
+    "run_id": "run-1",
+    "action_id": "submit-ticket",
+    "entity": "TK-123",
+    "surface": "fleet",
+    "board_id": "sandbox-board",
+    "candidate_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "causal_index": 4,
+    "runtime_id": "fleet-runtime-1"
+  },
+  "expected_digest": "...",
+  "evidence_id": "..."
+}
+```
+
+The parent validator must use `observation_id`, `entity`, `board_id`,
+`runtime_id`, and `causal_index` to ensure each `prior_state.observation` exists,
+passed independently in the same report, refers to the same relevant entity,
+precedes the dependent observation, and is neither self-referential nor cyclic.
+
+## `http_response`
+
+Recorder:
+
+```json
+{
+  "source_id": "fleet-api",
+  "action_origin": "verifier_api",
+  "request": {
+    "method": "GET",
+    "path": "/status",
+    "body": null,
+    "select": ["/status", "/result/id"]
+  }
+}
+```
+
+The verifier trust source pins the exact origin, surface, board, candidate,
+runtime, allowed methods/selectors, private request headers, timeout, and
+response JSON bindings. Runtime verification requires a private PID file,
+process start time, executable, full command digest, process cwd, exact listening
+PID and port, clean candidate-checkout HEAD, and an artifact path/digest inside
+that checkout which is the executed script at argv position one. Thus a
+matching-body echo
+service, including one serving identical bytes from another cwd, cannot
+substitute for the candidate runtime.
+The recorder injects observation/run/action/entity correlation headers and
+requires the real response to echo them. For a JSON request body it also sends
+`X-Pursers-Action-SHA256` over the exact bounded canonical bytes placed on the
+wire. It records status, selected bounded JSON values, and a body digest.
+Redirects cannot escape the trusted origin.
+Direct HTTP evidence is always `verifier_api`; it never claims a browser action.
+
+Conjuncts are exact
+`{"target":"status|field|action_origin","path":"","op":"eq","value":200}`.
+
+## `receipt_field`
+
+Recorder:
+
+```json
+{"source_id":"personal-receipt","fields":["/role","/transport","/pid"]}
+```
+
+The explicit `hmac_json_v1` adapter reads a private verifier-pinned receipt,
+recomputes HMAC over the canonical complete document, enforces freshness and
+context bindings, and can bind receipt PID to a private PID file plus live
+process argv. This is the adapter point for the validated Personal HMAC path.
+Reading arbitrary worker JSON or matching a receipt-only PID is insufficient.
+For the actual Personal receipt, `personal_runtime_receipt_v1` performs the
+candidate/build/process checks described above against a live
+`python -m pursers_personal.cli mcp` producer and records authenticity as
+`verifier_bound_personal_runtime`. A forged schema/version or arbitrary Python
+process cannot satisfy this adapter.
+
+Conjuncts are exact `{"path":"/role","op":"eq","value":"worker"}`.
+
+## `log_assertion`
+
+Recorder:
+
+```json
+{"source_id":"central-log","field_equals":{"/event":"ticket_submitted"}}
+```
+
+`fleet_evidence_trace_v1` is the product-backed adapter for the opt-in Fleet
+trace contract. Its verifier-owned source configuration pins an exact
+`document_keys` set and JSON pointers for timestamp, schema version, runtime,
+live PID, executed-entrypoint digest, HTTP status, changed flag, outcome, and
+all SHA-256 fields. It also pins the private action bytes and their digest, plus
+the exact trusted Fleet HTTP source configuration. The trace must contain the
+candidate/board/surface/observation/entity/run/action bindings and must come
+from the same live PID and entrypoint already proven by that HTTP source.
+Exactly one fresh matching record is accepted.
+
+The exact verifier trust source for that producer is:
+
+```json
+{
+  "adapter": "fleet_evidence_trace_v1",
+  "provenance": "fleet-runtime-evidence-trace",
+  "runtime_id": "fleet-runtime-1",
+  "path": "/PATH/TO/VERIFIER/fleet-evidence.jsonl",
+  "document_keys": [
+    "schema_version", "emitter", "timestamp", "runtime_id", "pid",
+    "candidate_commit", "entrypoint_sha256", "board_id", "surface",
+    "observation_id", "run_id", "action_id", "entity", "method", "path",
+    "status", "outcome", "effect", "changed", "before_sha256",
+    "after_sha256", "result_sha256", "action_sha256"
+  ],
+  "timestamp_pointer": "/timestamp",
+  "max_age_seconds": 300,
+  "required_bindings": {
+    "/candidate_commit": "$candidate_commit",
+    "/board_id": "$board_id",
+    "/surface": "$surface",
+    "/observation_id": "$observation_id",
+    "/entity": "$entity",
+    "/run_id": "$run_id",
+    "/action_id": "$action_id"
+  },
+  "emitter": "fleet-dashboard-runtime",
+  "runtime_pointer": "/runtime_id",
+  "max_bytes": 65536,
+  "action_input_path": "/PATH/TO/VERIFIER/action.json",
+  "action_input_sha256": "...",
+  "action_digest_pointer": "/action_sha256",
+  "action_path": "/api/attention",
+  "http_source_id": "fleet-api",
+  "http_source_config_sha256": "...",
+  "schema_version_pointer": "/schema_version",
+  "pid_pointer": "/pid",
+  "entrypoint_digest_pointer": "/entrypoint_sha256",
+  "status_pointer": "/status",
+  "changed_pointer": "/changed",
+  "outcome_pointer": "/outcome",
+  "effect_pointer": "/effect",
+  "sha256_pointers": [
+    "/before_sha256", "/after_sha256", "/result_sha256",
+    "/action_sha256", "/entrypoint_sha256"
+  ]
+}
+```
+
+The adapter fixes those document keys and pointer values as part of version 1;
+changing the verifier list cannot define a weaker schema. It allowlists only
+`POST /api/attention` and `POST /api/projects/add`, derives `outcome` from the
+status class and the route-specific `attention_state_*` or `project_state_*`
+effect from `changed`, and checks that `changed` agrees with the before/after
+digests.
+
+Collection snapshots the verifier-private JSONL file, sends the canonical bytes
+from `action_input_path` to the pinned Fleet process at the exact allowlisted
+`action_path`, and accepts only one correlated record appended by that call. The
+HTTP response must expose the complete matching record under `/_evidence`,
+report `log_emitted=true`, return the same status, and expose the route-specific
+result: `/items` for attention or `/steps` for project addition. For attention,
+the consumer independently recomputes both `after_sha256` and `result_sha256`
+from the exact original `{\"items\": ...}` product response. For project
+addition, the signed runtime trace binds the full state/result digests while the
+consumer exposes only `/steps`; it never selects the response's sensitive
+`/doors` member. This rejects a concurrent request's after-state being
+attributed to the observed action. Pre-existing records, replaced file
+prefixes, non-canonical action files, and response/log disagreement fail closed.
+`select_allowlist` must therefore include the route-specific result pointer,
+every `/_evidence/<document key>`, and `/_evidence/log_emitted`.
+
+The private action JSON must not contain any producer-owned trace field. In
+particular, caller input cannot provide status, outcome, changed/effect values,
+state digests, runtime identity, candidate identity, PID, or entrypoint digest.
+Those values must be derived by the real Fleet handler after the actual action.
+A changed HTTP source, substituted process, wrong PID/entrypoint, caller-authored
+result, stale/duplicate record, wrong correlation, schema extension, invalid
+JSON type, or malformed digest fails closed.
+
+`process_captured_jsonl_v1` remains the generic pinned-emitter adapter. It reads
+only a bounded tail from a verifier-owned capture file and binds a live exact
+emitter process to private action bytes. It is not evidence that a product
+action occurred merely because a verifier fixture emitted a matching line.
+Final Fleet acceptance must use `fleet_evidence_trace_v1` with the independently
+reviewed producer from `TK-3df615678068`; if that producer is unavailable, the
+caller reports `collector_gap` instead of manufacturing success evidence.
+The focused suite's real-product test runs only when
+`PURSERS_FLEET_EVIDENCE_CHECKOUT` names a clean checkout of the independently
+reviewed producer commit; otherwise it is explicitly skipped rather than
+substituting a test emitter.
+
+Conjuncts are exact
+`{"path":"/outcome","op":"eq","value":"succeeded"}`.
+
+## `state_transition`
+
+Recorder:
+
+```json
+{
+  "source_id": "fleet-state",
+  "before": {"method":"GET","path":"/state","body":null,"select":["/state"]},
+  "action": {"method":"POST","path":"/actions","body":{"next":"busy"},"select":["/accepted"]},
+  "after": {"method":"GET","path":"/state","body":null,"select":["/state"]}
+}
+```
+
+The `trusted_http_state_v1` adapter pins the referenced HTTP source configuration
+digest and runs before, action, and after against that one verified runtime.
+Every phase has the same board/candidate/surface/entity/run/action correlation.
+The signed record repeats the runtime and HTTP-source digest, preserves causal
+timestamps, and rejects changed identity, source, or order. Expected conjuncts
+cover positive and supported negative action results:
+
+```json
+{"phase":"before|action|after","path":"/state|/status","op":"eq","value":"idle"}
+```
+
+## Current integration boundary
+
+The disposable tests prove executable producer-to-recorder-to-evaluator paths
+for the actual Personal MCP receipt process and clean-checkout HTTP/state
+runtimes. Fleet coverage launches the real handler from a separate clean
+same-SHA producer checkout, executes a disposable correlated action, and
+consumes the resulting product trace. The Add project producer test passes its
+actual first-run and idempotent-rerun responses through the same secret-free
+projection used by the recorder, including invalid-status and credential-leak
+negatives. No production mutation or browser claim is supplied by this delta.
+Reviewer-owned setup and final browser evidence remain separate gates. The
+shared runner invokes
+the installed module's `evaluate-parent` command for every nonvisual canonical
+conjunct. That command authenticates the evidence with verifier-owned trust,
+binds the full observation correlation, evaluates the canonical source/state
+meaning, and returns the exact result schema consumed by the parent harness.

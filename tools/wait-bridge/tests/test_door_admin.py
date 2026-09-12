@@ -13,6 +13,8 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import jwt
+
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = ROOT.parents[1]
@@ -96,6 +98,10 @@ class DoorAdminTests(unittest.TestCase):
         self.assertEqual(worker_access.resource, self.central_url)
         self.assertEqual(worker.claims["aud"], self.central_url)
         self.assertEqual(worker.claims["resource"], self.central_url)
+        self.assertEqual(worker.claims[door_admin.BOARD_CLAIM], "project-a")
+        self.assertEqual(
+            worker_access.claims[door_admin.BOARD_CLAIM], "project-a"
+        )
         self.assertEqual(worker.claims["nbf"], self.now - 60)
         for path in self.keys.glob("*.pem"):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
@@ -136,6 +142,44 @@ class DoorAdminTests(unittest.TestCase):
         kids = [item["kid"] for item in json.loads(self.jwks.read_text())["keys"]]
         self.assertEqual(kids, ["door-project-a-worker-v2"])
 
+    def test_legacy_claimless_door_is_bound_by_trusted_key_metadata(self) -> None:
+        issued = self.issue("worker")
+        claims = dict(issued.claims)
+        claims.pop(door_admin.BOARD_CLAIM)
+        private_key = door_admin._load_private_key(
+            self.keys / f"{issued.kid}.pem"
+        )
+        legacy_token = jwt.encode(
+            claims,
+            private_key,
+            algorithm="RS256",
+            headers={"kid": issued.kid, "typ": "JWT"},
+        )
+
+        access = self.verify(legacy_token)
+
+        self.assertIsNotNone(access)
+        assert access is not None
+        self.assertEqual(
+            access.claims[door_admin.BOARD_CLAIM], "project-a"
+        )
+
+    def test_signed_board_must_match_trusted_key_metadata(self) -> None:
+        issued = self.issue("worker")
+        claims = dict(issued.claims)
+        claims[door_admin.BOARD_CLAIM] = "project-b"
+        private_key = door_admin._load_private_key(
+            self.keys / f"{issued.kid}.pem"
+        )
+        mismatched_token = jwt.encode(
+            claims,
+            private_key,
+            algorithm="RS256",
+            headers={"kid": issued.kid, "typ": "JWT"},
+        )
+
+        self.assertIsNone(self.verify(mismatched_token))
+
     def test_door_string_round_trip_and_rejections(self) -> None:
         issued = self.issue("reviewer")
 
@@ -163,6 +207,19 @@ class DoorAdminTests(unittest.TestCase):
         ).decode().rstrip("=")
         with self.assertRaisesRegex(door_admin.DoorAdminError, "malformed token"):
             door_admin.decode_door("prs1." + malformed)
+
+        payload = json.loads(
+            base64.urlsafe_b64decode(
+                issued.door_string.removeprefix("prs1.")
+                + "=" * (-len(issued.door_string.removeprefix("prs1.")) % 4)
+            )
+        )
+        payload["b"] = "project-b"
+        mismatched = base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+        with self.assertRaisesRegex(door_admin.DoorAdminError, "token board restriction"):
+            door_admin.decode_door("prs1." + mismatched)
 
     def test_failed_atomic_replace_leaves_valid_jwks_and_no_temp_file(self) -> None:
         original = self.issue("worker")

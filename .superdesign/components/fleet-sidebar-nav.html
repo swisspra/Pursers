@@ -1,0 +1,13 @@
+<aside aria-label="Primary navigation" class="flex min-h-[640px] w-56 flex-col border-r border-slate-700 bg-slate-950 p-4 text-slate-200">
+  <a :href="overviewHref" class="mb-6 flex min-h-11 items-center gap-2 rounded-xl px-2 font-semibold text-white">
+    <span aria-hidden="true" class="grid h-9 w-9 place-items-center rounded-xl border border-blue-300/40 bg-blue-300/10 text-sm font-extrabold text-blue-300">P</span>
+    <span>Pursers Fleet</span>
+  </a>
+  <nav class="grid gap-1">
+    <a :href="overviewHref" :class="{ 'bg-slate-800 text-white': activeItem === 'overview' }" class="inline-flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm text-slate-300"><span aria-hidden="true">⌂</span>Overview</a>
+    <a :href="boardsHref" :class="{ 'bg-slate-800 text-white': activeItem === 'boards' }" class="inline-flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm text-slate-300"><span aria-hidden="true">▦</span>Boards</a>
+    <a :href="agentsHref" :class="{ 'bg-slate-800 text-white': activeItem === 'agents' }" class="inline-flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm text-slate-300"><span aria-hidden="true">◎</span>Agents</a>
+    <a :href="operationsHref" :class="{ 'bg-slate-800 text-white': activeItem === 'operations' }" class="inline-flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm text-slate-300"><span aria-hidden="true">⚙</span>Operations</a>
+  </nav>
+  <p class="mt-auto px-3 text-xs text-slate-500">Loopback control plane</p>
+</aside>

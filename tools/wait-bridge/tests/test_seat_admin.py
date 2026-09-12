@@ -309,6 +309,7 @@ class SeatAdminTests(unittest.TestCase):
                     (
                         "from importlib.metadata import version; "
                         "import registry_admin, registry_doctor, seat_admin; "
+                        "import seat_lifecycle, team_lifecycle, ticket_lifecycle; "
                         f"assert version('pursers-wait-bridge') == {_bridge_version()!r}; "
                         "assert version('pursers-client') == '0.1.0a23'; "
                         "assert version('mcp') == '2.1.1'; "
@@ -342,6 +343,20 @@ class SeatAdminTests(unittest.TestCase):
                 cwd=temp,
             )
             self.assertIn("read-only health check", doctor_help.stdout)
+            bridge = environment / "bin" / "pursers-wait-bridge"
+            clean_environment = os.environ.copy()
+            clean_environment.pop("PYTHONHOME", None)
+            clean_environment.pop("PYTHONPATH", None)
+            for command in ("ticket-lifecycle", "seat-lifecycle", "team-lifecycle"):
+                lifecycle_help = subprocess.run(
+                    [str(bridge), command, "--help"],
+                    check=True,
+                    capture_output=True,
+                    cwd=temp,
+                    env=clean_environment,
+                    text=True,
+                )
+                self.assertIn(f"pursers-wait-bridge {command}", lifecycle_help.stdout)
 
     def test_invalid_identifiers_cause_zero_writes(self) -> None:
         cases = (

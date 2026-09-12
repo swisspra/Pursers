@@ -975,7 +975,7 @@ def _parse_capability_bool(name: str) -> bool | None:
     raise ValueError(f"{name} must be true or false")
 
 
-def _seat_capabilities() -> dict[str, Any] | None:
+def _seat_capabilities(role: str | None = None) -> dict[str, Any] | None:
     """Return explicit dispatch capabilities, or None for legacy seats."""
     names = (
         "PURSERS_TIER_MAX",
@@ -985,7 +985,7 @@ def _seat_capabilities() -> dict[str, Any] | None:
         "PURSERS_MODEL",
         "PURSERS_PROVIDER",
     )
-    if not any(os.environ.get(name, "").strip() for name in names):
+    if role is None and not any(os.environ.get(name, "").strip() for name in names):
         return None
     capabilities: dict[str, Any] = {"host": _host_name(), "max_parallel": 1}
     tier = os.environ.get("PURSERS_TIER_MAX", "").strip()
@@ -1016,6 +1016,13 @@ def _seat_capabilities() -> dict[str, Any] | None:
         value = os.environ.get(env_name, "").strip()
         if value:
             capabilities[field] = value
+    if role is not None:
+        capabilities["can_work"], capabilities["can_review"] = {
+            "worker": (True, False),
+            "reviewer": (False, True),
+            "orchestrator": (False, False),
+            "coordinator": (False, False),
+        }[role]
     return capabilities
 
 
@@ -6102,7 +6109,10 @@ async def _wait_for_work(
 
 
 def _door_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pursers-wait-bridge")
+    parser = argparse.ArgumentParser(
+        prog="pursers-wait-bridge",
+        description="Run the Pursers MCP wait bridge or manage its local seat.",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     join = commands.add_parser("join", help="store a door and onboard a seat")
     join.add_argument("door")
@@ -6116,6 +6126,11 @@ def _door_parser() -> argparse.ArgumentParser:
     forget.add_argument("--board", required=True)
     forget.add_argument("--role", required=True, choices=sorted(door_state.SEAT_ROLES))
     forget.add_argument("--state-dir")
+    commands.add_parser(
+        "ticket-lifecycle", help="run the ticket lifecycle sidecar"
+    )
+    commands.add_parser("seat-lifecycle", help="run the seat lifecycle sidecar")
+    commands.add_parser("team-lifecycle", help="run the team lifecycle sidecar")
     return parser
 
 
@@ -6156,14 +6171,13 @@ async def _door_join(args: argparse.Namespace) -> None:
         entry["b"],
         agent_name=name,
         role=entry["r"],
-        capabilities=_seat_capabilities(),
+        capabilities=_seat_capabilities(entry["r"]),
         allow_takeover=False,
     )
     async with client:
-        onboarded = await client.board_onboard(
-            role=entry["r"], capabilities=_seat_capabilities(), allow_takeover=False
-        )
-        push = await _probe_join_push(client, entry["b"], onboarded["agent_id"])
+        if client.identity is None:
+            raise RuntimeError("Central join did not return an identity")
+        push = await _probe_join_push(client, entry["b"], client.identity.agent_id)
     print(f"board={entry['b']}")
     print(f"role={entry['r']}")
     print(f"seat_name={name}")
@@ -6227,6 +6241,24 @@ def _configure_runtime() -> None:
 def main() -> None:
     if "--version" in sys.argv[1:]:
         print(VERSION)
+        return
+    if sys.argv[1:] in (["-h"], ["--help"]):
+        _door_parser().print_help()
+        return
+    if sys.argv[1:] and sys.argv[1] == "ticket-lifecycle":
+        from ticket_lifecycle import main as ticket_lifecycle_main
+
+        ticket_lifecycle_main(sys.argv[2:])
+        return
+    if sys.argv[1:] and sys.argv[1] == "team-lifecycle":
+        import team_lifecycle
+
+        team_lifecycle.main(sys.argv[2:])
+        return
+    if sys.argv[1:] and sys.argv[1] == "seat-lifecycle":
+        import seat_lifecycle
+
+        seat_lifecycle.main(sys.argv[2:])
         return
     if sys.argv[1:] and sys.argv[1] in {"join", "status", "forget"}:
         args = _door_parser().parse_args(sys.argv[1:])

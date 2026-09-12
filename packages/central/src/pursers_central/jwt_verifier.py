@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import jwt
 from mcp.server.auth.provider import AccessToken, TokenVerifier
+
+
+BOARD_CLAIM = "pursers_board"
+DOOR_METADATA_KEY = "pursers_door"
+BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
 
 @dataclass(frozen=True)
@@ -34,7 +40,7 @@ class JWTTokenVerifier(TokenVerifier):
     def __init__(self, config: JWTVerifierConfig):
         self.config = config
 
-    def _verification_key(self, token: str) -> Any:
+    def _verification_key(self, token: str) -> tuple[Any, dict[str, Any]]:
         header = jwt.get_unverified_header(token)
         if header.get("alg") not in self.config.algorithms:
             raise jwt.InvalidAlgorithmError("JWT algorithm is not allowed")
@@ -54,7 +60,42 @@ class JWTTokenVerifier(TokenVerifier):
             raise jwt.InvalidKeyError("JWT key is not an RSA signing key")
         if jwk.get("alg", "RS256") != "RS256":
             raise jwt.InvalidAlgorithmError("JWKS key algorithm is not RS256")
-        return jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(jwk))
+        return jwt.algorithms.RSAAlgorithm.from_jwk(json.dumps(jwk)), jwk
+
+    @staticmethod
+    def _authorized_board(
+        claims: dict[str, Any], jwk: dict[str, Any]
+    ) -> str | None:
+        """Resolve a board restriction from signed claims or trusted JWKS metadata.
+
+        Existing door keys already carry ``pursers_door.board`` metadata, so they
+        become confined without reissuing their JWT. Newly issued doors also carry
+        the signed claim and must match the trusted key metadata. Keys with neither
+        value retain the intentional legacy unbound operator contract.
+        """
+        claimed = claims.get(BOARD_CLAIM)
+        if claimed is not None and (
+            not isinstance(claimed, str) or not BOARD_ID_RE.fullmatch(claimed)
+        ):
+            raise jwt.InvalidTokenError(
+                f"{BOARD_CLAIM} must match {BOARD_ID_RE.pattern}"
+            )
+
+        metadata = jwk.get(DOOR_METADATA_KEY)
+        if metadata is None:
+            return claimed
+        if not isinstance(metadata, dict):
+            raise jwt.InvalidKeyError(f"JWKS {DOOR_METADATA_KEY} must be an object")
+        configured = metadata.get("board")
+        if not isinstance(configured, str) or not BOARD_ID_RE.fullmatch(configured):
+            raise jwt.InvalidKeyError(
+                f"JWKS {DOOR_METADATA_KEY}.board must match {BOARD_ID_RE.pattern}"
+            )
+        if claimed is not None and claimed != configured:
+            raise jwt.InvalidTokenError(
+                f"signed {BOARD_CLAIM} does not match trusted door key metadata"
+            )
+        return configured
 
     @staticmethod
     def _scopes(claims: dict[str, Any]) -> list[str]:
@@ -67,7 +108,7 @@ class JWTTokenVerifier(TokenVerifier):
 
     async def verify_token(self, token: str) -> AccessToken | None:
         try:
-            key = self._verification_key(token)
+            key, jwk = self._verification_key(token)
             claims = jwt.decode(
                 token,
                 key=key,
@@ -91,6 +132,10 @@ class JWTTokenVerifier(TokenVerifier):
             ):
                 raise jwt.InvalidTokenError("client_id must be a non-empty string when present")
             client_id = raw_client_id or "-"
+            authorized_board = self._authorized_board(claims, jwk)
+            verified_claims = dict(claims)
+            if authorized_board is not None:
+                verified_claims[BOARD_CLAIM] = authorized_board
             return AccessToken(
                 token=token,
                 client_id=client_id,
@@ -98,7 +143,7 @@ class JWTTokenVerifier(TokenVerifier):
                 expires_at=int(claims["exp"]),
                 resource=self.config.audience,
                 subject=subject,
-                claims=dict(claims),
+                claims=verified_claims,
             )
         except (jwt.PyJWTError, OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             return None

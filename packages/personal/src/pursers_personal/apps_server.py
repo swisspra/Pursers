@@ -11,11 +11,14 @@ import ast
 import asyncio
 import copy
 import hashlib
+import hmac
 import importlib
 import importlib.resources
 import ipaddress
 import json
+import os
 import re
+import subprocess
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
@@ -1946,9 +1949,86 @@ class LiveDashboard:
         return payload
 
 
+_ACCEPTANCE_NONCE = re.compile(r"^[0-9a-f]{32,128}$")
+_ACCEPTANCE_CHALLENGE_MIN_KEY_BYTES = 32
+
+
+@dataclass(frozen=True)
+class AcceptanceChallenge:
+    """Verifier-owned secret that lets one live server prove it is the candidate."""
+
+    key: bytes
+    candidate_source: Path
+    candidate_commit: str
+    build: str
+    board_id: str
+
+
+def load_acceptance_challenge(
+    key_path: Path,
+    *,
+    candidate_source: Path,
+    candidate_commit: str,
+    board_id: str,
+) -> AcceptanceChallenge:
+    """Load a verifier-generated challenge key bound to the loaded apps_server."""
+    source = candidate_source.resolve(strict=True)
+    expected = Path(__file__).resolve(strict=True)
+    if source != expected:
+        raise ValueError("acceptance challenge source does not match loaded apps_server")
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate_commit):
+        raise ValueError("acceptance challenge commit must be a full SHA")
+    repository = source.parents[4]
+    path = key_path.expanduser().absolute()
+    if path.is_symlink():
+        raise ValueError("acceptance challenge key must not be a symlink")
+    resolved = path.resolve(strict=True)
+    if resolved.is_relative_to(repository):
+        raise ValueError("acceptance challenge key must live outside the checkout")
+    status = resolved.stat()
+    if status.st_mode & 0o077:
+        raise ValueError("acceptance challenge key must be private")
+    key = resolved.read_bytes()
+    if len(key) < _ACCEPTANCE_CHALLENGE_MIN_KEY_BYTES:
+        raise ValueError("acceptance challenge key is too short to be verifier-generated")
+    return AcceptanceChallenge(
+        key=key,
+        candidate_source=source,
+        candidate_commit=candidate_commit,
+        build=hashlib.sha256(source.read_bytes()).hexdigest(),
+        board_id=board_id,
+    )
+
+
+def acceptance_attestation(
+    challenge: AcceptanceChallenge, nonce: str, pid: int
+) -> dict[str, Any]:
+    """Answer one verifier nonce over the exact loaded candidate identity."""
+    if not _ACCEPTANCE_NONCE.match(nonce or ""):
+        raise ValueError("acceptance challenge nonce must be 32-128 lowercase hex characters")
+    claim = {
+        "schema_version": 1,
+        "server_name": "On Board Personal",
+        "version": PRODUCT_VERSION,
+        "build": challenge.build,
+        "candidate_commit": challenge.candidate_commit,
+        "candidate_source": str(challenge.candidate_source),
+        "board_id": challenge.board_id,
+        "pid": pid,
+        "transport": "stdio",
+        "nonce": nonce,
+    }
+    payload = json.dumps(claim, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        **claim,
+        "signature": hmac.new(challenge.key, payload, hashlib.sha256).hexdigest(),
+    }
+
+
 def build_dashboard_server(
     config: DashboardConfig,
     *,
+    acceptance_challenge: AcceptanceChallenge | None = None,
     client_class: type[Any] | None = None,
     client_error_class: type[BaseException] | None = None,
     post_join_hook: PostJoinHook | None = None,
@@ -1963,6 +2043,21 @@ def build_dashboard_server(
         read_client_factory=read_client_factory,
     )
     apps = Apps()
+
+    if acceptance_challenge is not None:
+        if acceptance_challenge.board_id != config.board_id:
+            raise ValueError("acceptance challenge board does not match the profile board")
+
+        @apps.tool(
+            resource_uri=UI_URI,
+            description=(
+                "Answer one verifier nonce with an attestation bound to this live "
+                "server process, its loaded candidate source, build and board."
+            ),
+            visibility=MODEL_ONLY,
+        )
+        async def acceptance_runtime_attest(nonce: str) -> dict[str, Any]:
+            return acceptance_attestation(acceptance_challenge, nonce, os.getpid())
 
     @asynccontextmanager
     async def lifespan(_server):
@@ -2376,6 +2471,8 @@ def build_personal_server(
     profile_path: Path,
     host_id: str,
     session: str,
+    *,
+    acceptance_challenge: AcceptanceChallenge | None = None,
 ) -> tuple[MCPServer, LiveDashboard]:
     """Build a server from one verified profile and derived host/session identity."""
     client_class, client_error_class = _load_board_client()
@@ -2392,10 +2489,122 @@ def build_personal_server(
         client_class=client_class,
         client_error_class=client_error_class,
         post_join_hook=bootstrap_personal_review_policy,
+        acceptance_challenge=acceptance_challenge,
     )
 
 
-def run_personal_mcp(profile_path: Path, host_id: str, session: str) -> None:
+def _write_acceptance_runtime_receipt(
+    path: Path,
+    *,
+    state: LiveDashboard,
+    candidate_source: Path,
+    candidate_commit: str,
+    board_id: str,
+) -> None:
+    """Bind a live stdio server to verifier-pinned source and sandbox identity."""
+    source = candidate_source.resolve(strict=True)
+    expected = Path(__file__).resolve(strict=True)
+    if source != expected:
+        raise ValueError("acceptance candidate source does not match loaded apps_server")
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate_commit):
+        raise ValueError("acceptance candidate commit must be a full SHA")
+    repository = source.parents[4]
+    head = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    dirty = subprocess.check_output(
+        ["git", "-C", str(repository), "status", "--porcelain"], text=True
+    )
+    if head != candidate_commit or dirty:
+        raise ValueError("acceptance runtime requires a clean exact-candidate checkout")
+    if state.config.board_id != board_id or not re.fullmatch(
+        r"(?:sandbox|test)-[A-Za-z0-9._-]{1,71}", board_id
+    ):
+        raise ValueError("acceptance runtime board does not match the sandbox profile")
+    receipt = {
+        "schema_version": 1,
+        "product": "Pursers Personal",
+        "server_name": "On Board Personal",
+        "version": PRODUCT_VERSION,
+        "build": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "candidate_commit": candidate_commit,
+        "candidate_source": str(source),
+        "board_id": board_id,
+        "pid": os.getpid(),
+        "transport": "stdio",
+    }
+    path = path.expanduser().absolute()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent = path.parent.resolve(strict=True)
+    if parent.is_relative_to(repository) or parent.stat().st_mode & 0o077:
+        raise ValueError("acceptance runtime receipt directory must be private and outside checkout")
+    if path.is_symlink():
+        raise ValueError("acceptance runtime receipt must not be a symlink")
+    path = parent / path.name
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(receipt, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        with suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def run_personal_mcp(
+    profile_path: Path,
+    host_id: str,
+    session: str,
+    *,
+    acceptance_runtime_receipt: Path | None = None,
+    acceptance_challenge_key: Path | None = None,
+    candidate_source: Path | None = None,
+    candidate_commit: str | None = None,
+    board_id: str | None = None,
+) -> None:
     """Run the profile-backed personal MCP server over stdio."""
-    server, _state = build_personal_server(profile_path, host_id, session)
+    acceptance_values = (
+        acceptance_runtime_receipt,
+        acceptance_challenge_key,
+        candidate_source,
+        candidate_commit,
+        board_id,
+    )
+    challenge: AcceptanceChallenge | None = None
+    if any(value is not None for value in acceptance_values):
+        if not all(value is not None for value in acceptance_values):
+            raise ValueError("acceptance runtime binding arguments must be complete")
+        assert acceptance_challenge_key is not None
+        assert candidate_source is not None
+        assert candidate_commit is not None
+        assert board_id is not None
+        challenge = load_acceptance_challenge(
+            acceptance_challenge_key,
+            candidate_source=candidate_source,
+            candidate_commit=candidate_commit,
+            board_id=board_id,
+        )
+    if challenge is None:
+        server, state = build_personal_server(profile_path, host_id, session)
+    else:
+        server, state = build_personal_server(
+            profile_path, host_id, session, acceptance_challenge=challenge
+        )
+    if challenge is not None:
+        assert acceptance_runtime_receipt is not None
+        assert candidate_source is not None
+        assert candidate_commit is not None
+        assert board_id is not None
+        _write_acceptance_runtime_receipt(
+            acceptance_runtime_receipt,
+            state=state,
+            candidate_source=candidate_source,
+            candidate_commit=candidate_commit,
+            board_id=board_id,
+        )
     server.run()
