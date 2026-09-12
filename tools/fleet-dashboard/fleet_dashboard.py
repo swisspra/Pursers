@@ -49,6 +49,7 @@ if (_CENTRAL_SRC / "pursers_central").is_dir():
 from pursers_client import (
     BoardClient,
     BoardClientError,
+    JoinedIdentity,
     human_form_safety,
     parse_project_registry as parse_client_project_registry,
 )
@@ -3162,7 +3163,10 @@ class FleetFetcher:
         self._intake_submissions: dict[str, list[tuple[str, datetime]]] = {}
         self._board_work_dirs: dict[str, str | None] = {}
         self._write_join_lock = threading.Lock()
-        self._write_joins: dict[str, concurrent.futures.Future[None]] = {}
+        self._write_joins: dict[
+            str,
+            concurrent.futures.Future[tuple[str | None, JoinedIdentity | None]],
+        ] = {}
 
     def _client(self, board_id: str) -> Any:
         """Return an anonymous read transport; entering it never joins a seat."""
@@ -3189,7 +3193,9 @@ class FleetFetcher:
             )
         return self.client_factory(self.config.url, self.config.token, board_id)
 
-    async def _join_write_seat(self, board_id: str, client: Any) -> None:
+    async def _join_write_seat(
+        self, board_id: str, client: Any
+    ) -> tuple[str | None, JoinedIdentity | None]:
         arguments = {
             "agent_name": self.config.agent_name,
             "role": "reviewer",
@@ -3197,13 +3203,28 @@ class FleetFetcher:
             "allow_takeover": True,
         }
         if isinstance(client, _DashboardTransportClient):
-            await client._call("board_join", arguments)  # noqa: SLF001
-            return
+            await BoardClient.board_join(
+                client,
+                role="reviewer",
+                capabilities=arguments["capabilities"],
+                allow_takeover=True,
+            )
+            return client.generation_token, client.identity
         join = getattr(client, "board_join", None)
         if callable(join):
-            await join(**arguments)
+            result = await join(**arguments)
+            token = (
+                result.get("generation_token") if isinstance(result, dict) else None
+            )
+            if token is not None and (not isinstance(token, str) or not token):
+                raise BoardClientError("server returned an invalid generation_token")
+            identity = getattr(client, "identity", None)
+            return token, identity if isinstance(identity, JoinedIdentity) else None
+        return None, None
 
-    async def _ensure_write_join(self, board_id: str) -> None:
+    async def _ensure_write_join(
+        self, board_id: str
+    ) -> tuple[str | None, JoinedIdentity | None]:
         """Perform at most one lazy board_join per board across request loops."""
         leader = False
         with self._write_join_lock:
@@ -3213,11 +3234,10 @@ class FleetFetcher:
                 self._write_joins[board_id] = joined
                 leader = True
         if not leader:
-            await asyncio.shield(asyncio.wrap_future(joined))
-            return
+            return await asyncio.shield(asyncio.wrap_future(joined))
         try:
             async with self._write_transport(board_id) as client:
-                await self._join_write_seat(board_id, client)
+                state = await self._join_write_seat(board_id, client)
         except BaseException as exc:
             with self._write_join_lock:
                 if self._write_joins.get(board_id) is joined:
@@ -3226,12 +3246,16 @@ class FleetFetcher:
             joined.exception()
             raise
         else:
-            joined.set_result(None)
+            joined.set_result(state)
+            return state
 
     @asynccontextmanager
     async def _write_client(self, board_id: str) -> Any:
-        await self._ensure_write_join(board_id)
+        generation_token, identity = await self._ensure_write_join(board_id)
         async with self._write_transport(board_id) as client:
+            if isinstance(client, BoardClient):
+                client.generation_token = generation_token
+                client.identity = identity
             yield client
 
     async def _boards(self) -> list[tuple[str, str]]:

@@ -1274,6 +1274,88 @@ def test_real_dashboard_transport_clients_separate_read_and_write_identity() -> 
     assert writer.allow_takeover is True
 
 
+def test_dashboard_transport_write_carries_lazy_join_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, object], dict[str, object] | None]] = []
+    generation_token = "generation-7"
+
+    class RawClient:
+        async def call_tool(
+            self,
+            name: str,
+            arguments: dict[str, object],
+            meta: dict[str, object] | None = None,
+        ) -> SimpleNamespace:
+            calls.append((name, arguments, meta))
+            if name == "board_join":
+                result = {
+                    "ok": True,
+                    "board_id": "pursers",
+                    "agent_id": "AI-dashboard",
+                    "principal_id": "PR-dashboard",
+                    "agent_name": "fleet-dashboard-viewer",
+                    "role": "reviewer",
+                    "generation_token": generation_token,
+                }
+            else:
+                assert name == "ticket_create"
+                assert meta == {"io.onboard/expected-generation": generation_token}
+                result = {"ok": True, "ticket": {"ticket_id": "TK-created"}}
+            return SimpleNamespace(
+                is_error=False,
+                structured_content={"result": result},
+                content=[],
+            )
+
+    raw_client = RawClient()
+
+    class Transport(dashboard._DashboardTransportClient):
+        async def __aenter__(self) -> Self:
+            self._client = raw_client
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            self._client = None
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config)
+    monkeypatch.setattr(
+        fetcher,
+        "_write_transport",
+        lambda board_id: Transport(
+            config.url,
+            config.token,
+            board_id,
+            agent_name=config.agent_name,
+            role="reviewer",
+            capabilities={"can_work": False, "can_review": False},
+            allow_takeover=True,
+        ),
+    )
+
+    async def scenario() -> None:
+        await asyncio.gather(
+            *(fetcher._ensure_write_join("pursers") for _ in range(5))
+        )
+        async with fetcher._write_client("pursers") as client:
+            assert client.generation_token == generation_token
+            assert client.identity.agent_name == config.agent_name
+            await client.ticket_create(None, "Ad-hoc dashboard ticket")
+
+    asyncio.run(scenario())
+
+    assert [name for name, _, _ in calls] == ["board_join", "ticket_create"]
+    assert calls[0][2] is None
+
+
 def test_output_rows_and_titles_are_bounded() -> None:
     tickets = [
         {
