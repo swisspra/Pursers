@@ -971,7 +971,7 @@ def test_fetcher_requests_central_max_snapshot_bounds() -> None:
             )
             return {"latest_seq": 0, "agents": [], "tickets": []}
 
-        async def board_catchup(self, **_kwargs: object) -> dict:
+        async def board_dispatch_events(self, **_kwargs: object) -> dict:
             return {"events": []}
 
     config = dashboard.Config(
@@ -991,6 +991,287 @@ def test_fetcher_requests_central_max_snapshot_bounds() -> None:
         "max_bytes": 300_000,
         "include_retired": True,
     }
+
+
+def test_dashboard_read_clients_never_join_or_send_an_agent_name() -> None:
+    calls: list[dict[str, object]] = []
+    latest_seq = 41
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_state_get(self, **_kwargs: object) -> dict:
+            return registry({})
+
+        async def board_snapshot(self, **_kwargs: object) -> dict:
+            return {"latest_seq": latest_seq, "agents": [], "tickets": []}
+
+        async def board_dispatch_events(self, **_kwargs: object) -> dict:
+            return {"latest_seq": latest_seq, "events": []}
+
+        async def ticket_list(self, **_kwargs: object) -> dict:
+            return {"tickets": []}
+
+        async def board_join(self, **_kwargs: object) -> dict:
+            raise AssertionError("a dashboard read must not join the board")
+
+    def factory(
+        _url: str, _token: str, _board_id: str, **kwargs: object
+    ) -> Client:
+        calls.append(dict(kwargs))
+        return Client()
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetchers = [dashboard.FleetFetcher(config, client_factory=factory) for _ in range(3)]
+
+    async def load_tabs() -> None:
+        await asyncio.gather(*(fetcher.fetch() for fetcher in fetchers))
+        await asyncio.gather(*(fetcher.fetch() for fetcher in fetchers))
+
+    asyncio.run(load_tabs())
+
+    assert calls
+    assert all(arguments == {} for arguments in calls)
+    assert latest_seq == 41
+
+
+def test_dashboard_write_join_is_lazy_single_flight_and_reconnect_safe() -> None:
+    events: list[dict[str, object]] = []
+    active_names: set[str] = set()
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_join(self, **arguments: object) -> dict:
+            await asyncio.sleep(0.01)
+            name = str(arguments["agent_name"])
+            if name in active_names and arguments.get("allow_takeover") is not True:
+                events.append({"kind": "seat_name_collision"})
+                raise dashboard.BoardClientError("seat name already active")
+            active_names.add(name)
+            events.append({"kind": "board_join", **arguments})
+            return {"ok": True}
+
+        async def ticket_create(self, *_args: object, **_kwargs: object) -> dict:
+            events.append({"kind": "ticket_created"})
+            return {"ok": True}
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    def factory(*_args: object, **_kwargs: object) -> Client:
+        return Client()
+
+    fetcher = dashboard.FleetFetcher(config, client_factory=factory)
+
+    async def first_process() -> None:
+        await asyncio.gather(
+            *(fetcher._ensure_write_join("pursers") for _ in range(5))
+        )
+        async with fetcher._write_client("pursers") as client:
+            await client.ticket_create(None, "Ad-hoc dashboard ticket")
+
+    asyncio.run(first_process())
+    assert [event["kind"] for event in events] == ["board_join", "ticket_created"]
+    joined = events[0]
+    assert joined["allow_takeover"] is True
+    assert joined["role"] == "reviewer"
+    assert joined["capabilities"] == {"can_work": False, "can_review": False}
+
+    # A new dashboard process reclaims the same stable seat without collision.
+    restarted = dashboard.FleetFetcher(config, client_factory=factory)
+    asyncio.run(restarted._ensure_write_join("pursers"))
+    assert [event["kind"] for event in events] == [
+        "board_join",
+        "ticket_created",
+        "board_join",
+    ]
+    assert not any(event["kind"] == "seat_name_collision" for event in events)
+
+
+def test_real_central_dashboard_reads_are_event_free_and_write_reconnect_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jwks_path = tmp_path / "jwks.json"
+    jwks_path.write_text('{"keys": []}', encoding="utf-8")
+    for key, value in {
+        "CENTRAL_AUTH_MODE": "jwt",
+        "CENTRAL_JWT_ISSUER": "https://issuer.example",
+        "CENTRAL_JWT_AUDIENCE": "http://localhost:8765/mcp",
+        "CENTRAL_JWKS_PATH": str(jwks_path),
+        "CENTRAL_ADMISSION": "invite",
+        "STORE_BACKEND": "sqlite",
+    }.items():
+        monkeypatch.setenv(key, value)
+    mcp, service = central.build_server("localhost", 8765, tmp_path / "central")
+    scopes = frozenset({"board:read", "board:write", "board:review"})
+    admin = central.Principal("PR-admin", "admin", scopes)
+    dashboard_principal = central.Principal("PR-dashboard", "dashboard", scopes)
+    state: dict[str, central.Principal] = {"principal": admin}
+    monkeypatch.setattr(central, "current_principal", lambda: state["principal"])
+    join_calls: list[dict[str, object]] = []
+
+    async def call(
+        name: str, principal: central.Principal, **arguments: object
+    ) -> dict:
+        state["principal"] = principal
+        result = await mcp.call_tool(name, {"board_id": "pursers", **arguments})
+        assert not result.is_error, result.content
+        return result.structured_content
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_join(self, **arguments: object) -> dict:
+            join_calls.append(dict(arguments))
+            return await call("board_join", dashboard_principal, **arguments)
+
+        async def board_snapshot(self, **arguments: object) -> dict:
+            return await call("board_snapshot", dashboard_principal, **arguments)
+
+        async def board_dispatch_events(self, **arguments: object) -> dict:
+            return await call(
+                "board_dispatch_events", dashboard_principal, **arguments
+            )
+
+        async def ticket_list(self, **arguments: object) -> dict:
+            return await call("ticket_list", dashboard_principal, **arguments)
+
+        async def ticket_get(self, ticket_id: str) -> dict:
+            return await call(
+                "ticket_get", dashboard_principal, ticket_id=ticket_id
+            )
+
+        async def ticket_create(
+            self, ticket_id: str | None, title: str
+        ) -> dict:
+            return await call(
+                "ticket_create",
+                dashboard_principal,
+                ticket_id=ticket_id,
+                agent_name="fleet-dashboard-viewer",
+                title=title,
+                description="Acceptance probe for lazy dashboard joining",
+                target_url="fleet-dashboard/acceptance-probe",
+                scope="interactive-no-send",
+                required_fields=["test_output"],
+                unassigned=True,
+            )
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+
+    async def scenario() -> tuple[int, int, int, int, list[dict[str, object]]]:
+        await call(
+            "board_join",
+            admin,
+            agent_name="admin-agent",
+            capabilities={"can_work": False, "can_review": False},
+        )
+        await call(
+            "board_member_add",
+            admin,
+            agent_name="admin-agent",
+            principal_id=dashboard_principal.principal_id,
+            role="reviewer",
+        )
+        before = (await call("board_status", dashboard_principal))["latest_seq"]
+        fetchers = [
+            dashboard.FleetFetcher(
+                config, client_factory=lambda *_args, **_kwargs: Client()
+            )
+            for _ in range(3)
+        ]
+        await asyncio.gather(
+            *(fetcher._read_board("Pursers", "pursers") for fetcher in fetchers)
+        )
+        await asyncio.gather(
+            *(fetcher._read_board("Pursers", "pursers") for fetcher in fetchers)
+        )
+        after_reads = (await call("board_status", dashboard_principal))["latest_seq"]
+
+        async with fetchers[0]._write_client("pursers") as client:
+            await client.ticket_create(None, "Ad-hoc dashboard ticket")
+        after_write = (await call("board_status", dashboard_principal))["latest_seq"]
+
+        restarted = dashboard.FleetFetcher(
+            config, client_factory=lambda *_args, **_kwargs: Client()
+        )
+        await restarted._ensure_write_join("pursers")
+        after_reconnect = (await call("board_status", dashboard_principal))["latest_seq"]
+        journal = service.journal.read_after("pursers", before, 20)["events"]
+        return before, after_reads, after_write, after_reconnect, journal
+
+    before, after_reads, after_write, after_reconnect, journal = asyncio.run(
+        scenario()
+    )
+    kinds = [event["kind"] for event in journal]
+    print(
+        "acceptance-latest-seq: "
+        f"before={before} after_reads={after_reads} "
+        f"after_write={after_write} after_reconnect={after_reconnect}"
+    )
+
+    assert after_reads == before
+    assert after_write == before + 2
+    assert after_reconnect == after_write
+    assert len(join_calls) == 2
+    assert all(call_args["allow_takeover"] is True for call_args in join_calls)
+    assert kinds.count("ticket_created") == 1
+    assert "seat_name_collision" not in kinds
+
+
+def test_real_dashboard_transport_clients_separate_read_and_write_identity() -> None:
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config)
+
+    reader = fetcher._client("pursers")
+    writer = fetcher._write_transport("pursers")
+
+    assert isinstance(reader, dashboard._DashboardTransportClient)
+    assert reader.agent_name == ""
+    assert reader.role is None
+    assert isinstance(writer, dashboard._DashboardTransportClient)
+    assert writer.agent_name == "fleet-dashboard-viewer"
+    assert writer.role == "reviewer"
+    assert writer.allow_takeover is True
 
 
 def test_output_rows_and_titles_are_bounded() -> None:
@@ -1135,7 +1416,7 @@ def test_unknown_board_does_not_accumulate_detail_cache_entries() -> None:
     assert cache._details == {}
 
 
-def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
+def test_fetch_board_uses_bounded_snapshot_and_anonymous_dispatch_projection() -> None:
     calls: list[tuple[str, dict]] = []
 
     class Client:
@@ -1161,8 +1442,8 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
             calls.append(("board_snapshot", dict(kwargs)))
             return {"latest_seq": 9, "agents": [], "tickets": []}
 
-        async def board_catchup(self, **kwargs: object) -> dict:
-            calls.append(("board_catchup", dict(kwargs)))
+        async def board_dispatch_events(self, **kwargs: object) -> dict:
+            calls.append(("board_dispatch_events", dict(kwargs)))
             return {"events": []}
 
     config = dashboard.Config(
@@ -1183,14 +1464,8 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
         {"limit": 1_000, "max_bytes": 300_000, "include_retired": True},
     ) in calls
     assert (
-        "board_catchup",
-        {
-            "cursor": 0,
-            "limit": 100,
-            "ack": False,
-            "max_events": 100,
-            "max_bytes": 100_000,
-        },
+        "board_dispatch_events",
+        {"limit": 100},
     ) in calls
 
 
@@ -5999,7 +6274,7 @@ def test_truncated_snapshot_splices_active_ticket_list() -> None:
                 "total_matching": 2,
             }
 
-        async def board_catchup(self, **kwargs: object) -> dict:
+        async def board_dispatch_events(self, **kwargs: object) -> dict:
             return {"events": []}
 
     config = dashboard.Config(

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import copy
 import difflib
 import hashlib
@@ -27,6 +28,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -84,7 +86,6 @@ DISPATCH_TICKET_LIMIT = 500
 TICKET_LIST_LIMIT = 500
 SNAPSHOT_MAX_BYTES = 300_000
 EVENT_SCAN_LIMIT = 50
-EVENT_MAX_BYTES = 100_000
 DETAIL_EVENT_SCAN_LIMIT = 100
 ROUTE_WINDOW_DAYS = 7
 MAX_ROUTE_ROWS = 150
@@ -264,17 +265,6 @@ class FleetClient(Protocol):
     ) -> dict[str, Any]: ...
 
     async def agent_retire_inert(self) -> dict[str, Any]: ...
-
-    async def board_catchup(
-        self,
-        *,
-        cursor: int | None = None,
-        limit: int = 100,
-        ack: bool = True,
-        agent_name: str | None = None,
-        max_events: int | None = None,
-        max_bytes: int | None = None,
-    ) -> dict[str, Any]: ...
 
     async def ticket_list(
         self, *, include_closed: bool = False, limit: int = 100
@@ -3107,6 +3097,57 @@ async def _client_call(client: Any, name: str, arguments: dict[str, Any]) -> Any
     raise AttributeError(f"Client {type(client).__name__} does not support {name}")
 
 
+class _DashboardTransportClient(BoardClient):
+    """Open an MCP transport without registering a board seat."""
+
+    async def board_join(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        # BoardClient.__aenter__ invokes this hook. Dashboard reads and already-
+        # joined writes must not create another seat or journal event.
+        return {"ok": True, "joined": False}
+
+    async def ticket_list(
+        self,
+        *,
+        status: str | None = None,
+        assigned_to: str | None = None,
+        include_closed: bool = False,
+        include_archived: bool = True,
+        limit: int = 100,
+        review_unclaimed_only: bool = False,
+        ticket_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "include_closed": include_closed,
+            "include_archived": include_archived,
+            "limit": limit,
+            "review_unclaimed_only": review_unclaimed_only,
+        }
+        optional = {
+            "status": status,
+            "assigned_to": assigned_to,
+            "ticket_ids": ticket_ids,
+        }
+        arguments.update(
+            {key: value for key, value in optional.items() if value is not None}
+        )
+        return await self._call("ticket_list", arguments)
+
+    async def memory_search(
+        self,
+        query: str,
+        *,
+        tag: str | None = None,
+        author: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {"query": query, "limit": limit}
+        if tag is not None:
+            arguments["tag"] = tag
+        if author is not None:
+            arguments["author"] = author
+        return await self._call("memory_search", arguments)
+
+
 class FleetFetcher:
     def __init__(
         self,
@@ -3120,15 +3161,78 @@ class FleetFetcher:
         self._intake_write_lock = threading.Lock()
         self._intake_submissions: dict[str, list[tuple[str, datetime]]] = {}
         self._board_work_dirs: dict[str, str | None] = {}
+        self._write_join_lock = threading.Lock()
+        self._write_joins: dict[str, concurrent.futures.Future[None]] = {}
 
     def _client(self, board_id: str) -> Any:
-        return self.client_factory(
-            self.config.url,
-            self.config.token,
-            board_id,
-            agent_name=self.config.agent_name,
-            capabilities={"can_work": False, "can_review": False},
-        )
+        """Return an anonymous read transport; entering it never joins a seat."""
+        if self.client_factory is BoardClient:
+            return _DashboardTransportClient(
+                self.config.url,
+                self.config.token,
+                board_id,
+                agent_name="",
+                role=None,
+            )
+        return self.client_factory(self.config.url, self.config.token, board_id)
+
+    def _write_transport(self, board_id: str) -> Any:
+        if self.client_factory is BoardClient:
+            return _DashboardTransportClient(
+                self.config.url,
+                self.config.token,
+                board_id,
+                agent_name=self.config.agent_name,
+                role="reviewer",
+                capabilities={"can_work": False, "can_review": False},
+                allow_takeover=True,
+            )
+        return self.client_factory(self.config.url, self.config.token, board_id)
+
+    async def _join_write_seat(self, board_id: str, client: Any) -> None:
+        arguments = {
+            "agent_name": self.config.agent_name,
+            "role": "reviewer",
+            "capabilities": {"can_work": False, "can_review": False},
+            "allow_takeover": True,
+        }
+        if isinstance(client, _DashboardTransportClient):
+            await client._call("board_join", arguments)  # noqa: SLF001
+            return
+        join = getattr(client, "board_join", None)
+        if callable(join):
+            await join(**arguments)
+
+    async def _ensure_write_join(self, board_id: str) -> None:
+        """Perform at most one lazy board_join per board across request loops."""
+        leader = False
+        with self._write_join_lock:
+            joined = self._write_joins.get(board_id)
+            if joined is None:
+                joined = concurrent.futures.Future()
+                self._write_joins[board_id] = joined
+                leader = True
+        if not leader:
+            await asyncio.shield(asyncio.wrap_future(joined))
+            return
+        try:
+            async with self._write_transport(board_id) as client:
+                await self._join_write_seat(board_id, client)
+        except BaseException as exc:
+            with self._write_join_lock:
+                if self._write_joins.get(board_id) is joined:
+                    self._write_joins.pop(board_id, None)
+            joined.set_exception(exc)
+            joined.exception()
+            raise
+        else:
+            joined.set_result(None)
+
+    @asynccontextmanager
+    async def _write_client(self, board_id: str) -> Any:
+        await self._ensure_write_join(board_id)
+        async with self._write_transport(board_id) as client:
+            yield client
 
     async def _boards(self) -> list[tuple[str, str]]:
         async with self._client(self.config.home_board) as client:
@@ -3165,7 +3269,7 @@ class FleetFetcher:
             raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
         parse_client_project_registry({"state": {"value": encoded}})
-        async with self._client(self.config.home_board) as client:
+        async with self._write_client(self.config.home_board) as client:
             result = await client._call(  # noqa: SLF001 - CAS is not in old clients.
                 "board_state_update",
                 {
@@ -3185,16 +3289,10 @@ class FleetFetcher:
     async def _board_event_feed(
         self,
         client: FleetClient,
-        latest_seq: int,
+        _latest_seq: int,
         event_limit: int = EVENT_SCAN_LIMIT,
     ) -> list[dict[str, Any]]:
-        result = await client.board_catchup(
-            cursor=max(0, latest_seq - event_limit),
-            limit=event_limit,
-            ack=False,
-            max_events=event_limit,
-            max_bytes=EVENT_MAX_BYTES,
-        )
+        result = await client.board_dispatch_events(limit=event_limit)
         events = result.get("events")
         return events if isinstance(events, list) else []
 
@@ -3456,7 +3554,7 @@ class FleetFetcher:
         content = payload.get("content")
         if content is not None and not isinstance(content, dict):
             raise ValueError("content must be an object")
-        async with self._client(board_id) as client:
+        async with self._write_client(board_id) as client:
             result = await client.ticket_human_resolve(
                 ticket_id,
                 request_id=request_id,
@@ -3604,7 +3702,7 @@ class FleetFetcher:
         active = {active_board for _label, active_board in await self._boards()}
         if board_id not in active:
             raise ValueError("board_id is not registry-active")
-        async with self._client(board_id) as client:
+        async with self._write_client(board_id) as client:
             policy_result = await client.board_dispatch_policy_set(
                 offer_ttl_s=offer_ttl,
                 broadcast_reoffer_s=broadcast_reoffer_s,
@@ -3626,7 +3724,7 @@ class FleetFetcher:
         active = {active_board for _label, active_board in await self._boards()}
         if board_id not in active:
             raise ValueError("board_id is not registry-active")
-        async with self._client(board_id) as client:
+        async with self._write_client(board_id) as client:
             return await client.agent_retire(agent_id)
 
     async def retire_inert(self, board_id: str) -> dict[str, Any]:
@@ -3635,7 +3733,7 @@ class FleetFetcher:
         active = {active_board for _label, active_board in await self._boards()}
         if board_id not in active:
             raise ValueError("board_id is not registry-active")
-        async with self._client(board_id) as client:
+        async with self._write_client(board_id) as client:
             return await client.agent_retire_inert()
 
     async def fetch_config(self) -> dict[str, Any]:
@@ -3733,7 +3831,7 @@ class FleetFetcher:
         # One process-side critical section makes concurrent dashboard requests
         # deterministic. Central's expected_sha256 remains the cross-process gate.
         with self._intake_write_lock:
-            async with self._client(board_id) as client:
+            async with self._write_client(board_id) as client:
                 try:
                     raw = await client.board_state_get(key=INTAKE_STATE_KEY)
                 except BoardClientError as exc:
@@ -3839,7 +3937,7 @@ class FleetFetcher:
         decided_at = now.astimezone(timezone.utc).isoformat()
 
         with self._intake_write_lock:
-            async with self._client(board_id) as client:
+            async with self._write_client(board_id) as client:
                 raw = await client.board_state_get(key=INTAKE_STATE_KEY)
                 rows, tombstones, current_text = _intake_state_value(raw, board_id)
                 if current_text is None or not hmac.compare_digest(
@@ -3923,7 +4021,7 @@ class FleetFetcher:
         clean["updated_at"] = datetime.now(timezone.utc).isoformat()
         clean["updated_by"] = self.config.agent_name
         encoded = json.dumps(clean, sort_keys=True, separators=(",", ":"))
-        async with self._client(self.config.home_board) as client:
+        async with self._write_client(self.config.home_board) as client:
             try:
                 current = await client.board_state_get(key=CONFIG_STATE_KEY)
             except BoardClientError as exc:
@@ -4199,7 +4297,7 @@ class FleetFetcher:
         except Exception:
             board_already_present = False
 
-        async with self._client(board_id) as client:
+        async with self._write_client(board_id) as client:
             if board_already_present:
                 steps.append({
                     "step": "board_create",
