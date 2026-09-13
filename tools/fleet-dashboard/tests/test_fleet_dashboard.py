@@ -993,6 +993,62 @@ def test_fetcher_requests_central_max_snapshot_bounds() -> None:
     }
 
 
+def test_dashboard_reuses_one_takeover_client_join_per_process() -> None:
+    factory_calls: list[tuple[str, dict[str, object]]] = []
+    enter_calls = 0
+    exit_calls = 0
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            nonlocal enter_calls
+            enter_calls += 1
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            nonlocal exit_calls
+            exit_calls += 1
+
+        async def board_state_get(self, *, key: str) -> dict:
+            assert key == "project_registry"
+            return registry({})
+
+    def factory(
+        _url: str, _token: str, board_id: str, **kwargs: object
+    ) -> Client:
+        factory_calls.append((board_id, dict(kwargs)))
+        return Client()
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=factory)
+    cache = dashboard.DashboardCache(fetcher, 5.0)
+
+    try:
+        cache.get_project_registry()
+        cache.get_project_registry()
+        assert enter_calls == 1
+        assert factory_calls == [
+            (
+                "pursers",
+                {
+                    "agent_name": "fleet-dashboard-viewer",
+                    "capabilities": {"can_work": False, "can_review": False},
+                    "allow_takeover": True,
+                },
+            )
+        ]
+    finally:
+        cache.close()
+
+    assert exit_calls == 1
+
+
 def test_output_rows_and_titles_are_bounded() -> None:
     tickets = [
         {
