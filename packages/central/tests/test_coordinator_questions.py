@@ -146,6 +146,32 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
             message="Which rollout order do you want", kind="decision", **extra,
         )
 
+    async def offered_ticket(self, ticket_id: str = "TK-offered") -> None:
+        self.principal = self.worker
+        await self.call(
+            "agent_capabilities_set", agent_name="worker",
+            capabilities={
+                "tier_max": 2, "can_work": True, "can_review": False,
+            },
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=60
+        )
+        created = (
+            await self.call(
+                "ticket_create", ticket_id=ticket_id,
+                agent_name="admin-agent", title="Dispatch problem",
+                description="Report a pre-claim dispatch problem",
+                target_url="pursers/work", scope="interactive-no-send",
+                required_fields=["test_output"], assigned_to="worker",
+            )
+        ).structured_content
+        self.assertEqual(
+            created["ticket"]["work_offer"]["agent_id"],
+            self.agent_ids["worker"],
+        )
+
     def binding(self, canonical: str) -> str:
         return central.current_host_binding(self.agent_ids[canonical])
 
@@ -196,6 +222,75 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
             await self.call(
                 "ticket_question_ask", ticket_id="TK-comm", agent_name="other",
                 message="Let me in", kind="decision",
+            )
+
+    async def test_leaseless_information_about_own_offer_is_routed(self) -> None:
+        await self.register_coordinators("coord")
+        await self.offered_ticket()
+        self.principal = self.worker
+        asked = (
+            await self.call(
+                "ticket_question_ask", ticket_id="TK-offered",
+                agent_name="worker", message="My offer cannot be claimed",
+                kind="information", message_id="MSG-dispatch-problem",
+            )
+        ).structured_content
+        self.assertEqual(
+            asked["event"]["recipient_identities"], [self.agent_ids["coord"]]
+        )
+        self.assertEqual(
+            asked["question"]["asked_by"],
+            {
+                "agent_id": self.agent_ids["worker"],
+                "agent_name": "worker",
+                "principal_id": self.worker.principal_id,
+            },
+        )
+        self.principal = self.coordinator
+        inbox = (
+            await self.call("board_question_inbox", agent_name="coord", state="open")
+        ).structured_content
+        self.assertEqual(inbox["total"], 1)
+        self.assertEqual(inbox["questions"][0]["ticket_id"], "TK-offered")
+
+    async def test_leaseless_non_information_kinds_are_refused(self) -> None:
+        await self.register_coordinators("coord")
+        await self.offered_ticket()
+        self.principal = self.worker
+        for kind in ("decision", "deliverable", "approval"):
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(ToolError, "coordinator question requires"):
+                    await self.call(
+                        "ticket_question_ask", ticket_id="TK-offered",
+                        agent_name="worker", message=f"Not allowed: {kind}",
+                        kind=kind,
+                    )
+
+    async def test_leaseless_information_requires_own_dispatch_context(self) -> None:
+        await self.register_coordinators("coord")
+        await self.offered_ticket()
+        self.principal = self.other
+        with self.assertRaisesRegex(ToolError, "own dispatch context"):
+            await self.call(
+                "ticket_question_ask", ticket_id="TK-offered",
+                agent_name="other", message="Cross-project dispatch report",
+                kind="information",
+            )
+
+    async def test_leaseless_information_is_bounded_to_one_open_per_seat(self) -> None:
+        await self.register_coordinators("coord")
+        await self.offered_ticket()
+        self.principal = self.worker
+        await self.call(
+            "ticket_question_ask", ticket_id="TK-offered", agent_name="worker",
+            message="First dispatch report", kind="information",
+            message_id="MSG-dispatch-first",
+        )
+        with self.assertRaisesRegex(ToolError, "already has an open"):
+            await self.call(
+                "ticket_question_ask", ticket_id="TK-offered",
+                agent_name="worker", message="Second dispatch report",
+                kind="information", message_id="MSG-dispatch-second",
             )
 
     async def test_review_lease_holder_may_ask_without_new_write_rights(self) -> None:

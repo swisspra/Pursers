@@ -8719,6 +8719,55 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 return entry
         return None
 
+    def seat_has_ticket_dispatch_context(
+        ticket: Mapping[str, Any], actor: Mapping[str, Any]
+    ) -> bool:
+        """Return whether this ticket's durable dispatch state names the seat."""
+        actor_id = actor.get("agent_id")
+        if not isinstance(actor_id, str) or not actor_id:
+            return False
+        if any(
+            ticket.get(field) == actor_id
+            for field in (
+                "assigned_to_agent_id",
+                "claimed_by_agent_id",
+                "last_claimed_by_agent_id",
+                "last_unclaimed_by_agent_id",
+                "last_work_offered_agent_id",
+                "last_review_offered_agent_id",
+                "last_review_released_by_agent_id",
+            )
+        ):
+            return True
+        for field in ("work_offer", "review_offer", "dispatch_state"):
+            value = ticket.get(field)
+            if isinstance(value, Mapping) and value.get("agent_id") == actor_id:
+                return True
+        for entry in ticket.get("dispatch_history", []):
+            if not isinstance(entry, Mapping):
+                continue
+            if any(
+                entry.get(field) == actor_id
+                for field in (
+                    "agent_id",
+                    "offered_agent_id",
+                    "previous_assigned_to_agent_id",
+                )
+            ):
+                return True
+        # An unresolved or name-bound assignment is the durable evidence used
+        # when the problem itself is an identity collision. Exact agent-id
+        # assignments were handled above and must not fall back to a name match.
+        if ticket.get("assigned_to_kind") in {"agent_name", "unresolved"}:
+            assigned = ticket.get("assigned_to")
+            actor_name = actor.get("agent_name")
+            return (
+                isinstance(assigned, str)
+                and isinstance(actor_name, str)
+                and assigned.casefold() == actor_name.casefold()
+            )
+        return False
+
     @tool()
     async def ticket_question_ask(
         board_id: str,
@@ -8776,10 +8825,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 review_lease.get("reviewer_agent_id") == actor["agent_id"]
                 and review_lease.get("reviewer_principal_id") == principal.principal_id
             )
-            if not (is_holder or is_reviewer or is_admin):
+            is_dispatch_information = (
+                kind == "information"
+                and not (is_holder or is_reviewer or is_admin)
+                and seat_has_ticket_dispatch_context(ticket, actor)
+            )
+            if not (is_holder or is_reviewer or is_admin or is_dispatch_information):
                 raise PermissionError(
                     "coordinator question requires the work lease, the review "
-                    "lease, or board admin"
+                    "lease, board admin, or the seat's own dispatch context for "
+                    "an information message"
                 )
             if ticket.get("status") in TERMINAL_TICKET_STATES:
                 raise ValueError(f"ticket is already {ticket['status']}")
@@ -8806,6 +8861,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         "renewed": [i for i in renewed if i != ticket_id],
                         "scrub_audit": None,
                     }
+            if is_dispatch_information:
+                for entry in questions:
+                    asked_by = entry.get("asked_by") or {}
+                    if (
+                        entry.get("state") == "open"
+                        and asked_by.get("agent_id") == actor["agent_id"]
+                    ):
+                        raise ValueError(
+                            "seat already has an open coordinator information "
+                            "message for this ticket"
+                        )
             if in_reply_to is not None and find_coordinator_question(
                 ticket, in_reply_to
             ) is None:
