@@ -1,0 +1,55 @@
+name: Feature request
+description: Propose a focused improvement to Pursers
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: Describe the user problem first. A small, evidence-backed proposal is easier to evaluate.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Who is affected, and what cannot be done safely or clearly today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the smallest useful behavior and its expected result.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds or reasons they are insufficient.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Primary component
+      options:
+        - Central
+        - Client or MCP connector
+        - Personal
+        - Wait bridge
+        - Fleet Dashboard or seat kit
+        - Importer
+        - AionUi extension
+        - Documentation or release tooling
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Supporting evidence
+      description: Add redacted examples, links, or measurements that clarify the need.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and discussions for this request.
+          required: true
+        - label: I removed credentials, private data, and identifying paths.
+          required: true
