@@ -12,12 +12,16 @@ status. The create form requires the same generated-ID fields as Central: title,
 description, target URL, scope, and required fields. It also accepts priority,
 tier, tags, and related files within bounded input limits.
 
-Home may cancel a non-terminal ticket only by asking Central to enforce its
-creator/current-executor/reviewer authority rule. The UI does not expose claim,
+Home may claim a live offer only as the exact offered identity under the stored
+door principal, and may cancel a non-terminal ticket only by asking Central to
+enforce its authority rules. Claim failures, including stale expired-offer
+controls, display the real bounded Central refusal; the browser never derives an
+expiry refusal from its local clock or a route error. The UI does not expose
 unclaim, renew, submit, review-claim, review, assignment, or synthetic status
 transitions. Workers retain ownership of execution and independent reviewers
-retain ownership of approval. Every displayed state is returned by `ticket_list`,
-`ticket_get`, `ticket_create`, or `ticket_cancel` on the configured board.
+retain ownership of approval. Every displayed state is returned by Central via
+`ticket_list`, `ticket_get`, `ticket_create`, `ticket_claim`, or `ticket_cancel`
+on the configured board.
 
 The loopback helper keeps one board session open while it runs. Its dedicated
 actor sends only the supported `can_work=false` and `can_review=false`
@@ -62,6 +66,7 @@ this ticket.
 - `backend_unavailable`: keep form data, restart/reconnect the helper, then retry.
 - `permission_denied`: use an authorized principal; no fallback mutation occurs.
 - `ticket_not_found`: refresh the list and choose a persisted ticket.
+- `claim_refused`: Central did not accept the exact offered identity; refresh the offer.
 - `conflict`: refresh because the ticket is already terminal or changed.
 - `invalid_input`: correct the named field before retrying.
 

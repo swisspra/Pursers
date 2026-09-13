@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +19,12 @@ os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 import central
 import pursers_client.client as client_module
 from pursers_client import BoardClient, BoardClientError
-from ticket_lifecycle import CAPABILITIES, TicketLifecycleService, create_sidecar_client
+from ticket_lifecycle import (
+    CAPABILITIES,
+    OFFER_REFUSAL,
+    TicketLifecycleService,
+    create_sidecar_client,
+)
 
 
 class TicketLifecycleRealCentralTests(unittest.IsolatedAsyncioTestCase):
@@ -154,6 +160,63 @@ class TicketLifecycleRealCentralTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(member["capabilities"]["can_work"])
         self.assertFalse(member["capabilities"]["can_review"])
         self.assertEqual(document["tickets"][ticket_id]["status"], "canceled")
+
+    async def test_claim_uses_real_central_offer_identity_and_forwards_refusal(self) -> None:
+        capabilities = {"can_work": True, "can_review": False, "tier_max": 2}
+        with patch.object(client_module, "streamable_http_client", return_value=self.mcp):
+            async with self._sidecar() as sidecar:
+                added = await self.mcp.call_tool("board_member_add", {
+                    "board_id": "home-board",
+                    "agent_name": sidecar.agent_name,
+                    "principal_id": self.member.principal_id,
+                    "role": "member",
+                })
+                self.assertFalse(added.is_error)
+                self.principal = self.member
+                async with self._client(
+                    "home-worker-a", capabilities=capabilities, allow_takeover=True,
+                ) as worker_a:
+                    lifecycle = TicketLifecycleService(sidecar, "home-board")
+
+                    async def create(title: str) -> dict[str, Any]:
+                        return await worker_a.ticket_create(
+                            None,
+                            title,
+                            description="Exercise the authenticated Central claim path.",
+                            target_url="home/ticket-claim",
+                            scope="interactive-no-send",
+                            required_fields=["branch_and_commit"],
+                            unassigned=True,
+                        )
+
+                    expired = await create("Refuse an expired real offer")
+                    offered_name = expired["ticket"]["work_offer"]["agent_name"]
+                    expires_at = expired["ticket"]["work_offer"]["expires_at_epoch"]
+                    with patch.object(central.time, "time", return_value=expires_at + 1):
+                        refused = await lifecycle.dispatch("claim", {
+                            "board": "home-board",
+                            "ticket_id": expired["ticket"]["ticket_id"],
+                            "agent_name": offered_name,
+                        })
+                    self.assertEqual(refused, {
+                        "ok": False,
+                        "error": {
+                            "code": "claim_refused",
+                            "message": OFFER_REFUSAL,
+                            "retryable": False,
+                        },
+                    })
+
+                    live = await create("Claim a live real offer")
+                    offered_name = live["ticket"]["work_offer"]["agent_name"]
+                    claimed = await lifecycle.dispatch("claim", {
+                        "board": "home-board",
+                        "ticket_id": live["ticket"]["ticket_id"],
+                        "agent_name": offered_name,
+                    })
+                    self.assertTrue(claimed["ok"])
+                    self.assertEqual(claimed["ticket"]["status"], "claimed")
+                    self.assertEqual(claimed["identity"]["agent_name"], offered_name)
 
 
 if __name__ == "__main__":

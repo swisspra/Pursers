@@ -1,7 +1,10 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 const { createTicketLifecycleAdapter } = require('../ticket_lifecycle/adapter.cjs');
 const { createHandlers } = require('../webui/routes.js');
 const { createHelperServer, TOKEN_HEADER } = require('../host/helper.cjs');
@@ -38,30 +41,67 @@ test('adapter rejects wrong boards and unsupported input before backend mutation
   });
   assert.equal((await lifecycle.create({ ...valid, board: 'other' })).error.code, 'board_mismatch');
   assert.equal((await lifecycle.create({ ...valid, tier: 4 })).error.code, 'invalid_input');
+  assert.equal((await lifecycle.claim({ ticket_id: 'TK-1', agent_name: '../other' })).error.code, 'invalid_input');
   assert.equal(calls, 0);
 });
 
-test('only persisted read, create, and cancel routes exist; submission and review stay unavailable', async () => {
+test('persisted read, create, claim, and cancel routes exist; submission and review stay unavailable', async () => {
   const calls = [];
   const handlers = createHandlers({
     expectedBoard: 'demo',
     runTicketLifecycle: async (operation, payload) => {
       calls.push({ operation, payload });
       if (operation === 'list') return { ok: true, board: 'demo', tickets: [{ ticket_id: 'TK-1', status: 'submitted' }] };
+      if (operation === 'claim') return {
+        ok: true,
+        board: 'demo',
+        ticket: { ticket_id: payload.ticket_id, status: 'claimed', claimed_by: payload.agent_name },
+        identity: { agent_id: 'AI-worker', principal_id: 'PR-worker', agent_name: payload.agent_name, role: 'worker' },
+      };
       return { ok: true, board: 'demo', ticket: { ticket_id: payload.ticket_id || 'TK-2', status: operation === 'cancel' ? 'canceled' : 'open' } };
     },
   });
   const list = await handlers.handle(new Request('http://127.0.0.1/pursers/tickets'));
   const create = await handlers.handle(new Request('http://127.0.0.1/pursers/tickets/create', { method: 'POST', body: JSON.stringify(valid) }));
+  const claim = await handlers.handle(new Request('http://127.0.0.1/pursers/tickets/claim', { method: 'POST', body: JSON.stringify({ ticket_id: 'TK-2', agent_name: 'worker-one' }) }));
   const cancel = await handlers.handle(new Request('http://127.0.0.1/pursers/tickets/cancel', { method: 'POST', body: JSON.stringify({ ticket_id: 'TK-2' }) }));
   const submit = await handlers.handle(new Request('http://127.0.0.1/pursers/tickets/submit', { method: 'POST', body: '{}' }));
   const review = await handlers.handle(new Request('http://127.0.0.1/pursers/tickets/review', { method: 'POST', body: '{}' }));
   assert.equal(list.status, 200);
   assert.equal(create.status, 200);
+  assert.equal(claim.status, 200);
+  assert.equal((await claim.json()).identity.agent_name, 'worker-one');
   assert.equal(cancel.status, 200);
   assert.equal(submit.status, 404);
   assert.equal(review.status, 404);
-  assert.deepEqual(calls.map((entry) => entry.operation), ['list', 'create', 'cancel']);
+  assert.deepEqual(calls.map((entry) => entry.operation), ['list', 'create', 'claim', 'cancel']);
+});
+
+test('claim rendering never turns a route 404 into expiry and preserves a real Central refusal', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'webui', 'app.js'), 'utf8');
+  const start = source.indexOf('function claimFailure(result)');
+  const end = source.indexOf('\nasync function loadTickets()', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const claimFailure = vm.runInNewContext(`${source.slice(start, end)}\nclaimFailure`, {
+    errorCode: (result) => result.code || result.error?.code || result.error || 'unknown_error',
+    messageFor: (result, fallback) => result.message || result.error?.message || fallback,
+  });
+  const missing = claimFailure({ ok: false, error: 'not_found' });
+  assert.equal(missing.code, 'not_found');
+  assert.doesNotMatch(missing.message, /expired|Central refused/i);
+  const refusal = claimFailure({
+    ok: false,
+    error: {
+      code: 'claim_refused',
+      message: 'ticket is not offered to this seat; wait for your offer',
+      retryable: false,
+    },
+  });
+  assert.deepEqual({ ...refusal }, {
+    code: 'claim_refused',
+    message: 'ticket is not offered to this seat; wait for your offer',
+  });
 });
 
 test('ticket routes enforce loopback origin and surface recovery status', async () => {
@@ -80,7 +120,7 @@ test('ticket routes enforce loopback origin and surface recovery status', async 
   assert.equal((await recovery.json()).error.retryable, true);
 });
 
-test('helper token and exact origin protect board-pinned ticket creation', async () => {
+test('helper token and exact origin protect board-pinned ticket creation and claim', async () => {
   const calls = [];
   let closed = false;
   const token = 'a'.repeat(64);
@@ -92,6 +132,20 @@ test('helper token and exact origin protect board-pinned ticket creation', async
     ticketLifecycle: {
       run: async (operation, payload) => {
         calls.push({ operation, payload });
+        if (operation === 'claim' && payload.ticket_id === 'TK-expired') return {
+          ok: false,
+          error: {
+            code: 'claim_refused',
+            message: 'ticket is not offered to this seat; wait for your offer',
+            retryable: false,
+          },
+        };
+        if (operation === 'claim') return {
+          ok: true,
+          board: 'demo',
+          ticket: { ticket_id: payload.ticket_id, status: 'claimed', claimed_by: payload.agent_name },
+          identity: { agent_id: 'AI-worker', principal_id: 'PR-worker', agent_name: payload.agent_name, role: 'worker' },
+        };
         return { ok: true, board: 'demo', ticket: { ticket_id: 'TK-real', status: 'open' } };
       },
       close: async () => { closed = true; },
@@ -110,7 +164,25 @@ test('helper token and exact origin protect board-pinned ticket creation', async
     const created = await fetch(url, options(token, origin));
     assert.equal(created.status, 200);
     assert.equal((await created.json()).ticket.ticket_id, 'TK-real');
-    assert.deepEqual(calls.map((call) => call.payload.board), ['demo']);
+    const claimOptions = (ticketId) => ({
+      ...options(token, origin),
+      body: JSON.stringify({ ticket_id: ticketId, agent_name: 'worker-one' }),
+    });
+    const claimed = await fetch(`http://127.0.0.1:${address.port}/pursers/tickets/claim`, claimOptions('TK-live'));
+    assert.equal(claimed.status, 200);
+    assert.equal((await claimed.json()).identity.agent_name, 'worker-one');
+    const refused = await fetch(`http://127.0.0.1:${address.port}/pursers/tickets/claim`, claimOptions('TK-expired'));
+    assert.equal(refused.status, 409);
+    assert.deepEqual(await refused.json(), {
+      ok: false,
+      error: {
+        code: 'claim_refused',
+        message: 'ticket is not offered to this seat; wait for your offer',
+        retryable: false,
+      },
+    });
+    assert.deepEqual(calls.map((call) => call.operation), ['create', 'claim', 'claim']);
+    assert.deepEqual(calls.map((call) => call.payload.board), ['demo', 'demo', 'demo']);
   } finally {
     await helper.close();
   }

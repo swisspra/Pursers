@@ -11,7 +11,8 @@ sys.path.insert(0, str(REPOSITORY / "packages" / "client" / "src"))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
-from ticket_lifecycle import CAPABILITIES, TicketLifecycleService
+from pursers_client import BoardClientError
+from ticket_lifecycle import CAPABILITIES, OFFER_REFUSAL, TicketLifecycleService
 
 
 class FakeClient:
@@ -31,6 +32,26 @@ class FakeClient:
     async def ticket_create(self, ticket_id, title, **kwargs):
         self.calls.append(("create", {"ticket_id": ticket_id, "title": title, **kwargs}))
         return {"ticket": {"ticket_id": "TK-new", "status": "open", "assigned_to": None}}
+
+    async def _call(self, operation, payload):
+        self.calls.append((operation, payload))
+        if payload["ticket_id"] == "TK-expired":
+            raise BoardClientError(OFFER_REFUSAL)
+        return {
+            "ticket": {
+                "ticket_id": payload["ticket_id"],
+                "status": "claimed",
+                "claimed_by": payload["agent_name"],
+                "claimed_by_agent_id": "AI-worker",
+                "claimed_by_principal_id": "PR-worker",
+            },
+            "actor": {
+                "agent_id": "AI-worker",
+                "principal_id": "PR-worker",
+                "agent_name": payload["agent_name"],
+                "role": "worker",
+            },
+        }
 
     async def ticket_cancel(self, ticket_id, *, reason=None):
         self.calls.append(("cancel", {"ticket_id": ticket_id, "reason": reason}))
@@ -66,10 +87,36 @@ def test_status_progression_is_read_from_board_and_no_submit_or_review_exists() 
         "tickets": [{"ticket_id": "TK-1", "status": "submitted"}],
         "latest_seq": 9,
     }
-    for operation in ("claim", "submit", "review"):
+    for operation in ("submit", "review"):
         result = asyncio.run(service.dispatch(operation, {"board": "demo"}))
         assert result["error"]["code"] == "unsupported_action"
     assert [call[0] for call in client.calls] == ["list"]
+
+
+def test_claim_uses_explicit_offer_identity_and_forwards_central_refusal() -> None:
+    client = FakeClient()
+    service = TicketLifecycleService(client, "demo")
+    claimed = asyncio.run(service.dispatch("claim", {
+        "board": "demo", "ticket_id": "TK-live", "agent_name": "worker-one",
+    }))
+    assert claimed["ticket"]["status"] == "claimed"
+    assert claimed["identity"] == {
+        "agent_id": "AI-worker",
+        "principal_id": "PR-worker",
+        "agent_name": "worker-one",
+        "role": "worker",
+    }
+    refused = asyncio.run(service.dispatch("claim", {
+        "board": "demo", "ticket_id": "TK-expired", "agent_name": "worker-one",
+    }))
+    assert refused == {
+        "ok": False,
+        "error": {"code": "claim_refused", "message": OFFER_REFUSAL, "retryable": False},
+    }
+    assert client.calls == [
+        ("ticket_claim", {"agent_name": "worker-one", "ticket_id": "TK-live"}),
+        ("ticket_claim", {"agent_name": "worker-one", "ticket_id": "TK-expired"}),
+    ]
 
 
 def test_board_isolation_and_cancel_use_central_authority() -> None:

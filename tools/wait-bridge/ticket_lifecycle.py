@@ -16,6 +16,8 @@ CAPABILITIES = {
     "can_review": False,
 }
 
+OFFER_REFUSAL = "ticket is not offered to this seat; wait for your offer"
+
 
 def _failure(code: str, message: str, *, retryable: bool = False) -> dict[str, Any]:
     return {"ok": False, "error": {"code": code, "message": message, "retryable": retryable}}
@@ -32,6 +34,13 @@ def _classify(exc: BaseException) -> dict[str, Any]:
     if isinstance(exc, (BoardClientError, OSError, RuntimeError)):
         return _failure("backend_unavailable", "The board connection is unavailable. Restart or reconnect the helper, then retry.", retryable=True)
     return _failure("invalid_input", "Central rejected the request.")
+
+
+def _classify_claim(exc: BaseException) -> dict[str, Any]:
+    message = str(exc)
+    if OFFER_REFUSAL in message:
+        return _failure("claim_refused", OFFER_REFUSAL)
+    return _classify(exc)
 
 
 class TicketLifecycleService:
@@ -67,6 +76,31 @@ class TicketLifecycleService:
                     unassigned=True,
                 )
                 return {"ok": True, "board": self.board, "ticket": result["ticket"]}
+            if operation == "claim":
+                try:
+                    result = await self.client._call(
+                        "ticket_claim",
+                        {
+                            "agent_name": payload["agent_name"],
+                            "ticket_id": payload["ticket_id"],
+                        },
+                    )
+                except (
+                    BoardClientError, KeyError, OSError, RuntimeError, ValueError
+                ) as exc:
+                    return _classify_claim(exc)
+                ticket = result["ticket"]
+                identity = result.get("actor") or {
+                    "agent_id": ticket["claimed_by_agent_id"],
+                    "principal_id": ticket["claimed_by_principal_id"],
+                    "agent_name": ticket["claimed_by"],
+                }
+                return {
+                    "ok": True,
+                    "board": self.board,
+                    "ticket": ticket,
+                    "identity": identity,
+                }
             if operation == "cancel":
                 result = await self.client.ticket_cancel(payload["ticket_id"], reason=payload.get("reason"))
                 ticket = result.get("ticket")

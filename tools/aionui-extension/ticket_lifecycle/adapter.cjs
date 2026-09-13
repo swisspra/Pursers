@@ -75,10 +75,15 @@ function createTicketLifecycleAdapter(options) {
     try {
       const payload = { board: expectedBoard };
       if (operation === 'create') Object.assign(payload, validateCreate(input));
-      if (operation === 'get' || operation === 'cancel') {
+      if (operation === 'get' || operation === 'claim' || operation === 'cancel') {
         const ticketId = text(input.ticket_id, 'ticket_id', 100, true);
         if (!SAFE_ID.test(ticketId)) throw new Error('ticket_id contains unsupported characters');
         payload.ticket_id = ticketId;
+      }
+      if (operation === 'claim') {
+        const agentName = text(input.agent_name, 'agent_name', 80, true);
+        if (!SAFE_ID.test(agentName)) throw new Error('agent_name contains unsupported characters');
+        payload.agent_name = agentName;
       }
       if (operation === 'cancel') payload.reason = text(input.reason, 'reason', 2000);
       const result = await invoke(operation, payload);
@@ -99,6 +104,7 @@ function createTicketLifecycleAdapter(options) {
     list: () => call('list'),
     get: (input) => call('get', input),
     create: (input) => call('create', input),
+    claim: (input) => call('claim', input),
     cancel: (input) => call('cancel', input),
     actionFor(ticket) {
       return ticket && !TERMINAL.has(ticket.status) ? 'cancel' : null;

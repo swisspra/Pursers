@@ -1084,7 +1084,7 @@ function makeTicketRow(ticket) {
     claim.className = 'button button-secondary';
     claim.dataset.claimOffer = expired ? 'expired' : 'live';
     claim.textContent = expired ? 'Try expired offer' : 'Claim live offer';
-    claim.addEventListener('click', () => claimOffer(ticket, claim, expired));
+    claim.addEventListener('click', () => claimOffer(ticket, claim));
     actions.append(claim);
   }
   if (!['closed', 'canceled', 'terminated'].includes(ticket.status)) {
@@ -1102,7 +1102,7 @@ function makeTicketRow(ticket) {
   return row;
 }
 
-async function claimOffer(ticket, button, expired) {
+async function claimOffer(ticket, button) {
   const row = button.closest('.ticket-row');
   const error = $('.claim-error', row);
   const offer = ticketOffer(ticket);
@@ -1115,16 +1115,27 @@ async function claimOffer(ticket, button, expired) {
   });
   setBusy(button, false);
   if (!response?.ok || !result.ok) {
-    const text = expired
-      ? 'Offer expired; Central refused the claim.'
-      : messageFor(result, 'The live offer could not be claimed. Refresh and retry.');
-    error.dataset.claimError = expired ? 'offer_expired' : errorCode(result);
-    setMessage(error, text, 'error');
+    const failure = claimFailure(result);
+    error.dataset.claimError = failure.code;
+    setMessage(error, failure.message, 'error');
     return;
   }
+  const claimed = result.identity?.agent_name || result.ticket?.claimed_by || result.ticket?.claimed_by_agent_name || 'the offered identity';
+  row.dataset.offerStatus = result.ticket?.status || 'claimed';
+  const identity = $('[data-claimed-identity]', row);
+  identity.dataset.claimedIdentity = claimed;
+  identity.textContent = `Claimed identity: ${claimed}`;
   error.dataset.claimError = '';
-  setMessage(ticketMessage, `${ticket.ticket_id} is claimed by ${result.ticket?.claimed_by || result.ticket?.claimed_by_agent_name || 'the offered identity'}.`, 'success');
+  setMessage(ticketMessage, `${ticket.ticket_id} is claimed by ${claimed}.`, 'success');
   await loadTickets();
+}
+
+function claimFailure(result) {
+  const code = errorCode(result);
+  return {
+    code,
+    message: messageFor(result, 'The offer could not be claimed. Refresh and retry.'),
+  };
 }
 
 async function loadTickets() {

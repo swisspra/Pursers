@@ -84,7 +84,7 @@ function ticketResponseStatus(value) {
   const code = value.error && value.error.code;
   if (code === 'permission_denied') return 403;
   if (code === 'ticket_not_found') return 404;
-  if (code === 'conflict') return 409;
+  if (code === 'conflict' || code === 'claim_refused' || code === 'offer_expired') return 409;
   if (code === 'backend_unavailable' || code === 'not_connected') return 503;
   if (code === 'board_mismatch' || code === 'invalid_input') return 422;
   return 502;
@@ -304,6 +304,7 @@ function createHandlers(dependencies = {}) {
     if (request.method === 'GET' && url.pathname === '/pursers/tickets') return ticketTyped(request, 'list');
     if (request.method === 'POST' && url.pathname === '/pursers/tickets/get') return ticketTyped(request, 'get');
     if (request.method === 'POST' && url.pathname === '/pursers/tickets/create') return ticketTyped(request, 'create');
+    if (request.method === 'POST' && url.pathname === '/pursers/tickets/claim') return ticketTyped(request, 'claim');
     if (request.method === 'POST' && url.pathname === '/pursers/tickets/cancel') return ticketTyped(request, 'cancel');
     if (request.method === 'POST' && url.pathname === '/pursers/seat-lifecycle/join') return seatTyped(request, 'join', url);
     if (request.method === 'GET' && url.pathname === '/pursers/seat-lifecycle/status') return seatTyped(request, 'status', url);

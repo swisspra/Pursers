@@ -24,7 +24,9 @@ def test_ticket_lifecycle_ui_is_labeled_live_and_keyboard_reachable() -> None:
 def test_home_exposes_no_worker_submission_or_reviewer_approval_route() -> None:
     routes = read("webui/routes.js")
     adapter = read("ticket_lifecycle/adapter.cjs")
-    for forbidden in ("/pursers/tickets/claim", "/pursers/tickets/submit", "/pursers/tickets/review"):
+    for forbidden in ("/pursers/tickets/submit", "/pursers/tickets/review"):
         assert forbidden not in routes
+    assert "'/pursers/tickets/claim'" in routes
+    assert "claim: (input) => call('claim', input)" in adapter
     assert "create: (input) => call('create', input)" in adapter
     assert "cancel: (input) => call('cancel', input)" in adapter

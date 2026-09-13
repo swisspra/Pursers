@@ -812,6 +812,7 @@ def test_repository_discovery_reports_assembled_contracts() -> None:
         "/pursers/team/status",
         "/pursers/tickets",
         "/pursers/tickets/cancel",
+        "/pursers/tickets/claim",
         "/pursers/tickets/create",
         "/pursers/tickets/get",
         "/pursers/tickets/status",

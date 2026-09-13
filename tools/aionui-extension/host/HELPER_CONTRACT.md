@@ -21,8 +21,8 @@ The helper:
 - defers MCP registration to the authenticated same-origin AionCore API;
 - removes ambient AionUi runtime variables before Team CLI calls and injects
   only an explicit complete issuer-owned runtime context when configured;
-- keeps one persistent board session for ticket reads, unassigned creation, and
-  Central-authorized cancellation;
+- keeps one persistent board session for ticket reads, unassigned creation,
+  exact-offer claims, and Central-authorized cancellation;
 - gives that dedicated actor neither work nor review capability;
 - keeps one persistent, inert board actor for standalone group operations;
 - pins group routes to the selected board and uses Central board-state CAS;
@@ -41,10 +41,13 @@ Partial context and inherited sibling/session variables are refused; the token
 is never accepted on argv or printed.
 
 Ticket routes are `/pursers/tickets`, `/pursers/tickets/status`,
-`/pursers/tickets/get`, `/pursers/tickets/create`, and
-`/pursers/tickets/cancel`. They are pinned to `--board` and inherit the exact
-Origin, helper token, body-size, and no-store controls above. No claim, submit,
-or review route exists. The helper closes its ticket sidecar during shutdown.
+`/pursers/tickets/get`, `/pursers/tickets/create`,
+`/pursers/tickets/claim`, and `/pursers/tickets/cancel`. They are pinned to
+`--board` and inherit the exact Origin, helper token, body-size, and no-store
+controls above. Claim uses the stored principal's authenticated Central client
+and an exact offered identity; Central refusals are returned unchanged from the
+bounded sidecar result. No submit or review route exists. The helper closes its
+ticket sidecar during shutdown.
 
 Standalone seat routes are `/pursers/seat-lifecycle/join`,
 `/pursers/seat-lifecycle/status`, and `/pursers/seat-lifecycle/disconnect`.
