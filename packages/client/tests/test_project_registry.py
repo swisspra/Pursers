@@ -770,3 +770,92 @@ def test_single_board_drain_resyncs_compacted_cursor() -> None:
 
     assert asyncio.run(drain()) == []
     assert observed == [57]
+
+
+def test_registry_wait_caches_permanent_join_denial() -> None:
+    joins: list[str] = []
+
+    class Raw:
+        async def call_tool(self, name, arguments, **_kwargs):
+            assert name == "board_join"
+            joins.append(arguments["board_id"])
+            return SimpleNamespace(
+                is_error=True,
+                structured_content=None,
+                content=[SimpleNamespace(text="board access denied: invite required")],
+            )
+
+    client = SimpleNamespace(
+        board_id="pursers",
+        agent_name="worker-agent",
+        identity=SimpleNamespace(agent_id="AI-home"),
+        generation_token="home-gen",
+        _client=Raw(),
+    )
+
+    for _ in range(3):
+        response = asyncio.run(registry_module.wait_for_boards(
+            client,
+            ["fullplatts", "pursers"],
+            0,
+            0,
+            kinds=DISPATCH_KINDS,
+            submitted=False,
+            poll_fallback=True,
+        ))
+        assert response["boards"] == ["pursers"]
+        assert response["skipped_boards"] == {
+            "fullplatts": "board access denied: invite required"
+        }
+
+    # One refused join is remembered; the two re-arms did not ask Central again.
+    assert joins == ["fullplatts"]
+    cached = client._registry_wait_sessions["fullplatts"]
+    assert cached["denied"] == "board access denied: invite required"
+
+    # After the window expires the next wait probes exactly once more.
+    cached["denied_until"] = 0.0
+    asyncio.run(registry_module.wait_for_boards(
+        client,
+        ["fullplatts", "pursers"],
+        0,
+        0,
+        kinds=DISPATCH_KINDS,
+        submitted=False,
+        poll_fallback=True,
+    ))
+    assert joins == ["fullplatts", "fullplatts"]
+
+
+def test_registry_wait_still_retries_transient_join_failures() -> None:
+    joins: list[str] = []
+
+    class Raw:
+        async def call_tool(self, name, arguments, **_kwargs):
+            joins.append(arguments["board_id"])
+            return SimpleNamespace(
+                is_error=True,
+                structured_content=None,
+                content=[SimpleNamespace(text="board fullplatts is busy, retry")],
+            )
+
+    client = SimpleNamespace(
+        board_id="pursers",
+        agent_name="worker-agent",
+        identity=SimpleNamespace(agent_id="AI-home"),
+        _client=Raw(),
+    )
+
+    for _ in range(2):
+        asyncio.run(registry_module.wait_for_boards(
+            client,
+            ["fullplatts", "pursers"],
+            0,
+            0,
+            kinds=DISPATCH_KINDS,
+            submitted=False,
+            poll_fallback=True,
+        ))
+
+    assert joins == ["fullplatts", "fullplatts"]
+    assert "fullplatts" not in client._registry_wait_sessions

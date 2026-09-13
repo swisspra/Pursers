@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Wait bridge and client: a `board_join` refused as an authorization decision
+  (`invite required`, `lacks board:<scope>`, `board role not authorized`) is
+  now cached for 900 s instead of being retried on every wait cycle, cue, and
+  reconnect. One misconfigured Claude Desktop seat (`PURSERS_ROLE=orchestrator`
+  with a token lacking `board:coordinate`) and worker seats whose principal was
+  invited to one board only had issued more than 17,000 refused joins against
+  Central in two days. The bridge classifies these refusals as `denied`, sleeps
+  the subscriber for the same window after a permanent home-board failure, and
+  `_registry_boards` honors `PURSERS_BOARDS` (`registry` | `home` | list) so a
+  seat no longer joins every registry board its credential cannot enter.
+
 ### Changed
 
 - Client and seat kit: project-registry entries may declare an exact,
