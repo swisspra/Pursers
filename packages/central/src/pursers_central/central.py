@@ -127,9 +127,13 @@ DEFAULT_INLINE_HISTORY_LIMIT = 50
 MIN_INLINE_HISTORY_LIMIT = 1
 MAX_INLINE_HISTORY_LIMIT = 500
 DEFAULT_JOURNAL_RETENTION_DAYS = 7
+DEFAULT_JOURNAL_ROW_CAP = 50_000
+MIN_JOURNAL_ROW_CAP = MIN_COMPACTION_RETAIN_LAST + 1
+MAX_JOURNAL_ROW_CAP = 1_000_000
 DEFAULT_INVITE_PRUNE_AFTER_DAYS = 7
 MIN_RETENTION_DAYS = 0
 MAX_RETENTION_DAYS = 365
+BOARD_JOIN_AUTH_LOG_WINDOW_S = 600.0
 BOUNDED_HISTORY_FIELDS = (
     "dispatch_history",
     "submission_history",
@@ -1018,6 +1022,7 @@ class CentralBoard:
                 "archive_after_days": DEFAULT_ARCHIVE_AFTER_DAYS,
                 "inline_history_limit": DEFAULT_INLINE_HISTORY_LIMIT,
                 "journal_retention_days": DEFAULT_JOURNAL_RETENTION_DAYS,
+                "journal_row_cap": DEFAULT_JOURNAL_ROW_CAP,
                 "invite_prune_after_days": DEFAULT_INVITE_PRUNE_AFTER_DAYS,
                 "scrub_profile": "strict",
                 "review_policy": "strict",
@@ -1189,6 +1194,15 @@ class CentralBoard:
                 or not MIN_RETENTION_DAYS <= value <= MAX_RETENTION_DAYS
             ):
                 raise ValueError(f"board {field} is invalid")
+        journal_row_cap = config.setdefault(
+            "journal_row_cap", DEFAULT_JOURNAL_ROW_CAP
+        )
+        if (
+            isinstance(journal_row_cap, bool)
+            or not isinstance(journal_row_cap, int)
+            or not MIN_JOURNAL_ROW_CAP <= journal_row_cap <= MAX_JOURNAL_ROW_CAP
+        ):
+            raise ValueError("board journal_row_cap is invalid")
         allow_counts = config.setdefault("scrub_allow_counts", {})
         if not isinstance(allow_counts, dict) or any(
             not isinstance(rule, str)
@@ -2045,7 +2059,17 @@ class CentralBoard:
                     if parsed.timestamp() >= cutoff:
                         keep_from = index
                         break
-        retain = max(MIN_COMPACTION_RETAIN_LAST, len(rows) - keep_from)
+        row_cap = int(
+            doc.get("config", {}).get(
+                "journal_row_cap", DEFAULT_JOURNAL_ROW_CAP
+            )
+        )
+        # Reserve one row for the compaction event appended below so the
+        # resulting journal, not merely the pre-event tail, respects the cap.
+        retain = min(
+            max(MIN_COMPACTION_RETAIN_LAST, len(rows) - keep_from),
+            row_cap - 1,
+        )
         if retain >= len(rows):
             return {"removed": 0, "retained": len(rows)}
         compacted = self.journal.compact(board_id, retain)
@@ -2401,6 +2425,44 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             clock_skew_s=clock_skew_s,
         )
     )
+    join_authorization_log_state: dict[
+        tuple[str, str, str], dict[str, int | float]
+    ] = {}
+
+    def log_board_join_authorization_failure(
+        *,
+        board_id: str,
+        principal: Principal,
+        agent_name: str,
+        requested_role: str,
+        refusal_reason: str,
+    ) -> None:
+        """Rate-limit repeated join denials without losing suppression counts."""
+        key = (principal.principal_id, board_id, refusal_reason)
+        now = time.monotonic()
+        prior = join_authorization_log_state.get(key)
+        if (
+            prior is not None
+            and now - float(prior["logged_at"]) < BOARD_JOIN_AUTH_LOG_WINDOW_S
+        ):
+            prior["suppressed_count"] = int(prior["suppressed_count"]) + 1
+            return
+        suppressed_count = (
+            int(prior["suppressed_count"]) if prior is not None else 0
+        )
+        log_runtime_event(
+            "board_join_authorization_failed",
+            board_id=board_id,
+            principal_id_prefix=principal.principal_id[:12],
+            agent_name=agent_name,
+            requested_role=requested_role,
+            refusal_reason=refusal_reason,
+            suppressed_count=suppressed_count,
+        )
+        join_authorization_log_state[key] = {
+            "logged_at": now,
+            "suppressed_count": 0,
+        }
 
     def active_board_ids() -> list[str]:
         boards = list(service.board_ids_by_token.values())
@@ -5507,6 +5569,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         "inline_history_limit", DEFAULT_INLINE_HISTORY_LIMIT
                     )
                 ),
+                "journal_retention_days": int(
+                    document["config"].get(
+                        "journal_retention_days", DEFAULT_JOURNAL_RETENTION_DAYS
+                    )
+                ),
+                "journal_row_cap": int(
+                    document["config"].get(
+                        "journal_row_cap", DEFAULT_JOURNAL_ROW_CAP
+                    )
+                ),
                 "scrub_profile": board_scrub_profile(document),
                 "review_policy": board_review_policy(document),
                 "dispatch_enabled": dispatch_enabled(document),
@@ -5902,13 +5974,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             requested_role = (
                 validate_seat_role(principal, role) if role is not None else None
             )
-        except PermissionError:
-            log_runtime_event(
-                "board_join_authorization_failed",
+        except PermissionError as exc:
+            log_board_join_authorization_failure(
                 board_id=board_id,
-                principal_id_prefix=principal.principal_id[:12],
+                principal=principal,
                 agent_name=agent_name,
                 requested_role=role or "default",
+                refusal_reason=str(exc),
             )
             raise
         if (
@@ -6000,31 +6072,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
         try:
             result = service.mutate(board_id, join, require_generation=False)
-        except PermissionError:
-            log_runtime_event(
-                "board_join_authorization_failed",
+        except PermissionError as exc:
+            log_board_join_authorization_failure(
                 board_id=board_id,
-                principal_id_prefix=principal.principal_id[:12],
+                principal=principal,
                 agent_name=agent_name,
                 requested_role=role or "default",
+                refusal_reason=str(exc),
             )
             raise
         collision = result.get("collision")
         if collision is not None:
-            actor = collision["actor"]
             reason = collision["reason"]
-            await append_and_publish(
-                board_id,
-                actor,
-                SEAT_NAME_COLLISION,
-                resource_uri(board_id, "agent", actor["agent_id"]),
-                collision["recipients"],
-                ctx,
-                attempted_agent_id=actor["agent_id"],
-                attempted_agent_name=agent_name,
-                principal_id=principal.principal_id,
-                refusal_reason=reason,
-            )
             raise ValueError(reason)
         if result["role_defaulted_from_membership"]:
             note_key = (board_id, principal.principal_id, agent_name)
@@ -6136,20 +6195,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         result = service.mutate(board_id, onboard, require_generation=False)
         collision = result.get("collision")
         if collision is not None:
-            actor = collision["actor"]
             reason = collision["reason"]
-            await append_and_publish(
-                board_id,
-                actor,
-                SEAT_NAME_COLLISION,
-                resource_uri(board_id, "agent", actor["agent_id"]),
-                collision["recipients"],
-                ctx,
-                attempted_agent_id=actor["agent_id"],
-                attempted_agent_name=agent_name,
-                principal_id=principal.principal_id,
-                refusal_reason=reason,
-            )
             raise ValueError(reason)
         release_events = await publish_releases(
             board_id, result["released"], principal, ctx
@@ -6597,6 +6643,104 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "stale_after_days": stale_after_days,
             "previous_stale_after_days": result["previous"],
             "changed": result["previous"] != stale_after_days,
+            "renewed_ticket_ids": result["renewed"],
+            "events": events,
+        }
+
+    @tool()
+    async def board_journal_retention_set(
+        board_id: str,
+        agent_name: str,
+        journal_retention_days: int,
+        journal_row_cap: int,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Set the journal time window and hard row cap for one board."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        if (
+            isinstance(journal_retention_days, bool)
+            or not isinstance(journal_retention_days, int)
+            or not MIN_RETENTION_DAYS
+            <= journal_retention_days
+            <= MAX_RETENTION_DAYS
+        ):
+            raise ValueError(
+                f"journal_retention_days must be between {MIN_RETENTION_DAYS} "
+                f"and {MAX_RETENTION_DAYS}"
+            )
+        if (
+            isinstance(journal_row_cap, bool)
+            or not isinstance(journal_row_cap, int)
+            or not MIN_JOURNAL_ROW_CAP
+            <= journal_row_cap
+            <= MAX_JOURNAL_ROW_CAP
+        ):
+            raise ValueError(
+                f"journal_row_cap must be between {MIN_JOURNAL_ROW_CAP} "
+                f"and {MAX_JOURNAL_ROW_CAP}"
+            )
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        now = time.time()
+
+        def set_policy(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            membership = service.resolve_board_context(
+                document, principal.principal_id
+            )
+            coordinator = (
+                COORDINATOR_SCOPE in principal.scopes
+                and actor.get("role") in {"coordinator", "orchestrator"}
+            )
+            if membership.get("role") != "admin" and not coordinator:
+                raise PermissionError(
+                    "changing journal retention requires board admin or coordinator"
+                )
+            config = document["config"]
+            previous_days = int(
+                config.get(
+                    "journal_retention_days", DEFAULT_JOURNAL_RETENTION_DAYS
+                )
+            )
+            previous_cap = int(
+                config.get("journal_row_cap", DEFAULT_JOURNAL_ROW_CAP)
+            )
+            config["journal_retention_days"] = journal_retention_days
+            config["journal_row_cap"] = journal_row_cap
+            config["journal_retention_updated_at"] = iso_at(now)
+            config["journal_retention_updated_by_agent_id"] = actor["agent_id"]
+            return {
+                "previous_days": previous_days,
+                "previous_cap": previous_cap,
+                "released": released,
+                "renewed": renewed,
+            }
+
+        result = service.mutate(board_id, set_policy)
+        compacted = service.journal_sweep(
+            board_id, retention_days=journal_retention_days, now=now
+        )
+        if compacted.get("removed", 0) > 0:
+            await ctx.notify_resource_updated(f"board://{board_id}/journal")
+        events = await publish_releases(
+            board_id, result["released"], principal, ctx
+        )
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "journal_retention_days": journal_retention_days,
+            "previous_journal_retention_days": result["previous_days"],
+            "journal_row_cap": journal_row_cap,
+            "previous_journal_row_cap": result["previous_cap"],
+            "changed": (
+                result["previous_days"] != journal_retention_days
+                or result["previous_cap"] != journal_row_cap
+            ),
+            "journal_compaction": compacted,
             "renewed_ticket_ids": result["renewed"],
             "events": events,
         }
@@ -11118,6 +11262,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "agents": agents,
             "claim_ttl_s": claim_ttl(document),
             "stale_after_days": board_stale_after_days(document),
+            "journal_retention_days": int(
+                document["config"].get(
+                    "journal_retention_days", DEFAULT_JOURNAL_RETENTION_DAYS
+                )
+            ),
+            "journal_row_cap": int(
+                document["config"].get("journal_row_cap", DEFAULT_JOURNAL_ROW_CAP)
+            ),
             "retired_or_stale_count": hidden_lifecycle_count,
             "scrub_profile": board_scrub_profile(document),
             "review_policy": current_review_policy,

@@ -258,20 +258,39 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         self.principal = self.worker_a
         with patch.object(central, "log_runtime_event") as runtime_event:
-            with self.assertRaisesRegex(ToolError, "board:coordinate"):
-                await self.call(
-                    "board_join",
-                    agent_name="misconfigured-coordinator",
-                    role="coordinator",
-                )
+            with patch.object(central.time, "monotonic", return_value=1_000.0):
+                for _ in range(3):
+                    with self.assertRaisesRegex(ToolError, "board:coordinate"):
+                        await self.call(
+                            "board_join",
+                            agent_name="misconfigured-coordinator",
+                            role="coordinator",
+                        )
+            with patch.object(central.time, "monotonic", return_value=1_601.0):
+                with self.assertRaisesRegex(ToolError, "board:coordinate"):
+                    await self.call(
+                        "board_join",
+                        agent_name="misconfigured-coordinator",
+                        role="coordinator",
+                    )
 
-        runtime_event.assert_any_call(
-            "board_join_authorization_failed",
-            board_id="pursers",
-            principal_id_prefix=self.worker_a.principal_id[:12],
-            agent_name="misconfigured-coordinator",
-            requested_role="coordinator",
+        failures = [
+            call
+            for call in runtime_event.call_args_list
+            if call.args == ("board_join_authorization_failed",)
+        ]
+        self.assertEqual(len(failures), 2)
+        first, after_window = (call.kwargs for call in failures)
+        self.assertEqual(first["board_id"], "pursers")
+        self.assertEqual(
+            first["principal_id_prefix"], self.worker_a.principal_id[:12]
         )
+        self.assertEqual(first["agent_name"], "misconfigured-coordinator")
+        self.assertEqual(first["requested_role"], "coordinator")
+        self.assertIn("board:coordinate", first["refusal_reason"])
+        self.assertEqual(first["suppressed_count"], 0)
+        self.assertEqual(after_window["refusal_reason"], first["refusal_reason"])
+        self.assertEqual(after_window["suppressed_count"], 2)
 
     async def test_ticket_list_filters_a_bounded_set_of_ticket_ids(self) -> None:
         for ticket_id in ("TK-projection-a", "TK-projection-b", "TK-projection-c"):
