@@ -271,6 +271,11 @@ tagged, and `skipped_boards` is absent. With `boards` present, the response is:
   ],
   "waited_s": 0.0,
   "timed_out": false,
+  "mode": "immediate",
+  "mode_by_board": {
+    "project-a": "immediate",
+    "project-b": "immediate"
+  },
   "reason": "journal",
   "resynced": {"project-a": false, "project-b": false, "invite-only-board": false},
   "skipped_boards": {"invite-only-board": "access denied reason"}
@@ -280,6 +285,12 @@ tagged, and `skipped_boards` is absent. With `boards` present, the response is:
 `new_seq` includes every requested board and must be passed back unchanged on
 re-arm. Each board keeps its own cursor, generation token, deterministic agent
 ID, filtering, and entry backlog scan. Events always carry `board_id`.
+`mode_by_board` reports how each accessible board produced the return:
+`immediate` means
+the entry catchup/backlog scan returned before blocking, `push` means the
+subscription stream proved ready, and `poll` means the configured polling path
+or push-fallback path actually ran. `mode` is that value when all boards agree,
+or `mixed` when they differ.
 Invite-required boards that the bearer cannot access are skipped. A refusal
 that is an authorization decision (`invite required`, `lacks board:<scope>`,
 `board role not authorized`) is remembered for `BOARD_DENIAL_RETRY_S` (900 s):
