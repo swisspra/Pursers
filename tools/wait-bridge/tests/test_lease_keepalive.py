@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import os
 import sys
 import unittest
@@ -142,17 +143,32 @@ class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
         ):
             keepalive.model_refresh_pending = True
             await keepalive._discover()
+            # Keepalive tick while the model is still live (recent call):
+            # capabilities must be preserved, not downgraded.
+            await keepalive._discover()
+            # Keepalive tick while the model is inside a2a_wait: preserved.
+            keepalive.last_model_interaction = time.monotonic() - 10**6
+            keepalive.begin_wait()
+            keepalive.model_refresh_pending = False  # a keepalive tick mid-wait
+            await keepalive._discover()
+            keepalive.end_wait()
+            # Keepalive tick for a truly idle Codex seat: downgrade.
+            keepalive.last_model_interaction = time.monotonic() - 10**6
+            keepalive.model_refresh_pending = False
             await keepalive._discover()
 
         joins = [arguments for name, arguments in client.calls if name == "board_join"]
-        self.assertEqual(len(joins), 2)
+        self.assertEqual(len(joins), 4)
         self.assertEqual(joins[0]["role"], "worker")
         self.assertEqual(joins[0]["renewal_source"], "model")
         self.assertEqual(joins[0]["capabilities"], configured)
-        self.assertEqual(joins[1]["role"], "worker")
-        self.assertEqual(joins[1]["renewal_source"], "keepalive")
+        for index in (1, 2):
+            self.assertEqual(joins[index]["role"], "worker")
+            self.assertEqual(joins[index]["renewal_source"], "keepalive")
+            self.assertEqual(joins[index]["capabilities"], configured, index)
+        self.assertEqual(joins[3]["renewal_source"], "keepalive")
         self.assertEqual(
-            joins[1]["capabilities"],
+            joins[3]["capabilities"],
             {**configured, "can_work": False, "can_review": False},
         )
 

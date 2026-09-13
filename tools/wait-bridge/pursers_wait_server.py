@@ -1977,7 +1977,17 @@ class LeaseKeepalive:
         if (
             selected_source == "keepalive"
             and _host_name() in {"codex", "codex-cli"}
+            and not self.model_is_live(
+                self.board_ttls.get(BOARD_ID, DEFAULT_CLAIM_TTL_S)
+            )
         ):
+            # Only an IDLE Codex seat (no live wait, no recent model call)
+            # stops advertising dispatch capability. A keepalive tick that
+            # fires while the model is inside a2a_wait, or shortly after a
+            # model tool call, must not overwrite the seat's capabilities on
+            # Central: that made every Codex seat flap between eligible and
+            # `no_eligible_worker`/`no_eligible_reviewer` on each keepalive
+            # cycle, so offers were revoked seconds after being issued.
             capabilities = {
                 **(capabilities or {}),
                 "can_work": False,

@@ -9,6 +9,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Wait bridge: the lease keepalive's discovery re-join on Codex hosts no longer
+  overwrites the seat's dispatch capabilities with `can_work=false,
+  can_review=false` while the model is live (inside `a2a_wait` or within the
+  idle limit). Only a truly idle Codex seat stops advertising capability. The
+  old behaviour made every Codex seat flap between eligible and
+  `no_eligible_worker`/`no_eligible_reviewer` on each keepalive tick, so
+  Central revoked offers seconds after issuing them.
 - Wait bridge and client: a `board_join` refused as an authorization decision
   (`invite required`, `lacks board:<scope>`, `board role not authorized`) is
   now cached for 900 s instead of being retried on every wait cycle, cue, and
