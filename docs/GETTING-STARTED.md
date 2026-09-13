@@ -372,7 +372,7 @@ curl --fail http://127.0.0.1:25999/api/extensions/pursers/assets/webui/candidate
 ```
 
 The last response must name the release commit. The packaged Home also needs
-its authenticated loopback helper because AionCore 0.2.2 serves extension
+its authenticated loopback helper because AionCore 0.2.1 serves extension
 assets but does not execute the declared JavaScript route handlers. Create a
 mode-`0600` local token and start the packaged helper against the same origin:
 
@@ -387,7 +387,7 @@ node tools/aionui-extension/host/helper.cjs \
   --bridge-state-dir /PATH/TO/private/bridge-state \
   --bridge-bin /PATH/TO/.venv/bin/pursers-wait-bridge \
   --aioncore-bin /PATH/TO/AionUi.app/Contents/Resources/bundled-aioncore/darwin-arm64/aioncore \
-  --core-version 0.2.2 \
+  --core-version 0.2.1 \
   --port 25998
 ```
 
@@ -614,7 +614,7 @@ $ python /PATH/TO/throwaway/aion_extension_http_probe.py
 {"candidate_commit":"28f81308d1cf3d40c4ed38091cc02d9c7d0827aa","schema_version":1}
 
 $ python /PATH/TO/throwaway/aionui_helper_probe.py
-{"aionui_helper":{"ok":true,"board_id_matches":true,"central":"throwaway","transport":"authenticated_loopback_helper","core_version":"0.2.2"}}
+{"aionui_helper":{"ok":true,"board_id_matches":true,"central":"throwaway","transport":"authenticated_loopback_helper","core_version":"0.2.1"}}
 
 $ curl --silent --show-error --write-out '\nHTTP %{http_code}\n' --request POST http://127.0.0.1:44321/mcp --header 'Accept: application/json, text/event-stream' --header 'Content-Type: application/json' --header 'Authorization: Bearer redacted' --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"getting-started-check","version":"1.0"}}}'
 {"error": "invalid_token", "error_description": "Authentication required"}
