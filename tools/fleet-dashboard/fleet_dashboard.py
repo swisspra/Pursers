@@ -3323,7 +3323,7 @@ class _FleetClientPool:
             "capabilities": dict(DASHBOARD_CAPABILITIES),
             "agent_platform": DASHBOARD_AGENT_PLATFORM,
             "task_focus": DASHBOARD_TASK_FOCUS,
-            "allow_matching_takeover": True,
+            "allow_takeover": True,
         }
 
     async def _session(self, board_id: str) -> _FleetBoardSession:
@@ -3397,8 +3397,8 @@ class _FleetClientProxy:
         self.capabilities = dict(DASHBOARD_CAPABILITIES)
         self.agent_platform = DASHBOARD_AGENT_PLATFORM
         self.task_focus = DASHBOARD_TASK_FOCUS
-        self.allow_takeover = False
-        self.allow_matching_takeover = True
+        self.allow_takeover = True
+        self.allow_matching_takeover = False
 
     async def __aenter__(self) -> _FleetClientProxy:
         return self
@@ -3430,6 +3430,12 @@ class FleetFetcher:
         self._intake_submissions: dict[str, list[tuple[str, datetime]]] = {}
         self._board_work_dirs: dict[str, str | None] = {}
         self._client_pool = _FleetClientPool(config, client_factory)
+
+    def enable_client_reuse(self) -> None:
+        """Keep one joined client per board for this viewer process."""
+
+        # This candidate's bounded session pool always provides process reuse.
+        return None
 
     def _client(self, board_id: str) -> Any:
         return _FleetClientProxy(self._client_pool, board_id)
@@ -4778,12 +4784,37 @@ class FleetFetcher:
         }
 
 
+class _ReusableAsyncRunner:
+    """Run dashboard coroutines on one event loop across HTTP requests."""
+
+    def __init__(self) -> None:
+        self._runner = asyncio.Runner()
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def run(self, awaitable: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("dashboard async runner is closed")
+            return self._runner.run(awaitable)
+
+    def close(self) -> None:
+        with self._lock:
+            if not self._closed:
+                self._runner.close()
+                self._closed = True
+
+
 class TimedCache:
     def __init__(
-        self, ttl_seconds: float, loader: Callable[[], Awaitable[dict[str, Any]]]
+        self,
+        ttl_seconds: float,
+        loader: Callable[[], Awaitable[dict[str, Any]]],
+        runner: Callable[[Awaitable[dict[str, Any]]], dict[str, Any]] = asyncio.run,
     ) -> None:
         self.ttl_seconds = ttl_seconds
         self.loader = loader
+        self.runner = runner
         self._lock = threading.Lock()
         self._expires_at = 0.0
         self._value: dict[str, Any] | None = None
@@ -4792,7 +4823,7 @@ class TimedCache:
         with self._lock:
             now = time.monotonic()
             if self._value is None or now >= self._expires_at:
-                self._value = asyncio.run(self.loader())
+                self._value = self.runner(self.loader())
                 self._expires_at = time.monotonic() + self.ttl_seconds
             return self._value
 
@@ -6070,29 +6101,29 @@ class DashboardCache:
         fetchers = fetcher if isinstance(fetcher, list) else [fetcher]
         if not fetchers:
             raise ValueError("at least one central is required")
+        self._async_runner = _ReusableAsyncRunner()
         self.fetchers: dict[str, FleetFetcher] = {}
         for item in fetchers:
             label = getattr(getattr(item, "config", None), "label", "default")
             if label in self.fetchers:
                 raise ValueError(f"duplicate central label: {label}")
             self.fetchers[label] = item
+            enable_reuse = getattr(item, "enable_client_reuse", None)
+            if callable(enable_reuse):
+                enable_reuse()
         self.default_central = next(iter(self.fetchers))
         # Preserve these public attributes for single-central callers/tests.
         self.fetcher = self.fetchers[self.default_central]
         self.ttl_seconds = ttl_seconds
-        self.fleet = TimedCache(ttl_seconds, self.fetcher.fetch)
+        self.fleet = TimedCache(ttl_seconds, self.fetcher.fetch, self._async_runner.run)
         self._fleets = {
             label: self.fleet
             if label == self.default_central
-            else TimedCache(ttl_seconds, item.fetch)
+            else TimedCache(ttl_seconds, item.fetch, self._async_runner.run)
             for label, item in self.fetchers.items()
         }
         self._detail_lock = threading.Lock()
         self._details: dict[tuple[str, str], TimedCache] = {}
-
-    def close(self) -> None:
-        for fetcher in self.fetchers.values():
-            fetcher.close()
 
     def labels(self) -> list[str]:
         return list(self.fetchers)
@@ -6133,6 +6164,7 @@ class DashboardCache:
                 cache = TimedCache(
                     self.ttl_seconds,
                     lambda: self.fetchers[label].fetch_board(board_id),
+                    self._async_runner.run,
                 )
                 self._details[key] = cache
         try:
@@ -6146,14 +6178,17 @@ class DashboardCache:
 
     def get_config(self, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
-        return self._labeled(asyncio.run(self.fetchers[label].fetch_config()), label)
+        return self._labeled(
+            self._async_runner.run(self.fetchers[label].fetch_config()), label
+        )
 
     def get_project_registry(
         self, central: str | None = None
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].fetch_project_registry()), label
+            self._async_runner.run(self.fetchers[label].fetch_project_registry()),
+            label,
         )
 
     def get_project_evidence_state(
@@ -6163,7 +6198,7 @@ class DashboardCache:
         central: str | None = None,
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
-        return asyncio.run(
+        return self._async_runner.run(
             self.fetchers[label].project_evidence_state(project_name, board_id)
         )
 
@@ -6175,7 +6210,7 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(
+            self._async_runner.run(
                 self.fetchers[label].save_project_registry(value, expected_sha256)
             ),
             label,
@@ -6192,7 +6227,7 @@ class DashboardCache:
     def get_intake(self, board_id: str, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].fetch_intake(board_id)), label
+            self._async_runner.run(self.fetchers[label].fetch_intake(board_id)), label
         )
 
     def get_dispatch(
@@ -6200,7 +6235,7 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].fetch_dispatch(board_id)), label
+            self._async_runner.run(self.fetchers[label].fetch_dispatch(board_id)), label
         )
 
     def save_dispatch(
@@ -6208,7 +6243,10 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].save_dispatch(board_id, value)), label
+            self._async_runner.run(
+                self.fetchers[label].save_dispatch(board_id, value)
+            ),
+            label,
         )
 
     def retire_agent(
@@ -6216,7 +6254,10 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].retire_agent(board_id, agent_id)), label
+            self._async_runner.run(
+                self.fetchers[label].retire_agent(board_id, agent_id)
+            ),
+            label,
         )
 
     def retire_inert(
@@ -6224,7 +6265,7 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].retire_inert(board_id)), label
+            self._async_runner.run(self.fetchers[label].retire_inert(board_id)), label
         )
 
     def resolve_human_request(
@@ -6235,7 +6276,7 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(
+            self._async_runner.run(
                 self.fetchers[label].resolve_human_request(board_id, payload)
             ),
             label,
@@ -6249,7 +6290,9 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].save_config(value, expected_sha256)),
+            self._async_runner.run(
+                self.fetchers[label].save_config(value, expected_sha256)
+            ),
             label,
         )
 
@@ -6258,7 +6301,10 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].save_intake(board_id, text)), label
+            self._async_runner.run(
+                self.fetchers[label].save_intake(board_id, text)
+            ),
+            label,
         )
 
     def decide_intake(
@@ -6272,7 +6318,7 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(
+            self._async_runner.run(
                 self.fetchers[label].decide_intake(
                     board_id, ask_id, action, expected_sha256, title
                 )
@@ -6283,7 +6329,7 @@ class DashboardCache:
     def get_doors(self, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].fetch_doors()), label
+            self._async_runner.run(self.fetchers[label].fetch_doors()), label
         )
 
     def copy_door(
@@ -6291,7 +6337,8 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].copy_door(board_id, role)), label
+            self._async_runner.run(self.fetchers[label].copy_door(board_id, role)),
+            label,
         )
 
     def rotate_door(
@@ -6299,7 +6346,8 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(self.fetchers[label].rotate_door(board_id, role)), label
+            self._async_runner.run(self.fetchers[label].rotate_door(board_id, role)),
+            label,
         )
 
     def add_project(
@@ -6313,7 +6361,7 @@ class DashboardCache:
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            asyncio.run(
+            self._async_runner.run(
                 self.fetchers[label].add_project(
                     project_name=project_name,
                     board_id=board_id,
@@ -6324,6 +6372,13 @@ class DashboardCache:
             ),
             label,
         )
+
+    def close(self) -> None:
+        for fetcher in self.fetchers.values():
+            close = getattr(fetcher, "close", None)
+            if callable(close):
+                close()
+        self._async_runner.close()
 
 
 HTML = r"""<!doctype html>

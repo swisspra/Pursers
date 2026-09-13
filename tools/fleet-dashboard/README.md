@@ -247,11 +247,10 @@ or writes them to logs. Central TLS verification follows
 The dashboard uses one persistent, serialized Central session per board. Its
 identity must be in the reserved `fleet-dashboard-session-*` namespace and has
 explicit `can_work=false` and `can_review=false` capabilities. A restart may
-reclaim that identity only when Central confirms that its role, capabilities,
-platform, and ownership marker all match. A collision with a worker, reviewer,
-or differently marked identity is refused instead of being taken over.
-The dashboard and Central must therefore be deployed from the same approved
-candidate or a later release that includes the matching-takeover contract.
+reclaim that fixed, dashboard-only identity with `allow_takeover=True`. The
+reserved namespace and CLI validation keep worker and reviewer seat names out
+of this takeover path. The dashboard and Central must be deployed from the same
+approved candidate or a later compatible release.
 
 Run the focused identity/session regression with these exact pytest node IDs
 (the two parametrized functions expand to five cases, for ten cases total):
@@ -563,6 +562,13 @@ for path in / /api/fleet /api/config /api/config/registry /api/attention; do
   curl --fail --silent --show-error --output /dev/null "http://127.0.0.1:8899$path"
 done
 ```
+
+The viewer keeps one joined client per board for the lifetime of the process and
+uses `allow_takeover=True` when it joins. Launchers embedding this dashboard,
+including the separately installed `pursers-personal-app/launch_dashboard.py`,
+must preserve that process lifetime instead of constructing a `FleetFetcher` for
+each request; they must also pass through the viewer's fixed single-process
+identity rather than starting multiple processes with the same agent name.
 
 ### Multiple central instances
 

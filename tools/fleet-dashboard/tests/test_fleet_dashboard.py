@@ -1011,8 +1011,8 @@ def test_fetcher_real_client_uses_reserved_read_only_session_identity() -> None:
     assert isinstance(client, dashboard._FleetClientProxy)
     assert client.agent_name == "fleet-dashboard-session-default"
     assert client.role == "worker"
-    assert client.allow_takeover is False
-    assert client.allow_matching_takeover is True
+    assert client.allow_takeover is True
+    assert client.allow_matching_takeover is False
     assert client.capabilities == {"can_work": False, "can_review": False}
     assert client.agent_platform == "pursers-fleet-dashboard"
     assert client.task_focus == "dashboard-session-owner-v1"
@@ -1162,10 +1162,7 @@ def test_config_api_reuses_dashboard_identity_after_restart_and_concurrently() -
                             )
                         }
                         existing = owner.active.get(identity)
-                        if existing is not None and (
-                            not captured.get("allow_matching_takeover")
-                            or existing != expected
-                        ):
+                        if existing is not None and not captured.get("allow_takeover"):
                             raise dashboard.BoardClientError("unsafe identity collision")
                         owner.active[identity] = expected
                         owner.join_count += 1
@@ -1233,7 +1230,7 @@ def test_config_api_reuses_dashboard_identity_after_restart_and_concurrently() -
             "capabilities": {"can_work": False, "can_review": False},
             "agent_platform": "pursers-fleet-dashboard",
             "task_focus": "dashboard-session-owner-v1",
-            "allow_matching_takeover": True,
+            "allow_takeover": True,
         }
         for arguments in central.client_arguments
     )
@@ -1289,6 +1286,65 @@ def test_fetcher_reconnects_once_after_transport_failure() -> None:
     assert result["registry"] == {"schema_version": 1, "projects": {}}
     assert central.joins == 2
     assert central.closes == 2
+
+
+def test_dashboard_reuses_one_takeover_client_join_per_process() -> None:
+    factory_calls: list[tuple[str, dict[str, object]]] = []
+    enter_calls = 0
+    exit_calls = 0
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            nonlocal enter_calls
+            enter_calls += 1
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            nonlocal exit_calls
+            exit_calls += 1
+
+        async def board_state_get(self, *, key: str) -> dict:
+            assert key == "project_registry"
+            return registry({})
+
+    def factory(
+        _url: str, _token: str, board_id: str, **kwargs: object
+    ) -> Client:
+        factory_calls.append((board_id, dict(kwargs)))
+        return Client()
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=factory)
+    cache = dashboard.DashboardCache(fetcher, 5.0)
+
+    try:
+        cache.get_project_registry()
+        cache.get_project_registry()
+        assert enter_calls == 1
+        assert factory_calls == [
+            (
+                "pursers",
+                {
+                    "agent_name": "fleet-dashboard-session-default",
+                    "role": "worker",
+                    "capabilities": {"can_work": False, "can_review": False},
+                    "agent_platform": "pursers-fleet-dashboard",
+                    "task_focus": "dashboard-session-owner-v1",
+                    "allow_takeover": True,
+                },
+            )
+        ]
+    finally:
+        cache.close()
+
+    assert exit_calls == 1
 
 
 def test_output_rows_and_titles_are_bounded() -> None:
