@@ -71,9 +71,15 @@ def synthetic_door(*, role: str = "worker") -> str:
             json.dumps(value, separators=(",", ":")).encode()
         ).decode().rstrip("=")
 
+    # PyJWT >= 2.14 base64url-decodes the signature segment even when the
+    # signature is not verified, so the synthetic signature must be valid
+    # base64url (the literal "synthetic-signature" has invalid padding).
+    synthetic_signature = (
+        base64.urlsafe_b64encode(b"synthetic-signature").decode().rstrip("=")
+    )
     compact = (
         f"{segment({'alg': 'RS256', 'kid': 'seat-test'})}."
-        f"{segment({'exp': 2_000_000_000})}.synthetic-signature"
+        f"{segment({'exp': 2_000_000_000})}.{synthetic_signature}"
     )
     return f"prs1.{segment({'u': 'http://127.0.0.1:8766/mcp', 'b': 'sandbox', 'r': role, 't': compact})}"
 

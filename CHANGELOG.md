@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Seat kit tests: the synthetic door token used by the door tests now carries
+  a valid base64url signature segment. PyJWT 2.14.0 (2026-09-11) decodes the
+  signature segment even with `verify_signature=False`, so the former literal
+  `synthetic-signature` failed with `Invalid crypto padding` and turned the
+  `ci` workflow red on every push; production doors were never affected.
 - Wait bridge: the lease keepalive's discovery re-join on Codex hosts no longer
   overwrites the seat's dispatch capabilities with `can_work=false,
   can_review=false` while the model is live (inside `a2a_wait` or within the
