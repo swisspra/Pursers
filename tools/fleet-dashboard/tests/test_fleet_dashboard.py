@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import socket
 import stat
 import subprocess
 import sys
@@ -16,14 +17,20 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Self
 from unittest.mock import MagicMock
 
+import httpx2
+import jwt
 import pytest
 import tomllib
+import uvicorn
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt.algorithms import RSAAlgorithm
 
 MODULE_PATH = Path(__file__).parents[1] / "fleet_dashboard.py"
 SPEC = importlib.util.spec_from_file_location("fleet_dashboard", MODULE_PATH)
@@ -35,10 +42,37 @@ SPEC.loader.exec_module(dashboard)
 CENTRAL_SRC = MODULE_PATH.parents[2] / "packages" / "central" / "src" / "pursers_central"
 sys.path.insert(0, str(CENTRAL_SRC))
 import central  # noqa: E402
+from runtime_health import create_streamable_http_app  # noqa: E402
 
 
 def registry(projects: dict) -> dict:
     return {"state": {"value": json.dumps({"schema_version": 1, "projects": projects})}}
+
+
+def local_central_token(root: Path, audience: str) -> tuple[Path, str]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
+    public.update({"kid": "fleet-dashboard-test", "alg": "RS256", "use": "sig"})
+    jwks = root / "jwks.json"
+    jwks.write_text(json.dumps({"keys": [public]}), encoding="utf-8")
+    now = datetime.now(timezone.utc)
+    token = jwt.encode(
+        {
+            "iss": "https://issuer.example",
+            "sub": "fleet-dashboard-test-principal",
+            "aud": audience,
+            "resource": audience,
+            "scope": "board:read board:write board:review",
+            "client_id": "fleet-dashboard-test",
+            "iat": now,
+            "nbf": now - timedelta(seconds=5),
+            "exp": now + timedelta(minutes=10),
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "fleet-dashboard-test"},
+    )
+    return jwks, token
 
 
 def test_registry_includes_home_and_excludes_paused_projects() -> None:
@@ -1047,6 +1081,204 @@ def test_dashboard_reuses_one_takeover_client_join_per_process() -> None:
         cache.close()
 
     assert exit_calls == 1
+
+
+def test_reusable_async_runner_keeps_one_loop_thread_across_callers() -> None:
+    runner = dashboard._ReusableAsyncRunner()
+    caller_threads: set[int] = set()
+    barrier = threading.Barrier(3)
+
+    async def identity() -> dict[str, int]:
+        return {
+            "loop": id(asyncio.get_running_loop()),
+            "thread": threading.get_ident(),
+        }
+
+    def call() -> dict[str, int]:
+        caller_threads.add(threading.get_ident())
+        barrier.wait(timeout=5)
+        return runner.run(identity())
+
+    try:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(lambda _index: call(), range(3)))
+    finally:
+        runner.close()
+
+    assert len(caller_threads) > 1
+    assert len({result["loop"] for result in results}) == 1
+    assert len({result["thread"] for result in results}) == 1
+    assert results[0]["thread"] not in caller_threads
+
+
+def test_threaded_dashboard_concurrent_fleet_and_workers_use_live_local_central(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    central_port = int(listener.getsockname()[1])
+    central_url = f"http://127.0.0.1:{central_port}/mcp"
+    jwks, token = local_central_token(tmp_path, central_url)
+    for key, value in {
+        "CENTRAL_AUTH_MODE": "jwt",
+        "CENTRAL_JWT_ISSUER": "https://issuer.example",
+        "CENTRAL_JWT_AUDIENCE": central_url,
+        "CENTRAL_JWKS_PATH": str(jwks),
+        "CENTRAL_ADMISSION": "invite",
+        "STORE_BACKEND": "sqlite",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    mcp, service = central.build_server(
+        "127.0.0.1", central_port, tmp_path / "central"
+    )
+    central_server = uvicorn.Server(
+        uvicorn.Config(
+            create_streamable_http_app(mcp, service, host="127.0.0.1"),
+            host="127.0.0.1",
+            port=central_port,
+            log_level="error",
+            access_log=False,
+        )
+    )
+    central_thread = threading.Thread(
+        target=central_server.run,
+        kwargs={"sockets": [listener]},
+        daemon=True,
+    )
+    central_thread.start()
+    deadline = time.monotonic() + 5
+    while not central_server.started and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert central_server.started
+
+    async def initialize_registry() -> None:
+        async with dashboard.BoardClient(
+            central_url,
+            token,
+            "pursers",
+            agent_name="fleet-dashboard-setup",
+            capabilities={"can_work": False, "can_review": False},
+        ) as client:
+            await client.board_state_update(
+                "project_registry",
+                json.dumps({"schema_version": 1, "projects": {}}),
+            )
+
+    asyncio.run(initialize_registry())
+    config = dashboard.Config(
+        url=central_url,
+        token=token,
+        home_board="pursers",
+        agent_name="fleet-dashboard-viewer",
+        stale_seconds=300,
+        cache_seconds=0,
+    )
+    cache = dashboard.DashboardCache(dashboard.FleetFetcher(config), 0)
+
+    class Workers:
+        enabled = True
+        roles = ("worker", "reviewer")
+
+        def list(self, _fleet_names: set[str]) -> list[dict]:
+            return []
+
+    dashboard_server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, worker_manager=Workers()),
+    )
+    dashboard_thread = threading.Thread(
+        target=dashboard_server.serve_forever, daemon=True
+    )
+    dashboard_thread.start()
+    root = f"http://127.0.0.1:{dashboard_server.server_port}"
+    barrier = threading.Barrier(3)
+
+    def request(path: str) -> tuple[str, int, dict]:
+        barrier.wait(timeout=5)
+        with urllib.request.urlopen(root + path, timeout=10) as response:
+            return path, response.status, json.loads(response.read())
+
+    try:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [
+                executor.submit(request, "/api/fleet"),
+                executor.submit(request, "/api/fleet"),
+                executor.submit(request, "/api/workers"),
+            ]
+            results = [future.result() for future in futures]
+    finally:
+        dashboard_server.shutdown()
+        dashboard_server.server_close()
+        dashboard_thread.join()
+        cache.close()
+        central_server.should_exit = True
+        central_thread.join(5)
+        if central_thread.is_alive():
+            central_server.force_exit = True
+            central_thread.join(5)
+        listener.close()
+
+    assert not central_thread.is_alive()
+    assert [status for _path, status, _payload in results] == [200, 200, 200]
+    for path, _status, payload in results:
+        if path == "/api/fleet":
+            assert {"central", "boards", "agents", "pool_summary"} <= payload.keys()
+        else:
+            assert {"central", "enabled", "workers", "roles", "presets"} <= payload.keys()
+
+
+def test_fleet_and_workers_errors_report_scrubbed_exception_group_leaf(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    sensitive_path = "/".join(("", "Users", "private"))
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            assert value is None
+            return "default"
+
+        def get(self) -> dict:
+            raise ExceptionGroup(
+                "request failed",
+                [httpx2.ReadError(f"transport reset at {sensitive_path}")],
+            )
+
+    class Workers:
+        enabled = True
+        roles = ("worker", "reviewer")
+
+        def list(self, _fleet_names: set[str]) -> list[dict]:
+            return []
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(Cache(), worker_manager=Workers()),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root = f"http://127.0.0.1:{server.server_port}"
+    payloads = []
+    try:
+        for path in ("/api/fleet", "/api/workers"):
+            with pytest.raises(urllib.error.HTTPError) as captured:
+                urllib.request.urlopen(root + path)
+            assert captured.value.code == 503
+            payloads.append(json.loads(captured.value.read()))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert all(payload["error"] == "ReadError" for payload in payloads)
+    assert all("[REDACTED:POSIX_HOME]" in payload["detail"] for payload in payloads)
+    stderr = capsys.readouterr().err
+    assert "fleet-dashboard /api/fleet central=default: ReadError" in stderr
+    assert "fleet-dashboard /api/workers central=default: ReadError" in stderr
+    assert "ExceptionGroup" not in stderr
+    assert sensitive_path not in stderr
 
 
 def test_output_rows_and_titles_are_bounded() -> None:
