@@ -25,11 +25,12 @@ chat session so every seat can resume from the same record.
 - **Cross-vendor MCP.** Claude Desktop, Codex, Cursor, AionUi, and other
   MCP-capable hosts can connect to the same board through ordinary MCP clients.
 - **One strict ticket lifecycle.** Offers, claims, renewable leases,
-  submissions, retryable rejections, and approvals are server-arbitrated.
+  submissions, retryable rejections, and independent approvals are
+  server-arbitrated and carry exact Git/test evidence.
 - **Human-governed decisions.** Coordinators amend tickets with attributed
   annotations and answer durable questions without hiding context in DMs.
-- **Independent review.** Submitted Git objects carry exact-file and test
-  evidence for a separately provisioned reviewer to verify before approval.
+- **Authenticated admission.** Central verifies RS256 JWTs, derives stable
+  principals, and combines token scopes with board membership before access.
 - **Push-aware workers.** MCP `subscriptions/listen` wakes waiting seats from
   durable journal cues, with explicit compatibility fallback where needed.
 - **Verifiable releases.** A pinned build toolchain produces hash-locked wheels;
