@@ -48,8 +48,11 @@ const state = {
   groups: [],
   groupAgents: [],
   pendingGroupRemove: null,
+  selectedGroupId: null,
   seatIdentity: null,
   seatConfirmation: '',
+  registrationErrorCount: 0,
+  latestCursor: 0,
 };
 
 const ERROR_COPY = {
@@ -86,6 +89,8 @@ const ERROR_COPY = {
   invalid_input: 'Correct the highlighted board fields and retry.',
   identity_mismatch: 'The preserved seat identity no longer matches Central. Nothing changed.',
   active_lease: 'Finish or release the active assignment before retiring this seat.',
+  offer_expired: 'This offer has expired and cannot be claimed.',
+  expired_offer: 'This offer has expired and cannot be claimed.',
   confirmation_required: 'Type the exact retirement confirmation shown for this identity.',
   seat_handed_off: 'This seat was handed off. Rejoin the exact same identity or ask the operator to inspect it.',
   seat_stale: 'This seat is stale. Reconnect and rejoin the exact same identity.',
@@ -226,6 +231,27 @@ function setPill(target, text, tone = 'neutral') {
   target.className = `status-pill ${tone}`;
 }
 
+function setSemantic(target, name, value) {
+  target.setAttribute(`data-${name}`, String(value));
+}
+
+function syncConnectionSemantics() {
+  setSemantic(connectionCard, 'connection-count', state.connection ? 1 : 0);
+  setSemantic(connectionCard, 'registration-error-count', state.registrationErrorCount);
+}
+
+function syncResultSemantics(results = [], tickets = []) {
+  const closed = results.filter((item) => item.ticket_status === 'closed');
+  const independent = closed.filter((item) => item.review?.independent === true);
+  const pendingApproval = tickets.filter((ticket) => ['needs_human', 'pending_approval'].includes(ticket.status));
+  setSemantic(submissionList, 'closed-result-count', closed.length);
+  setSemantic(submissionList, 'independent-review-count', independent.length);
+  setSemantic(submissionList, 'pending-approval-count', pendingApproval.length);
+  setSemantic(submissionList, 'result-count', results.length);
+  setSemantic(submissionList, 'cursor', state.latestCursor);
+  setSemantic(submissionList, 'raw-json-count', $$('[data-raw-json]').length);
+}
+
 function setBusy(button, busy, busyText) {
   if (!button.dataset.label) button.dataset.label = button.textContent;
   button.disabled = busy;
@@ -296,6 +322,7 @@ function showConnection(status) {
     exp: status.exp,
   };
   state.connection = normalized;
+  syncConnectionSemantics();
   for (const field of ['board', 'role', 'seat_name', 'push_mode', 'kid', 'exp']) {
     const target = `[data-field="${field}"]`;
     const value = field === 'exp' ? formatExpiry(normalized[field]) : (normalized[field] || '—');
@@ -358,12 +385,16 @@ async function submitDoor(operation, button) {
   }
   showConnection(result.status);
   if (!(await importMcpDefinition(result))) {
+    state.registrationErrorCount = 1;
+    syncConnectionSemantics();
     setMessage(connectionMessage, 'Project connected, but AionUi MCP registration needs attention. Select Recover registration after restoring host access.', 'error');
     $('#recover-seat').disabled = false;
     showGlobal('Registration needs attention', 'The local door is stored, but AionUi rejected same-origin MCP registration. No credential was sent to the helper.', 'warning');
     return;
   }
   const outcome = result.outcome === 'rotated' ? 'Connection replaced' : 'Project connected';
+  state.registrationErrorCount = 0;
+  syncConnectionSemantics();
   setMessage(connectionMessage, `${outcome}. AionUi registration is ready.`, 'success');
   showGlobal(outcome, 'The saved status is redacted. Next, prepare distinct Team seats and preview the plan.', 'info');
   if (result.team?.seat) addSeat(result.team.seat, true);
@@ -372,6 +403,8 @@ async function submitDoor(operation, button) {
 async function loadConnection() {
   const { response, result } = await api('/pursers/onboarding/status');
   if (!response?.ok || !result.ok) {
+    state.connection = null;
+    syncConnectionSemantics();
     const text = messageFor(result, 'No saved project connection was found.');
     setPill($('#connection-pill'), 'Not connected', 'neutral');
     setPill($('#saved-state'), 'Unavailable', 'warning');
@@ -383,6 +416,8 @@ async function loadConnection() {
   }
   const first = Array.isArray(result.seats) ? result.seats[0] : null;
   if (!first) {
+    state.connection = null;
+    syncConnectionSemantics();
     setPill($('#connection-pill'), 'Not connected', 'neutral');
     setPill($('#saved-state'), 'No saved seat', 'neutral');
     showGlobal('Connect a project to begin', 'Paste one coordinator-issued door. No manual configuration file is required.', 'info');
@@ -416,8 +451,12 @@ async function recoverConnection() {
   }
   showConnection(result.status);
   if (await importMcpDefinition(result)) {
+    state.registrationErrorCount = 0;
+    syncConnectionSemantics();
     setMessage(connectionMessage, 'Registration recovered without replaying the door.', 'success');
   } else {
+    state.registrationErrorCount = 1;
+    syncConnectionSemantics();
     setMessage(connectionMessage, 'The saved project is available, but AionUi still rejected MCP registration.', 'error');
   }
 }
@@ -617,6 +656,8 @@ function openGroupRemove(group) {
 function makeGroupCard(group) {
   const card = document.createElement('article');
   card.className = 'group-card';
+  card.dataset.groupId = group.group_id;
+  card.dataset.selectedGroup = String(group.group_id === state.selectedGroupId);
   const heading = document.createElement('div');
   heading.className = 'card-heading';
   const title = document.createElement('h3');
@@ -644,7 +685,15 @@ function makeGroupCard(group) {
   const remove = document.createElement('button');
   remove.type = 'button'; remove.className = 'button button-danger-quiet'; remove.textContent = 'Remove';
   remove.addEventListener('click', () => openGroupRemove(group));
-  actions.append(edit, remove);
+  const select = document.createElement('button');
+  select.type = 'button'; select.className = 'button button-secondary';
+  select.textContent = group.group_id === state.selectedGroupId ? 'Selected' : 'Select group';
+  select.disabled = group.group_id === state.selectedGroupId;
+  select.addEventListener('click', () => {
+    state.selectedGroupId = group.group_id;
+    groupList.replaceChildren(...state.groups.map(makeGroupCard));
+  });
+  actions.append(select, edit, remove);
   card.append(heading, members, actions);
   return card;
 }
@@ -663,6 +712,9 @@ async function loadGroups() {
   state.groupRevision = result.revision;
   state.groups = Array.isArray(result.groups) ? result.groups : [];
   state.groupAgents = Array.isArray(result.agents) ? result.agents : [];
+  if (!state.groups.some((group) => group.group_id === state.selectedGroupId)) {
+    state.selectedGroupId = state.groups.length === 1 ? state.groups[0].group_id : null;
+  }
   groupList.replaceChildren(...state.groups.map(makeGroupCard));
   groupsEmpty.hidden = state.groups.length > 0;
   setPill($('#groups-pill'), `${state.groups.length} group${state.groups.length === 1 ? '' : 's'}`, 'ready');
@@ -813,6 +865,9 @@ const RESULT_LABELS = {
 function makeResultRow(item) {
   const article = document.createElement('article');
   article.className = 'submission-row';
+  article.dataset.resultState = item.result_state || 'unknown';
+  article.dataset.ticketStatus = item.ticket_status || 'unknown';
+  article.dataset.reviewIndependent = String(item.review?.independent === true);
   const heading = document.createElement('div');
   heading.className = 'submission-heading';
   const identity = document.createElement('div');
@@ -874,6 +929,15 @@ function makeResultRow(item) {
     review.textContent = item.result_state === 'missing' ? 'Review: unavailable without a submission.' : 'Review: pending.';
   }
   article.append(review);
+  const actor = document.createElement('p');
+  actor.className = 'result-actor';
+  actor.dataset.resultActor = item.review?.reviewer || '—';
+  actor.textContent = `Actor: ${item.review?.reviewer || '—'}`;
+  const transition = document.createElement('p');
+  transition.className = 'result-transition';
+  transition.dataset.statusTransition = item.ticket_status === 'closed' ? 'submitted → closed' : item.ticket_status || 'unknown';
+  transition.textContent = `Status: ${transition.dataset.statusTransition}`;
+  article.append(actor, transition);
   return article;
 }
 
@@ -882,6 +946,7 @@ async function loadResults() {
   setBusy(button, true, 'Refreshing…');
   const query = resultState.value ? `?state=${encodeURIComponent(resultState.value)}` : '';
   const { response, result } = await api(`/pursers/results${query}`);
+  const ticketResponse = await api('/pursers/tickets');
   setBusy(button, false);
   if (!response?.ok || !result.ok || !Array.isArray(result.results)) {
     submissionList.replaceChildren();
@@ -890,9 +955,14 @@ async function loadResults() {
     resultsEmpty.querySelector('p').textContent = messageFor(result, 'Board results could not be read.');
     setMessage($('#results-message'), messageFor(result, 'Board results could not be read.'), 'error');
     setPill($('#results-pill'), 'Unavailable', 'warning');
+    syncResultSemantics();
     return result;
   }
+  const tickets = ticketResponse.response?.ok && ticketResponse.result.ok && Array.isArray(ticketResponse.result.tickets)
+    ? ticketResponse.result.tickets : [];
+  state.latestCursor = Number.isInteger(ticketResponse.result.latest_seq) ? ticketResponse.result.latest_seq : state.latestCursor;
   submissionList.replaceChildren(...result.results.map(makeResultRow));
+  syncResultSemantics(result.results, tickets);
   resultsEmpty.hidden = result.results.length > 0;
   if (!result.results.length) {
     resultsEmpty.querySelector('h3').textContent = 'No matching results';
@@ -974,9 +1044,17 @@ function ticketTone(status) {
   return 'neutral';
 }
 
+function ticketOffer(ticket) {
+  if (ticket.current_offer || ticket.offer) return ticket.current_offer || ticket.offer;
+  const history = Array.isArray(ticket.dispatch_history) ? [...ticket.dispatch_history].reverse() : [];
+  return history.find((item) => ['offered', 'expired'].includes(item.state)) || null;
+}
+
 function makeTicketRow(ticket) {
   const row = document.createElement('article');
   row.className = 'ticket-row';
+  row.dataset.ticketId = ticket.ticket_id || '';
+  row.dataset.ticketStatus = ticket.status || 'unknown';
   row.tabIndex = 0;
   row.setAttribute('aria-label', `${ticket.ticket_id || 'Ticket'}: ${ticket.title || 'Untitled'}, ${ticket.status || 'unknown'}`);
   const heading = document.createElement('strong');
@@ -989,6 +1067,26 @@ function makeTicketRow(ticket) {
   detail.textContent = [ticket.priority, ticket.assigned_to ? `assigned to ${ticket.assigned_to}` : 'unassigned', ticket.created_by ? `created by ${ticket.created_by}` : null].filter(Boolean).join(' · ');
   const actions = document.createElement('div');
   actions.className = 'row-actions';
+  const claimedIdentity = ticket.claimed_by || ticket.claimed_by_agent_name || ticket.assigned_to || '—';
+  const identity = document.createElement('p');
+  identity.className = 'claimed-identity';
+  identity.dataset.claimedIdentity = claimedIdentity;
+  identity.textContent = `Claimed identity: ${claimedIdentity}`;
+  const offer = ticketOffer(ticket);
+  const rawExpiry = offer?.expires_at || offer?.offer_expires_at || '';
+  const expiry = typeof rawExpiry === 'number' ? rawExpiry * 1000 : Date.parse(rawExpiry);
+  const expired = offer && (offer.state === 'expired' || Number.isFinite(expiry) && expiry <= Date.now());
+  const offerStatus = ticket.status === 'claimed' ? 'claimed' : offer ? (expired ? 'expired' : 'live') : 'none';
+  row.dataset.offerStatus = offerStatus;
+  if (offer && ticket.status !== 'claimed') {
+    const claim = document.createElement('button');
+    claim.type = 'button';
+    claim.className = 'button button-secondary';
+    claim.dataset.claimOffer = expired ? 'expired' : 'live';
+    claim.textContent = expired ? 'Try expired offer' : 'Claim live offer';
+    claim.addEventListener('click', () => claimOffer(ticket, claim, expired));
+    actions.append(claim);
+  }
   if (!['closed', 'canceled', 'terminated'].includes(ticket.status)) {
     const cancel = document.createElement('button');
     cancel.type = 'button';
@@ -997,8 +1095,36 @@ function makeTicketRow(ticket) {
     cancel.addEventListener('click', () => cancelTicket(ticket, cancel));
     actions.append(cancel);
   }
-  row.append(heading, id, status, detail, actions);
+  const claimError = document.createElement('p');
+  claimError.className = 'claim-error';
+  claimError.dataset.claimError = '';
+  row.append(heading, id, status, detail, identity, actions, claimError);
   return row;
+}
+
+async function claimOffer(ticket, button, expired) {
+  const row = button.closest('.ticket-row');
+  const error = $('.claim-error', row);
+  const offer = ticketOffer(ticket);
+  setBusy(button, true, 'Claiming…');
+  const { response, result } = await api('/pursers/tickets/claim', {
+    json: {
+      ticket_id: ticket.ticket_id,
+      agent_name: offer?.offered_agent_name || null,
+    },
+  });
+  setBusy(button, false);
+  if (!response?.ok || !result.ok) {
+    const text = expired
+      ? 'Offer expired; Central refused the claim.'
+      : messageFor(result, 'The live offer could not be claimed. Refresh and retry.');
+    error.dataset.claimError = expired ? 'offer_expired' : errorCode(result);
+    setMessage(error, text, 'error');
+    return;
+  }
+  error.dataset.claimError = '';
+  setMessage(ticketMessage, `${ticket.ticket_id} is claimed by ${result.ticket?.claimed_by || result.ticket?.claimed_by_agent_name || 'the offered identity'}.`, 'success');
+  await loadTickets();
 }
 
 async function loadTickets() {
@@ -1011,9 +1137,12 @@ async function loadTickets() {
     return;
   }
   const tickets = Array.isArray(result.tickets) ? result.tickets : [];
+  state.latestCursor = Number.isInteger(result.latest_seq) ? result.latest_seq : state.latestCursor;
   ticketList.replaceChildren(...tickets.map(makeTicketRow));
   ticketEmpty.hidden = tickets.length > 0;
   setPill($('#ticket-pill'), `${tickets.length} persisted`, tickets.length ? 'ready' : 'neutral');
+  setSemantic(submissionList, 'cursor', state.latestCursor);
+  setSemantic(submissionList, 'pending-approval-count', tickets.filter((ticket) => ['needs_human', 'pending_approval'].includes(ticket.status)).length);
 }
 
 async function createTicket(event) {
@@ -1168,6 +1297,10 @@ ticketForm.addEventListener('submit', createTicket);
 $('#refresh-results').addEventListener('click', loadResults);
 resultState.addEventListener('change', loadResults);
 $('#refresh-all').addEventListener('click', refreshAll);
+$('#open-quickstart').addEventListener('click', () => {
+  setSemantic(submissionList, 'raw-json-count', $$('[data-raw-json]').length);
+  window.setTimeout(() => $('#connect-helper').focus(), 0);
+});
 $('#refresh-groups').addEventListener('click', loadGroups);
 groupForm.addEventListener('submit', saveGroup);
 $('#cancel-group-edit').addEventListener('click', resetGroupForm);
@@ -1186,6 +1319,8 @@ doorInput.addEventListener('paste', () => {
 addSeat({ role: 'worker', tier_max: 2, name: 'pursers-worker-1', folder: 'pursers-worker-1' });
 addSeat({ role: 'reviewer', tier_max: 2, name: 'pursers-reviewer-1', folder: 'pursers-reviewer-1' });
 
+syncConnectionSemantics();
+syncResultSemantics();
 updateJourney();
 showGlobal('Connect the local helper first', 'AionUi loaded Pursers Home. Authenticate the loopback helper to read the selected board.', 'info');
 window.__PURSERS_HOME_READY__ = true;

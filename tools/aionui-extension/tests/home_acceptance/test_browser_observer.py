@@ -1736,6 +1736,23 @@ def test_unknown_observation_is_refused(tmp_path: Path) -> None:
     assert "holds no capture" in completed.stderr
 
 
+def test_transition_observer_reads_typed_semantic_attributes() -> None:
+    selectors = observer_module._validate_transition_selectors([
+        {"path": "/cursor", "selector": "#submission-list", "property": "attribute:data-cursor"},
+        {"path": "/connection_count", "selector": "#connection-card", "property": "attribute:data-connection-count"},
+        {"path": "/raw_json_count", "selector": "#submission-list", "property": "attribute:data-raw-json-count"},
+    ], "after")
+    assert [item["property"] for item in selectors] == [
+        "attribute:data-cursor",
+        "attribute:data-connection-count",
+        "attribute:data-raw-json-count",
+    ]
+    with pytest.raises(observer_module.ObserverError, match="selector is invalid"):
+        observer_module._validate_transition_selectors([
+            {"path": "/secret", "selector": "body", "property": "attribute:value"},
+        ], "after")
+
+
 def test_capture_missing_required_field_is_refused_even_with_extra_field(
     tmp_path: Path,
 ) -> None:

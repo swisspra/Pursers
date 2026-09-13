@@ -59,7 +59,10 @@
             <h2 id="next-step-title">Connect your first project</h2>
             <p id="next-step-copy">Use the door supplied by your coordinator. It is sent directly to the protected local backend and cleared from this page.</p>
           </div>
-          <a class="button button-primary" id="next-step-action" href="#connection">Connect project</a>
+          <div class="card-actions">
+            <a class="button button-secondary" id="open-quickstart" href="#helper">Open Quickstart</a>
+            <a class="button button-primary" id="next-step-action" href="#connection">Connect project</a>
+          </div>
         </section>
 
         <ol class="stepper" aria-label="Setup progress">
@@ -143,7 +146,7 @@
               <p class="form-message field-wide" id="connection-message" role="status" aria-live="polite"></p>
             </form>
 
-            <article class="card status-card" id="connection-card" aria-labelledby="saved-connection-title">
+            <article class="card status-card" id="connection-card" aria-labelledby="saved-connection-title" data-connection-count="0" data-registration-error-count="0">
               <div class="card-heading"><div><p class="eyebrow">Saved locally</p><h3 id="saved-connection-title">Connection status</h3></div><span class="status-pill neutral" id="saved-state">Unknown</span></div>
               <dl class="detail-list">
                 <div><dt>Board</dt><dd data-field="board">—</dd></div>
@@ -290,7 +293,7 @@
             </div>
             <p class="form-message" id="results-message" role="status" aria-live="polite"></p>
             <div class="empty-state" id="results-empty"><span aria-hidden="true">↗</span><h3>No results loaded</h3><p>Connect the local helper to read the selected board.</p></div>
-            <div class="submission-list" id="submission-list" aria-live="polite"></div>
+            <div class="submission-list" id="submission-list" aria-live="polite" data-closed-result-count="0" data-independent-review-count="0" data-pending-approval-count="0" data-result-count="0" data-cursor="0" data-raw-json-count="0"></div>
           </div>
           <div class="card dashboard-card">
             <div><p class="eyebrow">Follow board work</p><h3>Open the Pursers dashboard</h3><p>The dashboard is supplied by the Pursers Personal MCP app. Open it from Tools in the same AionUi conversation. If the host does not expose the app, ask the Team to run <code>board_snapshot</code>; this page does not invent a navigation route.</p></div>

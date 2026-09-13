@@ -82,8 +82,9 @@ TRANSITION_CONTEXT_KEYS = {
     "board_id", "candidate_commit", "issued_at", "causal_index",
 }
 TRANSITION_PROPERTIES = frozenset({
-    "text", "value", "checked", "disabled", "count", "class", "hidden",
+    "text", "value", "checked", "disabled", "count", "class", "hidden", "integer",
 })
+SEMANTIC_ATTRIBUTE_PROPERTY = re.compile(r"attribute:(?:data|aria)-[a-z][a-z0-9-]{0,63}")
 TRANSITION_ACTION_KEYS = {
     "observe": {"kind", "path"},
     "click": {"kind", "selector", "path"},
@@ -1312,6 +1313,15 @@ const transitionResult = await cdp('Runtime.evaluate', {
         else if (spec.property === 'disabled') result[spec.path] = node.disabled === true
         else if (spec.property === 'class') result[spec.path] = String(node.className || '')
         else if (spec.property === 'hidden') result[spec.path] = node.hidden === true
+        else if (spec.property === 'integer') {
+          const raw = (node.textContent || '').trim()
+          if (!/^-?[0-9]+$/.test(raw)) throw new Error('semantic integer is invalid')
+          result[spec.path] = Number(raw)
+        } else if (spec.property.startsWith('attribute:')) {
+          const raw = node.getAttribute(spec.property.slice('attribute:'.length))
+          if (raw === null) throw new Error('semantic attribute is absent')
+          result[spec.path] = /^-?[0-9]+$/.test(raw) ? Number(raw) : raw
+        }
         else throw new Error('unsupported selector property')
       }
       return result
@@ -1715,7 +1725,10 @@ def _validate_transition_selectors(value: Any, label: str) -> list[dict[str, Any
         if (
             not isinstance(path, str) or not path.startswith("/") or path in paths
             or not isinstance(selector, str) or not selector or len(selector) > 512
-            or item["property"] not in TRANSITION_PROPERTIES
+            or (
+                item["property"] not in TRANSITION_PROPERTIES
+                and SEMANTIC_ATTRIBUTE_PROPERTY.fullmatch(str(item["property"])) is None
+            )
         ):
             raise _fail(EXIT_USAGE, f"{label} selector is invalid")
         paths.add(path)

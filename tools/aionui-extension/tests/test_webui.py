@@ -91,7 +91,7 @@ def test_assets_are_packaged_and_do_not_load_remote_dependencies() -> None:
     css = read("webui/style.css")
     urls = re.findall(r'(?:src|href)="([^"]+)"', html)
     assert set(urls).issubset({
-        "#main-content", "#home", "#connection", "#seat-lifecycle", "#team", "#progress", "#tickets", "#advanced",
+        "#main-content", "#home", "#helper", "#connection", "#seat-lifecycle", "#team", "#progress", "#tickets", "#advanced",
         "./style.css", "./app.js", "data:", "data:,",
     })
     assert "http://" not in html.replace("http://127.0.0.1:43121", "")
@@ -110,3 +110,34 @@ def test_controls_have_touch_sized_targets_and_responsive_layout() -> None:
     assert 'class="confirm-control"' in read("webui/index.html")
     assert "@media (max-width: 680px)" in css
     assert "prefers-reduced-motion: reduce" in css
+
+
+def test_beta_blocking_semantics_are_exposed_without_raw_json() -> None:
+    html = read("webui/index.html")
+    script = read("webui/app.js")
+    for marker in (
+        'id="open-quickstart"',
+        'data-connection-count="0"',
+        'data-registration-error-count="0"',
+        'data-closed-result-count="0"',
+        'data-independent-review-count="0"',
+        'data-pending-approval-count="0"',
+        'data-result-count="0"',
+        'data-cursor="0"',
+        'data-raw-json-count="0"',
+    ):
+        assert marker in html
+    for marker in (
+        "dataset.selectedGroup",
+        "dataset.ticketStatus",
+        "dataset.offerStatus",
+        "dataset.claimedIdentity",
+        "dataset.claimOffer",
+        "dataset.claimError",
+        "dataset.reviewIndependent",
+        "dataset.resultActor",
+        "dataset.statusTransition",
+        "'/pursers/tickets/claim'",
+    ):
+        assert marker in script
+    assert "innerHTML" not in script

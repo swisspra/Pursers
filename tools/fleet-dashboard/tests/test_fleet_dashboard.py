@@ -8378,3 +8378,10 @@ def test_deployment_runbook_actual_verify_pipeline_and_substitution_fail_closed(
         assert "ps " not in log and "curl " not in log
     elif failure == "ps_substitution":
         assert "curl " not in log
+
+
+def test_ticket_rows_expose_semantic_status_and_active_marker() -> None:
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    assert 'data-ticket-status="${esc(t.status)}"' in source
+    assert 'data-active-ticket-row="${[' in source
+    assert "'open','claimed','in_progress','creating_report','submitted','reviewing','in_review'" in source
