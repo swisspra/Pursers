@@ -1,0 +1,372 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "browser201_beta_ga_split",
+  "ticket_id": "TK-ea739305b3d9",
+  "criterion": "A row is beta_blocking when a first-time beta user following docs-local/manual-en.html on the normal path would hit it; unusual operator flows and 1.0-grade completeness checks are ga_only.",
+  "sources": {
+    "gap_map": "planning/gap-implementability-map.json",
+    "gap_map_sha256": "b3dcf545034fb72bb4431a7e014f58189ab35e66e97930286cd7ecc5d909e9ec",
+    "candidate_commit": "53e638bdc06efc513f5af122a673110ca170d0fc",
+    "normal_path_manual": "docs-local/manual-en.html",
+    "normal_path_manual_commit": "9e3b05072e4521c10d0f4390d7ac57ad7421c07a",
+    "normal_path_manual_sha256": "ddfb51fc9986c1d678bff59aa108d280dcb1eae3e858b66b3f3196a4fbeab96f"
+  },
+  "counts": {
+    "total": 42,
+    "beta_blocking": 22,
+    "ga_only": 20,
+    "beta_blocking_requires_candidate_or_adapter_change": 8
+  },
+  "beta_blocking_requires_candidate_or_adapter_change": [
+    3,
+    5,
+    6,
+    7,
+    8,
+    17,
+    27,
+    161
+  ],
+  "gap_map_status_dimension_note": "The gap-map classification records implementation or fixture readiness, while tier records release scope; this split does not dispute any gap-map status.",
+  "rows": [
+    {
+      "row_id": 1,
+      "observation_id": "door_connect",
+      "gap_map_classification": "recipe_supported_requires_fixture",
+      "tier": "beta_blocking",
+      "reason": "A first-time worker must connect a valid door before the seat can join and receive work, so failure here stops the documented normal path.",
+      "required_change": "Create the valid-worker-door fixture and capture the existing browser-door-connect-worker recipe; no candidate change is indicated."
+    },
+    {
+      "row_id": 2,
+      "observation_id": "door_connect",
+      "gap_map_classification": "recipe_supported_requires_fixture",
+      "tier": "beta_blocking",
+      "reason": "A first-time reviewer must connect an independent reviewer door before the documented submit-to-review lifecycle can close.",
+      "required_change": "Create the valid-reviewer-door fixture and capture the existing browser-door-connect-reviewer recipe; no candidate change is indicated."
+    },
+    {
+      "row_id": 3,
+      "observation_id": "team_setup",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "beta_blocking",
+      "reason": "Prepare Team is the second onboarding step, so a first-time user needs an unambiguous selected-group state before proceeding.",
+      "required_change": "Expose selected-group semantics in tools/aionui-extension/webui/index.html or tools/aionui-extension/webui/app.js and teach trusted_browser_state_v1/browser_observer.py to read them."
+    },
+    {
+      "row_id": 4,
+      "observation_id": "five_workers_three_reviewers",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "ga_only",
+      "reason": "The normal first-time path needs a worker and an independent reviewer, not an exact eight-seat 5-to-3 roster.",
+      "known_limitation": "The beta does not guarantee semantic worker, reviewer, and unique-identity counts for an exact five-worker and three-reviewer roster."
+    },
+    {
+      "row_id": 5,
+      "observation_id": "ticket_offer_claim",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "beta_blocking",
+      "reason": "The documented lifecycle requires an offered ticket to become claimed by a real identity, so a read-only claim surface blocks the normal path.",
+      "required_change": "Add a live-offer claim control plus semantic claimed status and identity fields in tools/aionui-extension/webui/index.html and tools/aionui-extension/webui/app.js, then extend trusted_browser_state_v1/browser_observer.py."
+    },
+    {
+      "row_id": 6,
+      "observation_id": "ticket_offer_claim",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "beta_blocking",
+      "borderline": true,
+      "reason": "An offer can expire while a first-time user follows the walkthrough, and accepting it or hiding the expiry would make the documented claim step silently wrong.",
+      "required_change": "Add an expired-offer claim control and semantic expiry error in tools/aionui-extension/webui/index.html and tools/aionui-extension/webui/app.js, then extend trusted_browser_state_v1/browser_observer.py."
+    },
+    {
+      "row_id": 7,
+      "observation_id": "ticket_submit_independent_review",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "beta_blocking",
+      "reason": "A first-time user must see one submitted ticket close only after independent review, with no approval still pending.",
+      "required_change": "Expose semantic closed-result, independent-review, and pending-approval counts in tools/aionui-extension/webui/app.js and read them in trusted_browser_state_v1/browser_observer.py."
+    },
+    {
+      "row_id": 8,
+      "observation_id": "result_visible",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "beta_blocking",
+      "reason": "The normal path ends with the dashboard showing the real closed result, reviewer attribution, status transition, and a fresh cursor rather than stale state.",
+      "required_change": "Expose actor, closed transition, result count, and cursor semantics in tools/aionui-extension/webui/app.js and extend trusted_browser_state_v1/browser_observer.py to record them after refresh."
+    },
+    {
+      "row_id": 9,
+      "observation_id": "pause_resume_stop",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "ga_only",
+      "reason": "Pausing, resuming, and cooperatively stopping an already running operation is an optional operator-control flow rather than the first ticket lifecycle.",
+      "known_limitation": "AionUI supports pause and cooperative stop, but it does not yet support resume."
+    },
+    {
+      "row_id": 10,
+      "observation_id": "clean_reconnect_after_rotation",
+      "gap_map_classification": "recipe_supported_requires_fixture",
+      "tier": "ga_only",
+      "reason": "Credential rotation and recovery from an expired door occur after initial setup and are not part of the first-time normal path.",
+      "known_limitation": "Recovery from an expired or invalid door has not been validated for this beta."
+    },
+    {
+      "row_id": 11,
+      "observation_id": "clean_reconnect_after_rotation",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "ga_only",
+      "reason": "Post-rotation cleanup counters matter to operators diagnosing an unusual recovery, not to a first-time user completing one clean connection.",
+      "known_limitation": "After a door replacement, the UI does not expose stale-offer, duplicate-identity, or orphan-registration cleanup counters."
+    },
+    {
+      "row_id": 12,
+      "observation_id": "dashboard-ui.state.permission-denied",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "ga_only",
+      "reason": "A correctly provisioned first-time principal does not enter the permission-denied recovery path.",
+      "known_limitation": "The Personal dashboard may show a generic connection failure instead of the exact text “Permission denied.”"
+    },
+    {
+      "row_id": 13,
+      "observation_id": "dashboard-ui.styles",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "ga_only",
+      "reason": "The normal path works with the host-selected theme and does not require a dashboard-specific light-to-dark switch.",
+      "known_limitation": "The Personal dashboard follows the host theme and does not provide its own light/dark theme switch."
+    },
+    {
+      "row_id": 14,
+      "observation_id": "extension-join.state.joined",
+      "gap_map_classification": "implementable_now",
+      "tier": "beta_blocking",
+      "reason": "The connection and saved-state indicators must both show Connected for a first-time user to know the seat actually joined.",
+      "required_change": "Run the existing browser-extension-join-state-joined recipe and retain the resulting evidence; no candidate change is indicated."
+    },
+    {
+      "row_id": 15,
+      "observation_id": "extension-join.state.status-loaded",
+      "gap_map_classification": "requires_fixture_change",
+      "tier": "beta_blocking",
+      "reason": "Showing status for the wrong board would make the first-time joined state silently incorrect even though the page appears connected.",
+      "required_change": "Prepare the exact sandbox-home-acceptance board fixture and capture the existing status-loaded recipe; no candidate change is indicated."
+    },
+    {
+      "row_id": 17,
+      "observation_id": "extension.idempotent-reconnect",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "beta_blocking",
+      "borderline": true,
+      "reason": "Automatic reconnect can occur during normal first use, and duplicate connections or hidden registration errors can make the first ticket flow silently wrong.",
+      "required_change": "Expose connection and registration-error counts in tools/aionui-extension/webui/app.js and extend trusted_browser_state_v1/browser_observer.py to verify recover remains idempotent."
+    },
+    {
+      "row_id": 18,
+      "observation_id": "extension.join-form",
+      "gap_map_classification": "implementable_now",
+      "tier": "beta_blocking",
+      "reason": "The join form and one protected door input are the entry point for every first-time seat connection.",
+      "required_change": "Run the existing browser-extension-join-form recipe and retain the resulting evidence; no candidate change is indicated."
+    },
+    {
+      "row_id": 20,
+      "observation_id": "extension.redacted-status-card",
+      "gap_map_classification": "implementable_now",
+      "tier": "beta_blocking",
+      "reason": "A first-time connection must show useful status without retaining the secret door value, because a visible secret would be silently unsafe.",
+      "required_change": "Run the existing browser-extension-redacted-status-card recipe and retain the resulting evidence; no candidate change is indicated."
+    },
+    {
+      "row_id": 23,
+      "observation_id": "extension.settings-navigation",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "ga_only",
+      "reason": "The documented setup uses the Home connection and Fleet Config routes, not a hidden AionUI settings panel.",
+      "known_limitation": "The AionUI Home page does not provide a separate settings panel opened by a settings-navigation action."
+    },
+    {
+      "row_id": 26,
+      "observation_id": "fleet-dashboard.state.offline",
+      "gap_map_classification": "recipe_supported_current_fixture_fails",
+      "tier": "ga_only",
+      "reason": "A total Central outage is a failure drill outside the correctly configured first-time normal path.",
+      "known_limitation": "The Fleet Dashboard’s offline-only state has not been validated against a fixture where every configured Central is unavailable."
+    },
+    {
+      "row_id": 27,
+      "observation_id": "fleet.active-ticket-rows",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "beta_blocking",
+      "reason": "The dashboard must distinguish the active ticket created and claimed in the normal path from closed rows and an empty sentinel.",
+      "required_change": "Add a semantic ticket-status attribute or active-row marker in tools/fleet-dashboard/fleet_dashboard.py and read it in trusted_browser_state_v1/browser_observer.py."
+    },
+    {
+      "row_id": 40,
+      "observation_id": "fleet.board-cards",
+      "gap_map_classification": "implementable_now",
+      "tier": "beta_blocking",
+      "reason": "A first-time operator needs at least one real board card to confirm the dashboard is connected to the configured project.",
+      "required_change": "Run the existing browser-fleet-board-cards recipe and retain the resulting evidence; no candidate change is indicated."
+    },
+    {
+      "row_id": 44,
+      "observation_id": "fleet.central-availability-isolation",
+      "gap_map_classification": "recipe_supported_current_fixture_fails",
+      "tier": "ga_only",
+      "reason": "Mixed healthy and unavailable Centrals require a multi-Central fault fixture that the first-time single-Central path does not use.",
+      "known_limitation": "Mixed healthy and unavailable Central isolation has not been validated for this beta."
+    },
+    {
+      "row_id": 55,
+      "observation_id": "fleet.coordinator-configuration",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "ga_only",
+      "reason": "The normal path uses the current Config-to-seats route, so only an operator seeking the legacy coordinator form would notice its absence.",
+      "known_limitation": "The legacy coordinator configuration form is not reachable; configure seats from the Fleet Dashboard Config route."
+    },
+    {
+      "row_id": 70,
+      "observation_id": "fleet.hub-overview",
+      "gap_map_classification": "implementable_now",
+      "tier": "beta_blocking",
+      "reason": "The normal dashboard path must open on Overview and show health for the connected fleet rather than an empty or wrong view.",
+      "required_change": "Run the existing browser-fleet-hub-overview recipe and retain the resulting evidence; no candidate change is indicated."
+    },
+    {
+      "row_id": 85,
+      "observation_id": "fleet.release-manifest",
+      "gap_map_classification": "implementable_now",
+      "tier": "ga_only",
+      "reason": "Release-package manifest inspection is an operator release task, not the first-time ticket lifecycle.",
+      "known_limitation": "The Fleet release view’s manifest and package rows are outside the beta user-acceptance scope."
+    },
+    {
+      "row_id": 88,
+      "observation_id": "fleet.release-tag",
+      "gap_map_classification": "implementable_now",
+      "tier": "ga_only",
+      "reason": "Reading the latest release tag is an operator release check and is not needed to join a seat or complete a ticket.",
+      "known_limitation": "The Fleet release view’s latest-tag display is outside the beta user-acceptance scope."
+    },
+    {
+      "row_id": 95,
+      "observation_id": "fleet.ticket-counts",
+      "gap_map_classification": "implementable_now",
+      "tier": "beta_blocking",
+      "reason": "The dashboard must show real ticket counts as the first ticket moves through open, claimed, submitted, and closed states.",
+      "required_change": "Run the existing browser-fleet-ticket-counts recipe and retain the resulting evidence; no candidate change is indicated."
+    },
+    {
+      "row_id": 97,
+      "observation_id": "fleet.updated-state",
+      "gap_map_classification": "implementable_now",
+      "tier": "beta_blocking",
+      "reason": "A first-time operator needs an Updated state to distinguish current dashboard data from stale or invented status.",
+      "required_change": "Run the existing browser-fleet-updated-state recipe and retain the resulting evidence; no candidate change is indicated."
+    },
+    {
+      "row_id": 98,
+      "observation_id": "personal-mcp.state.board-empty",
+      "gap_map_classification": "recipe_supported_requires_fixture",
+      "tier": "beta_blocking",
+      "reason": "A new board is normally empty before the first ticket is created, so the dashboard must represent zero tickets truthfully.",
+      "required_change": "Prepare an empty-board snapshot and execute the existing personal-board-snapshot-empty recipe; no candidate change is indicated."
+    },
+    {
+      "row_id": 100,
+      "observation_id": "personal-mcp.state.links-empty",
+      "gap_map_classification": "recipe_supported_requires_fixture",
+      "tier": "ga_only",
+      "reason": "An empty link graph is optional context inspection and does not affect the first join, ticket, review, or dashboard flow.",
+      "known_limitation": "The Personal dashboard’s empty link-graph state has not been validated for this beta."
+    },
+    {
+      "row_id": 101,
+      "observation_id": "personal-mcp.state.memory-empty",
+      "gap_map_classification": "recipe_supported_requires_fixture",
+      "tier": "ga_only",
+      "reason": "Pinned-memory highlights are reusable context features, not a prerequisite for the first ticket lifecycle.",
+      "known_limitation": "The Personal dashboard’s no-pinned-memory state has not been validated for this beta."
+    },
+    {
+      "row_id": 103,
+      "observation_id": "personal-mcp.state.ticket-not-found",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "ga_only",
+      "reason": "Looking up a nonexistent ticket is an error-recovery flow rather than the documented normal path using a real dispatched ticket.",
+      "known_limitation": "A missing ticket may produce a generic Personal dashboard failure instead of the exact text “ticket not found.”"
+    },
+    {
+      "row_id": 104,
+      "observation_id": "personal-mcp.surface",
+      "gap_map_classification": "implementable_now",
+      "tier": "ga_only",
+      "reason": "A receipt-level surface identifier is 1.0-grade evidence completeness and has no first-time user-visible consequence.",
+      "known_limitation": "The Personal surface identifier is not part of the beta’s user-visible acceptance claims."
+    },
+    {
+      "row_id": 123,
+      "observation_id": "personal.board-identity",
+      "gap_map_classification": "requires_fixture_change",
+      "tier": "beta_blocking",
+      "reason": "The Personal dashboard must identify the actual board or a first-time user can inspect and act on the wrong project without noticing.",
+      "required_change": "Prepare the exact sandbox-home-acceptance board fixture and capture the existing board-identity recipe; no candidate change is indicated."
+    },
+    {
+      "row_id": 128,
+      "observation_id": "personal.fleet-projects",
+      "gap_map_classification": "recipe_supported_requires_fixture",
+      "tier": "beta_blocking",
+      "reason": "The normal Fleet view must show the configured project so a first-time operator can confirm registry routing before work starts.",
+      "required_change": "Prepare a fleet snapshot containing at least one project and capture the existing fleet-projects recipe; no candidate change is indicated."
+    },
+    {
+      "row_id": 133,
+      "observation_id": "personal.keyboard-tabs",
+      "gap_map_classification": "implementable_now",
+      "tier": "beta_blocking",
+      "borderline": true,
+      "reason": "The docs do not prescribe keyboard input, but a keyboard-only first-time user follows the same normal tab flow and must be able to reveal Work with ArrowRight.",
+      "required_change": "Run the existing browser-personal-keyboard-tabs recipe and retain the resulting evidence; no candidate change is indicated."
+    },
+    {
+      "row_id": 141,
+      "observation_id": "personal.search-results",
+      "gap_map_classification": "recipe_supported_requires_fixture",
+      "tier": "ga_only",
+      "reason": "Searching an existing corpus is optional navigation after data exists and is not required to complete the first dispatched ticket.",
+      "known_limitation": "Personal dashboard search results require a preloaded matching corpus and are not validated for the beta normal path."
+    },
+    {
+      "row_id": 153,
+      "observation_id": "personal.work-lease",
+      "gap_map_classification": "recipe_supported_requires_fixture",
+      "tier": "ga_only",
+      "reason": "The normal user needs truthful claimed status, while inspecting the underlying lease expiry is an operator diagnostic.",
+      "known_limitation": "Personal dashboard lease-detail rendering has not been validated for this beta."
+    },
+    {
+      "row_id": 161,
+      "observation_id": "final.quickstart-candidate-flow",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "beta_blocking",
+      "reason": "Quickstart is the first-time route into connecting the Home helper, so an absent action or raw internal JSON leaves the normal path incomplete or misleading.",
+      "required_change": "Align tools/aionui-extension/webui/index.html and tools/aionui-extension/webui/app.js with the canonical quickstart action and expose a semantic raw-JSON count, then extend trusted_browser_state_v1/browser_observer.py."
+    },
+    {
+      "row_id": 162,
+      "observation_id": "final.fleet-503-recovery",
+      "gap_map_classification": "requires_fixture_controller",
+      "tier": "ga_only",
+      "reason": "Creating and healing a deterministic Central 503 is a fault-injection exercise outside the healthy first-time normal path.",
+      "known_limitation": "Automated Fleet recovery from a controlled Central 503 has not been validated for this beta."
+    },
+    {
+      "row_id": 163,
+      "observation_id": "final.o1-readiness-rollback",
+      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "tier": "ga_only",
+      "reason": "A guarded release operation and rollback is an operator-only release flow, not a first-time seat or ticket action.",
+      "known_limitation": "The Fleet Dashboard does not yet expose canonical rollback-result and success-effect fields for guarded release operations."
+    }
+  ]
+}
