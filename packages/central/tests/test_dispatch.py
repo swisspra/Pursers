@@ -388,6 +388,20 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(worker_a, worker_b)
 
+    async def test_active_wait_listener_wins_over_recent_activity(self) -> None:
+        recent = await self.add_seat(
+            self.worker_a, "recent-worker", {"tier_max": 2}
+        )
+        waiting = await self.add_seat(
+            self.worker_b, "waiting-worker", {"tier_max": 2}
+        )
+        self.service.register_listener("pursers", waiting)
+
+        ticket = (await self.create()).structured_content["ticket"]
+
+        self.assertEqual(ticket["work_offer"]["agent_id"], waiting)
+        self.assertNotEqual(ticket["work_offer"]["agent_id"], recent)
+
     async def test_admin_and_coordinator_bypass_work_offer_gate(self) -> None:
         worker = await self.add_seat(
             self.worker_a, "worker-a", {"tier_max": 2}
@@ -928,6 +942,26 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         await assert_refusal("ticket is parked by the board owner")
 
+    async def test_busy_assignment_pin_records_busy_reason(self) -> None:
+        pinned = await self.add_seat(
+            self.worker_a, "busy-pinned-worker", {"tier_max": 2}
+        )
+        first = (await self.create(assigned_to=pinned)).structured_content["ticket"]
+        self.principal = self.worker_a
+        await self.call(
+            "ticket_claim",
+            agent_name="busy-pinned-worker",
+            ticket_id=first["ticket_id"],
+        )
+
+        second = (await self.create(assigned_to=pinned)).structured_content["ticket"]
+
+        self.assertEqual(second["dispatch_state"]["state"], "unassignable")
+        self.assertEqual(second["dispatch_state"]["reason"], "pinned_seat_busy")
+        self.assertEqual(
+            second["dispatch_history"][-1]["reason"], "pinned_seat_busy"
+        )
+
     async def test_dead_assignment_pin_is_released_after_fallback_cycles(self) -> None:
         pinned = await self.add_seat(
             self.worker_a, "pinned-worker", {"tier_max": 2}
@@ -975,7 +1009,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             if entry.get("state") == "pin_released"
         ]
         self.assertEqual(len(released), 1)
-        self.assertEqual(released[0]["reason"], "pinned_seat_unavailable")
+        self.assertEqual(released[0]["reason"], "pinned_seat_exited")
         self.assertEqual(
             released[0]["previous_assigned_to_agent_id"], pinned
         )
