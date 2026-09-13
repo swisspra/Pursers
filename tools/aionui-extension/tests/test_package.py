@@ -23,7 +23,8 @@ def test_package_contains_only_allowlisted_runtime_files(tmp_path: Path) -> None
     archive_path = builder.build(tmp_path / builder.ARCHIVE_NAME)
     with ZipFile(archive_path) as archive:
         assert archive.namelist() == list(builder.PACKAGE_FILES)
-        assert len(archive.namelist()) == 26
+        assert len(archive.namelist()) == 27
+        assert archive.read("LICENSE") == (ROOT / "LICENSE").read_bytes()
         assert "IMPORT_PROVENANCE.md" in archive.namelist()
         assert "host/helper.cjs" in archive.namelist()
         assert "host/HELPER_CONTRACT.md" in archive.namelist()
