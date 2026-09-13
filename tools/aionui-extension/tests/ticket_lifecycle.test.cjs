@@ -19,6 +19,22 @@ const valid = {
   tier: 2,
 };
 
+function loadClaimUi(overrides = {}) {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'webui', 'app.js'), 'utf8');
+  const start = source.indexOf('function ticketOffer(ticket)');
+  const end = source.indexOf('\nasync function loadTickets()', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  return vm.runInNewContext(`${source.slice(start, end)}\n({ ticketOffer, claimOffer })`, {
+    errorCode: (result) => result.code || result.error?.code || result.error || 'unknown_error',
+    messageFor: (result, fallback) => result.message || result.error?.message || fallback,
+    setBusy: () => {},
+    setMessage: (target, message) => { target.textContent = message; },
+    ticketMessage: {},
+    ...overrides,
+  });
+}
+
 test('create is board-pinned, unassigned by backend contract, and preserves supported fields', async () => {
   const calls = [];
   const lifecycle = createTicketLifecycleAdapter({
@@ -102,6 +118,99 @@ test('claim rendering never turns a route 404 into expiry and preserves a real C
     code: 'claim_refused',
     message: 'ticket is not offered to this seat; wait for your offer',
   });
+});
+
+test('UI claim path sends work_offer.agent_name through the exact adapter', async () => {
+  const backendCalls = [];
+  const lifecycle = createTicketLifecycleAdapter({
+    expectedBoard: 'demo',
+    run: async (operation, payload) => {
+      backendCalls.push({ operation, payload });
+      return {
+        ok: true,
+        board: 'demo',
+        ticket: { ticket_id: payload.ticket_id, status: 'claimed', claimed_by: payload.agent_name },
+        identity: { agent_name: payload.agent_name },
+      };
+    },
+  });
+  const row = { dataset: {}, error: { dataset: {} }, identity: { dataset: {} } };
+  const button = { closest: () => row };
+  let refreshes = 0;
+  const { ticketOffer, claimOffer } = loadClaimUi({
+    $: (selector) => selector === '.claim-error' ? row.error : row.identity,
+    api: async (endpoint, options) => {
+      assert.equal(endpoint, '/pursers/tickets/claim');
+      const result = await lifecycle.claim(options.json);
+      return { response: { ok: result.ok }, result };
+    },
+    loadTickets: async () => { refreshes += 1; },
+  });
+  const ticket = {
+    ticket_id: 'TK-live',
+    status: 'open',
+    work_offer: {
+      agent_name: 'worker-one',
+      offered_at: '2026-09-13T08:00:00Z',
+      expires_at: '2026-09-13T09:00:00Z',
+    },
+  };
+  assert.equal(ticketOffer(ticket).agent_name, 'worker-one');
+  await claimOffer(ticket, button);
+  assert.deepEqual(backendCalls, [{
+    operation: 'claim',
+    payload: { board: 'demo', ticket_id: 'TK-live', agent_name: 'worker-one' },
+  }]);
+  assert.equal(row.dataset.offerStatus, 'claimed');
+  assert.equal(row.identity.dataset.claimedIdentity, 'worker-one');
+  assert.equal(refreshes, 1);
+});
+
+test('UI expired history offer reaches adapter and preserves Central refusal unchanged', async () => {
+  const refusal = {
+    ok: false,
+    error: {
+      code: 'claim_refused',
+      message: 'ticket is not offered to this seat; wait for your offer',
+      retryable: false,
+    },
+  };
+  const backendCalls = [];
+  const lifecycle = createTicketLifecycleAdapter({
+    expectedBoard: 'demo',
+    run: async (operation, payload) => {
+      backendCalls.push({ operation, payload });
+      return refusal;
+    },
+  });
+  const row = { dataset: {}, error: { dataset: {} }, identity: { dataset: {} } };
+  const { ticketOffer, claimOffer } = loadClaimUi({
+    $: (selector) => selector === '.claim-error' ? row.error : row.identity,
+    api: async (_endpoint, options) => {
+      const result = await lifecycle.claim(options.json);
+      assert.equal(result, refusal);
+      return { response: { ok: false }, result };
+    },
+    loadTickets: async () => { throw new Error('refused claims must not refresh'); },
+  });
+  const ticket = {
+    ticket_id: 'TK-expired',
+    status: 'open',
+    dispatch_history: [{
+      state: 'expired',
+      agent_name: 'worker-one',
+      offered_at: '2026-09-13T07:00:00Z',
+      expires_at: '2026-09-13T07:10:00Z',
+    }],
+  };
+  assert.equal(ticketOffer(ticket).agent_name, 'worker-one');
+  await claimOffer(ticket, { closest: () => row });
+  assert.deepEqual(backendCalls, [{
+    operation: 'claim',
+    payload: { board: 'demo', ticket_id: 'TK-expired', agent_name: 'worker-one' },
+  }]);
+  assert.equal(row.error.dataset.claimError, 'claim_refused');
+  assert.equal(row.error.textContent, refusal.error.message);
 });
 
 test('ticket routes enforce loopback origin and surface recovery status', async () => {

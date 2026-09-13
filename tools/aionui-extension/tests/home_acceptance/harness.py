@@ -492,7 +492,6 @@ def _semantic_capabilities(routes: tuple[str, ...]) -> set[str]:
         "/pursers/tickets/status",
         "/pursers/tickets/get",
         "/pursers/tickets/create",
-        "/pursers/tickets/claim",
         "/pursers/tickets/cancel",
     }.issubset(lowered):
         capabilities.add("ticket_lifecycle")

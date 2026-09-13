@@ -127,14 +127,11 @@ a dedicated actor with `can_work=false` and `can_review=false`; credentials and
 the Central URL never enter the browser. Use a wait-bridge build containing
 `ticket_lifecycle.py` with this extension candidate.
 
-Home supports list, get, generated-ID create, exact-offer claim, and cancel.
-Create always sets `unassigned=true`. Claim sends the offered identity through
-the authenticated helper and displays Central's real refusal if the offer is no
-longer claimable; a local expired marker or route error never becomes a synthetic
-expiry refusal. Cancel is not a UI authorization shortcut: Central permits it
+Home supports list, get, generated-ID create, and cancel. Create always sets
+`unassigned=true`. Cancel is not a UI authorization shortcut: Central permits it
 only for the creator principal, current executor, or an authorized reviewer.
-There are deliberately no Home routes for renew, submit, review-claim, review,
-assignment, or client-authored status changes. See
+There are deliberately no Home routes for claim, renew, submit, review-claim,
+review, assignment, or client-authored status changes. See
 `ticket_lifecycle/FEATURE_CONTRACT.md` for the role and recovery contract.
 
 `GET /pursers/results` is read-only and accepts only optional `ticket_id` and

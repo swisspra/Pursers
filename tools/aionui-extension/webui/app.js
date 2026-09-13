@@ -1045,7 +1045,9 @@ function ticketTone(status) {
 }
 
 function ticketOffer(ticket) {
-  if (ticket.current_offer || ticket.offer) return ticket.current_offer || ticket.offer;
+  if (ticket.work_offer || ticket.current_offer || ticket.offer) {
+    return ticket.work_offer || ticket.current_offer || ticket.offer;
+  }
   const history = Array.isArray(ticket.dispatch_history) ? [...ticket.dispatch_history].reverse() : [];
   return history.find((item) => ['offered', 'expired'].includes(item.state)) || null;
 }
@@ -1110,7 +1112,7 @@ async function claimOffer(ticket, button) {
   const { response, result } = await api('/pursers/tickets/claim', {
     json: {
       ticket_id: ticket.ticket_id,
-      agent_name: offer?.offered_agent_name || null,
+      agent_name: offer?.agent_name || null,
     },
   });
   setBusy(button, false);
