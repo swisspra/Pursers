@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "fixture_id": "valid-reviewer-door",
+  "board_id": "sandbox-home-acceptance",
+  "role": "reviewer",
+  "central_path": "/mcp",
+  "credential": {
+    "algorithm": "RS256",
+    "key_id": "synthetic-reviewer-key",
+    "expires_at": 2000000000,
+    "signature_marker": "synthetic-signature"
+  }
+}
