@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -229,6 +230,24 @@ _BOARD_REDACTION_POLICY = BoardScrubPolicy(mode="redact")
 
 def _board_redact(value: str) -> str:
     return board_scrub(value, _BOARD_REDACTION_POLICY)[0]
+
+
+def _api_exception_payload(
+    route: str, central: str, exc: BaseException
+) -> dict[str, str]:
+    """Return and log a bounded, scrubbed leaf exception for local API failures."""
+    leaf = exc
+    while isinstance(leaf, BaseExceptionGroup) and leaf.exceptions:
+        leaf = leaf.exceptions[0]
+    error = type(leaf).__name__
+    message = _clip(_board_redact(str(leaf).strip()), 500)
+    detail = f"{error}: {message}" if message else error
+    print(
+        f"fleet-dashboard {route} central={central}: {detail}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return {"error": error, "detail": detail, "central": central}
 
 
 class ConfigConflictError(RuntimeError):
@@ -4424,24 +4443,67 @@ class FleetFetcher:
 
 
 class _ReusableAsyncRunner:
-    """Run dashboard coroutines on one event loop across HTTP requests."""
+    """Run dashboard coroutines in one task on a dedicated event-loop thread."""
 
     def __init__(self) -> None:
-        self._runner = asyncio.Runner()
         self._lock = threading.Lock()
         self._closed = False
+        self._loop = asyncio.new_event_loop()
+        self._queue: asyncio.Queue[
+            tuple[Awaitable[dict[str, Any]], Future[dict[str, Any]]] | None
+        ]
+        self._ready = threading.Event()
+        self._thread = threading.Thread(
+            target=self._serve_loop,
+            name="fleet-dashboard-async",
+            daemon=True,
+        )
+        self._thread.start()
+        self._ready.wait()
+
+    def _serve_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._queue = asyncio.Queue()
+        self._ready.set()
+        try:
+            self._loop.run_until_complete(self._serve_awaitables())
+        finally:
+            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            self._loop.close()
+
+    async def _serve_awaitables(self) -> None:
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                return
+            awaitable, future = item
+            try:
+                result = await awaitable
+            except BaseException as exc:  # Keep the runner alive after one failure.
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
 
     def run(self, awaitable: Awaitable[dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
             if self._closed:
+                close = getattr(awaitable, "close", None)
+                if callable(close):
+                    close()
                 raise RuntimeError("dashboard async runner is closed")
-            return self._runner.run(awaitable)
+            future: Future[dict[str, Any]] = Future()
+            self._loop.call_soon_threadsafe(
+                self._queue.put_nowait, (awaitable, future)
+            )
+            return future.result()
 
     def close(self) -> None:
         with self._lock:
             if not self._closed:
-                self._runner.close()
                 self._closed = True
+                self._loop.call_soon_threadsafe(self._queue.put_nowait, None)
+        if threading.current_thread() is not self._thread:
+            self._thread.join()
 
 
 class TimedCache:
@@ -6752,8 +6814,8 @@ def make_handler(
             if route == "/api/fleet":
                 try:
                     body = _json_bytes(cache_call("get", central=central))
-                except Exception as exc:  # noqa: BLE001 - return bounded HTTP error.
-                    body = _json_bytes({"error": type(exc).__name__, "central": label})
+                except Exception as exc:  # noqa: BLE001 - return bounded leaf error.
+                    body = _json_bytes(_api_exception_payload(route, label, exc))
                     self._send(503, "application/json; charset=utf-8", body)
                     return
                 self._send(200, "application/json; charset=utf-8", body)
@@ -6953,11 +7015,11 @@ def make_handler(
                         _json_bytes({"error": str(exc), "central": label}),
                     )
                     return
-                except Exception as exc:  # noqa: BLE001 - bounded type only.
+                except Exception as exc:  # noqa: BLE001 - bounded leaf error.
                     self._send(
                         503,
                         "application/json; charset=utf-8",
-                        _json_bytes({"error": type(exc).__name__, "central": label}),
+                        _json_bytes(_api_exception_payload(route, label, exc)),
                     )
                     return
                 self._send(200, "application/json; charset=utf-8", body)
