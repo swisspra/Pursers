@@ -863,10 +863,13 @@ class CentralBoard:
     def record_agent_activity(self, board_id: str, agent_id: str, now: float) -> None:
         self.last_seen_activity[(board_id, agent_id)] = now
 
+    def agent_has_active_listener(self, board_id: str, agent_id: str) -> bool:
+        return agent_id in self.active_listeners.get(board_id, set())
+
     def is_agent_live(
         self, board_id: str, agent_id: str, member: Mapping[str, Any], now: float, offer_ttl_s: int,
     ) -> bool:
-        if agent_id in self.active_listeners.get(board_id, set()):
+        if self.agent_has_active_listener(board_id, agent_id):
             return True
         last_seen = self.last_seen_activity.get((board_id, agent_id))
         window = DISPATCH_ACTIVITY_WINDOW_MULTIPLIER * float(offer_ttl_s)
@@ -3069,6 +3072,36 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 return True
         return False
 
+    def pinned_seat_unavailable_reason(
+        document: Mapping[str, Any],
+        ticket: Mapping[str, Any],
+        now: float,
+        kind: str,
+    ) -> str:
+        agent_id_value = ticket.get("assigned_to_agent_id")
+        member = document.get("members", {}).get(agent_id_value)
+        if not isinstance(member, Mapping) or not dispatch_member_matches_requirements(
+            document, ticket, member, kind
+        ):
+            return "pinned_seat_unavailable"
+        if agent_is_busy(
+            document,
+            str(agent_id_value),
+            now,
+            excluding_ticket_id=str(ticket.get("ticket_id", "")),
+        ):
+            return "pinned_seat_busy"
+        policy = dispatch_policy(document)
+        if not service.is_agent_live(
+            str(document["board_id"]),
+            str(agent_id_value),
+            member,
+            now,
+            int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S)),
+        ):
+            return "pinned_seat_exited"
+        return "pinned_seat_unavailable"
+
     def invalid_dispatch_offer_reason(
         document: Mapping[str, Any], ticket: Mapping[str, Any],
         offer: Mapping[str, Any], now: float, kind: str,
@@ -3361,6 +3394,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             candidates = alternatives
         if not candidates:
             if kind == "work" and ticket.get("assigned_to_agent_id"):
+                unavailable_reason = pinned_seat_unavailable_reason(
+                    document, ticket, now, kind
+                )
                 cycle_key = "work_pin_unavailable_cycles"
                 last_key = "work_pin_unavailable_last_at"
                 now_marker = iso_at(now)
@@ -3370,13 +3406,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     ticket[cycle_key] = cycles
                     ticket[last_key] = now_marker
                 if cycles >= DEFAULT_FALLBACK_AFTER_OFFERS:
-                    release_assignment_pin(ticket, now, "pinned_seat_unavailable")
+                    release_assignment_pin(ticket, now, unavailable_reason)
                     ticket[f"{kind}_offer_expirations"] = 0
                     return dispatch_ticket(document, ticket, now, kind)
                 state = {
                     "state": "unassignable",
                     "kind": kind,
-                    "reason": "pinned_seat_unavailable",
+                    "reason": unavailable_reason,
                     "pin_unavailable_cycles": cycles,
                 }
                 if ticket.get("dispatch_state") == state:
@@ -3411,6 +3447,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             }
         candidates.sort(
             key=lambda pair: (
+                0
+                if service.agent_has_active_listener(
+                    str(document["board_id"]), str(pair[0]["agent_id"])
+                )
+                else 1,
                 0 if agent_matches(preferred, pair[0]) else 1,
                 int(pair[1]["tier_max"]) - required_tier,
                 str(pair[0].get("last_offered_at", "")),
@@ -7823,15 +7864,37 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 )
             assignment_changed = current_assignee != assigned_to_agent_id
             released: list[dict[str, Any]] = []
+            displaced_offers: list[tuple[str, str]] = []
             if assigned_to_agent_id is not None:
                 target = document["members"].get(assigned_to_agent_id)
+                target_caps = member_capabilities(target or {})
                 if (
                     target is None
                     or assigned_to_agent_id == actor["agent_id"]
                     or target.get("lifecycle_status", "active") != "active"
-                    or target.get("membership_role") not in {"member", "admin"}
+                    or target.get("principal_id")
+                    not in document.get("principal_memberships", {})
+                    or target.get("role") in {"coordinator", "orchestrator"}
+                    or not target_caps["can_work"]
                 ):
                     raise ValueError("assignment target is not an active eligible seat")
+                if agent_has_live_lease_elsewhere(
+                    document,
+                    assigned_to_agent_id,
+                    now,
+                    excluding_ticket_id=ticket_id,
+                ):
+                    raise ValueError("assignment target is busy with a live lease")
+                if assignment_changed:
+                    target_releases = revoke_agent_offers(
+                        document, target, now, "ticket_reassigned"
+                    )
+                    released.extend(target_releases)
+                    displaced_offers.extend(
+                        (str(item["ticket_id"]), str(item["offer_kind"]))
+                        for item in target_releases
+                        if item.get("ticket_id") != ticket_id
+                    )
                 ticket["assigned_to"] = assigned_to_agent_id
                 ticket["assigned_to_agent_id"] = assigned_to_agent_id
                 ticket["assigned_to_kind"] = "agent_id"
@@ -7875,6 +7938,15 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 dispatched = dispatch_ticket(document, ticket, now, "work")
                 if dispatched is not None:
                     released.append(dispatched)
+                for displaced_ticket_id, displaced_kind in displaced_offers:
+                    displaced_ticket = document["tickets"].get(displaced_ticket_id)
+                    if not isinstance(displaced_ticket, dict):
+                        continue
+                    replacement = dispatch_ticket(
+                        document, displaced_ticket, now, displaced_kind
+                    )
+                    if replacement is not None:
+                        released.append(replacement)
             return {
                 "actor": copy.deepcopy(actor),
                 "ticket": copy.deepcopy(ticket),

@@ -521,6 +521,140 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(claimed.is_error)
 
+    async def test_assignment_revokes_target_offer_elsewhere_before_dispatch(
+        self,
+    ) -> None:
+        other_worker_id = await self.join_other_worker()
+        await self.enable_work_dispatch(self.worker, "worker-agent")
+        await self.enable_work_dispatch(
+            self.other_worker, "other-worker-agent"
+        )
+        self.principal = self.admin
+        first = await self.call(
+            "ticket_create",
+            agent_name="admin-agent",
+            title="target's previous offer",
+            description="the explicit assignment must revoke this offer",
+            target_url="pursers/packages/central",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            prefer_agents=[other_worker_id],
+        )
+        second = await self.call(
+            "ticket_create",
+            agent_name="admin-agent",
+            title="explicit assignment target",
+            description="the target must receive this offer in the same cycle",
+            target_url="pursers/packages/central",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            prefer_agents=[self.worker_id],
+        )
+        first_id = first.structured_content["ticket"]["ticket_id"]
+        second_id = second.structured_content["ticket"]["ticket_id"]
+        self.assertEqual(
+            first.structured_content["ticket"]["work_offer"]["agent_id"],
+            other_worker_id,
+        )
+        self.assertEqual(
+            second.structured_content["ticket"]["work_offer"]["agent_id"],
+            self.worker_id,
+        )
+
+        self.principal = self.coordinator
+        assigned = await self.call(
+            "ticket_assign",
+            agent_name="coordinator-1",
+            ticket_id=second_id,
+            assigned_to_agent_id=other_worker_id,
+            expected_status="open",
+            expected_assigned_to_agent_id=None,
+            coordinator_op_key="assignment-revokes-target-offer",
+            reason="move the live target to the explicitly pinned ticket",
+        )
+
+        assigned_ticket = assigned.structured_content["ticket"]
+        self.assertEqual(
+            assigned_ticket["work_offer"]["agent_id"], other_worker_id
+        )
+        persisted = self.service.load("pursers")["tickets"]
+        self.assertEqual(
+            persisted[first_id]["work_offer"]["agent_id"], self.worker_id
+        )
+        self.assertEqual(
+            persisted[second_id]["work_offer"]["agent_id"], other_worker_id
+        )
+        events = assigned.structured_content["dispatch_events"]
+        self.assertTrue(
+            any(
+                event["kind"] == central.OFFER_REVOKED
+                and event["ticket_id"] == first_id
+                and event["dispatch_reason"] == "ticket_reassigned"
+                for event in events
+            )
+        )
+        self.assertTrue(
+            any(
+                event["kind"] == central.TICKET_OFFERED
+                and event["ticket_id"] == second_id
+                and event["offered_agent_id"] == other_worker_id
+                for event in events
+            )
+        )
+
+    async def test_assignment_rejects_target_with_live_claim(self) -> None:
+        other_worker_id = await self.join_other_worker()
+        await self.enable_work_dispatch(self.worker, "worker-agent")
+        await self.enable_work_dispatch(
+            self.other_worker, "other-worker-agent"
+        )
+        self.principal = self.admin
+        claimed_target = await self.call(
+            "ticket_create",
+            agent_name="admin-agent",
+            title="claimed target work",
+            description="give the target a live lease",
+            target_url="pursers/packages/central",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            prefer_agents=[other_worker_id],
+        )
+        claimed_target_id = claimed_target.structured_content["ticket"]["ticket_id"]
+        self.principal = self.other_worker
+        await self.call(
+            "ticket_claim",
+            agent_name="other-worker-agent",
+            ticket_id=claimed_target_id,
+        )
+        self.principal = self.admin
+        pending = await self.call(
+            "ticket_create",
+            agent_name="admin-agent",
+            title="must remain unassigned",
+            description="a live claim blocks explicit assignment",
+            target_url="pursers/packages/central",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+        )
+        pending_id = pending.structured_content["ticket"]["ticket_id"]
+
+        self.principal = self.coordinator
+        with self.assertRaisesRegex(ToolError, "busy with a live lease"):
+            await self.call(
+                "ticket_assign",
+                agent_name="coordinator-1",
+                ticket_id=pending_id,
+                assigned_to_agent_id=other_worker_id,
+                expected_status="open",
+                expected_assigned_to_agent_id=None,
+                coordinator_op_key="reject-busy-assignment-target",
+                reason="do not overload the claimed seat",
+            )
+
+        persisted = self.service.load("pursers")["tickets"][pending_id]
+        self.assertIsNone(persisted["assigned_to_agent_id"])
+        self.assertEqual(persisted["work_offer"]["agent_id"], self.worker_id)
+
     async def test_assignment_noop_preserves_offer_and_clear_redispatches(
         self,
     ) -> None:
