@@ -27,6 +27,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Unavailable host identity or browser channel is reported as blocked, never as
   pass or skip. Documented in `docs/design-home/acceptance-observer.md`.
 
+### Fixed
+
+- Seat kit tests: the synthetic door token used by the door tests now carries
+  a valid base64url signature segment. PyJWT 2.14.0 (2026-09-11) decodes the
+  signature segment even with `verify_signature=False`, so the former literal
+  `synthetic-signature` failed with `Invalid crypto padding` and turned the
+  `ci` workflow red on every push; production doors were never affected.
+
 ## [5.0.0b1] - 2026-09-11
 
 This release includes `pursers-central==0.1.0a30`,
