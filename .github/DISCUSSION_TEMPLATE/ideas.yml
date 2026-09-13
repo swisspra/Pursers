@@ -1,0 +1,54 @@
+title: "[Idea] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping shape Pursers. Describe the problem and desired
+        outcome before proposing implementation details. Do not include tokens,
+        credentials, private board data, or identifying local paths.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or opportunity
+      description: What is difficult today, and who encounters it?
+      placeholder: Describe the workflow, constraint, and impact.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What would a successful result make possible?
+      placeholder: Focus on observable behavior rather than a specific implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of Pursers is most relevant?
+      options:
+        - Core coordination
+        - Setup and operations
+        - Dashboards and UX
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Share workarounds or related approaches, if any.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional context
+      description: Add sanitized examples, constraints, or links that support the idea.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private board content, and identifying local paths.
+          required: true

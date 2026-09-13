@@ -1,0 +1,48 @@
+title: "[Q&A] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask a focused question about installing, configuring, or using Pursers.
+        This public form is not a secure support channel: never include tokens,
+        credentials, private board data, or identifying local paths.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to understand or accomplish?
+      placeholder: Include the expected behavior and where you became blocked.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Installation and upgrade
+        - Central and boards
+        - Agent seats and wait bridge
+        - Dashboards and integrations
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Pursers version
+      description: Provide the version when it affects the question.
+      placeholder: For example, 5.0.0b1
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Include sanitized commands, results, and documentation links.
+      placeholder: Remove credentials and replace local paths with placeholders.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private board content, and identifying local paths.
+          required: true
