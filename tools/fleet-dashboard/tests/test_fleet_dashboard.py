@@ -8,6 +8,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import urllib.request
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from ipaddress import ip_address
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Self
@@ -29,7 +31,10 @@ import jwt
 import pytest
 import tomllib
 import uvicorn
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from jwt.algorithms import RSAAlgorithm
 
 MODULE_PATH = Path(__file__).parents[1] / "fleet_dashboard.py"
@@ -73,6 +78,39 @@ def local_central_token(root: Path, audience: str) -> tuple[Path, str]:
         headers={"kid": "fleet-dashboard-test"},
     )
     return jwks, token
+
+
+def local_tls_certificate(root: Path) -> tuple[Path, Path]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(minutes=10))
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [x509.DNSName("localhost"), x509.IPAddress(ip_address("127.0.0.1"))]
+            ),
+            critical=False,
+        )
+        .sign(private_key, hashes.SHA256())
+    )
+    certificate_path = root / "central-cert.pem"
+    private_key_path = root / "central-key.pem"
+    certificate_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    private_key_path.write_bytes(
+        private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return certificate_path, private_key_path
 
 
 def test_registry_includes_home_and_excludes_paused_projects() -> None:
@@ -1027,7 +1065,7 @@ def test_fetcher_requests_central_max_snapshot_bounds() -> None:
     }
 
 
-def test_dashboard_reuses_one_takeover_client_join_per_process() -> None:
+def test_dashboard_uses_short_lived_takeover_clients_per_operation() -> None:
     factory_calls: list[tuple[str, dict[str, object]]] = []
     enter_calls = 0
     exit_calls = 0
@@ -1066,8 +1104,8 @@ def test_dashboard_reuses_one_takeover_client_join_per_process() -> None:
     try:
         cache.get_project_registry()
         cache.get_project_registry()
-        assert enter_calls == 1
-        assert factory_calls == [
+        assert enter_calls == 2
+        assert factory_calls == 2 * [
             (
                 "pursers",
                 {
@@ -1080,21 +1118,21 @@ def test_dashboard_reuses_one_takeover_client_join_per_process() -> None:
     finally:
         cache.close()
 
-    assert exit_calls == 1
+    assert exit_calls == 2
 
 
-def test_reusable_async_runner_keeps_one_loop_thread_across_callers() -> None:
+def test_async_runner_keeps_each_operation_in_its_caller_thread() -> None:
     runner = dashboard._ReusableAsyncRunner()
     caller_threads: set[int] = set()
     barrier = threading.Barrier(3)
 
-    async def identity() -> dict[str, int]:
+    async def identity() -> dict[str, object]:
         return {
-            "loop": id(asyncio.get_running_loop()),
+            "loop": asyncio.get_running_loop(),
             "thread": threading.get_ident(),
         }
 
-    def call() -> dict[str, int]:
+    def call() -> dict[str, object]:
         caller_threads.add(threading.get_ident())
         barrier.wait(timeout=5)
         return runner.run(identity())
@@ -1106,21 +1144,71 @@ def test_reusable_async_runner_keeps_one_loop_thread_across_callers() -> None:
         runner.close()
 
     assert len(caller_threads) > 1
-    assert len({result["loop"] for result in results}) == 1
-    assert len({result["thread"] for result in results}) == 1
-    assert results[0]["thread"] not in caller_threads
+    assert len({result["loop"] for result in results}) == len(results)
+    assert {result["thread"] for result in results} == caller_threads
 
 
+@pytest.mark.parametrize("use_tls", [False, True])
 def test_threaded_dashboard_concurrent_fleet_and_workers_use_live_local_central(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_tls: bool
 ) -> None:
     listener = socket.socket()
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", 0))
     listener.listen(128)
     central_port = int(listener.getsockname()[1])
-    central_url = f"http://127.0.0.1:{central_port}/mcp"
+    scheme = "https" if use_tls else "http"
+    central_url = f"{scheme}://127.0.0.1:{central_port}/mcp"
     jwks, token = local_central_token(tmp_path, central_url)
+    traces: list[dict[str, object]] = []
+    if use_tls:
+        certificate_path, private_key_path = local_tls_certificate(tmp_path)
+
+        async def record_request(request: httpx2.Request) -> None:
+            traces.append(
+                {
+                    "phase": "request",
+                    "method": request.method,
+                    "path": request.url.path,
+                    "headers": tuple(
+                        sorted(
+                            (key, value)
+                            for key, value in request.headers.multi_items()
+                            if key not in {
+                                "authorization",
+                                "mcp-session-id",
+                            }
+                        )
+                    ),
+                }
+            )
+
+        async def record_response(response: httpx2.Response) -> None:
+            traces.append(
+                {
+                    "phase": "response",
+                    "status": response.status_code,
+                    "http_version": response.extensions.get("http_version"),
+                }
+            )
+
+        def traced_http(client: dashboard.BoardClient) -> httpx2.AsyncClient:
+            return httpx2.AsyncClient(
+                headers={"Authorization": f"Bearer {client.token}"},
+                timeout=httpx2.Timeout(10.0, read=None),
+                limits=httpx2.Limits(
+                    max_connections=client.max_connections,
+                    max_keepalive_connections=client.max_connections,
+                ),
+                verify=ssl.create_default_context(cafile=str(certificate_path)),
+                trust_env=False,
+                event_hooks={
+                    "request": [record_request],
+                    "response": [record_response],
+                },
+            )
+
+        monkeypatch.setattr(dashboard.BoardClient, "_http", traced_http)
     for key, value in {
         "CENTRAL_AUTH_MODE": "jwt",
         "CENTRAL_JWT_ISSUER": "https://issuer.example",
@@ -1134,6 +1222,12 @@ def test_threaded_dashboard_concurrent_fleet_and_workers_use_live_local_central(
     mcp, service = central.build_server(
         "127.0.0.1", central_port, tmp_path / "central"
     )
+    server_options: dict[str, object] = {}
+    if use_tls:
+        server_options.update(
+            ssl_certfile=str(certificate_path),
+            ssl_keyfile=str(private_key_path),
+        )
     central_server = uvicorn.Server(
         uvicorn.Config(
             create_streamable_http_app(mcp, service, host="127.0.0.1"),
@@ -1141,6 +1235,7 @@ def test_threaded_dashboard_concurrent_fleet_and_workers_use_live_local_central(
             port=central_port,
             log_level="error",
             access_log=False,
+            **server_options,
         )
     )
     central_thread = threading.Thread(
@@ -1168,6 +1263,21 @@ def test_threaded_dashboard_concurrent_fleet_and_workers_use_live_local_central(
             )
 
     asyncio.run(initialize_registry())
+    traces.clear()
+
+    async def plain_client_probe() -> None:
+        async with dashboard.BoardClient(
+            central_url,
+            token,
+            "pursers",
+            agent_name="fleet-dashboard-probe",
+            capabilities={"can_work": False, "can_review": False},
+        ) as client:
+            await client.board_snapshot(limit=1, max_bytes=5_000)
+
+    asyncio.run(plain_client_probe())
+    plain_trace = list(traces)
+    traces.clear()
     config = dashboard.Config(
         url=central_url,
         token=token,
@@ -1228,6 +1338,42 @@ def test_threaded_dashboard_concurrent_fleet_and_workers_use_live_local_central(
             assert {"central", "boards", "agents", "pool_summary"} <= payload.keys()
         else:
             assert {"central", "enabled", "workers", "roles", "presets"} <= payload.keys()
+    if use_tls:
+        assert plain_trace
+        request_traces = [item for item in traces if item["phase"] == "request"]
+        plain_requests = [item for item in plain_trace if item["phase"] == "request"]
+        assert request_traces and plain_requests
+        assert {item["method"] for item in request_traces} == {"POST"}
+        assert {item["path"] for item in request_traces} == {"/mcp"}
+        stable_names = {
+            "accept",
+            "accept-encoding",
+            "connection",
+            "content-type",
+            "user-agent",
+        }
+
+        def stable_headers(item: dict[str, object]) -> tuple[tuple[str, str], ...]:
+            return tuple(
+                (key, value)
+                for key, value in item["headers"]
+                if key in stable_names
+            )
+
+        assert {stable_headers(item) for item in request_traces} == {
+            stable_headers(item) for item in plain_requests
+        }
+        assert {
+            dict(item["headers"])["connection"] for item in request_traces
+        } == {"keep-alive"}
+        assert all(
+            int(dict(item["headers"])["content-length"]) > 0
+            for item in request_traces
+        )
+        response_traces = [item for item in traces if item["phase"] == "response"]
+        assert response_traces
+        assert {item["status"] for item in response_traces} == {200}
+        assert {item["http_version"] for item in response_traces} == {b"HTTP/1.1"}
 
 
 def test_fleet_and_workers_errors_report_scrubbed_exception_group_leaf(

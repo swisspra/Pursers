@@ -27,7 +27,6 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Awaitable, Callable
-from concurrent.futures import Future
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -4443,46 +4442,11 @@ class FleetFetcher:
 
 
 class _ReusableAsyncRunner:
-    """Run dashboard coroutines in one task on a dedicated event-loop thread."""
+    """Run each dashboard coroutine in its caller's own short-lived loop."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._closed = False
-        self._loop = asyncio.new_event_loop()
-        self._queue: asyncio.Queue[
-            tuple[Awaitable[dict[str, Any]], Future[dict[str, Any]]] | None
-        ]
-        self._ready = threading.Event()
-        self._thread = threading.Thread(
-            target=self._serve_loop,
-            name="fleet-dashboard-async",
-            daemon=True,
-        )
-        self._thread.start()
-        self._ready.wait()
-
-    def _serve_loop(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        self._queue = asyncio.Queue()
-        self._ready.set()
-        try:
-            self._loop.run_until_complete(self._serve_awaitables())
-        finally:
-            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
-            self._loop.close()
-
-    async def _serve_awaitables(self) -> None:
-        while True:
-            item = await self._queue.get()
-            if item is None:
-                return
-            awaitable, future = item
-            try:
-                result = await awaitable
-            except BaseException as exc:  # Keep the runner alive after one failure.
-                future.set_exception(exc)
-            else:
-                future.set_result(result)
 
     def run(self, awaitable: Awaitable[dict[str, Any]]) -> dict[str, Any]:
         with self._lock:
@@ -4491,19 +4455,12 @@ class _ReusableAsyncRunner:
                 if callable(close):
                     close()
                 raise RuntimeError("dashboard async runner is closed")
-            future: Future[dict[str, Any]] = Future()
-            self._loop.call_soon_threadsafe(
-                self._queue.put_nowait, (awaitable, future)
-            )
-            return future.result()
+            with asyncio.Runner() as runner:
+                return runner.run(awaitable)
 
     def close(self) -> None:
         with self._lock:
-            if not self._closed:
-                self._closed = True
-                self._loop.call_soon_threadsafe(self._queue.put_nowait, None)
-        if threading.current_thread() is not self._thread:
-            self._thread.join()
+            self._closed = True
 
 
 class TimedCache:
@@ -5734,9 +5691,6 @@ class DashboardCache:
             if label in self.fetchers:
                 raise ValueError(f"duplicate central label: {label}")
             self.fetchers[label] = item
-            enable_reuse = getattr(item, "enable_client_reuse", None)
-            if callable(enable_reuse):
-                enable_reuse()
         self.default_central = next(iter(self.fetchers))
         # Preserve these public attributes for single-central callers/tests.
         self.fetcher = self.fetchers[self.default_central]

@@ -244,12 +244,15 @@ The server refuses non-loopback binding. It never returns tokens to the browser
 or writes them to logs. Central TLS verification follows
 `pursers_client.BoardClient` behavior.
 
-The viewer keeps one joined client per board for the lifetime of the process and
-uses `allow_takeover=True` when it joins. Launchers embedding this dashboard,
-including the separately installed `pursers-personal-app/launch_dashboard.py`,
-must preserve that process lifetime instead of constructing a `FleetFetcher` for
-each request; they must also pass through the viewer's fixed single-process
-identity rather than starting multiple processes with the same agent name.
+The viewer opens a short-lived joined client for each board operation and uses
+`allow_takeover=True` when it joins. Each synchronous dashboard operation owns a
+short-lived asyncio runner, so an MCP client is created, used, and closed in the
+same task, loop, and HTTP handler thread. MCP sessions and HTTP connection pools
+do not survive across browser requests. Launchers embedding this dashboard,
+including the separately installed
+`pursers-personal-app/launch_dashboard.py`, must pass through the viewer's fixed
+single-process identity rather than starting multiple processes with the same
+agent name.
 
 ### Multiple central instances
 
