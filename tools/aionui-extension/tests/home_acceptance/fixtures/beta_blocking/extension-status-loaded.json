@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "fixture_id": "extension-status-loaded",
+  "helper_status": {
+    "ok": true,
+    "board": "sandbox-home-acceptance",
+    "central": "synthetic-loopback",
+    "transport": "push",
+    "core_version": "fixture-runtime",
+    "team_context": "standalone"
+  },
+  "onboarding_status": {
+    "ok": true,
+    "push_mode": "push",
+    "seats": [
+      {
+        "board": "sandbox-home-acceptance",
+        "role": "worker",
+        "seat_name": "fixture-worker-1",
+        "kid": "synthetic-worker-key",
+        "exp": 2000000000
+      }
+    ]
+  }
+}
