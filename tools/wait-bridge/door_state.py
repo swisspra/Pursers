@@ -407,13 +407,27 @@ def resolve(env: Mapping[str, str] | None = None) -> dict[str, str]:
         document = load(state_path(env=selected))
         if document["doors"]:
             stored = select(document, board=board, role=role)
-    if not direct_token and token_file:
+    if token_file:
         try:
-            direct_token = (
+            file_token = (
                 Path(token_file).expanduser().read_text(encoding="utf-8").strip()
             )
         except OSError as exc:
             raise ValueError("ONBOARD_CENTRAL_TOKEN_FILE is not readable") from exc
+        if (
+            direct_token
+            and not hmac.compare_digest(direct_token, file_token)
+            and selected.get("PURSERS_ALLOW_ENV_TOKEN", "").strip() != "1"
+        ):
+            raise ValueError(
+                "split identity: ONBOARD_CENTRAL_TOKEN and "
+                "ONBOARD_CENTRAL_TOKEN_FILE differ"
+            )
+        if not (
+            direct_token
+            and selected.get("PURSERS_ALLOW_ENV_TOKEN", "").strip() == "1"
+        ):
+            direct_token = file_token
     return {
         "url": selected.get("ONBOARD_CENTRAL_URL", "").strip()
         or str(stored.get("u") or "http://127.0.0.1:8766/mcp"),

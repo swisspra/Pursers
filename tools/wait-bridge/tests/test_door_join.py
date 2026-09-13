@@ -66,7 +66,7 @@ class DoorStateTests(unittest.TestCase):
             selected = door_state.select(document, board="beta", role="reviewer")
             self.assertEqual((selected["b"], selected["r"]), ("beta", "reviewer"))
 
-    def test_explicit_environment_wins_field_by_field(self) -> None:
+    def test_environment_token_without_file_wins_over_stored_token(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "doors.json"
             door_state.store(path, door(url="http://127.0.0.1:9000/mcp"))
@@ -83,7 +83,7 @@ class DoorStateTests(unittest.TestCase):
             env["ONBOARD_CENTRAL_TOKEN"] = "explicit-token"
             self.assertEqual(door_state.resolve(env)["token"], "explicit-token")
 
-    def test_token_file_precedes_stored_token(self) -> None:
+    def test_token_file_without_environment_precedes_stored_token(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state = Path(raw)
             door_state.store(state / "doors.json", door())
@@ -98,6 +98,40 @@ class DoorStateTests(unittest.TestCase):
                 }
             )
             self.assertEqual(resolved["token"], "explicit-file-token")
+
+    def test_matching_environment_and_file_tokens_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            token_file = Path(raw) / "explicit.txt"
+            token_file.write_text("same-token\n", encoding="utf-8")
+            resolved = door_state.resolve(
+                {
+                    "ONBOARD_CENTRAL_TOKEN": "same-token",
+                    "ONBOARD_CENTRAL_TOKEN_FILE": str(token_file),
+                    "ONBOARD_CENTRAL_URL": "http://127.0.0.1:8766/mcp",
+                    "ONBOARD_BOARD_ID": "sandbox",
+                    "PURSERS_ROLE": "worker",
+                }
+            )
+            self.assertEqual(resolved["token"], "same-token")
+
+    def test_different_environment_and_file_tokens_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            token_file = Path(raw) / "explicit.txt"
+            token_file.write_text("seat-token\n", encoding="utf-8")
+            env = {
+                "ONBOARD_CENTRAL_TOKEN": "inherited-admin-token",
+                "ONBOARD_CENTRAL_TOKEN_FILE": str(token_file),
+                "ONBOARD_CENTRAL_URL": "http://127.0.0.1:8766/mcp",
+                "ONBOARD_BOARD_ID": "sandbox",
+                "PURSERS_ROLE": "worker",
+            }
+            with self.assertRaisesRegex(ValueError, "split identity"):
+                door_state.resolve(env)
+
+            env["PURSERS_ALLOW_ENV_TOKEN"] = "1"
+            self.assertEqual(
+                door_state.resolve(env)["token"], "inherited-admin-token"
+            )
 
     def test_omitted_board_and_role_fail_closed_when_ambiguous(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -59,7 +59,7 @@ order:
 | Value | First choice | Stored-door fallback |
 | --- | --- | --- |
 | Central URL | `ONBOARD_CENTRAL_URL` | `u` |
-| credential | `ONBOARD_CENTRAL_TOKEN`, then `ONBOARD_CENTRAL_TOKEN_FILE` | `t` |
+| credential | `ONBOARD_CENTRAL_TOKEN_FILE`, then `ONBOARD_CENTRAL_TOKEN` | `t` |
 | board | `ONBOARD_BOARD_ID` | `b`, requiring the only stored board when omitted |
 | role | `PURSERS_ROLE` | `r`, requiring the only stored role when omitted |
 | seat name | `ONBOARD_AGENT_NAME` | first unused `<role>-<short-hostname>-<n>` in `doors.json` |
@@ -72,8 +72,9 @@ roles fail closed and tell the operator which selector to set.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `ONBOARD_CENTRAL_TOKEN` | no | Explicit Central credential; overrides `ONBOARD_CENTRAL_TOKEN_FILE` and stored-door state. |
-| `ONBOARD_CENTRAL_TOKEN_FILE` | no | Explicit credential file; used before stored-door state when the direct credential is absent. |
+| `ONBOARD_CENTRAL_TOKEN` | no | Explicit Central credential; used when `ONBOARD_CENTRAL_TOKEN_FILE` is absent. |
+| `ONBOARD_CENTRAL_TOKEN_FILE` | no | Authoritative explicit credential file. If the environment token differs, startup fails with `split identity`; set `PURSERS_ALLOW_ENV_TOKEN=1` only for an intentional environment-token override. |
+| `PURSERS_ALLOW_ENV_TOKEN` | no | Escape hatch: when set to `1`, permits `ONBOARD_CENTRAL_TOKEN` to override a differing token file. |
 | `ONBOARD_CENTRAL_URL` | no | Central MCP URL; defaults to `http://127.0.0.1:8766/mcp`. |
 | `ONBOARD_BOARD_ID` | no | Board ID; defaults to `pursers`. |
 | `ONBOARD_AGENT_NAME` | no | Base board identity; defaults to `pursers-wait-bridge`. |
@@ -211,6 +212,11 @@ in errors or logs. Doctor also launches the exact managed command and env block,
 opens an MCP session, calls `project_registry_get`, and compares the connector
 and bridge principals at Central. Regenerate the seat configuration and restart
 the host after changing either token source.
+
+Any process that sets both explicit token sources also fails closed when their
+values differ, even without a managed-seat launcher. This prevents an inherited
+operator credential from overriding a seat token file. Use
+`PURSERS_ALLOW_ENV_TOKEN=1` only when the environment override is deliberate.
 
 An explicit identity is joined when its call starts. Joins are stateless and
 idempotent; the bridge deliberately keeps no mutable join cache and does not
