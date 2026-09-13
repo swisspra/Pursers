@@ -1,6 +1,6 @@
 {
   "artifact_kind": "verifier_gap_implementability_map",
-  "candidate_commit": "fc216c0cc4938ee2e324a93e465db3eea8004d35",
+  "candidate_commit": "98c32986aee796918ffe36b6d791ed9d1fa05790",
   "classification": {
     "closed_recorder_request": "The assembled candidate emits the approved semantic selector or attribute and the trusted browser observer reads it; this closes the candidate or adapter request without claiming passing browser evidence.",
     "implementable_now": "Recorder recipe is implemented and current read-only fixture facts do not contradict it; this is not a passing-evidence claim.",
