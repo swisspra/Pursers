@@ -146,6 +146,105 @@ class JournalCompactTests(unittest.IsolatedAsyncioTestCase):
         after = self.service.journal.read_after("pursers", 0, 1000)
         self.assertEqual(after, before)
 
+    async def test_admin_sets_retention_and_hard_row_cap(self) -> None:
+        self.seed_journal(620)
+
+        result = await self.call(
+            "board_journal_retention_set",
+            agent_name="admin-agent",
+            journal_retention_days=0,
+            journal_row_cap=501,
+        )
+
+        self.assertFalse(result.is_error)
+        payload = result.structured_content
+        self.assertEqual(payload["previous_journal_retention_days"], 7)
+        self.assertEqual(payload["previous_journal_row_cap"], 50_000)
+        self.assertEqual(payload["journal_retention_days"], 0)
+        self.assertEqual(payload["journal_row_cap"], 501)
+        self.assertTrue(payload["changed"])
+        self.assertGreater(payload["journal_compaction"]["removed"], 0)
+        journal = self.service.store.load(
+            self.service.journal._path("pursers"), dict
+        )
+        self.assertEqual(len(journal["rows"]), 501)
+        self.assertEqual(
+            journal["rows"][-1]["archived_reason"], "journal_compaction"
+        )
+
+        status = await self.call("board_status", agent_name="admin-agent")
+        self.assertEqual(status.structured_content["journal_retention_days"], 0)
+        self.assertEqual(status.structured_content["journal_row_cap"], 501)
+
+    async def test_coordinator_can_set_retention_but_member_cannot(self) -> None:
+        coordinator = central.Principal(
+            "PR-coordinator",
+            "coordinator",
+            frozenset({"board:read", "board:coordinate"}),
+        )
+        member = central.Principal(
+            "PR-member",
+            "member",
+            frozenset({"board:read", "board:write"}),
+        )
+        for principal in (coordinator, member):
+            self.principal = central.Principal(
+                "PR-admin",
+                "admin-canonical",
+                frozenset({"board:read", "board:write", "board:review"}),
+            )
+            await self.call(
+                "board_member_add",
+                agent_name="admin-agent",
+                principal_id=principal.principal_id,
+                role="member",
+            )
+        self.principal = coordinator
+        await self.call(
+            "board_join",
+            agent_name="coordinator-agent",
+            role="coordinator",
+        )
+        configured = await self.call(
+            "board_journal_retention_set",
+            agent_name="coordinator-agent",
+            journal_retention_days=3,
+            journal_row_cap=2_000,
+        )
+        self.assertFalse(configured.is_error)
+        self.assertEqual(configured.structured_content["journal_row_cap"], 2_000)
+
+        self.principal = member
+        await self.call("board_join", agent_name="member-agent")
+        with self.assertRaisesRegex(
+            ToolError, "requires board admin or coordinator"
+        ):
+            await self.call(
+                "board_journal_retention_set",
+                agent_name="member-agent",
+                journal_retention_days=4,
+                journal_row_cap=3_000,
+            )
+
+    async def test_journal_retention_bounds_are_validated(self) -> None:
+        for arguments, message in (
+            (
+                {"journal_retention_days": 7, "journal_row_cap": 500},
+                "journal_row_cap",
+            ),
+            (
+                {"journal_retention_days": 7, "journal_row_cap": True},
+                "journal_row_cap",
+            ),
+        ):
+            with self.subTest(arguments=arguments):
+                with self.assertRaisesRegex(ToolError, message):
+                    await self.call(
+                        "board_journal_retention_set",
+                        agent_name="admin-agent",
+                        **arguments,
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

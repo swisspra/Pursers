@@ -219,18 +219,24 @@ class SharedPrincipalIdentityTests(unittest.IsolatedAsyncioTestCase):
             {item["memory_id"] for item in legacy.structured_content["memories"]},
         )
 
-    async def test_active_collision_journaled_and_takeover_stale_retired_allowed(self) -> None:
+    async def test_active_same_identity_collision_is_not_journaled_and_takeover_allowed(
+        self,
+    ) -> None:
         self.principal = self.shared_worker
         reason = (
             "seat name already active under this principal; choose another name "
             "or pass allow_takeover=true"
         )
+        before_collision = self.service.journal.read_after(
+            "pursers", 0, 1_000
+        )["latest_cursor"]
         with self.assertRaisesRegex(ToolError, reason.replace("+", r"\+")):
             await self.call("board_join", agent_name="worker-a")
-        event = self.service.journal.read_after("pursers", 0, 1_000)["events"][-1]
-        self.assertEqual(event["kind"], "seat_name_collision")
-        self.assertEqual(event["refusal_reason"], reason)
-        self.assertEqual(event["recipient_identities"], [self.admin_agent_id])
+        after_collision = self.service.journal.read_after(
+            "pursers", before_collision, 1_000
+        )
+        self.assertEqual(after_collision["events"], [])
+        self.assertEqual(after_collision["latest_cursor"], before_collision)
 
         before_takeover = self.service.journal.read_after("pursers", 0, 1_000)[
             "latest_cursor"
@@ -246,8 +252,18 @@ class SharedPrincipalIdentityTests(unittest.IsolatedAsyncioTestCase):
             "seat_name_collision",
             {event["kind"] for event in takeover_events},
         )
+        before_onboard_collision = self.service.journal.read_after(
+            "pursers", 0, 1_000
+        )["latest_cursor"]
         with self.assertRaisesRegex(ToolError, "seat name already active"):
             await self.call("board_onboard", agent_name="worker-a")
+        after_onboard_collision = self.service.journal.read_after(
+            "pursers", before_onboard_collision, 1_000
+        )
+        self.assertEqual(after_onboard_collision["events"], [])
+        self.assertEqual(
+            after_onboard_collision["latest_cursor"], before_onboard_collision
+        )
 
         seat_a_id = central.agent_id(
             "pursers", self.shared_worker.principal_id, "worker-a"
