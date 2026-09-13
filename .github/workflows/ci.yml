@@ -20,7 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          # PR merge -> head -> head parent, required by candidate-only diff.
+          fetch-depth: 3
 
       - uses: actions/setup-python@v5
         with:
