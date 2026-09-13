@@ -1142,6 +1142,60 @@ def _git(*arguments: str) -> str:
     return result.stdout.strip()
 
 
+def _verified_commit(value: str) -> str | None:
+    if not FULL_SHA.fullmatch(value):
+        return None
+    try:
+        resolved = _git("rev-parse", "--verify", f"{value}^{{commit}}")
+    except AcceptanceError:
+        return None
+    return value if resolved == value else None
+
+
+def _resolve_candidate_diff_commit(candidate_commit: str) -> str:
+    """Resolve the authored commit hidden behind a GitHub PR merge checkout."""
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "").strip()
+    if event_name == "pull_request":
+        event_path = os.environ.get("GITHUB_EVENT_PATH", "").strip()
+        if event_path:
+            try:
+                path = Path(event_path)
+                if path.stat().st_size <= 1_000_000:
+                    event = json.loads(path.read_text(encoding="utf-8"))
+                    pull_request = event.get("pull_request")
+                    head = (
+                        pull_request.get("head")
+                        if isinstance(pull_request, dict)
+                        else None
+                    )
+                    head_sha = head.get("sha") if isinstance(head, dict) else None
+                    if isinstance(head_sha, str):
+                        resolved = _verified_commit(head_sha)
+                        if resolved is not None:
+                            return resolved
+            except (OSError, ValueError):
+                pass
+        try:
+            second_parent = _git("rev-parse", "HEAD^2")
+        except AcceptanceError:
+            second_parent = ""
+        resolved = _verified_commit(second_parent)
+        if resolved is None:
+            raise AcceptanceError("pull request head commit is unavailable")
+        return resolved
+
+    github_sha = os.environ.get("GITHUB_SHA", "").strip()
+    if github_sha:
+        resolved = _verified_commit(github_sha)
+        if resolved is None or resolved != candidate_commit:
+            raise AcceptanceError("GITHUB_SHA does not match the candidate commit")
+        return resolved
+    resolved = _verified_commit(candidate_commit)
+    if resolved is None:
+        raise AcceptanceError("candidate commit is unavailable in this checkout")
+    return resolved
+
+
 def _verify_candidate_commit(candidate_commit: str) -> None:
     resolved = _git("rev-parse", "--verify", f"{candidate_commit}^{{commit}}")
     if resolved != candidate_commit:
@@ -1940,8 +1994,9 @@ def _validate_suite_receipt(
         if match is None or int(match.group(1)) < 1:
             raise AcceptanceError("Node suite output must report at least one pass")
     if suite["name"] == "candidate-diff-check":
+        diff_commit = _resolve_candidate_diff_commit(candidate_commit)
         result = subprocess.run(
-            ["git", "diff", "--check", f"{candidate_commit}^", candidate_commit],
+            ["git", "diff", "--check", f"{diff_commit}^", diff_commit],
             cwd=REPOSITORY_ROOT,
             text=True,
             capture_output=True,
@@ -2042,8 +2097,9 @@ def _execute_required_suite(name: str, command: str, candidate_commit: str) -> N
         cwd = REPOSITORY_ROOT
         environment = None
     elif name == "candidate-diff-check":
+        diff_commit = _resolve_candidate_diff_commit(candidate_commit)
         arguments = [
-            "git", "diff", "--check", f"{candidate_commit}^", candidate_commit
+            "git", "diff", "--check", f"{diff_commit}^", diff_commit
         ]
         cwd = REPOSITORY_ROOT
         environment = None
