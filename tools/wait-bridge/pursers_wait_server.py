@@ -1726,6 +1726,7 @@ class LeaseKeepalive:
         self.last_model_interaction = time.monotonic()
         self.active_waits = 0
         self.model_refresh_pending = False
+        self.idle_downgraded = False
         self.idle_limit_override = self._idle_limit_override()
 
     @staticmethod
@@ -1761,6 +1762,7 @@ class LeaseKeepalive:
     def observe_model_interaction(self) -> None:
         self.last_model_interaction = time.monotonic()
         self.model_refresh_pending = True
+        self.idle_downgraded = False
         self.idle_paused.clear()
         now = time.monotonic()
         for lease in self.leases.values():
@@ -2178,6 +2180,21 @@ class LeaseKeepalive:
                         await self._discover()
                     except Exception as exc:
                         _log(f"lease keepalive discovery deferred: {exc}")
+                elif (
+                    not self.idle_downgraded
+                    and _host_name() in {"codex", "codex-cli"}
+                ):
+                    # One discovery at the live->idle transition so Central
+                    # stops offering work to a Codex seat whose model went
+                    # away (the downgrade branch in _discover). Later idle
+                    # ticks do not re-join; the next model interaction resets
+                    # the flag and the following live discovery restores the
+                    # seat's real capabilities.
+                    try:
+                        await self._discover()
+                        self.idle_downgraded = True
+                    except Exception as exc:
+                        _log(f"lease keepalive idle downgrade deferred: {exc}")
                 self.next_discovery = time.monotonic() + self.interval(ttl)
             now = time.monotonic()
             due_keys = [

@@ -118,6 +118,43 @@ class ClaimOnDiscoveryKeepalive(NoDiscoveryKeepalive):
 
 
 class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_downgrades_idle_codex_seat_once(self) -> None:
+        """The scheduler must reach the downgrade path for a truly idle seat.
+
+        _discover() is normally only called while the model is live; an idle
+        Codex seat needs exactly one extra discovery at the live->idle
+        transition (and none on later idle ticks) so Central stops offering it
+        work, and a model interaction must re-arm that transition.
+        """
+        keepalive = wait_server.LeaseKeepalive(Connection(RawClient()))
+        keepalive.idle_limit_override = 1.0
+        keepalive.last_model_interaction = time.monotonic() - 10**6
+        seen: list[bool] = []
+
+        async def fake_discover() -> None:
+            seen.append(keepalive.model_is_live(1))
+
+        async def tick() -> None:
+            keepalive.next_discovery = 0.0
+            keepalive.changed.set()
+            await asyncio.sleep(0.05)
+
+        with (
+            patch.object(keepalive, "_discover", fake_discover),
+            patch.object(wait_server, "_host_name", return_value="codex"),
+        ):
+            task = asyncio.create_task(keepalive._run())
+            await asyncio.sleep(0.05)   # idle tick 1 -> one downgrade discovery
+            await tick()                # idle tick 2 -> no re-join
+            keepalive.observe_model_interaction()
+            keepalive.last_model_interaction = time.monotonic() - 10**6
+            await tick()                # idle again after a model call -> one more
+            keepalive.stopped.set()
+            keepalive.changed.set()
+            await asyncio.wait_for(task, timeout=2.0)
+
+        self.assertEqual(seen, [False, False])
+
     async def test_discovery_preserves_model_capabilities_but_idles_codex(
         self,
     ) -> None:
