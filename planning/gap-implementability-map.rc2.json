@@ -1,0 +1,3715 @@
+{
+  "artifact_kind": "verifier_gap_implementability_map",
+  "candidate_commit": "fc216c0cc4938ee2e324a93e465db3eea8004d35",
+  "classification": {
+    "closed_recorder_request": "The assembled candidate emits the approved semantic selector or attribute and the trusted browser observer reads it; this closes the candidate or adapter request without claiming passing browser evidence.",
+    "implementable_now": "Recorder recipe is implemented and current read-only fixture facts do not contradict it; this is not a passing-evidence claim.",
+    "recipe_supported_current_fixture_fails": "Recorder recipe is authoritative and current prepared fixture contradicts canonical values.",
+    "recipe_supported_requires_fixture": "Recorder recipe is authoritative, but the named state must be created before capture.",
+    "requires_candidate_or_adapter_change": "The current product DOM/action surface or recorder schema cannot authoritatively expose the canonical predicate.",
+    "requires_fixture_change": "Current rendered value contradicts exact canonical equality; no passing recipe is emitted.",
+    "requires_fixture_controller": "A deterministic external state transition is required and cannot be driven by the closed recorder action schema."
+  },
+  "current_prepared_surface_facts": {
+    "board_id": "sandbox-home-acceptance-tk946",
+    "fleet_centrals": [
+      {
+        "availability": "available",
+        "central_id": "tk4ea",
+        "probe_status": 200
+      }
+    ],
+    "note": "Read-only planning facts; they are not evidence records and do not satisfy canonical predicates by themselves.",
+    "personal_receipt": {
+      "private_regular_file": true,
+      "server_name": "On Board Personal",
+      "transport": "stdio"
+    }
+  },
+  "evidence_status": "planning_only_no_capture_performed",
+  "rows": [
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/connect",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/connection_pill",
+            "phase": "after",
+            "value": "Connected"
+          },
+          {
+            "op": "eq",
+            "path": "/role",
+            "phase": "after",
+            "value": "worker"
+          },
+          {
+            "op": "eq",
+            "path": "/push_mode",
+            "phase": "after",
+            "value": "push"
+          },
+          {
+            "op": "ne",
+            "path": "/key_id",
+            "phase": "after",
+            "value": "—"
+          },
+          {
+            "op": "ne",
+            "path": "/expires",
+            "phase": "after",
+            "value": "—"
+          },
+          {
+            "op": "eq",
+            "path": "/door_value",
+            "phase": "after",
+            "value": ""
+          },
+          {
+            "op": "contains",
+            "path": "/registration_message",
+            "phase": "after",
+            "value": "AionUi registration is ready"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-door-connect-worker"
+      },
+      "canonical_predicate_sha256": "de62047b20a59fb1a994c8eb85a8b3ed0b0f7931b2a1e6141eb09ce241bed750",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "click",
+              "path": "/connect",
+              "selector": "#connect-door"
+            }
+          ],
+          "after": [
+            {
+              "path": "/connection_pill",
+              "property": "text",
+              "selector": "#connection-pill"
+            },
+            {
+              "path": "/role",
+              "property": "value",
+              "selector": "#role"
+            },
+            {
+              "path": "/push_mode",
+              "property": "text",
+              "selector": "[data-field=\"push_mode\"]"
+            },
+            {
+              "path": "/key_id",
+              "property": "text",
+              "selector": "[data-field=\"kid\"]"
+            },
+            {
+              "path": "/expires",
+              "property": "text",
+              "selector": "[data-field=\"exp\"]"
+            },
+            {
+              "path": "/door_value",
+              "property": "value",
+              "selector": "#door"
+            },
+            {
+              "path": "/registration_message",
+              "property": "text",
+              "selector": "#connection-message"
+            }
+          ],
+          "before": [
+            {
+              "path": "/door_supplied",
+              "property": "value",
+              "selector": "#door"
+            }
+          ],
+          "source_id": "browser-door-connect-worker"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": "Helper connected; valid worker door already entered; worker role selected.",
+      "index": 1,
+      "observation_id": "door_connect",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "recipe_supported_requires_fixture",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "click",
+              "path": "/connect",
+              "selector": "#connect-door"
+            }
+          ],
+          "after": [
+            {
+              "path": "/connection_pill",
+              "property": "text",
+              "selector": "#connection-pill"
+            },
+            {
+              "path": "/role",
+              "property": "value",
+              "selector": "#role"
+            },
+            {
+              "path": "/push_mode",
+              "property": "text",
+              "selector": "[data-field=\"push_mode\"]"
+            },
+            {
+              "path": "/key_id",
+              "property": "text",
+              "selector": "[data-field=\"kid\"]"
+            },
+            {
+              "path": "/expires",
+              "property": "text",
+              "selector": "[data-field=\"exp\"]"
+            },
+            {
+              "path": "/door_value",
+              "property": "value",
+              "selector": "#door"
+            },
+            {
+              "path": "/registration_message",
+              "property": "text",
+              "selector": "#connection-message"
+            }
+          ],
+          "before": [
+            {
+              "path": "/door_supplied",
+              "property": "value",
+              "selector": "#door"
+            }
+          ],
+          "settle_milliseconds": 10000
+        },
+        "select_allowlist": [
+          "/connect",
+          "/connection_pill",
+          "/door_supplied",
+          "/door_value",
+          "/expires",
+          "/key_id",
+          "/push_mode",
+          "/registration_message",
+          "/role"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-001",
+        "causal_index": 1,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-001.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/connect",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/connection_pill",
+            "phase": "after",
+            "value": "Connected"
+          },
+          {
+            "op": "eq",
+            "path": "/role",
+            "phase": "after",
+            "value": "reviewer"
+          },
+          {
+            "op": "eq",
+            "path": "/push_mode",
+            "phase": "after",
+            "value": "push"
+          },
+          {
+            "op": "ne",
+            "path": "/seat",
+            "phase": "after",
+            "value": "—"
+          },
+          {
+            "op": "eq",
+            "path": "/door_value",
+            "phase": "after",
+            "value": ""
+          },
+          {
+            "op": "contains",
+            "path": "/registration_message",
+            "phase": "after",
+            "value": "AionUi registration is ready"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-door-connect-reviewer"
+      },
+      "canonical_predicate_sha256": "49fc5a8b15c584a3fa9dbabdad0b2067637a6e51f3eab28c989d2efed949a467",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "click",
+              "path": "/connect",
+              "selector": "#connect-door"
+            }
+          ],
+          "after": [
+            {
+              "path": "/connection_pill",
+              "property": "text",
+              "selector": "#connection-pill"
+            },
+            {
+              "path": "/role",
+              "property": "value",
+              "selector": "#role"
+            },
+            {
+              "path": "/push_mode",
+              "property": "text",
+              "selector": "[data-field=\"push_mode\"]"
+            },
+            {
+              "path": "/seat",
+              "property": "text",
+              "selector": "[data-field=\"seat_name\"]"
+            },
+            {
+              "path": "/door_value",
+              "property": "value",
+              "selector": "#door"
+            },
+            {
+              "path": "/registration_message",
+              "property": "text",
+              "selector": "#connection-message"
+            }
+          ],
+          "before": [
+            {
+              "path": "/door_supplied",
+              "property": "value",
+              "selector": "#door"
+            }
+          ],
+          "source_id": "browser-door-connect-reviewer"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": "Helper connected; valid reviewer door already entered; reviewer role selected.",
+      "index": 2,
+      "observation_id": "door_connect",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "recipe_supported_requires_fixture",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "click",
+              "path": "/connect",
+              "selector": "#connect-door"
+            }
+          ],
+          "after": [
+            {
+              "path": "/connection_pill",
+              "property": "text",
+              "selector": "#connection-pill"
+            },
+            {
+              "path": "/role",
+              "property": "value",
+              "selector": "#role"
+            },
+            {
+              "path": "/push_mode",
+              "property": "text",
+              "selector": "[data-field=\"push_mode\"]"
+            },
+            {
+              "path": "/seat",
+              "property": "text",
+              "selector": "[data-field=\"seat_name\"]"
+            },
+            {
+              "path": "/door_value",
+              "property": "value",
+              "selector": "#door"
+            },
+            {
+              "path": "/registration_message",
+              "property": "text",
+              "selector": "#connection-message"
+            }
+          ],
+          "before": [
+            {
+              "path": "/door_supplied",
+              "property": "value",
+              "selector": "#door"
+            }
+          ],
+          "settle_milliseconds": 10000
+        },
+        "select_allowlist": [
+          "/connect",
+          "/connection_pill",
+          "/door_supplied",
+          "/door_value",
+          "/push_mode",
+          "/registration_message",
+          "/role",
+          "/seat"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-002",
+        "causal_index": 2,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-002.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/group_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "eq",
+            "path": "/selected_group_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-team-setup"
+      },
+      "canonical_predicate_sha256": "802ba1dba76bdf7d815aff3e330a70bd88b86c2c2c29a85b58f8c4613fbb5c1f",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 3,
+      "observation_id": "team_setup",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "reclassified_by": "TK-4981bc2da3ac@6c514f87ed39445d18d6812e0946c19ba2eca7fe",
+      "status": "closed_recorder_request",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-003",
+        "causal_index": 3,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-003.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "Roster rows expose role only as undifferentiated text; no semantic worker/reviewer or unique-identity counters exist.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/worker_count",
+            "phase": "after",
+            "value": 5
+          },
+          {
+            "op": "eq",
+            "path": "/reviewer_count",
+            "phase": "after",
+            "value": 3
+          },
+          {
+            "op": "eq",
+            "path": "/unique_identity_count",
+            "phase": "after",
+            "value": 8
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-five-workers-three-reviewers"
+      },
+      "canonical_predicate_sha256": "10134d4f596faf1cf8c6953969e403b2715bd23b7f759837567b294ee818ae8f",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 4,
+      "observation_id": "five_workers_three_reviewers",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "status": "requires_candidate_or_adapter_change",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-004",
+        "causal_index": 4,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-004.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/claim_live_offer",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/live_offer_status",
+            "phase": "after",
+            "value": "claimed"
+          },
+          {
+            "op": "ne",
+            "path": "/claimed_identity",
+            "phase": "after",
+            "value": "—"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-ticket-offer-claim-live"
+      },
+      "canonical_predicate_sha256": "85cf0b6c15cd8c10286039edbad1e8b85fc6fbb4528689ecc5e2c747ca11948b",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 5,
+      "observation_id": "ticket_offer_claim",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "reclassified_by": "TK-4981bc2da3ac@6c514f87ed39445d18d6812e0946c19ba2eca7fe",
+      "status": "closed_recorder_request",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-005",
+        "causal_index": 5,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-005.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/claim_expired_offer",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "ne",
+            "path": "/expired_offer_status",
+            "phase": "after",
+            "value": "claimed"
+          },
+          {
+            "op": "contains",
+            "path": "/claim_error",
+            "phase": "after",
+            "value": "expired"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-ticket-offer-claim-expired"
+      },
+      "canonical_predicate_sha256": "989be2ca08eb6155a0cc23ca8976a4896c483d2642c742dd8576d644c5d56756",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 6,
+      "observation_id": "ticket_offer_claim",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "reclassified_by": "TK-4981bc2da3ac@6c514f87ed39445d18d6812e0946c19ba2eca7fe",
+      "status": "closed_recorder_request",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-006",
+        "causal_index": 6,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-006.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/closed_result_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "eq",
+            "path": "/independent_review_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "eq",
+            "path": "/pending_approval_count",
+            "phase": "after",
+            "value": 0
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-ticket-submit-independent-review"
+      },
+      "canonical_predicate_sha256": "644bb3fd90e620c89e7ec2a85f66a32fa7ffadfacdd5a7112f056fb6ff69afbb",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 7,
+      "observation_id": "ticket_submit_independent_review",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "reclassified_by": "TK-4981bc2da3ac@6c514f87ed39445d18d6812e0946c19ba2eca7fe",
+      "status": "closed_recorder_request",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-007",
+        "causal_index": 7,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-007.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/refresh_results",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/closed_result_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "contains",
+            "path": "/review",
+            "phase": "after",
+            "value": "independent review"
+          },
+          {
+            "op": "ne",
+            "path": "/actor",
+            "phase": "after",
+            "value": "—"
+          },
+          {
+            "op": "contains",
+            "path": "/status_transition",
+            "phase": "after",
+            "value": "closed"
+          },
+          {
+            "op": "gt",
+            "path": "/cursor",
+            "phase": "after",
+            "value": 0
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-result-visible"
+      },
+      "canonical_predicate_sha256": "4f66634fc297d8d949088a53d66649b6ee312586d6c4dce5143e0aeef5057aac",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 8,
+      "observation_id": "result_visible",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "reclassified_by": "TK-4981bc2da3ac@6c514f87ed39445d18d6812e0946c19ba2eca7fe",
+      "status": "closed_recorder_request",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-008",
+        "causal_index": 8,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-008.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "Resume is explicitly unsupported; UI only implements pause and cooperative stop.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "gte",
+            "path": "/running_count",
+            "phase": "before",
+            "value": 1
+          },
+          {
+            "op": "eq",
+            "path": "/pause",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/resume",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/stop",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/running_count",
+            "phase": "after",
+            "value": 0
+          },
+          {
+            "op": "eq",
+            "path": "/stop_disabled",
+            "phase": "after",
+            "value": true
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-pause-resume-stop"
+      },
+      "canonical_predicate_sha256": "40f6d7bbc564f2c067bfa3cc598521a778f3328833dc3ac68aec733f89e60910",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 9,
+      "observation_id": "pause_resume_stop",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "status": "requires_candidate_or_adapter_change",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-009",
+        "causal_index": 9,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-009.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/check_old_door",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/connection_pill",
+            "phase": "after",
+            "value": "Needs attention"
+          },
+          {
+            "op": "ne",
+            "path": "/old_door_error",
+            "phase": "after",
+            "value": ""
+          },
+          {
+            "op": "eq",
+            "path": "/door_value",
+            "phase": "after",
+            "value": ""
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-clean-reconnect-old-door"
+      },
+      "canonical_predicate_sha256": "f54d6faae7433efb2383add64cffbbfba1f4ddd8b916e77db527e2bda1dd91e2",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "click",
+              "path": "/check_old_door",
+              "selector": "#validate-door"
+            }
+          ],
+          "after": [
+            {
+              "path": "/connection_pill",
+              "property": "text",
+              "selector": "#connection-pill"
+            },
+            {
+              "path": "/old_door_error",
+              "property": "text",
+              "selector": "#connection-message"
+            },
+            {
+              "path": "/door_value",
+              "property": "value",
+              "selector": "#door"
+            }
+          ],
+          "before": [
+            {
+              "path": "/door_supplied",
+              "property": "value",
+              "selector": "#door"
+            }
+          ],
+          "source_id": "browser-clean-reconnect-old-door"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": "Expired or invalid old door already entered.",
+      "index": 10,
+      "observation_id": "clean_reconnect_after_rotation",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "recipe_supported_requires_fixture",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "click",
+              "path": "/check_old_door",
+              "selector": "#validate-door"
+            }
+          ],
+          "after": [
+            {
+              "path": "/connection_pill",
+              "property": "text",
+              "selector": "#connection-pill"
+            },
+            {
+              "path": "/old_door_error",
+              "property": "text",
+              "selector": "#connection-message"
+            },
+            {
+              "path": "/door_value",
+              "property": "value",
+              "selector": "#door"
+            }
+          ],
+          "before": [
+            {
+              "path": "/door_supplied",
+              "property": "value",
+              "selector": "#door"
+            }
+          ],
+          "settle_milliseconds": 10000
+        },
+        "select_allowlist": [
+          "/check_old_door",
+          "/connection_pill",
+          "/door_supplied",
+          "/door_value",
+          "/old_door_error"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-010",
+        "causal_index": 10,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-010.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "Replace-door exists, but stale-offer, duplicate-identity, and orphan-registration counters are absent.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/replace_door",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/connection_pill",
+            "phase": "after",
+            "value": "Connected"
+          },
+          {
+            "op": "contains",
+            "path": "/connection_message",
+            "phase": "after",
+            "value": "Connection replaced"
+          },
+          {
+            "op": "eq",
+            "path": "/stale_offer_count",
+            "phase": "after",
+            "value": 0
+          },
+          {
+            "op": "eq",
+            "path": "/duplicate_identity_count",
+            "phase": "after",
+            "value": 0
+          },
+          {
+            "op": "eq",
+            "path": "/orphan_registration_count",
+            "phase": "after",
+            "value": 0
+          },
+          {
+            "op": "eq",
+            "path": "/door_value",
+            "phase": "after",
+            "value": ""
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-clean-reconnect-new-door"
+      },
+      "canonical_predicate_sha256": "87c9ba973def9cdbf3f064a7f687e9d22ff082dadf78097f8a4b79e72bd91ca3",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 11,
+      "observation_id": "clean_reconnect_after_rotation",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "status": "requires_candidate_or_adapter_change",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-011",
+        "causal_index": 11,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-011.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "render_state is only body[data-render-state], which this recorder cannot read; exact Permission denied text is also absent.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/render_state",
+            "phase": "after",
+            "value": "error"
+          },
+          {
+            "op": "contains",
+            "path": "/connection_detail",
+            "phase": "after",
+            "value": "Permission denied"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-dashboard-ui-state-permission-denied"
+      },
+      "canonical_predicate_sha256": "4e0394ca2c1f24c4842fca07f201311113b8c0a97a4113c42ac02e3aded2f06a",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 12,
+      "observation_id": "dashboard-ui.state.permission-denied",
+      "source_anchors": [
+        "tools/dashboard-ui/src/dashboard.ts:643",
+        "tools/dashboard-ui/src/dashboard.ts:1045",
+        "tools/dashboard-ui/src/dashboard.ts:1431",
+        "tools/dashboard-ui/src/dashboard.ts:1682"
+      ],
+      "status": "requires_candidate_or_adapter_change",
+      "surface": "personal",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-012",
+        "causal_index": 12,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-012.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "Theme is host-context driven; no theme action exists and the recorder cannot read data-theme.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/theme",
+            "phase": "before",
+            "value": "light"
+          },
+          {
+            "op": "eq",
+            "path": "/theme",
+            "phase": "action",
+            "value": "dark"
+          },
+          {
+            "op": "eq",
+            "path": "/theme",
+            "phase": "after",
+            "value": "dark"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-dashboard-ui-styles"
+      },
+      "canonical_predicate_sha256": "c130e9f29808701e788fbe39a81f19223256007521a861978956d5250a4d06ae",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 13,
+      "observation_id": "dashboard-ui.styles",
+      "source_anchors": [
+        "tools/dashboard-ui/src/dashboard.ts:643",
+        "tools/dashboard-ui/src/dashboard.ts:1045",
+        "tools/dashboard-ui/src/dashboard.ts:1431",
+        "tools/dashboard-ui/src/dashboard.ts:1682"
+      ],
+      "status": "requires_candidate_or_adapter_change",
+      "surface": "personal",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-013",
+        "causal_index": 13,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-013.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/connection_pill",
+            "phase": "after",
+            "value": "Connected"
+          },
+          {
+            "op": "eq",
+            "path": "/saved_state",
+            "phase": "after",
+            "value": "Connected"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-extension-join-state-joined"
+      },
+      "canonical_predicate_sha256": "941f206bb8a1223a54a011e51ad59e28124a602e8b93f8a5f3dd6db64f4af781",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "wait",
+              "milliseconds": 3000,
+              "path": "/settled"
+            }
+          ],
+          "after": [
+            {
+              "path": "/connection_pill",
+              "property": "text",
+              "selector": "#connection-pill"
+            },
+            {
+              "path": "/saved_state",
+              "property": "text",
+              "selector": "#saved-state"
+            }
+          ],
+          "before": [
+            {
+              "path": "/connection_before",
+              "property": "text",
+              "selector": "#connection-pill"
+            }
+          ],
+          "source_id": "browser-extension-join-state-joined"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 14,
+      "observation_id": "extension-join.state.joined",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "implementable_now",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "wait",
+              "milliseconds": 3000,
+              "path": "/settled"
+            }
+          ],
+          "after": [
+            {
+              "path": "/connection_pill",
+              "property": "text",
+              "selector": "#connection-pill"
+            },
+            {
+              "path": "/saved_state",
+              "property": "text",
+              "selector": "#saved-state"
+            }
+          ],
+          "before": [
+            {
+              "path": "/connection_before",
+              "property": "text",
+              "selector": "#connection-pill"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/connection_before",
+          "/connection_pill",
+          "/saved_state",
+          "/settled"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-014",
+        "causal_index": 14,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-014.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "Current DOM board is sandbox-home-acceptance-tk946; canonical equality requires sandbox-home-acceptance.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/board_text",
+            "phase": "after",
+            "value": "sandbox-home-acceptance"
+          },
+          {
+            "op": "gte",
+            "path": "/status_field_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-extension-join-state-status-loaded"
+      },
+      "canonical_predicate_sha256": "36fec2a95190fbaca84f9792751952548c4682ca6d9049ea409d9bec978b3756",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 15,
+      "observation_id": "extension-join.state.status-loaded",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "status": "requires_fixture_change",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-015",
+        "causal_index": 15,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-015.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/connection_count",
+            "phase": "before",
+            "value": 1
+          },
+          {
+            "op": "eq",
+            "path": "/recover",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/connection_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "eq",
+            "path": "/registration_error_count",
+            "phase": "after",
+            "value": 0
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-extension-idempotent-reconnect"
+      },
+      "canonical_predicate_sha256": "9ab6ded7b0756d05fde3cbc15ed71831080d01621f31086531459657385a9bd6",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 17,
+      "observation_id": "extension.idempotent-reconnect",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "reclassified_by": "TK-4981bc2da3ac@6c514f87ed39445d18d6812e0946c19ba2eca7fe",
+      "status": "closed_recorder_request",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-017",
+        "causal_index": 17,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-017.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/join_form_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "eq",
+            "path": "/door_password_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-extension-join-form"
+      },
+      "canonical_predicate_sha256": "49add07405cd9a0842f2450c371413b4f8c986c5625dfe240e0bdc13fa092240",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "observe",
+              "path": "/form_observed"
+            }
+          ],
+          "after": [
+            {
+              "path": "/join_form_count",
+              "property": "count",
+              "selector": "#connection-form"
+            },
+            {
+              "path": "/door_password_count",
+              "property": "count",
+              "selector": "#connection-form #door[type=\"password\"]"
+            }
+          ],
+          "before": [
+            {
+              "path": "/form_before",
+              "property": "count",
+              "selector": "#connection-form"
+            }
+          ],
+          "source_id": "browser-extension-join-form"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 18,
+      "observation_id": "extension.join-form",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "implementable_now",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "observe",
+              "path": "/form_observed"
+            }
+          ],
+          "after": [
+            {
+              "path": "/join_form_count",
+              "property": "count",
+              "selector": "#connection-form"
+            },
+            {
+              "path": "/door_password_count",
+              "property": "count",
+              "selector": "#connection-form #door[type=\"password\"]"
+            }
+          ],
+          "before": [
+            {
+              "path": "/form_before",
+              "property": "count",
+              "selector": "#connection-form"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/door_password_count",
+          "/form_before",
+          "/form_observed",
+          "/join_form_count"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-018",
+        "causal_index": 18,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-018.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/door_value",
+            "phase": "after",
+            "value": ""
+          },
+          {
+            "op": "gte",
+            "path": "/status_field_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-extension-redacted-status-card"
+      },
+      "canonical_predicate_sha256": "677453eec4c76db488e84f9198f2b8260b7b5311765e4a286b0ee41286e214b4",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "observe",
+              "path": "/status_observed"
+            }
+          ],
+          "after": [
+            {
+              "path": "/door_value",
+              "property": "value",
+              "selector": "#door"
+            },
+            {
+              "path": "/status_field_count",
+              "property": "count",
+              "selector": "#connection-card [data-field]"
+            }
+          ],
+          "before": [
+            {
+              "path": "/door_before",
+              "property": "value",
+              "selector": "#door"
+            }
+          ],
+          "source_id": "browser-extension-redacted-status-card"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 20,
+      "observation_id": "extension.redacted-status-card",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "implementable_now",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "observe",
+              "path": "/status_observed"
+            }
+          ],
+          "after": [
+            {
+              "path": "/door_value",
+              "property": "value",
+              "selector": "#door"
+            },
+            {
+              "path": "/status_field_count",
+              "property": "count",
+              "selector": "#connection-card [data-field]"
+            }
+          ],
+          "before": [
+            {
+              "path": "/door_before",
+              "property": "value",
+              "selector": "#door"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/door_before",
+          "/door_value",
+          "/status_field_count",
+          "/status_observed"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-020",
+        "causal_index": 20,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-020.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "Home page uses hash anchors; no settings-hidden panel or settings-navigation action exists.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/settings_hidden",
+            "phase": "before",
+            "value": true
+          },
+          {
+            "op": "eq",
+            "path": "/settings_navigation",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/settings_hidden",
+            "phase": "after",
+            "value": false
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-extension-settings-navigation"
+      },
+      "canonical_predicate_sha256": "ba6b3c23ad941cd524c135fbb5a2eee44383b380bc3c02002dd17ee2504eb861",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 23,
+      "observation_id": "extension.settings-navigation",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "status": "requires_candidate_or_adapter_change",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-023",
+        "causal_index": 23,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-023.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "The only configured Central is healthy; canonical requires unavailable>=1 and available=0.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "gte",
+            "path": "/unavailable_central_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "eq",
+            "path": "/available_central_count",
+            "phase": "after",
+            "value": 0
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-fleet-dashboard-state-offline"
+      },
+      "canonical_predicate_sha256": "56a9a186d91683e4533adea128e808fda88d4e1d4b8bd3a95929cc522a751020",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/data_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/unavailable_central_count",
+              "property": "count",
+              "selector": ".health-card .signal-dot.bad"
+            },
+            {
+              "path": "/available_central_count",
+              "property": "count",
+              "selector": ".health-card .signal-dot:not(.bad)"
+            }
+          ],
+          "before": [
+            {
+              "path": "/state_before",
+              "property": "text",
+              "selector": "#state"
+            }
+          ],
+          "source_id": "browser-fleet-dashboard-state-offline"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 26,
+      "observation_id": "fleet-dashboard.state.offline",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "recipe_supported_current_fixture_fails",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/data_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/unavailable_central_count",
+              "property": "count",
+              "selector": ".health-card .signal-dot.bad"
+            },
+            {
+              "path": "/available_central_count",
+              "property": "count",
+              "selector": ".health-card .signal-dot:not(.bad)"
+            }
+          ],
+          "before": [
+            {
+              "path": "/state_before",
+              "property": "text",
+              "selector": "#state"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/available_central_count",
+          "/data_wait",
+          "/state_before",
+          "/unavailable_central_count"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-026",
+        "causal_index": 26,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-026.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "gte",
+            "path": "/active_ticket_row_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-fleet-active-ticket-rows"
+      },
+      "canonical_predicate_sha256": "531fc6fe1f1dff3bc5ec80cc570552f1920defe91904be78c40349f78a4d0485",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 27,
+      "observation_id": "fleet.active-ticket-rows",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654"
+      ],
+      "reclassified_by": "TK-4981bc2da3ac@6c514f87ed39445d18d6812e0946c19ba2eca7fe",
+      "status": "closed_recorder_request",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-027",
+        "causal_index": 27,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-027.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "gte",
+            "path": "/board_card_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-fleet-board-cards"
+      },
+      "canonical_predicate_sha256": "870830819cf63ff3601861706dd851feaaba656d0d1ad91fa3e888fcf60b8fcc",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "click",
+              "path": "/open_boards",
+              "selector": "[data-nav=\"boards\"]"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 1000,
+              "path": "/view_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/board_card_count",
+              "property": "count",
+              "selector": ".board-card"
+            }
+          ],
+          "before": [
+            {
+              "path": "/boards_nav",
+              "property": "count",
+              "selector": "[data-nav=\"boards\"]"
+            }
+          ],
+          "source_id": "browser-fleet-board-cards"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 40,
+      "observation_id": "fleet.board-cards",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "implementable_now",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "click",
+              "path": "/open_boards",
+              "selector": "[data-nav=\"boards\"]"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 1000,
+              "path": "/view_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/board_card_count",
+              "property": "count",
+              "selector": ".board-card"
+            }
+          ],
+          "before": [
+            {
+              "path": "/boards_nav",
+              "property": "count",
+              "selector": "[data-nav=\"boards\"]"
+            }
+          ],
+          "settle_milliseconds": 1000
+        },
+        "select_allowlist": [
+          "/board_card_count",
+          "/boards_nav",
+          "/open_boards",
+          "/view_wait"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-040",
+        "causal_index": 40,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-040.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "Only one healthy Central exists; canonical requires exactly one unavailable and at least one available.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/unavailable_central_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "gte",
+            "path": "/available_central_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-fleet-central-availability-isolation"
+      },
+      "canonical_predicate_sha256": "2c2792dbb024b727e03b99c2c761833aa5a14c7a60fc2ce42a85332fbbe903f2",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/data_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/unavailable_central_count",
+              "property": "count",
+              "selector": ".health-card .signal-dot.bad"
+            },
+            {
+              "path": "/available_central_count",
+              "property": "count",
+              "selector": ".health-card .signal-dot:not(.bad)"
+            }
+          ],
+          "before": [
+            {
+              "path": "/state_before",
+              "property": "text",
+              "selector": "#state"
+            }
+          ],
+          "source_id": "browser-fleet-central-availability-isolation"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 44,
+      "observation_id": "fleet.central-availability-isolation",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "recipe_supported_current_fixture_fails",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/data_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/unavailable_central_count",
+              "property": "count",
+              "selector": ".health-card .signal-dot.bad"
+            },
+            {
+              "path": "/available_central_count",
+              "property": "count",
+              "selector": ".health-card .signal-dot:not(.bad)"
+            }
+          ],
+          "before": [
+            {
+              "path": "/state_before",
+              "property": "text",
+              "selector": "#state"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/available_central_count",
+          "/data_wait",
+          "/state_before",
+          "/unavailable_central_count"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-044",
+        "causal_index": 44,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-044.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "No reachable navigation opens the legacy #config-view coordinator form; Config opens the seats route.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/config_view_hidden",
+            "phase": "after",
+            "value": false
+          },
+          {
+            "op": "gte",
+            "path": "/config_form_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-fleet-coordinator-configuration"
+      },
+      "canonical_predicate_sha256": "2016b5e51a6603df9b69862afa5f2203d447e4c38dd4db67b3e131a7eb08b8b8",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 55,
+      "observation_id": "fleet.coordinator-configuration",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654"
+      ],
+      "status": "requires_candidate_or_adapter_change",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-055",
+        "causal_index": 55,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-055.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/overview_active_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "gte",
+            "path": "/health_card_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-fleet-hub-overview"
+      },
+      "canonical_predicate_sha256": "051ed3b0e70ea2f68d12b419fa3a00cef60208b6e1add2225e64dbc0f75a8dc4",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/data_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/overview_active_count",
+              "property": "count",
+              "selector": "[data-nav=\"overview\"].active[aria-current=\"page\"]"
+            },
+            {
+              "path": "/health_card_count",
+              "property": "count",
+              "selector": ".health-card"
+            }
+          ],
+          "before": [
+            {
+              "path": "/overview_nav",
+              "property": "count",
+              "selector": "[data-nav=\"overview\"]"
+            }
+          ],
+          "source_id": "browser-fleet-hub-overview"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 70,
+      "observation_id": "fleet.hub-overview",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "implementable_now",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/data_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/overview_active_count",
+              "property": "count",
+              "selector": "[data-nav=\"overview\"].active[aria-current=\"page\"]"
+            },
+            {
+              "path": "/health_card_count",
+              "property": "count",
+              "selector": ".health-card"
+            }
+          ],
+          "before": [
+            {
+              "path": "/overview_nav",
+              "property": "count",
+              "selector": "[data-nav=\"overview\"]"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/data_wait",
+          "/health_card_count",
+          "/overview_active_count",
+          "/overview_nav"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-070",
+        "causal_index": 70,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-070.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/release_card_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "gte",
+            "path": "/release_package_row_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-fleet-release-manifest"
+      },
+      "canonical_predicate_sha256": "67d9450b75b2a1a67ccd2e6e27599b25562140fafcf19178bdf096f08d11c8f9",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "click",
+              "path": "/open_config",
+              "selector": "[data-nav=\"seats\"]"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/release_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/release_card_count",
+              "property": "count",
+              "selector": "#release-ops-card"
+            },
+            {
+              "path": "/release_package_row_count",
+              "property": "count",
+              "selector": "#release-ops-card .ops-grid-2 > div:first-child table tbody tr td:first-child b"
+            }
+          ],
+          "before": [
+            {
+              "path": "/config_nav",
+              "property": "count",
+              "selector": "[data-nav=\"seats\"]"
+            }
+          ],
+          "source_id": "browser-fleet-release-manifest"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 85,
+      "observation_id": "fleet.release-manifest",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "implementable_now",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "click",
+              "path": "/open_config",
+              "selector": "[data-nav=\"seats\"]"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/release_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/release_card_count",
+              "property": "count",
+              "selector": "#release-ops-card"
+            },
+            {
+              "path": "/release_package_row_count",
+              "property": "count",
+              "selector": "#release-ops-card .ops-grid-2 > div:first-child table tbody tr td:first-child b"
+            }
+          ],
+          "before": [
+            {
+              "path": "/config_nav",
+              "property": "count",
+              "selector": "[data-nav=\"seats\"]"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/config_nav",
+          "/open_config",
+          "/release_card_count",
+          "/release_package_row_count",
+          "/release_wait"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-085",
+        "causal_index": 85,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-085.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "contains",
+            "path": "/latest_tag_text",
+            "phase": "after",
+            "value": "Latest tag:"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-fleet-release-tag"
+      },
+      "canonical_predicate_sha256": "6ccb4ecff8f5e177bf8756aacc968e5692f59f4cdd4b40c7cce5bfb254c4a182",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "click",
+              "path": "/open_config",
+              "selector": "[data-nav=\"seats\"]"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/release_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/latest_tag_text",
+              "property": "text",
+              "selector": "#release-ops-card .ops-grid-2 > div:first-child > p.meta:first-of-type"
+            }
+          ],
+          "before": [
+            {
+              "path": "/config_nav",
+              "property": "count",
+              "selector": "[data-nav=\"seats\"]"
+            }
+          ],
+          "source_id": "browser-fleet-release-tag"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 88,
+      "observation_id": "fleet.release-tag",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "implementable_now",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "click",
+              "path": "/open_config",
+              "selector": "[data-nav=\"seats\"]"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/release_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/latest_tag_text",
+              "property": "text",
+              "selector": "#release-ops-card .ops-grid-2 > div:first-child > p.meta:first-of-type"
+            }
+          ],
+          "before": [
+            {
+              "path": "/config_nav",
+              "property": "count",
+              "selector": "[data-nav=\"seats\"]"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/config_nav",
+          "/latest_tag_text",
+          "/open_config",
+          "/release_wait"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-088",
+        "causal_index": 88,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-088.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "gte",
+            "path": "/ticket_count_group_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-fleet-ticket-counts"
+      },
+      "canonical_predicate_sha256": "a066882dfd46f45054d856b798f49cf06695020e9a6cf6c6f80f5f43e272138a",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "click",
+              "path": "/open_boards",
+              "selector": "[data-nav=\"boards\"]"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 1000,
+              "path": "/view_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/ticket_count_group_count",
+              "property": "count",
+              "selector": ".board-card .counts"
+            }
+          ],
+          "before": [
+            {
+              "path": "/boards_nav",
+              "property": "count",
+              "selector": "[data-nav=\"boards\"]"
+            }
+          ],
+          "source_id": "browser-fleet-ticket-counts"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 95,
+      "observation_id": "fleet.ticket-counts",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "implementable_now",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "click",
+              "path": "/open_boards",
+              "selector": "[data-nav=\"boards\"]"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 1000,
+              "path": "/view_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/ticket_count_group_count",
+              "property": "count",
+              "selector": ".board-card .counts"
+            }
+          ],
+          "before": [
+            {
+              "path": "/boards_nav",
+              "property": "count",
+              "selector": "[data-nav=\"boards\"]"
+            }
+          ],
+          "settle_milliseconds": 1000
+        },
+        "select_allowlist": [
+          "/boards_nav",
+          "/open_boards",
+          "/ticket_count_group_count",
+          "/view_wait"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-095",
+        "causal_index": 95,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-095.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "contains",
+            "path": "/state_text",
+            "phase": "after",
+            "value": "Updated"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-fleet-updated-state"
+      },
+      "canonical_predicate_sha256": "9e721f88d494d5756810ded47cf8492cc03a47154fb7b4425356641163035d0e",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/data_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/state_text",
+              "property": "text",
+              "selector": "#state"
+            }
+          ],
+          "before": [
+            {
+              "path": "/state_before",
+              "property": "text",
+              "selector": "#state"
+            }
+          ],
+          "source_id": "browser-fleet-updated-state"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 97,
+      "observation_id": "fleet.updated-state",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "implementable_now",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/data_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/state_text",
+              "property": "text",
+              "selector": "#state"
+            }
+          ],
+          "before": [
+            {
+              "path": "/state_before",
+              "property": "text",
+              "selector": "#state"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/data_wait",
+          "/state_before",
+          "/state_text"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-097",
+        "causal_index": 97,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-097.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/ticket_total",
+            "value": 0
+          },
+          {
+            "op": "eq",
+            "path": "/tickets",
+            "value": []
+          }
+        ],
+        "kind": "mcp_tool_response",
+        "source_id": "personal-board-snapshot-empty"
+      },
+      "canonical_predicate_sha256": "ac3fee8d3462a4ee36a10d90189fbe7e109a64c404649ec44f151cc995206c41",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "mcp_tool_response",
+        "recorder": {
+          "arguments": {},
+          "select": [
+            "/ticket_total",
+            "/tickets"
+          ],
+          "source_id": "personal-board-snapshot-empty",
+          "tool": "board_snapshot"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": "Board snapshot includes no tickets, including closed tickets.",
+      "index": 98,
+      "observation_id": "personal-mcp.state.board-empty",
+      "source_anchors": [
+        "packages/personal/src/pursers_personal/apps_server.py:1037",
+        "packages/personal/src/pursers_personal/apps_server.py:1280",
+        "packages/personal/src/pursers_personal/apps_server.py:2074",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:1891"
+      ],
+      "status": "recipe_supported_requires_fixture",
+      "surface": "personal",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-098",
+        "causal_index": 98,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-098.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/returned_node_count",
+            "value": 0
+          },
+          {
+            "op": "eq",
+            "path": "/returned_edge_count",
+            "value": 0
+          }
+        ],
+        "kind": "mcp_tool_response",
+        "source_id": "personal-link-snapshot-empty"
+      },
+      "canonical_predicate_sha256": "0a02d8224c3b43c7fa3e33bb993ceb175423e3fa9b33de16004caca909088e3a",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "mcp_tool_response",
+        "recorder": {
+          "arguments": {},
+          "select": [
+            "/returned_node_count",
+            "/returned_edge_count"
+          ],
+          "source_id": "personal-link-snapshot-empty",
+          "tool": "link_snapshot"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": "Link snapshot contains no returned nodes or edges.",
+      "index": 100,
+      "observation_id": "personal-mcp.state.links-empty",
+      "source_anchors": [
+        "packages/personal/src/pursers_personal/apps_server.py:1037",
+        "packages/personal/src/pursers_personal/apps_server.py:1280",
+        "packages/personal/src/pursers_personal/apps_server.py:2074",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:1891"
+      ],
+      "status": "recipe_supported_requires_fixture",
+      "surface": "personal",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-100",
+        "causal_index": 100,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-100.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/highlights/important_pinned",
+            "value": null
+          }
+        ],
+        "kind": "mcp_tool_response",
+        "source_id": "personal-board-snapshot-memory-empty"
+      },
+      "canonical_predicate_sha256": "013c9efd71a70df66568cdf1fc35b08b5482d2ce4530a8caa9146ce402c77e8b",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "mcp_tool_response",
+        "recorder": {
+          "arguments": {},
+          "select": [
+            "/highlights/important_pinned"
+          ],
+          "source_id": "personal-board-snapshot-memory-empty",
+          "tool": "board_snapshot"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": "Board snapshot has no important pinned memory.",
+      "index": 101,
+      "observation_id": "personal-mcp.state.memory-empty",
+      "source_anchors": [
+        "packages/personal/src/pursers_personal/apps_server.py:1037",
+        "packages/personal/src/pursers_personal/apps_server.py:1280",
+        "packages/personal/src/pursers_personal/apps_server.py:2074",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:1891"
+      ],
+      "status": "recipe_supported_requires_fixture",
+      "surface": "personal",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-101",
+        "causal_index": 101,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-101.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "Personal has generic failure snapshots but no ticket-not-found-specific tool_error_text DOM.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "contains",
+            "path": "/tool_error_text",
+            "phase": "after",
+            "value": "ticket not found"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-personal-mcp-state-ticket-not-found"
+      },
+      "canonical_predicate_sha256": "45453e941e85f60063fdf4e7db83dd8a954a4c0cd968826478f8c89b38b1d1d5",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 103,
+      "observation_id": "personal-mcp.state.ticket-not-found",
+      "source_anchors": [
+        "tools/dashboard-ui/src/dashboard.ts:643",
+        "tools/dashboard-ui/src/dashboard.ts:1045",
+        "tools/dashboard-ui/src/dashboard.ts:1431",
+        "tools/dashboard-ui/src/dashboard.ts:1682"
+      ],
+      "status": "requires_candidate_or_adapter_change",
+      "surface": "personal",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-103",
+        "causal_index": 103,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-103.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "expected": "On Board Personal",
+        "field": "server_name",
+        "kind": "receipt_field",
+        "receipt": "personal-runtime-receipt"
+      },
+      "canonical_predicate_sha256": "5155951221ab2c74356fd164c15848cc6507e1a3587ff334d389eee7a311ba56",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "receipt_field",
+        "recorder": {
+          "fields": [
+            "/server_name"
+          ],
+          "source_id": "personal-runtime-receipt"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 104,
+      "observation_id": "personal-mcp.surface",
+      "source_anchors": [
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:2007"
+      ],
+      "status": "implementable_now",
+      "surface": "personal",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-104",
+        "causal_index": 104,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-104.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "#board-id is sandbox-home-acceptance-tk946; canonical equality requires sandbox-home-acceptance.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/board_text",
+            "phase": "after",
+            "value": "sandbox-home-acceptance"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-personal-board-identity"
+      },
+      "canonical_predicate_sha256": "519bf1869402d895a9bae61c69c9c96b5071074ee5b1da6027b111f365bfaabd",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 123,
+      "observation_id": "personal.board-identity",
+      "source_anchors": [
+        "tools/dashboard-ui/src/dashboard.ts:643",
+        "tools/dashboard-ui/src/dashboard.ts:1045",
+        "tools/dashboard-ui/src/dashboard.ts:1431",
+        "tools/dashboard-ui/src/dashboard.ts:1682"
+      ],
+      "status": "requires_fixture_change",
+      "surface": "personal",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-123",
+        "causal_index": 123,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-123.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "gte",
+            "path": "/project_row_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "contains",
+            "path": "/fleet_total_text",
+            "phase": "after",
+            "value": "project"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-personal-fleet-projects"
+      },
+      "canonical_predicate_sha256": "1674ad464b028d9189454c94e4ff03f66f95d18058e06e7fbeb6360122870e31",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "click",
+              "path": "/open_projects",
+              "selector": "#tab-fleet"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/fleet_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/project_row_count",
+              "property": "count",
+              "selector": "#fleet-projects .fleet-table tbody tr"
+            },
+            {
+              "path": "/fleet_total_text",
+              "property": "text",
+              "selector": "#fleet-total"
+            }
+          ],
+          "before": [
+            {
+              "path": "/projects_hidden",
+              "property": "hidden",
+              "selector": "#view-fleet"
+            }
+          ],
+          "source_id": "browser-personal-fleet-projects"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": "fleet_snapshot returns at least one project.",
+      "index": 128,
+      "observation_id": "personal.fleet-projects",
+      "source_anchors": [
+        "tools/dashboard-ui/src/dashboard.ts:643",
+        "tools/dashboard-ui/src/dashboard.ts:1045",
+        "tools/dashboard-ui/src/dashboard.ts:1431",
+        "tools/dashboard-ui/src/dashboard.ts:1682",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "recipe_supported_requires_fixture",
+      "surface": "personal",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "click",
+              "path": "/open_projects",
+              "selector": "#tab-fleet"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 5000,
+              "path": "/fleet_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/project_row_count",
+              "property": "count",
+              "selector": "#fleet-projects .fleet-table tbody tr"
+            },
+            {
+              "path": "/fleet_total_text",
+              "property": "text",
+              "selector": "#fleet-total"
+            }
+          ],
+          "before": [
+            {
+              "path": "/projects_hidden",
+              "property": "hidden",
+              "selector": "#view-fleet"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/fleet_total_text",
+          "/fleet_wait",
+          "/open_projects",
+          "/project_row_count",
+          "/projects_hidden"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-128",
+        "causal_index": 128,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-128.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/work_hidden",
+            "phase": "before",
+            "value": true
+          },
+          {
+            "op": "eq",
+            "path": "/pressed_key",
+            "phase": "action",
+            "value": "ArrowRight"
+          },
+          {
+            "op": "eq",
+            "path": "/work_hidden",
+            "phase": "after",
+            "value": false
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-personal-keyboard-tabs"
+      },
+      "canonical_predicate_sha256": "8f71b032e1f2afba13f6d1b4101ab0f1f3bd919f3ea153a07e9e97412e8b5936",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "click",
+              "path": "/open_projects",
+              "selector": "#tab-fleet"
+            },
+            {
+              "key": "ArrowRight",
+              "kind": "press_key",
+              "path": "/pressed_key",
+              "selector": "#tab-fleet"
+            }
+          ],
+          "after": [
+            {
+              "path": "/work_hidden",
+              "property": "hidden",
+              "selector": "#view-work"
+            }
+          ],
+          "before": [
+            {
+              "path": "/work_hidden",
+              "property": "hidden",
+              "selector": "#view-work"
+            }
+          ],
+          "source_id": "browser-personal-keyboard-tabs"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": null,
+      "index": 133,
+      "observation_id": "personal.keyboard-tabs",
+      "source_anchors": [
+        "tools/dashboard-ui/src/dashboard.ts:643",
+        "tools/dashboard-ui/src/dashboard.ts:1045",
+        "tools/dashboard-ui/src/dashboard.ts:1431",
+        "tools/dashboard-ui/src/dashboard.ts:1682",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "implementable_now",
+      "surface": "personal",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "click",
+              "path": "/open_projects",
+              "selector": "#tab-fleet"
+            },
+            {
+              "key": "ArrowRight",
+              "kind": "press_key",
+              "path": "/pressed_key",
+              "selector": "#tab-fleet"
+            }
+          ],
+          "after": [
+            {
+              "path": "/work_hidden",
+              "property": "hidden",
+              "selector": "#view-work"
+            }
+          ],
+          "before": [
+            {
+              "path": "/work_hidden",
+              "property": "hidden",
+              "selector": "#view-work"
+            }
+          ],
+          "settle_milliseconds": 100
+        },
+        "select_allowlist": [
+          "/open_projects",
+          "/pressed_key",
+          "/work_hidden"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-133",
+        "causal_index": 133,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-133.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/panel_hidden",
+            "phase": "before",
+            "value": true
+          },
+          {
+            "op": "eq",
+            "path": "/query",
+            "phase": "action",
+            "value": "TK"
+          },
+          {
+            "op": "eq",
+            "path": "/panel_hidden",
+            "phase": "after",
+            "value": false
+          },
+          {
+            "op": "gte",
+            "path": "/result_count",
+            "phase": "after",
+            "value": 1
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-personal-search-results"
+      },
+      "canonical_predicate_sha256": "298f0bfd2e9ba0510ae07be8ce951d7f404b72304a3bdd2f1767f9e52549ff7a",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "set_value",
+              "path": "/query",
+              "selector": "#global-search",
+              "value": "TK"
+            }
+          ],
+          "after": [
+            {
+              "path": "/panel_hidden",
+              "property": "hidden",
+              "selector": "#search-results"
+            },
+            {
+              "path": "/result_count",
+              "property": "count",
+              "selector": "#search-results-list .search-result"
+            }
+          ],
+          "before": [
+            {
+              "path": "/panel_hidden",
+              "property": "hidden",
+              "selector": "#search-results"
+            }
+          ],
+          "source_id": "browser-personal-search-results"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": "Loaded snapshot corpus contains at least one TK match.",
+      "index": 141,
+      "observation_id": "personal.search-results",
+      "source_anchors": [
+        "tools/dashboard-ui/src/dashboard.ts:643",
+        "tools/dashboard-ui/src/dashboard.ts:1045",
+        "tools/dashboard-ui/src/dashboard.ts:1431",
+        "tools/dashboard-ui/src/dashboard.ts:1682",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "recipe_supported_requires_fixture",
+      "surface": "personal",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "set_value",
+              "path": "/query",
+              "selector": "#global-search",
+              "value": "TK"
+            }
+          ],
+          "after": [
+            {
+              "path": "/panel_hidden",
+              "property": "hidden",
+              "selector": "#search-results"
+            },
+            {
+              "path": "/result_count",
+              "property": "count",
+              "selector": "#search-results-list .search-result"
+            }
+          ],
+          "before": [
+            {
+              "path": "/panel_hidden",
+              "property": "hidden",
+              "selector": "#search-results"
+            }
+          ],
+          "settle_milliseconds": 100
+        },
+        "select_allowlist": [
+          "/panel_hidden",
+          "/query",
+          "/result_count"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-141",
+        "causal_index": 141,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-141.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "gte",
+            "path": "/lease_count",
+            "phase": "after",
+            "value": 1
+          },
+          {
+            "op": "contains",
+            "path": "/lease_text",
+            "phase": "after",
+            "value": "lease"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-personal-work-lease"
+      },
+      "canonical_predicate_sha256": "a27b74b78d660a1fd10d8d64cf1041ed70f7c010fe09e54ddd36e0599806c8ac",
+      "executable_request_template": {
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "kind": "state_transition",
+        "recorder": {
+          "action": [
+            {
+              "kind": "click",
+              "path": "/open_work",
+              "selector": "#tab-work"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 1000,
+              "path": "/work_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/lease_count",
+              "property": "count",
+              "selector": ".lease-countdown"
+            },
+            {
+              "path": "/lease_text",
+              "property": "text",
+              "selector": ".lease-countdown"
+            }
+          ],
+          "before": [
+            {
+              "path": "/work_hidden",
+              "property": "hidden",
+              "selector": "#view-work"
+            }
+          ],
+          "source_id": "browser-personal-work-lease"
+        },
+        "schema_version": 1
+      },
+      "fixture_requirement": "Loaded board snapshot contains at least one non-null lease_expires_at.",
+      "index": 153,
+      "observation_id": "personal.work-lease",
+      "source_anchors": [
+        "tools/dashboard-ui/src/dashboard.ts:643",
+        "tools/dashboard-ui/src/dashboard.ts:1045",
+        "tools/dashboard-ui/src/dashboard.ts:1431",
+        "tools/dashboard-ui/src/dashboard.ts:1682",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:94",
+        "tools/aionui-extension/tests/home_acceptance/browser_observer.py:1638",
+        "tools/aionui-extension/tests/home_acceptance/typed_evidence.py:668"
+      ],
+      "status": "recipe_supported_requires_fixture",
+      "surface": "personal",
+      "trust_source_recipe_fragment": {
+        "adapter": "trusted_browser_state_v1",
+        "recipe": {
+          "actions": [
+            {
+              "kind": "click",
+              "path": "/open_work",
+              "selector": "#tab-work"
+            },
+            {
+              "kind": "wait",
+              "milliseconds": 1000,
+              "path": "/work_wait"
+            }
+          ],
+          "after": [
+            {
+              "path": "/lease_count",
+              "property": "count",
+              "selector": ".lease-countdown"
+            },
+            {
+              "path": "/lease_text",
+              "property": "text",
+              "selector": ".lease-countdown"
+            }
+          ],
+          "before": [
+            {
+              "path": "/work_hidden",
+              "property": "hidden",
+              "selector": "#view-work"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/lease_count",
+          "/lease_text",
+          "/open_work",
+          "/work_hidden",
+          "/work_wait"
+        ]
+      },
+      "typed_reference": {
+        "action_id": "typed-153",
+        "causal_index": 153,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-153.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": null,
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/open_quickstart",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "eq",
+            "path": "/helper_action",
+            "phase": "after",
+            "value": "Connect helper"
+          },
+          {
+            "op": "contains",
+            "path": "/helper_heading",
+            "phase": "after",
+            "value": "Connect the Home helper"
+          },
+          {
+            "op": "eq",
+            "path": "/raw_json_count",
+            "phase": "after",
+            "value": 0
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-final-quickstart-candidate-flow"
+      },
+      "canonical_predicate_sha256": "30dc93dc800c42cb60f282f83b1a7857f8a7bdd7473f1d1bf95d485c1ace7875",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 161,
+      "observation_id": "final.quickstart-candidate-flow",
+      "source_anchors": [
+        "tools/aionui-extension/webui/index.html:103",
+        "tools/aionui-extension/webui/app.js:287",
+        "tools/aionui-extension/webui/app.js:617",
+        "tools/aionui-extension/webui/app.js:813"
+      ],
+      "reclassified_by": "TK-4981bc2da3ac@6c514f87ed39445d18d6812e0946c19ba2eca7fe",
+      "status": "closed_recorder_request",
+      "surface": "aionui",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-161",
+        "causal_index": 161,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-161.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "Recorder cannot create and heal a deterministic Central 503; current only Central is healthy.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "gte",
+            "path": "/unavailable_central_count",
+            "phase": "before",
+            "value": 1
+          },
+          {
+            "op": "eq",
+            "path": "/unavailable_central_count",
+            "phase": "after",
+            "value": 0
+          },
+          {
+            "op": "contains",
+            "path": "/state_text",
+            "phase": "after",
+            "value": "Updated"
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-final-fleet-503-recovery"
+      },
+      "canonical_predicate_sha256": "023733fc9988bfeb447dac3edd66a9f033dd2ef42e7ea8709115207bd9dddd7f",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 162,
+      "observation_id": "final.fleet-503-recovery",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654"
+      ],
+      "status": "requires_fixture_controller",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-162",
+        "causal_index": 162,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-162.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    },
+    {
+      "blocker": "Confirm flow blocks plain click; lifecycle action result is not canonical clicked; rollback_result and success_effect_count fields are absent.",
+      "canonical_predicate": {
+        "assertions": [
+          {
+            "op": "eq",
+            "path": "/run_guarded_operation",
+            "phase": "action",
+            "value": "clicked"
+          },
+          {
+            "op": "contains",
+            "path": "/readiness",
+            "phase": "after",
+            "value": "CI: main"
+          },
+          {
+            "op": "contains",
+            "path": "/job_result",
+            "phase": "after",
+            "value": "Outcome: failed"
+          },
+          {
+            "op": "contains",
+            "path": "/rollback_result",
+            "phase": "after",
+            "value": "Rollback"
+          },
+          {
+            "op": "eq",
+            "path": "/success_effect_count",
+            "phase": "after",
+            "value": 0
+          }
+        ],
+        "kind": "state_transition",
+        "source_id": "browser-final-o1-readiness-rollback"
+      },
+      "canonical_predicate_sha256": "bf60f47442c362dd1c5921ae7744b0b07d32a3f87f77c3d3dae987a20cc07b1b",
+      "executable_request_template": null,
+      "fixture_requirement": null,
+      "index": 163,
+      "observation_id": "final.o1-readiness-rollback",
+      "source_anchors": [
+        "tools/fleet-dashboard/fleet_dashboard.py:6372",
+        "tools/fleet-dashboard/fleet_dashboard.py:6591",
+        "tools/fleet-dashboard/fleet_dashboard.py:6607",
+        "tools/fleet-dashboard/fleet_dashboard.py:6654"
+      ],
+      "status": "requires_candidate_or_adapter_change",
+      "surface": "fleet",
+      "trust_source_recipe_fragment": null,
+      "typed_reference": {
+        "action_id": "typed-163",
+        "causal_index": 163,
+        "entity": "sandbox-home-acceptance-tk946",
+        "evidence": "typed/typed-163.json",
+        "run_id": "browser201-53e638bd-taskspace21"
+      }
+    }
+  ],
+  "schema_version": 1,
+  "totals": {
+    "candidate_or_adapter_change": 9,
+    "closed_recorder_request": 8,
+    "executable_recipe_templates": 22,
+    "fixture_dependent_or_currently_failing": 14,
+    "gaps": 42,
+    "implementable_now": 11
+  }
+}
