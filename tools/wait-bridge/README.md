@@ -235,8 +235,11 @@ revocation, and events for tickets it already holds. A reviewer waiting for
 submitted work wakes only for its own `review_offered` event and its review
 lease lifecycle. The returned `reason` is `offer`, and the event includes
 `offer: {ticket_id, board_id, expires_at, tier, skills_required}`.
-Offer addressing is checked before ticket refetch; a refetch failure discards
-the cue instead of waking a seat that was not proven to own it.
+Offer addressing is confirmed from the authoritative ticket instead of relying
+on routing hints in the wake cue. Each wait also reconciles active offers at
+entry and before a return without an offer. A missed recipient-scoped push is
+then synthesized as `ticket_offered`/`review_offered` with
+`reason="reconciled"` while the offer is still unexpired.
 
 Do not claim an unoffered ticket. If an offer expires or is revoked, re-arm and
 wait for the next offer. When none of the capability variables is set, the
