@@ -1037,15 +1037,26 @@ def command_central(args: argparse.Namespace) -> None:
         module_member="pursers_central/central.py",
     )
 
-    mcp, _service = central.build_server(
+    mcp, service = central.build_server(
         "127.0.0.1", profile.central_port, profile.central_data_dir
     )
-    mcp.run(
-        transport="streamable-http",
+    app = central.create_streamable_http_app(
+        mcp, service, host="127.0.0.1"
+    )
+    print(
+        "Pursers Personal Central starting: "
+        f"bind=http://127.0.0.1:{profile.central_port}/mcp "
+        f"data_dir={profile.central_data_dir} "
+        f"health=http://127.0.0.1:{profile.central_port}/healthz",
+        file=sys.stderr,
+        flush=True,
+    )
+    central.uvicorn.run(
+        app,
         host="127.0.0.1",
         port=profile.central_port,
-        streamable_http_path="/mcp",
-        stateless_http=True,
+        server_header=False,
+        access_log=False,
     )
 
 

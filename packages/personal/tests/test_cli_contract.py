@@ -1,16 +1,70 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx2
 import pytest
 
 import pursers_personal.cli as cli
 from pursers_personal.artifacts import ArtifactVerificationError
 from pursers_personal.integration import IntegrationError
+
+
+def test_personal_embedded_central_serves_healthz(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from pursers_central import central
+    from pursers_personal import artifacts
+
+    jwks = tmp_path / "jwks.json"
+    jwks.write_text(json.dumps({"keys": []}), encoding="utf-8")
+    profile = SimpleNamespace(
+        central_port=54329,
+        central_data_dir=tmp_path / "central-data",
+        issuer="https://issuer.example",
+        audience="http://127.0.0.1:54329/mcp",
+        jwks_path=jwks,
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "_selected_profile", lambda _args: (profile, "test"))
+    monkeypatch.setattr(
+        artifacts, "import_verified_component", lambda *_a, **_k: central
+    )
+    monkeypatch.setattr(
+        central.uvicorn,
+        "run",
+        lambda app, **kwargs: captured.update(app=app, kwargs=kwargs),
+    )
+
+    cli.command_central(argparse.Namespace())
+
+    async def request_healthz() -> httpx2.Response:
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=captured["app"]),
+            base_url="http://127.0.0.1:54329",
+        ) as client:
+            return await client.get("/healthz")
+
+    response = asyncio.run(request_healthz())
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert "health=http://127.0.0.1:54329/healthz" in capsys.readouterr().err
+    assert captured["kwargs"] == {
+        "host": "127.0.0.1",
+        "port": 54329,
+        "server_header": False,
+        "access_log": False,
+    }
 
 
 def test_console_is_bound_to_current_python_entrypoint(

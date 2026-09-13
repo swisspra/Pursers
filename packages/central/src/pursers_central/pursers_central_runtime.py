@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
 
 import uvicorn
 
@@ -18,6 +19,17 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value if value not in (None, "") else default
 
 
+def _acquire_data_lock(
+    parser: argparse.ArgumentParser, data_dir: Path
+) -> central.CentralDataLock:
+    lock = central.CentralDataLock(data_dir)
+    try:
+        lock.__enter__()
+    except (OSError, RuntimeError) as exc:
+        parser.error(f"cannot use data directory {data_dir}: {exc}")
+    return lock
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run On Board Central")
     parser.add_argument("--host", default=_env("ONBOARD_CENTRAL_HOST", "127.0.0.1"))
@@ -25,6 +37,11 @@ def main() -> None:
     parser.add_argument(
         "--data-dir", "--data-root", dest="data_dir", type=Path,
         default=_env("ONBOARD_CENTRAL_DATA_DIR"),
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=("critical", "error", "warning", "info", "debug", "trace"),
+        default=_env("ONBOARD_CENTRAL_LOG_LEVEL", "info"),
     )
     parser.add_argument("--advance-generation", metavar="BOARD_ID")
     parser.add_argument("--expect-generation-sha256", metavar="HEX")
@@ -62,13 +79,29 @@ def main() -> None:
             )
         )
         return
-    with central.CentralDataLock(args.data_dir):
+    lock = _acquire_data_lock(parser, args.data_dir)
+    try:
         mcp, service = central.build_server(args.host, args.port, args.data_dir)
         app = create_streamable_http_app(mcp, service, host=args.host)
+        bind_url = f"http://{args.host}:{args.port}/mcp"
+        health_url = f"http://{args.host}:{args.port}/healthz"
+        print(
+            "Pursers Central starting: "
+            f"bind={bind_url} data_dir={args.data_dir} health={health_url}",
+            file=sys.stderr,
+            flush=True,
+        )
         uvicorn.run(
             app,
             host=args.host,
             port=args.port,
+            log_level=args.log_level,
             server_header=False,
             access_log=False,
         )
+    finally:
+        lock.__exit__(*sys.exc_info())
+
+
+if __name__ == "__main__":
+    main()
