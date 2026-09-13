@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
 import pursers_wait_server as wait_server  # noqa: E402
+from pursers_client import BoardClientError  # noqa: E402
 
 
 REGISTRY = {
@@ -186,6 +187,52 @@ class ProjectRegistryTests(unittest.IsolatedAsyncioTestCase):
             [wait_server.BOARD_ID, "alpha"],
         )
         self.assertEqual(client.get_calls, ["project_registry"])
+
+    async def test_registry_boards_honor_pursers_boards_env(self) -> None:
+        with patch.dict(os.environ, {"PURSERS_BOARDS": "home"}):
+            self.assertEqual(
+                wait_server._registry_boards(REGISTRY), [wait_server.BOARD_ID]
+            )
+        with patch.dict(os.environ, {"PURSERS_BOARDS": "paused-board, other"}):
+            # An explicit list still excludes non-active registry boards.
+            self.assertEqual(
+                wait_server._registry_boards(REGISTRY), [wait_server.BOARD_ID]
+            )
+        with patch.dict(os.environ, {"PURSERS_BOARDS": "alpha"}):
+            self.assertEqual(
+                wait_server._registry_boards(REGISTRY),
+                [wait_server.BOARD_ID, "alpha"],
+            )
+        for value in ("", "registry", "REGISTRY"):
+            with patch.dict(os.environ, {"PURSERS_BOARDS": value}):
+                self.assertEqual(
+                    wait_server._registry_boards(REGISTRY),
+                    [wait_server.BOARD_ID, "alpha"],
+                )
+
+    async def test_subscriber_boards_drop_freshly_denied_registry_boards(self) -> None:
+        wait_server._BOARD_DENIALS.clear()
+        try:
+            self.assertTrue(
+                wait_server._remember_board_denial(
+                    "alpha", BoardClientError("board access denied: invite required")
+                )
+            )
+            self.assertFalse(
+                wait_server._remember_board_denial(
+                    "alpha", BoardClientError("connection reset")
+                )
+            )
+            self.assertEqual(
+                wait_server._subscriber_boards(REGISTRY), [wait_server.BOARD_ID]
+            )
+            wait_server._BOARD_DENIALS["alpha"]["until"] = 0.0
+            self.assertEqual(
+                wait_server._subscriber_boards(REGISTRY),
+                [wait_server.BOARD_ID, "alpha"],
+            )
+        finally:
+            wait_server._BOARD_DENIALS.clear()
 
     async def test_registry_sentinel_list_and_omitted_paths_do_not_cross(self) -> None:
         client = FakeRegistryClient(json.dumps(REGISTRY))

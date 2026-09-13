@@ -26,7 +26,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   artifacts, fixtures, or a local HTTP response cannot forge GUI acceptance.
   Unavailable host identity or browser channel is reported as blocked, never as
   pass or skip. Documented in `docs/design-home/acceptance-observer.md`.
-
 ### Fixed
 
 - Seat kit tests: the synthetic door token used by the door tests now carries
@@ -34,6 +33,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   signature segment even with `verify_signature=False`, so the former literal
   `synthetic-signature` failed with `Invalid crypto padding` and turned the
   `ci` workflow red on every push; production doors were never affected.
+- Wait bridge: the lease keepalive's discovery re-join on Codex hosts no longer
+  overwrites the seat's dispatch capabilities with `can_work=false,
+  can_review=false` while the model is live (inside `a2a_wait` or within the
+  idle limit). Only a truly idle Codex seat stops advertising capability. The
+  old behaviour made every Codex seat flap between eligible and
+  `no_eligible_worker`/`no_eligible_reviewer` on each keepalive tick, so
+  Central revoked offers seconds after issuing them.
+- Wait bridge and client: a `board_join` refused as an authorization decision
+  (`invite required`, `lacks board:<scope>`, `board role not authorized`) is
+  now cached for 900 s instead of being retried on every wait cycle, cue, and
+  reconnect. One misconfigured Claude Desktop seat (`PURSERS_ROLE=orchestrator`
+  with a token lacking `board:coordinate`) and worker seats whose principal was
+  invited to one board only had issued more than 17,000 refused joins against
+  Central in two days. The bridge classifies these refusals as `denied`, sleeps
+  the subscriber for the same window after a permanent home-board failure, and
+  `_registry_boards` honors `PURSERS_BOARDS` (`registry` | `home` | list) so a
+  seat no longer joins every registry board its credential cannot enter.
 
 ## [5.0.0b1] - 2026-09-11
 

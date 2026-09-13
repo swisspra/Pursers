@@ -91,7 +91,9 @@ class FakeTransport:
         self.calls.append((name, board_id, payload))
         if name == "board_join":
             if board_id in self.denied:
-                return FakeResult(error=f"board {board_id!r} requires an invite")
+                return FakeResult(
+                    error=f"board access denied: invite required ({board_id})"
+                )
             agent_name = payload["agent_name"]
             return FakeResult(
                 {
@@ -225,6 +227,7 @@ class FakeRootClient:
 class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         wait_server._BACKLOG_SEEN.clear()
+        wait_server._BOARD_DENIALS.clear()
 
     async def test_single_board_function_keeps_original_response_shape(self) -> None:
         from test_per_call_wait import FakeClient
@@ -512,6 +515,43 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(joins)
         self.assertTrue(all(payload["allow_takeover"] is True for payload in joins))
+
+    async def test_permanently_denied_board_is_not_rejoined_every_wait(self) -> None:
+        transport = FakeTransport(["alpha", "denied"])
+        transport.denied.add("denied")
+        transport.add_event("alpha", "TK-alpha", 1)
+
+        for _ in range(3):
+            result = await wait_server._wait_for_work_many(
+                FakeRootClient(transport),
+                boards=["alpha", "denied"],
+                only_mine=False,
+            )
+            self.assertIn("invite required", result["skipped_boards"]["denied"])
+            self.assertEqual(result["new_seq"]["alpha"], 1)
+
+        denied_joins = [
+            payload
+            for name, board_id, payload in transport.calls
+            if name == "board_join" and board_id == "denied"
+        ]
+        # Three waits, one refused join: the denial is cached, not re-asked.
+        self.assertEqual(len(denied_joins), 1)
+        self.assertIsNotNone(wait_server._board_denied("denied"))
+        self.assertIsNone(wait_server._board_denied("alpha"))
+
+        # An expired denial is probed again exactly once.
+        wait_server._BOARD_DENIALS["denied"]["until"] = 0.0
+        await wait_server._wait_for_work_many(
+            FakeRootClient(transport),
+            boards=["alpha", "denied"],
+            only_mine=False,
+        )
+        denied_joins = [
+            1 for name, board_id, _payload in transport.calls
+            if name == "board_join" and board_id == "denied"
+        ]
+        self.assertEqual(len(denied_joins), 2)
 
     async def test_heartbeat_renews_only_on_board_holding_claim(self) -> None:
         transport = FakeTransport(["alpha", "beta"])

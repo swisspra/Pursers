@@ -198,6 +198,17 @@ MAX_CENTRAL_CONNECTION_CAP = 64
 DEFAULT_KEEPALIVE_IDLE_TTL_MULTIPLIER = 3
 MAX_LEASE_RENEW_INTERVAL_S = 300.0
 PROGRESS_INTERVAL_S = 300.0
+BOARD_DENIAL_RETRY_S = 900.0
+"""Seconds a permanently denied board join is remembered before one retry."""
+_BOARD_DENIAL_MARKERS = (
+    "invite required",
+    "lacks board:",
+    "board role not authorized",
+    "access denied",
+    "not authorized",
+    "forbidden",
+)
+_BOARD_DENIALS: dict[str, dict[str, Any]] = {}
 CATCHUP_PAGE_LIMIT = 500
 CATCHUP_PAGE_MAX_BYTES = 750_000
 REPLAY_EVENT_LIMIT = 200
@@ -1358,6 +1369,72 @@ def _seat_subscription_can_degrade(exc: BaseException) -> bool:
     )
 
 
+def _is_permanent_denial(exc: BaseException | str) -> bool:
+    """Return whether a refusal is an authorization decision, not a transient fault.
+
+    Invite-required boards, missing role scopes (``lacks board:coordinate``)
+    and role refusals do not change between two attempts of the same
+    credential. Retrying them on every wait cycle produced thousands of
+    refused ``board_join`` calls per seat per day against Central.
+    """
+    if isinstance(exc, BaseException):
+        text = " ".join(str(item) for item in _nested_exceptions(exc)).casefold()
+    else:
+        text = str(exc).casefold()
+    return any(marker in text for marker in _BOARD_DENIAL_MARKERS)
+
+
+def _board_denied(board_id: str) -> str | None:
+    """Return the cached refusal reason while a board denial is still fresh."""
+    entry = _BOARD_DENIALS.get(board_id)
+    if entry is None:
+        return None
+    if time.monotonic() >= float(entry.get("until", 0.0)):
+        _BOARD_DENIALS.pop(board_id, None)
+        return None
+    return str(entry.get("reason", "board join denied"))
+
+
+def _remember_board_denial(board_id: str, exc: BaseException | str) -> bool:
+    """Cache a permanent join denial for BOARD_DENIAL_RETRY_S; log it once."""
+    if not _is_permanent_denial(exc):
+        return False
+    first = board_id not in _BOARD_DENIALS
+    _BOARD_DENIALS[board_id] = {
+        "reason": str(exc),
+        "until": time.monotonic() + BOARD_DENIAL_RETRY_S,
+    }
+    if first:
+        _log(
+            f"board {board_id!r} join denied; not retrying for "
+            f"{int(BOARD_DENIAL_RETRY_S)}s: {exc}"
+        )
+    return True
+
+
+def _forget_board_denial(board_id: str) -> None:
+    _BOARD_DENIALS.pop(board_id, None)
+
+
+def _configured_board_filter() -> frozenset[str] | None:
+    """Boards this seat may span, from PURSERS_BOARDS; None means every registry board.
+
+    ``registry`` (or unset) keeps the full active-registry expansion; ``home``
+    pins the seat to its home board; a comma-separated list allows exactly
+    those boards plus home. Seat kits already export PURSERS_BOARDS for the
+    CLI ``wait --boards`` default, so the bridge now honors the same contract
+    instead of joining every registry board for every seat.
+    """
+    raw = os.environ.get("PURSERS_BOARDS", "").strip()
+    if not raw or raw.casefold() == "registry":
+        return None
+    if raw.casefold() == "home":
+        return frozenset({BOARD_ID})
+    return frozenset(
+        {BOARD_ID, *(part.strip() for part in raw.split(",") if part.strip())}
+    )
+
+
 def _classify_board_join_failure(exc: BaseException) -> BoardJoinFailure:
     nested = _nested_exceptions(exc)
     names = {type(item).__name__ for item in nested}
@@ -1387,7 +1464,6 @@ def _classify_board_join_failure(exc: BaseException) -> BoardJoinFailure:
             "401",
             "403",
             "authentication",
-            "forbidden",
             "invalid token",
             "unauthorized",
         )
@@ -1396,6 +1472,12 @@ def _classify_board_join_failure(exc: BaseException) -> BoardJoinFailure:
     ):
         return BoardJoinFailure(
             "auth", "Central rejected ONBOARD_CENTRAL_TOKEN"
+        )
+    if _is_permanent_denial(text):
+        return BoardJoinFailure(
+            "denied",
+            "Central denied this credential the configured board or role; "
+            "fix PURSERS_ROLE/token scope or the board invite before retrying",
         )
     return BoardJoinFailure("board", "Central rejected board join")
 
@@ -1555,12 +1637,24 @@ def _registry_boards(registry: dict[str, Any]) -> list[str]:
     """Return active boards in registry order, always led by the home board."""
     selected = [BOARD_ID]
     seen = {BOARD_ID}
+    allowed = _configured_board_filter()
     for project in registry["projects"].values():
         board_id = project["board_id"]
+        if allowed is not None and board_id not in allowed:
+            continue
         if project["status"] == "active" and board_id not in seen:
             selected.append(board_id)
             seen.add(board_id)
     return selected
+
+
+def _subscriber_boards(registry: dict[str, Any]) -> list[str]:
+    """Registry boards for the background subscriber, minus fresh join denials."""
+    return [
+        board_id
+        for board_id in _registry_boards(registry)
+        if board_id == BOARD_ID or _board_denied(board_id) is None
+    ]
 
 
 def _enrich_registry_routes(
@@ -1639,6 +1733,7 @@ class LeaseKeepalive:
         self.last_model_interaction = time.monotonic()
         self.active_waits = 0
         self.model_refresh_pending = False
+        self.idle_downgraded = False
         self.idle_limit_override = self._idle_limit_override()
 
     @staticmethod
@@ -1674,6 +1769,7 @@ class LeaseKeepalive:
     def observe_model_interaction(self) -> None:
         self.last_model_interaction = time.monotonic()
         self.model_refresh_pending = True
+        self.idle_downgraded = False
         self.idle_paused.clear()
         now = time.monotonic()
         for lease in self.leases.values():
@@ -1890,7 +1986,17 @@ class LeaseKeepalive:
         if (
             selected_source == "keepalive"
             and _host_name() in {"codex", "codex-cli"}
+            and not self.model_is_live(
+                self.board_ttls.get(BOARD_ID, DEFAULT_CLAIM_TTL_S)
+            )
         ):
+            # Only an IDLE Codex seat (no live wait, no recent model call)
+            # stops advertising dispatch capability. A keepalive tick that
+            # fires while the model is inside a2a_wait, or shortly after a
+            # model tool call, must not overwrite the seat's capabilities on
+            # Central: that made every Codex seat flap between eligible and
+            # `no_eligible_worker`/`no_eligible_reviewer` on each keepalive
+            # cycle, so offers were revoked seconds after being issued.
             capabilities = {
                 **(capabilities or {}),
                 "can_work": False,
@@ -2081,6 +2187,21 @@ class LeaseKeepalive:
                         await self._discover()
                     except Exception as exc:
                         _log(f"lease keepalive discovery deferred: {exc}")
+                elif (
+                    not self.idle_downgraded
+                    and _host_name() in {"codex", "codex-cli"}
+                ):
+                    # One discovery at the live->idle transition so Central
+                    # stops offering work to a Codex seat whose model went
+                    # away (the downgrade branch in _discover). Later idle
+                    # ticks do not re-join; the next model interaction resets
+                    # the flag and the following live discovery restores the
+                    # seat's real capabilities.
+                    try:
+                        await self._discover()
+                        self.idle_downgraded = True
+                    except Exception as exc:
+                        _log(f"lease keepalive idle downgrade deferred: {exc}")
                 self.next_discovery = time.monotonic() + self.interval(ttl)
             now = time.monotonic()
             due_keys = [
@@ -2343,7 +2464,7 @@ class OrchestratorEngine:
                 client = await self._get_client()
                 try:
                     registry = await _read_project_registry(client)
-                    active_boards = _registry_boards(registry)
+                    active_boards = _subscriber_boards(registry)
                     async with self.lock:
                         self.active_boards = list(active_boards)
                     self.save_state()
@@ -2367,6 +2488,8 @@ class OrchestratorEngine:
                         or AGENT_NAME
                     )
                     for b in active_boards:
+                        if b != BOARD_ID and _board_denied(b) is not None:
+                            continue
                         cursor = self.cursor_map.get(b, 0)
                         while True:
                             view = _BoardView(client, b)
@@ -2388,7 +2511,8 @@ class OrchestratorEngine:
                                             agent_name=agent_name,
                                         )
                                     except Exception as join_exc:
-                                        _log(f"board_join/catchup failed for {b}: {join_exc}")
+                                        if not _remember_board_denial(b, join_exc):
+                                            _log(f"board_join/catchup failed for {b}: {join_exc}")
                                         break
                                 else:
                                     _log(f"catchup failed for {b}: {exc}")
@@ -2465,7 +2589,7 @@ class OrchestratorEngine:
                         except asyncio.TimeoutError:
                             try:
                                 reg = await asyncio.wait_for(_read_project_registry(client), timeout=0.5)
-                                new_active = _registry_boards(reg)
+                                new_active = _subscriber_boards(reg)
                                 if set(new_active) != set(active_boards):
                                     _log(f"registry boards changed: {active_boards} -> {new_active}; reopening listen")
                                     async with self.lock:
@@ -2480,7 +2604,7 @@ class OrchestratorEngine:
 
                         try:
                             reg = await asyncio.wait_for(_read_project_registry(client), timeout=0.5)
-                            new_active = _registry_boards(reg)
+                            new_active = _subscriber_boards(reg)
                             if set(new_active) != set(active_boards):
                                 _log(f"registry boards changed on cue: {active_boards} -> {new_active}; reopening listen")
                                 async with self.lock:
@@ -2500,6 +2624,15 @@ class OrchestratorEngine:
                 self.save_state()
                 if self._stop_event.is_set():
                     break
+                permanent = (
+                    isinstance(exc, BoardJoinFailure)
+                    and exc.cause_class in {"auth", "configuration", "denied"}
+                ) or _is_permanent_denial(exc)
+                if permanent:
+                    # A refused credential/role/invite does not heal by itself;
+                    # one probe per BOARD_DENIAL_RETRY_S keeps Central quiet.
+                    await asyncio.sleep(BOARD_DENIAL_RETRY_S)
+                    continue
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
 
@@ -5268,6 +5401,10 @@ async def _wait_for_work_many(
     if client.identity is None:
         raise RuntimeError("BoardClient has no default joined identity")
     for board_id in board_order:
+        denied = _board_denied(board_id)
+        if denied is not None:
+            skipped[board_id] = denied
+            continue
         try:
             view = _BoardView(client, board_id)
             joined = await view.board_join(
@@ -5278,7 +5415,9 @@ async def _wait_for_work_many(
             )
             if _GLOBAL_KEEPALIVE is not None:
                 _GLOBAL_KEEPALIVE.observe_join(board_id, joined)
+            _forget_board_denial(board_id)
         except BoardClientError as exc:
+            _remember_board_denial(board_id, exc)
             skipped[board_id] = str(exc)
             continue
         expected_id = _derived_agent_id(

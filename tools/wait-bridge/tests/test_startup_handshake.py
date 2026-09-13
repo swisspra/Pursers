@@ -150,6 +150,18 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failure.cause_class, "board")
         self.assertIn("board join failed (board)", str(failure))
 
+    async def test_permanent_denials_have_denied_cause_class(self) -> None:
+        for message in (
+            "board access denied: invite required",
+            "authenticated principal lacks board:coordinate authorization",
+            "board role not authorized",
+        ):
+            failure = wait_server._classify_board_join_failure(
+                BoardClientError(message)
+            )
+            self.assertEqual(failure.cause_class, "denied", message)
+            self.assertNotIn(message, str(failure))
+
     async def _initialize_then_call(
         self,
         *,

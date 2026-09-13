@@ -358,6 +358,31 @@ def _cursors(boards: list[str], since: int | dict[str, int], home: str) -> dict[
     return {board: value if board == home else 0 for board in boards}
 
 
+BOARD_JOIN_DENIAL_RETRY_S = 900.0
+"""Seconds a permanently denied board join is remembered before one retry."""
+
+_PERMANENT_JOIN_DENIAL_MARKERS = (
+    "invite required",
+    "lacks board:",
+    "board role not authorized",
+    "access denied",
+    "not authorized",
+    "forbidden",
+)
+
+
+def join_denial_is_permanent(message: str) -> bool:
+    """Return whether a board_join refusal is an authorization decision.
+
+    Invite-required boards, missing role scopes, and role refusals do not
+    change between two wait calls of the same credential. Treating them as
+    transient made every wait cycle re-issue ``board_join`` against every
+    denied registry board (thousands of refused joins per seat per day).
+    """
+    text = str(message).casefold()
+    return any(marker in text for marker in _PERMANENT_JOIN_DENIAL_MARKERS)
+
+
 async def wait_for_boards(
     client: BoardClient,
     boards: Iterable[str],
@@ -391,6 +416,12 @@ async def wait_for_boards(
             generations[board_id] = getattr(client, "generation_token", None)
             continue
         cached = sessions.get(board_id)
+        if isinstance(cached, dict) and "denied" in cached:
+            if time.monotonic() < float(cached.get("denied_until", 0.0)):
+                skipped[board_id] = str(cached["denied"])
+                continue
+            sessions.pop(board_id, None)
+            cached = None
         if (
             isinstance(cached, dict)
             and cached.get("agent_name") == client.agent_name
@@ -425,8 +456,15 @@ async def wait_for_boards(
                 "generation_token": joined.get("generation_token"),
             }
         except BoardClientError as exc:
-            sessions.pop(board_id, None)
-            skipped[board_id] = str(exc)
+            message = str(exc)
+            if join_denial_is_permanent(message):
+                sessions[board_id] = {
+                    "denied": message,
+                    "denied_until": time.monotonic() + BOARD_JOIN_DENIAL_RETRY_S,
+                }
+            else:
+                sessions.pop(board_id, None)
+            skipped[board_id] = message
     active = [board for board in board_ids if board in identities]
     if not active:
         details = "\n".join(

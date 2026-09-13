@@ -288,7 +288,16 @@ tagged, and `skipped_boards` is absent. With `boards` present, the response is:
 `new_seq` includes every requested board and must be passed back unchanged on
 re-arm. Each board keeps its own cursor, generation token, deterministic agent
 ID, filtering, and entry backlog scan. Events always carry `board_id`.
-Invite-required boards that the bearer cannot access are skipped. In push
+Invite-required boards that the bearer cannot access are skipped. A refusal
+that is an authorization decision (`invite required`, `lacks board:<scope>`,
+`board role not authorized`) is remembered for `BOARD_DENIAL_RETRY_S` (900 s):
+later waits report the cached reason in `skipped_boards` without calling
+`board_join` again, then probe once more after the window. Transient join
+failures are retried on every call as before. `PURSERS_BOARDS` narrows the
+`"registry"` expansion for both `a2a_wait` and the orchestrator subscriber:
+unset or `registry` spans every active registry board, `home` pins the seat to
+its home board, and a comma-separated list allows exactly those boards plus
+home. In push
 mode, each accessible board subscribes independently to
 `board://<board_id>/journal` and `board://<board_id>/agent/<agent_id>`; an
 authoritative event advances only its board, while a failed subscription
