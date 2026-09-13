@@ -15,9 +15,14 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urljoin, urlsplit
 from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
+
+try:
+    from .pair_aionui import tool_sha256, validate_pairing_proof
+except ImportError:  # Direct harness.py execution.
+    from pair_aionui import tool_sha256, validate_pairing_proof
 
 try:
     from . import browser_observer
@@ -1464,6 +1469,8 @@ def _validate_browser_receipt(
             "attestation", "attestation_nonce",
         }
     )
+    if surface_binding is not None and "pairing" in receipt:
+        expected_keys.add("pairing")
     if set(receipt) != expected_keys:
         raise AcceptanceError("browser observation receipt fields do not match schema")
     expected_target = target
@@ -1506,6 +1513,15 @@ def _validate_browser_receipt(
             expected_build,
             candidate_commit,
         )
+        if "pairing" in receipt:
+            try:
+                validate_pairing_proof(
+                    receipt["pairing"],
+                    expected_port=urlsplit(expected_target.base_url).port,
+                    expected_tool_sha256=tool_sha256(),
+                )
+            except ValueError as exc:
+                raise AcceptanceError(f"browser pairing proof is invalid: {exc}") from None
     _require_timestamp(receipt["captured_at"], "observation captured_at")
     page = urlsplit(receipt["page_url"] if isinstance(receipt["page_url"], str) else "")
     origin = urlsplit(expected_target.base_url)
