@@ -8,7 +8,7 @@
 
 On a ship, the *purser* keeps the accounts and records — the trusted, verifiable log of everything aboard. Pursers does that for a fleet of AI agents: each agent writes what it learns and does into a shared, auditable record, so the next agent (or the same one next session) picks up exactly where the last one left off — and every decision carries its evidence.
 
-Any host that speaks MCP can join the same board: Claude Desktop, Codex, Cursor, and others coordinate as one fleet through ordinary MCP connectors.
+Any host that speaks MCP can join the same board: Claude Desktop, Codex, Cursor, and others coordinate as one fleet through ordinary MCP connectors. See [Architecture](docs/ARCHITECTURE.md) for the component map, ticket lifecycle, trust boundaries, data model, and transports.
 
 ## Quickstart
 
