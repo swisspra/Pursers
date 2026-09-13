@@ -1312,6 +1312,8 @@ class BoardJoinFailure(ToolError):
 
 
 def _split_identity_failure() -> BoardJoinFailure | None:
+    if _RUNTIME_CONFIG_ERROR:
+        return BoardJoinFailure("configuration", _RUNTIME_CONFIG_ERROR)
     if os.environ.get("PURSERS_REQUIRE_TOKEN_MATCH", "").strip() != "1":
         return None
     connector_token = os.environ.get(CONNECTOR_TOKEN_ENV, "")
@@ -6331,7 +6333,11 @@ def _door_forget(args: argparse.Namespace) -> None:
 def _configure_runtime() -> None:
     global CENTRAL_URL, BOARD_ID, CENTRAL_TOKEN, RUNTIME_ROLE, RUNTIME_FROM_DOOR
     global BASE_AGENT_NAME, AGENT_NAME, _RUNTIME_CONFIG_ERROR
-    config = door_state.resolve()
+    try:
+        config = door_state.resolve()
+    except ValueError as exc:
+        _RUNTIME_CONFIG_ERROR = str(exc)
+        raise
     CENTRAL_URL = config["url"]
     BOARD_ID = config["board"]
     CENTRAL_TOKEN = config["token"]

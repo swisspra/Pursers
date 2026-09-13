@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import io
 import os
 import socket
 import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -38,6 +40,42 @@ class _UnauthorizedHandler(BaseHTTPRequestHandler):
 
 
 class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_main_refuses_mismatched_explicit_token_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            token_file = Path(raw) / "seat-token"
+            token_file.write_text("seat-token\n", encoding="utf-8")
+            stderr = io.StringIO()
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "ONBOARD_CENTRAL_TOKEN": "inherited-admin-token",
+                        "ONBOARD_CENTRAL_TOKEN_FILE": str(token_file),
+                    },
+                    clear=True,
+                ),
+                patch.object(sys, "argv", ["pursers-wait-bridge"]),
+                patch.object(wait_server, "_RUNTIME_CONFIG_ERROR", None),
+                patch.object(wait_server.mcp, "run") as run,
+                redirect_stderr(stderr),
+            ):
+                wait_server.main()
+            run.assert_not_called()
+            self.assertIn("FATAL: split identity", stderr.getvalue())
+
+    async def test_runtime_config_split_identity_is_a_configuration_failure(
+        self,
+    ) -> None:
+        with patch.object(
+            wait_server,
+            "_RUNTIME_CONFIG_ERROR",
+            "split identity: explicit token sources differ",
+        ):
+            failure = wait_server._split_identity_failure()
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.cause_class, "configuration")
+        self.assertIn("split identity", str(failure))
+
     async def test_split_identity_refuses_start_and_matching_token_passes(self) -> None:
         connection = wait_server.DeferredBoardConnection(
             wait_server.BridgeStats(Path(tempfile.gettempdir()) / "unused.json")
