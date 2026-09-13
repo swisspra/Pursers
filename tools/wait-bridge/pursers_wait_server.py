@@ -1726,6 +1726,7 @@ class LeaseKeepalive:
         self.last_model_interaction = time.monotonic()
         self.active_waits = 0
         self.model_refresh_pending = False
+        self.idle_downgraded = False
         self.idle_limit_override = self._idle_limit_override()
 
     @staticmethod
@@ -1761,6 +1762,7 @@ class LeaseKeepalive:
     def observe_model_interaction(self) -> None:
         self.last_model_interaction = time.monotonic()
         self.model_refresh_pending = True
+        self.idle_downgraded = False
         self.idle_paused.clear()
         now = time.monotonic()
         for lease in self.leases.values():
@@ -1977,7 +1979,17 @@ class LeaseKeepalive:
         if (
             selected_source == "keepalive"
             and _host_name() in {"codex", "codex-cli"}
+            and not self.model_is_live(
+                self.board_ttls.get(BOARD_ID, DEFAULT_CLAIM_TTL_S)
+            )
         ):
+            # Only an IDLE Codex seat (no live wait, no recent model call)
+            # stops advertising dispatch capability. A keepalive tick that
+            # fires while the model is inside a2a_wait, or shortly after a
+            # model tool call, must not overwrite the seat's capabilities on
+            # Central: that made every Codex seat flap between eligible and
+            # `no_eligible_worker`/`no_eligible_reviewer` on each keepalive
+            # cycle, so offers were revoked seconds after being issued.
             capabilities = {
                 **(capabilities or {}),
                 "can_work": False,
@@ -2168,6 +2180,21 @@ class LeaseKeepalive:
                         await self._discover()
                     except Exception as exc:
                         _log(f"lease keepalive discovery deferred: {exc}")
+                elif (
+                    not self.idle_downgraded
+                    and _host_name() in {"codex", "codex-cli"}
+                ):
+                    # One discovery at the live->idle transition so Central
+                    # stops offering work to a Codex seat whose model went
+                    # away (the downgrade branch in _discover). Later idle
+                    # ticks do not re-join; the next model interaction resets
+                    # the flag and the following live discovery restores the
+                    # seat's real capabilities.
+                    try:
+                        await self._discover()
+                        self.idle_downgraded = True
+                    except Exception as exc:
+                        _log(f"lease keepalive idle downgrade deferred: {exc}")
                 self.next_discovery = time.monotonic() + self.interval(ttl)
             now = time.monotonic()
             due_keys = [
