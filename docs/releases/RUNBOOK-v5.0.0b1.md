@@ -18,7 +18,10 @@ Read this together with the [release train guide](../release-train.md), the
 
 The non-publishing rehearsal built all six wheels from a `git archive` of the
 exact candidate with Python 3.12 and the pinned build toolchain. The generated
-hashes matched the approved set byte for byte.
+hashes matched the approved set byte for byte. It also verified the separately
+archived 30-wheel Home runtime wheelhouse: every recorded wheel passes its
+checksum, and the wheelhouse `SHA256SUMS` file hashes to
+`a34844ff32687fb8b30b9c03c990db35eec74dd88296dfcb0dd450001bbac4c5`.
 
 | Artifact | Rehearsed SHA-256 | Result |
 | --- | --- | --- |
@@ -105,7 +108,7 @@ python3 tools/release_publish.py "$TAG" verify-checkout
 ```
 
 Do not create a temporary tag just to make the rehearsal pass. Run the same
-command again after the operator creates the real signed tag in step 6; its
+command again after the operator creates the real signed tag in step 7; its
 only expected output then is the full candidate SHA.
 
 ## 3. Build the six-wheel cohort
@@ -198,7 +201,52 @@ diff -u "$STAGING/approved-SHA256SUMS.txt" dist/SHA256SUMS.txt
 all six wheels. These exact bytes are the `SHA256SUMS.txt` the release carries.
 Any difference is a hard stop; do not upload the new bytes under this version.
 
-## 5. Render and approve the release body
+## 5. Verify the archived Home runtime wheelhouse
+
+The b1 Home runtime dependency resolver was not locked when rc6 was approved.
+A fresh resolution has already drifted (`uvicorn` 0.52.4 to 0.53.0), so it is
+not a reproducible replacement for the approved wheelhouse. Use the archived
+30-wheel directory only; do not run `build_home_runtime_wheelhouse.py` to
+create b1 upload bytes.
+
+The archive path is operator-owned. Use a public-safe path in logs and tickets:
+
+```sh
+APPROVED_HOME_WHEELHOUSE=/PATH/TO/ARCHIVED/wheelhouse-approved-a34844ff
+HOME_RUNTIME_UPLOAD=/PATH/TO/EMPTY/HOME-RUNTIME-UPLOAD
+HOME_SHA256SUMS_SHA256=a34844ff32687fb8b30b9c03c990db35eec74dd88296dfcb0dd450001bbac4c5
+
+test "$(find "$APPROVED_HOME_WHEELHOUSE" -maxdepth 1 -type f \
+  -name '*.whl' | wc -l | tr -d ' ')" = 30
+test "$(shasum -a 256 "$APPROVED_HOME_WHEELHOUSE/SHA256SUMS" | \
+  awk '{print $1}')" = "$HOME_SHA256SUMS_SHA256"
+(cd "$APPROVED_HOME_WHEELHOUSE" && shasum -a 256 -c SHA256SUMS)
+
+test ! -e "$HOME_RUNTIME_UPLOAD"
+mkdir -p "$HOME_RUNTIME_UPLOAD"
+cp -p "$APPROVED_HOME_WHEELHOUSE"/*.whl \
+  "$APPROVED_HOME_WHEELHOUSE/SHA256SUMS" \
+  "$APPROVED_HOME_WHEELHOUSE/wheelhouse.json" \
+  "$HOME_RUNTIME_UPLOAD/"
+test "$(find "$HOME_RUNTIME_UPLOAD" -maxdepth 1 -type f \
+  -name '*.whl' | wc -l | tr -d ' ')" = 30
+test "$(shasum -a 256 "$HOME_RUNTIME_UPLOAD/SHA256SUMS" | \
+  awk '{print $1}')" = "$HOME_SHA256SUMS_SHA256"
+(cd "$HOME_RUNTIME_UPLOAD" && shasum -a 256 -c SHA256SUMS)
+```
+
+Expected output is 30 `OK` lines for the archive and the same 30 `OK` lines
+for the upload staging directory; the count and top-level hash assertions are
+silent. This is a separate Home runtime deployment input, not part of the
+seven-asset GitHub Release cohort. If a later transport is required, upload
+these verified bytes from `HOME_RUNTIME_UPLOAD` without rebuilding or
+renaming them, then repeat both hash checks at the destination.
+
+The committed dependency-lock repair is tracked as beta.2 fix
+`TK-143f427367aa` (release tooling: wheelhouse builds install from a committed
+hash lock). That future fix does not authorize regenerating the frozen b1 set.
+
+## 6. Render and approve the release body
 
 The release body is a reviewed docs artifact, not a file from the rc6 commit.
 Use a separate clean checkout containing the reviewed correction of
@@ -218,7 +266,7 @@ Expected output includes the full candidate SHA and a reviewed docs commit.
 The `grep` currently fails on the unrevised body; that is an intentional
 pre-publish gate. Do not substitute the shorter CHANGELOG body without review.
 
-## 6. Operator-only tag creation
+## 7. Operator-only tag creation
 
 Only the release operator performs these commands, after all gates above are
 green and the exact candidate has passed the required CI and review:
@@ -248,7 +296,7 @@ test -n "$RUN_ID"
 gh run watch "$RUN_ID" --exit-status
 ```
 
-## 7. Controlled manual recovery only
+## 8. Controlled manual recovery only
 
 Use this section only if the tag-triggered workflow failed before creating a
 release, no release job is still running, the local seven assets passed the
@@ -296,7 +344,7 @@ gh release edit "$TAG" \
 Each `verify-asset` invocation prints that asset's approved SHA-256. A mismatch
 must stop the recovery; do not replace the existing asset.
 
-## 8. Post-publish verification
+## 9. Post-publish verification
 
 Verify the tag, release state, exact seven-asset set, checksums, install path,
 and stable-latest boundary from a fresh download directory:
@@ -322,7 +370,11 @@ test "$LATEST_STABLE" != "$TAG"
 
 python3.12 -m venv "$STAGING/install-venv"
 "$STAGING/install-venv/bin/python" -m pip install \
-  --no-index --find-links "$DOWNLOADS" \
+  --no-index --no-deps "$DOWNLOADS"/*.whl
+# The six release wheels are now pinned locally. Deliberately allow the package
+# index only for their third-party dependencies; the seven-asset release does
+# not contain a complete dependency wheelhouse.
+"$STAGING/install-venv/bin/python" -m pip install \
   "pursers==$VERSION" "pursers-wait-bridge==0.1.0a16"
 "$STAGING/install-venv/bin/python" -m pip check
 ```
@@ -330,9 +382,13 @@ python3.12 -m venv "$STAGING/install-venv"
 The release JSON must show `isDraft: false`, `isPrerelease: true`, the expected
 tag, and exactly the six wheel names plus `SHA256SUMS.txt`. All checksum lines
 must say `OK`; `pip check` must report `No broken requirements found.` The
-stable-latest assertion must be silent and exit zero.
+stable-latest assertion must be silent and exit zero. The first install must
+name all six downloaded local wheel paths; the second may contact the configured
+package index for third-party dependencies only. If fully offline installation
+is required, use a separately reviewed complete dependency wheelhouse rather
+than claiming the seven GitHub assets are sufficient.
 
-## 9. Stop and rollback rules
+## 10. Stop and rollback rules
 
 - Before tag push: stop, preserve logs, discard the staging artifacts, and
   rebuild from a fresh exact-candidate checkout. Nothing external needs
@@ -357,6 +413,16 @@ stable-latest assertion must be silent and exit zero.
   create and edit modes.
 - All six reproducible wheel hashes matched the approved set, and the detached
   rc6 checkout remained clean.
+- The archived Home runtime wheelhouse contains 30 wheels, all 30 checksum
+  lines pass, and its `SHA256SUMS` hash is exactly
+  `a34844ff32687fb8b30b9c03c990db35eec74dd88296dfcb0dd450001bbac4c5`.
+  A fresh b1 wheelhouse resolution must not replace it; `TK-143f427367aa`
+  carries the committed-lock fix for beta.2.
+- A genuinely fresh Python 3.12 venv installed all six local release wheels
+  with `--no-index --no-deps`, then resolved third-party dependencies through
+  the package index and finished with `No broken requirements found.` The
+  earlier six-wheel-only `--no-index` command was invalid because the release
+  cohort is not a complete dependency wheelhouse.
 - `verify-checkout` correctly failed before the tag existed. It becomes an
   effective exact-SHA gate only after the signed tag is created.
 - The curated release body is absent from rc6, still names an older candidate,
