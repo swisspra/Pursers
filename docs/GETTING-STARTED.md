@@ -137,6 +137,18 @@ A healthy response starts with `{"status":"ok","store_backend":"sqlite"`.
 It also reports the board count, journal head, uptime, and file-descriptor
 pressure without exposing credentials.
 
+When running the Fleet Dashboard from a source checkout, pass the same Central
+URL explicitly, including its scheme:
+
+```bash
+python tools/fleet-dashboard/fleet_dashboard.py \
+  --url http://127.0.0.1:8766/mcp \
+  --token-file "$TOKEN_FILE"
+```
+
+Open `http://127.0.0.1:8899`. If Central is behind the repository's local TLS
+wrapper, use its `https://` MCP URL instead.
+
 > **Known b1 limitation:** `python -m pursers_central.pursers_central_runtime`
 > exits silently and there is no `pursers-central` console script yet; fixed in
 > beta.2 (see ticket “central: runnable entry point”). Use the `python -c`

@@ -2034,6 +2034,90 @@ def test_non_loopback_host_is_refused() -> None:
         dashboard.parse_args(["--host", "0.0.0.0"])
 
 
+def test_cli_default_matches_documented_loopback_central_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ONBOARD_CENTRAL_URL", raising=False)
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "test-token")
+
+    args = dashboard.parse_args([])
+    config = dashboard.load_central_configs(args)[0]
+    getting_started = (MODULE_PATH.parents[2] / "docs" / "GETTING-STARTED.md").read_text(
+        encoding="utf-8"
+    )
+    documented = re.search(r"--url (https?://\S+)", getting_started)
+
+    assert documented is not None
+    assert config.url == dashboard.DEFAULT_URL
+    assert dashboard.urlsplit(config.url).scheme == dashboard.urlsplit(
+        documented.group(1)
+    ).scheme
+
+
+def test_plain_http_disconnect_reports_tls_hint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    central_url = "http://127.0.0.1:8766/mcp"
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            assert value is None
+            return "default"
+
+        def central_url(self, value: str | None) -> str:
+            assert value is None
+            return central_url
+
+        def get(self) -> dict:
+            raise ExceptionGroup(
+                "request failed",
+                [ConnectionError("Server disconnected without sending a response.")],
+            )
+
+    class Workers:
+        enabled = True
+        roles = ("worker", "reviewer")
+
+        def list(self, _fleet_names: set[str]) -> list[dict]:
+            return []
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(Cache(), worker_manager=Workers()),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root = f"http://127.0.0.1:{server.server_port}"
+    payloads = []
+    try:
+        for path in ("/api/fleet", "/api/workers"):
+            with pytest.raises(urllib.error.HTTPError) as captured:
+                urllib.request.urlopen(root + path)
+            assert captured.value.code == 503
+            payloads.append(json.loads(captured.value.read()))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    expected = (
+        "Central at http://127.0.0.1:8766/mcp closed the connection before "
+        "responding - if it serves TLS use https://"
+    )
+    assert all(payload["error"] == "ConnectionError" for payload in payloads)
+    assert all(expected in payload["detail"] for payload in payloads)
+    stderr = capsys.readouterr().err
+    assert (
+        f"fleet-dashboard /api/fleet central=default: ConnectionError: {expected}"
+        in stderr
+    )
+    assert (
+        f"fleet-dashboard /api/workers central=default: ConnectionError: {expected}"
+        in stderr
+    )
+    assert "ExceptionGroup" not in stderr
+
+
 @pytest.mark.parametrize(
     ("contents", "expected_status"),
     [(None, "missing"), ("not-json", "malformed")],
