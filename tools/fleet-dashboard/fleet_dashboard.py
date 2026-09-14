@@ -231,6 +231,61 @@ def _board_redact(value: str) -> str:
     return board_scrub(value, _BOARD_REDACTION_POLICY)[0]
 
 
+def _api_exception_payload(
+    route: str,
+    central: str,
+    central_url: str | None,
+    exc: BaseException,
+) -> dict[str, str]:
+    """Return and log a bounded, scrubbed leaf exception for local API failures."""
+    leaf = exc
+    while isinstance(leaf, BaseExceptionGroup) and leaf.exceptions:
+        leaf = leaf.exceptions[0]
+
+    chain = [leaf]
+    seen = {id(leaf)}
+    while True:
+        nested = leaf.__cause__ or leaf.__context__
+        if nested is None or id(nested) in seen:
+            break
+        seen.add(id(nested))
+        leaf = nested
+        while isinstance(leaf, BaseExceptionGroup) and leaf.exceptions:
+            leaf = leaf.exceptions[0]
+        chain.append(leaf)
+
+    informative = next(
+        (item for item in reversed(chain) if str(item).strip()), chain[-1]
+    )
+    error = type(informative).__name__
+    messages = [str(item).strip() for item in chain if str(item).strip()]
+    disconnected = any(
+        "server disconnected without sending a response" in message.casefold()
+        for message in messages
+    )
+    if (
+        disconnected
+        and central_url
+        and urlsplit(central_url).scheme.casefold() == "http"
+    ):
+        safe_url = _board_redact(central_url)
+        message = (
+            f"Central at {safe_url} closed the connection before responding - "
+            "if it serves TLS use https://"
+        )
+    else:
+        message = _board_redact(str(informative).strip())
+    if len(message) > 500:
+        message = f"{message[:499]}…"
+    detail = f"{error}: {message}" if message else error
+    print(
+        f"fleet-dashboard {route} central={central}: {detail}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return {"error": error, "detail": detail, "central": central}
+
+
 class ConfigConflictError(RuntimeError):
     """The dashboard form was based on missing or superseded state."""
 
@@ -6752,8 +6807,14 @@ def make_handler(
             if route == "/api/fleet":
                 try:
                     body = _json_bytes(cache_call("get", central=central))
-                except Exception as exc:  # noqa: BLE001 - return bounded HTTP error.
-                    body = _json_bytes({"error": type(exc).__name__, "central": label})
+                except Exception as exc:  # noqa: BLE001 - return bounded leaf error.
+                    try:
+                        central_url = selected_central_url(central)
+                    except Exception:  # noqa: BLE001 - preserve the original failure.
+                        central_url = None
+                    body = _json_bytes(
+                        _api_exception_payload(route, label, central_url, exc)
+                    )
                     self._send(503, "application/json; charset=utf-8", body)
                     return
                 self._send(200, "application/json; charset=utf-8", body)
@@ -6953,11 +7014,17 @@ def make_handler(
                         _json_bytes({"error": str(exc), "central": label}),
                     )
                     return
-                except Exception as exc:  # noqa: BLE001 - bounded type only.
+                except Exception as exc:  # noqa: BLE001 - bounded leaf error.
+                    try:
+                        central_url = selected_central_url(central)
+                    except Exception:  # noqa: BLE001 - preserve the original failure.
+                        central_url = None
                     self._send(
                         503,
                         "application/json; charset=utf-8",
-                        _json_bytes({"error": type(exc).__name__, "central": label}),
+                        _json_bytes(
+                            _api_exception_payload(route, label, central_url, exc)
+                        ),
                     )
                     return
                 self._send(200, "application/json; charset=utf-8", body)
