@@ -1,12 +1,12 @@
 schema_version = 1
-product = "5.0.0a26"
+product = "5.0.0b1"
 source_date_epoch = "315532800"
 
 [packages]
-pursers = "5.0.0a26"
+pursers = "5.0.0b1"
 central = "0.1.0a30"
 client = "0.1.0a23"
-personal = "5.0.0a26"
+personal = "5.0.0b1"
 import = "5.0.0a3"
 wait_bridge = "0.1.0a16"
 

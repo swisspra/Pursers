@@ -1,0 +1,26 @@
+{
+  "generated_at": "2030-01-02T12:00:00Z",
+  "pool_summary": {
+    "online": 1,
+    "busy": 0,
+    "available": 1,
+    "stale": 0
+  },
+  "boards": [
+    {
+      "board_id": "sandbox-home-acceptance",
+      "label": "Sandbox Home Acceptance",
+      "counts": {
+        "open": 1,
+        "claimed": 0,
+        "submitted": 0,
+        "closed_today": 0
+      },
+      "tickets": [],
+      "coordinator_findings": {
+        "items": []
+      },
+      "coordinator_heartbeat": "2030-01-02T11:59:00Z"
+    }
+  ]
+}

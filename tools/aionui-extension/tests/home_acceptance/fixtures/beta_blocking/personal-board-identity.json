@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "fixture_id": "personal-board-identity",
+  "board": {
+    "id": "sandbox-home-acceptance",
+    "name": "Sandbox Home Acceptance"
+  },
+  "selector": "#board-id",
+  "expected_text": "sandbox-home-acceptance"
+}

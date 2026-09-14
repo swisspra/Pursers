@@ -15,6 +15,34 @@ all eight authoritative AionUI Team seat folders are prepared. The legacy
 Fleet Dashboard inventory is incomplete and must not be used as the migration
 roster.
 
+### Final Home train action state (2026-09-09)
+
+The assembled Home rework does not change the cutover verdict. Its current
+release actions are:
+
+- **Component lock: remediated in source.** The pinned canonical toolchain
+  rebuilt the Central and client wheels and regenerated
+  `component-lock.json` from the assembled sources. Final release verification
+  must reproduce the committed bytes on the immutable candidate.
+- **Dashboard dependency audit: remediated in source.** The transitive Hono
+  lock moved from vulnerable `4.13.2` to fixed `4.13.7` within the existing
+  supported dependency range. `npm audit --omit=optional` reports zero known
+  vulnerabilities on the regenerated lock.
+- **Candidate provenance: required before review.** The next immutable
+  submission must be one commit on frozen main so its tip contains the complete
+  assembled delta and exact manifest.
+- **Sandbox browser acceptance: blocked on private operator inputs.** The
+  verifier-owned observer and authenticated AionUi host were established, but
+  the sandbox handoff lacked a worker door and a Fleet-capable sandbox
+  credential whose Central label matches the helper. `TK-515fc1706606` owns
+  that private reissue. No credential may be added to this repository or ticket
+  evidence.
+
+Until the private sandbox inputs are supplied and an independent verifier
+passes all nine browser steps and full inventory against the new exact SHA,
+O1 activation, production cutover, versioning, tagging, publishing, and release
+remain **NO-GO**.
+
 ## Findings and confirmed baseline
 
 - `origin/main` and tag `v5.0.0a25` resolve to
@@ -292,7 +320,7 @@ faa60203ee6a1857636322def8e5f3c92510c87983cbcd07d2ebd68b9e7d3611
       --token-file /PATH/TO/dashboard-admin.jwt \
       --doors-keys-dir /PATH/TO/target-jwt/door-keys \
       --jwks-path /PATH/TO/target-jwt/jwks.json \
-      --home-board pursers --agent-name '<DASHBOARD_NAME>'
+      --home-board pursers --agent-name fleet-dashboard-session-default
     ```
 
     Append each existing coordinator policy flag unchanged. Produce and review

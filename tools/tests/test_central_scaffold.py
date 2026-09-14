@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import plistlib
 import shlex
 import socket
@@ -321,18 +322,26 @@ def test_generated_install_command_resolves_current_central_and_client_wheels(
         content = content.replace(old, new)
     profile.write_text(content)
 
+    clean_environment = os.environ.copy()
+    clean_environment.pop("PYTHONPATH", None)
     command = central_scaffold.runtime_install_command(str(root))
     subprocess.run(
-        ["/bin/sh", "-c", command], check=True, capture_output=True, text=True
+        ["/bin/sh", "-c", command],
+        check=True,
+        capture_output=True,
+        env=clean_environment,
+        text=True,
     )
     verify = subprocess.run(
         [
             str(root / ".venv" / "bin" / "python"),
+            "-I",
             "-c",
             "import pursers_central, pursers_client",
         ],
         check=True,
         capture_output=True,
+        env=clean_environment,
         text=True,
     )
     assert verify.returncode == 0

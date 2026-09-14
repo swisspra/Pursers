@@ -168,11 +168,23 @@ async def test_takeover_and_memory_identity_are_forwarded(monkeypatch) -> None:
 
     await board.board_join(allow_takeover=True)
     await board.board_onboard(allow_takeover=True)
+    matching = {
+        "agent_platform": "dashboard",
+        "task_focus": "owned-session",
+        "capabilities": {"can_work": False, "can_review": False},
+        "allow_matching_takeover": True,
+    }
+    await board.board_join(**matching)
+    await board.board_onboard(**matching)
     await board.memory_search("private")
     await board.memory_links()
 
     assert refresh_calls[0][1]["allow_takeover"] is True
     assert refresh_calls[1][1]["allow_takeover"] is True
+    assert refresh_calls[2][1]["allow_matching_takeover"] is True
+    assert refresh_calls[2][1]["agent_platform"] == "dashboard"
+    assert refresh_calls[2][1]["task_focus"] == "owned-session"
+    assert refresh_calls[3][1]["allow_matching_takeover"] is True
     assert read_calls[0][1]["agent_name"] == "env-default"
     assert read_calls[1][1]["agent_name"] == "env-default"
 
@@ -194,18 +206,26 @@ async def test_context_startup_forwards_explicit_takeover_policy(
         "board-multi-name",
         agent_name="stable-seat",
         allow_takeover=allow_takeover,
+        agent_platform="dashboard",
+        task_focus="owned-session",
     )
     captured: dict[str, Any] = {}
 
     async def board_join(
         _claim_ttl_s: int | None = None,
         *,
+        agent_platform: str | None = None,
+        task_focus: str | None = None,
         capabilities: dict[str, Any] | None = None,
         allow_takeover: bool = False,
+        allow_matching_takeover: bool = False,
     ) -> dict[str, Any]:
         captured.update(
             capabilities=capabilities,
             allow_takeover=allow_takeover,
+            allow_matching_takeover=allow_matching_takeover,
+            agent_platform=agent_platform,
+            task_focus=task_focus,
         )
         return joined("stable-seat")
 
@@ -224,6 +244,9 @@ async def test_context_startup_forwards_explicit_takeover_policy(
     assert captured == {
         "capabilities": None,
         "allow_takeover": allow_takeover,
+        "allow_matching_takeover": False,
+        "agent_platform": "dashboard",
+        "task_focus": "owned-session",
     }
 
 

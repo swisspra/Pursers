@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "fixture_id": "valid-worker-door",
+  "board_id": "sandbox-home-acceptance",
+  "role": "worker",
+  "central_path": "/mcp",
+  "credential": {
+    "algorithm": "RS256",
+    "key_id": "synthetic-worker-key",
+    "expires_at": 2000000000,
+    "signature_marker": "synthetic-signature"
+  }
+}

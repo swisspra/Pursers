@@ -127,3 +127,39 @@ def test_two_builds_from_same_lock_have_identical_checksums(
     assert (first / "SHA256SUMS").read_bytes() == (second / "SHA256SUMS").read_bytes()
     assert first_manifest["artifacts"] == second_manifest["artifacts"]
     assert first_manifest["lock"] == second_manifest["lock"]
+
+
+def test_build_verifier_ignores_checkout_egg_info_on_pythonpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    python = shutil.which("python3.12")
+    if python is None:
+        pytest.skip("python3.12 is required")
+
+    client_name, client_version = builder._project(builder.CLIENT_PROJECT)
+    fake_source = tmp_path / "checkout-src"
+    egg_info = fake_source / "pursers_client.egg-info"
+    egg_info.mkdir(parents=True)
+    (egg_info / "PKG-INFO").write_text(
+        "Metadata-Version: 2.1\n"
+        f"Name: {client_name}\n"
+        f"Version: {client_version}\n"
+    )
+    (egg_info / "top_level.txt").write_text("pursers_client\n")
+    monkeypatch.setenv("PYTHONPATH", str(fake_source))
+
+    output = tmp_path / "wheelhouse"
+    manifest = builder.build(output, Path(python), allow_dirty=True)
+
+    assert "PYTHONPATH" not in builder._build_environment(Path(python))
+    assert "PYTHONPATH" not in builder._pip_environment()
+    assert manifest["verification"]["imports"] == [
+        "pursers_client",
+        "pursers_wait_server",
+    ]
+    assert any(
+        artifact["filename"].startswith(
+            f"{client_name.replace('-', '_')}-{client_version}-"
+        )
+        for artifact in manifest["artifacts"]
+    )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import configparser
 import hashlib
 import importlib
 import importlib.metadata
@@ -9,6 +10,7 @@ import importlib.resources
 import importlib.util
 import json
 import sys
+import sysconfig
 import tempfile
 import threading
 from pathlib import Path
@@ -39,6 +41,54 @@ def _lock_document() -> dict[str, Any]:
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _locked_console_scripts(
+    name: str,
+    members: dict[str, str],
+    installed_members: dict[str, str],
+) -> set[str]:
+    entry_points = [
+        relative
+        for relative in members
+        if relative.endswith(".dist-info/entry_points.txt")
+    ]
+    if not entry_points:
+        return set()
+    if len(entry_points) != 1:
+        raise ArtifactVerificationError(f"invalid {name} entry point lock")
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.optionxform = str
+    try:
+        parser.read_string(
+            Path(installed_members[entry_points[0]]).read_text(encoding="utf-8")
+        )
+    except (configparser.Error, OSError, UnicodeError) as exc:
+        raise ArtifactVerificationError(f"invalid {name} entry point lock") from exc
+    if not parser.has_section("console_scripts"):
+        return set()
+    return set(parser.options("console_scripts"))
+
+
+def _is_locked_console_script(
+    relative: str,
+    distribution: importlib.metadata.Distribution,
+    declared: set[str],
+) -> bool:
+    if Path(relative).name not in declared:
+        return False
+    located = Path(distribution.locate_file(relative))
+    if located.is_symlink():
+        return False
+    try:
+        candidate = located.resolve(strict=True)
+        scripts_path = sysconfig.get_path("scripts")
+        if not scripts_path:
+            return False
+        scripts_dir = Path(scripts_path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return candidate.is_file() and candidate.parent == scripts_dir
 
 
 def verify_component_artifacts(
@@ -96,6 +146,9 @@ def verify_component_artifacts(
             if actual != expected:
                 raise ArtifactVerificationError(f"installed {name} artifact drifted")
             installed_members[relative] = str(candidate)
+        declared_console_scripts = _locked_console_scripts(
+            name, members, installed_members
+        )
         recorded = {str(item) for item in distribution.files or ()}
         generated_suffixes = (
             ".dist-info/RECORD",
@@ -111,6 +164,9 @@ def verify_component_artifacts(
             and not relative.endswith(generated_suffixes)
             and not (
                 "/__pycache__/" in relative and relative.endswith(".pyc")
+            )
+            and not _is_locked_console_script(
+                relative, distribution, declared_console_scripts
             )
         }
         if unapproved:
