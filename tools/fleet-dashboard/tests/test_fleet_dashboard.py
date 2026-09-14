@@ -1672,9 +1672,10 @@ def test_global_search_groups_escaped_results_and_enter_jumps_to_item() -> None:
             source("const ticketMatches="),
             source("function groupSearchResults("),
             source("function renderSearchResults("),
+            source("function closeSearchResults("),
             source("function jumpSearchResult("),
             f"let fleetData={json.dumps(fixture)},detailData=null,filterNeedle='needle',searchItems=[],searchSelection=0;",
-            "const host={innerHTML:'',hidden:true},input={setAttribute(){}};",
+            "const host={innerHTML:'',hidden:true},input={setAttribute(){},removeAttribute(){}};",
             "const document={querySelector:key=>key==='#search-results'?host:input};",
             "const location={hash:''};const sectionStates=new Map();",
             "renderSearchResults();",
@@ -1696,6 +1697,103 @@ def test_global_search_groups_escaped_results_and_enter_jumps_to_item() -> None:
     assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt; needle" in result["html"]
     assert (
         result["hash"] == "#/central/personal/board/board-one/tickets?ticket=TK-needle"
+    )
+
+
+def test_global_search_aria_combobox_keyboard_contract() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    assert 'role="combobox"' in dashboard.HTML
+    assert 'aria-autocomplete="list"' in dashboard.HTML
+    assert 'aria-haspopup="listbox"' in dashboard.HTML
+    assert 'aria-controls="search-results"' in dashboard.HTML
+    assert 'id="search-results"' in dashboard.HTML
+    assert 'role="listbox"' in dashboard.HTML
+
+    fixture = {
+        "personal": {
+            "boards": [
+                {
+                    "label": "Needle board",
+                    "board_id": "board-one",
+                    "tickets": [
+                        {
+                            "id": "TK-needle",
+                            "title": "Needle ticket",
+                            "status": "open",
+                            "claimed_by": None,
+                        }
+                    ],
+                }
+            ],
+            "agents": [],
+        }
+    }
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("const ticketMatches="),
+            source("function groupSearchResults("),
+            source("function renderSearchResults("),
+            source("function closeSearchResults("),
+            source("function jumpSearchResult("),
+            source("function handleDashboardKeydown("),
+            f"let fleetData={json.dumps(fixture)},detailData=null,filterNeedle='needle',searchItems=[],searchSelection=0,goPrefix=false,goTimer=null,defaultCentral='personal';",
+            "const attrs={};",
+            "const host={innerHTML:'',hidden:true};",
+            "const help={open:false,showModal(){this.open=true},close(){this.open=false}};",
+            "const helpToggle={focused:false,focus(){this.focused=true}};",
+            "const body={tagName:'BODY'};",
+            "const input={tagName:'INPUT',focused:false,setAttribute(k,v){attrs[k]=v},removeAttribute(k){delete attrs[k]},focus(){this.focused=true;document.activeElement=this}};",
+            "const document={activeElement:body,querySelector(key){if(key==='#search-results')return host;if(key==='#filter')return input;if(key==='#help-overlay')return help;if(key==='#help-toggle')return helpToggle;throw new Error(key)},querySelectorAll(){return[]}};",
+            "const location={hash:''};const sectionStates=new Map();",
+            "const key=value=>{let prevented=false;handleDashboardKeydown({key:value,preventDefault(){prevented=true}});return prevented};",
+            "const slash=key('/');",
+            "const initial={expanded:attrs['aria-expanded'],active:attrs['aria-activedescendant'],html:host.innerHTML};",
+            "const down=key('ArrowDown');",
+            "const moved={active:attrs['aria-activedescendant'],html:host.innerHTML};",
+            "const up=key('ArrowUp');",
+            "const restored={active:attrs['aria-activedescendant']};",
+            "const escape=key('Escape');",
+            "const closed={hidden:host.hidden,expanded:attrs['aria-expanded'],active:attrs['aria-activedescendant']||null,focused:document.activeElement===input};",
+            "renderSearchResults();key('ArrowDown');const enter=key('Enter');",
+            "console.log(JSON.stringify({slash,down,up,escape,enter,initial,moved,restored,closed,hash:location.hash}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["slash"] is True
+    assert result["initial"]["expanded"] == "true"
+    assert result["initial"]["active"] == "search-option-0"
+    assert 'id="search-option-0"' in result["initial"]["html"]
+    assert result["down"] is True
+    assert result["moved"]["active"] == "search-option-1"
+    assert 'id="search-option-1"' in result["moved"]["html"]
+    assert 'aria-selected="true"' in result["moved"]["html"]
+    assert result["up"] is True
+    assert result["restored"]["active"] == "search-option-0"
+    assert result["escape"] is True
+    assert result["closed"] == {
+        "hidden": True,
+        "expanded": "false",
+        "active": None,
+        "focused": True,
+    }
+    assert result["enter"] is True
+    assert (
+        result["hash"]
+        == "#/central/personal/board/board-one/tickets?ticket=TK-needle"
     )
 
 
