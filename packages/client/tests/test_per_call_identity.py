@@ -421,6 +421,7 @@ async def test_review_lease_calls_carry_the_seat_identity(monkeypatch) -> None:
     await board.ticket_review_claim("TK-review")
     await board.lease_renew("TK-review")
     await board.ticket_review_release("TK-review", reason="handoff")
+    await board.dispatch_my_offers()
     await board.ticket_list(status="submitted", review_unclaimed_only=True)
 
     assert calls == [
@@ -439,6 +440,10 @@ async def test_review_lease_calls_carry_the_seat_identity(monkeypatch) -> None:
                 "ticket_id": "TK-review",
                 "reason": "handoff",
             },
+        ),
+        (
+            "dispatch_my_offers",
+            {"agent_name": "env-default"},
         ),
         (
             "ticket_list",
