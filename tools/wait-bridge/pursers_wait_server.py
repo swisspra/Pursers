@@ -25,7 +25,7 @@ THE TOOL
          a2a_wait request is still in progress.
       3. Bound large replays by compacting to the latest event per ticket, and
          return partial progress if catch-up consumes the call deadline.
-         reason is offer|reconciled|held_ticket_update|broadcast|partial|timeout.
+         reason is offer|held_ticket_update|broadcast|partial|timeout.
          timed_out=True is the re-arm cue: call again with since_seq=new_seq.
 
 RELEVANCE
@@ -54,7 +54,6 @@ import hashlib
 import hmac
 import importlib.metadata
 import json
-import logging
 import math
 import os
 import re
@@ -214,7 +213,6 @@ CATCHUP_PAGE_LIMIT = 500
 CATCHUP_PAGE_MAX_BYTES = 750_000
 REPLAY_EVENT_LIMIT = 200
 BACKLOG_SCAN_LIMIT = 100
-OFFER_RECONCILE_TIMEOUT_S = 0.05
 try:
     BACKLOG_RESURFACE_INTERVAL_S = float(
         os.environ.get("PURSERS_BACKLOG_RESURFACE_INTERVAL_S", "600")
@@ -1079,18 +1077,6 @@ def _progress_cadence_s() -> float | None:
 def _log(msg: str) -> None:
     # stderr only -- stdout is the stdio JSON-RPC channel.
     print(f"[a2a_wait] {msg}", file=sys.stderr, flush=True)
-
-
-_LOGGER = logging.getLogger(__name__)
-
-
-def _debug_dropped_event(event: dict[str, Any], reason: str) -> None:
-    _LOGGER.debug(
-        "dropped wait event kind=%s ticket_id=%s reason=%s",
-        event.get("kind"),
-        event.get("ticket_id"),
-        reason,
-    )
 
 
 def _central_connection_cap() -> int:
@@ -4571,7 +4557,7 @@ def _event_matches_wait(event: dict[str, Any], wait_for: str) -> bool:
 
 def _wait_reason(events: list[dict[str, Any]]) -> str:
     if events and events[0].get("reason") in {
-        "offer", "reconciled", "held_ticket_update", "broadcast"
+        "offer", "held_ticket_update", "broadcast"
     }:
         return str(events[0]["reason"])
     if any(event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED} for event in events):
@@ -4706,8 +4692,10 @@ async def _is_relevant(
         REVIEW_OFFERED if wait_for == WAIT_FOR_SUBMITTED else TICKET_OFFERED
     )
     if kind in {TICKET_OFFERED, REVIEW_OFFERED}:
-        if kind != offered_kind:
-            _debug_dropped_event(event, "offer_kind_mismatch")
+        if kind != offered_kind or event.get("offered_agent_id") != my_agent_id:
+            return False
+        recipients = event.get("recipient_identities")
+        if isinstance(recipients, list) and my_agent_id not in recipients:
             return False
     if kind in {OFFER_EXPIRED, OFFER_REVOKED}:
         relevant_lifecycle = bool(
@@ -4721,8 +4709,6 @@ async def _is_relevant(
     if tickets_by_id is not None:
         ticket = tickets_by_id.get(ticket_id)
         if not isinstance(ticket, dict):
-            if kind == offered_kind:
-                _debug_dropped_event(event, "authoritative_ticket_not_projected")
             relevant_without_projection = bool(
                 wait_for == WAIT_FOR_SUBMITTED
                 and kind in {REVIEW_LEASE_EXPIRED, REVIEW_LEASE_RELEASED}
@@ -4736,10 +4722,6 @@ async def _is_relevant(
             result = await client.ticket_get(ticket_id)
         except Exception as exc:
             if kind in {TICKET_OFFERED, REVIEW_OFFERED}:
-                _debug_dropped_event(
-                    event,
-                    f"authoritative_ticket_get_failed:{type(exc).__name__}",
-                )
                 return False
             if (
                 wait_for == WAIT_FOR_SUBMITTED
@@ -4858,18 +4840,6 @@ async def _is_relevant(
         continuation = continuation_hint(ticket)
         if continuation is not None:
             event["continuation"] = continuation
-    elif kind == offered_kind:
-        offer = ticket.get(
-            "review_offer" if wait_for == WAIT_FOR_SUBMITTED else "work_offer"
-        )
-        reason = (
-            "authoritative_offer_missing"
-            if not isinstance(offer, dict)
-            else "authoritative_offer_for_other_agent"
-            if offer.get("agent_id") != my_agent_id
-            else "authoritative_offer_not_claimable"
-        )
-        _debug_dropped_event(event, reason)
     return relevant
 
 
@@ -4986,120 +4956,8 @@ async def _scan_open_backlog(
     projected = backlog_events(
         tickets, my_agent_id, only_mine, project, wait_for, board_id
     )
-    fresh = _fresh_backlog_events(
+    return _fresh_backlog_events(
         board_id, wait_for, my_agent_id, projected
-    )
-    offer_key = "review_offer" if wait_for == WAIT_FOR_SUBMITTED else "work_offer"
-    offered_kind = REVIEW_OFFERED if wait_for == WAIT_FOR_SUBMITTED else TICKET_OFFERED
-    tickets_by_id = {
-        ticket.get("ticket_id"): ticket
-        for ticket in tickets
-        if isinstance(ticket, dict)
-    }
-    reconciled: list[dict[str, Any]] = []
-    for event in fresh:
-        if event.get("kind") != offered_kind:
-            reconciled.append(event)
-            continue
-        ticket = tickets_by_id.get(event.get("ticket_id"))
-        offer = ticket.get(offer_key) if isinstance(ticket, dict) else None
-        if not isinstance(offer, dict) or not _offer_is_unexpired(offer):
-            _debug_dropped_event(event, "authoritative_offer_expired_or_invalid")
-            continue
-        reconciled.append({
-            **event,
-            "source": "offer_reconciliation",
-            "reason": "reconciled",
-        })
-    return reconciled
-
-
-def _offer_is_unexpired(offer: dict[str, Any]) -> bool:
-    expires_epoch = offer.get("expires_at_epoch")
-    if isinstance(expires_epoch, (int, float)) and not isinstance(
-        expires_epoch, bool
-    ):
-        return float(expires_epoch) > time.time()
-    expires_at = offer.get("expires_at")
-    if expires_at is None:
-        return True
-    try:
-        parsed = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return parsed.tzinfo is not None and parsed.astimezone(
-        timezone.utc
-    ) > datetime.now(timezone.utc)
-
-
-def _reconciled_offer_events(
-    tickets: list[dict[str, Any]],
-    my_agent_id: str,
-    only_mine: bool,
-    project: str | None,
-    wait_for: str,
-    board_id: str,
-) -> list[dict[str, Any]]:
-    offer_key = "review_offer" if wait_for == WAIT_FOR_SUBMITTED else "work_offer"
-    offered_kind = REVIEW_OFFERED if wait_for == WAIT_FOR_SUBMITTED else TICKET_OFFERED
-    by_id = {
-        ticket.get("ticket_id"): ticket
-        for ticket in tickets
-        if isinstance(ticket, dict)
-    }
-    reconciled: list[dict[str, Any]] = []
-    for event in backlog_events(
-        tickets, my_agent_id, only_mine, project, wait_for, board_id
-    ):
-        ticket = by_id.get(event.get("ticket_id"))
-        offer = ticket.get(offer_key) if isinstance(ticket, dict) else None
-        if (
-            event.get("kind") != offered_kind
-            or not isinstance(offer, dict)
-            or offer.get("agent_id") != my_agent_id
-            or not _offer_is_unexpired(offer)
-        ):
-            continue
-        reconciled.append({
-            **event,
-            "source": "offer_reconciliation",
-            "reason": "reconciled",
-        })
-    return reconciled
-
-
-async def _reconcile_offers(
-    client: BoardClient,
-    my_agent_id: str,
-    only_mine: bool,
-    project: str | None,
-    wait_for: str,
-    board_id: str,
-    *,
-    tickets: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    if tickets is None:
-        arguments: dict[str, Any] = {
-            "include_closed": False,
-            "limit": CATCHUP_PAGE_LIMIT,
-        }
-        if wait_for == WAIT_FOR_SUBMITTED:
-            arguments["status"] = "submitted"
-        try:
-            listed = await asyncio.wait_for(
-                client.ticket_list(**arguments),
-                timeout=OFFER_RECONCILE_TIMEOUT_S,
-            )
-        except Exception as exc:
-            _LOGGER.debug(
-                "offer reconciliation failed board_id=%s reason=%s",
-                board_id,
-                type(exc).__name__,
-            )
-            return []
-        tickets = list(listed.get("tickets", []))
-    return _reconciled_offer_events(
-        tickets, my_agent_id, only_mine, project, wait_for, board_id
     )
 
 
@@ -5200,9 +5058,8 @@ async def _a2a_wait_impl(
 
     Returns {new_seq, events, waited_s, timed_out, reason, resynced}, with
     compacted/dropped/event_counts, partial, and warnings when applicable.
-    reason is "offer", "reconciled", "held_ticket_update", "broadcast",
-    "partial", or "timeout" (legacy internal cues may still report
-    "journal"/"backlog"). timed_out=True
+    reason is "offer", "held_ticket_update", "broadcast", "partial", or
+    "timeout" (legacy internal cues may still report "journal"/"backlog"). timed_out=True
     means "no work" -- call again with since_seq=new_seq to re-arm. resynced=True
     means the journal was compacted past our cursor and events were lost:
     re-fetch full state (e.g. ticket_list) before trusting events as complete.
@@ -5637,33 +5494,10 @@ async def _wait_for_work_many(
             result["warnings"] = warnings
         return result
 
-    async def respond(events: list[dict], timed_out: bool) -> dict[str, Any]:
-        if not any(
-            event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}
-            for event in events
-        ):
-            reconciled: list[dict[str, Any]] = []
-            for board_id in active:
-                offers = await _reconcile_offers(
-                    views[board_id],
-                    agent_ids[board_id],
-                    only_mine,
-                    proj,
-                    wait_for_by_board[board_id],
-                    board_id,
-                )
-                reconciled.extend(
-                    {**event, "board_id": board_id} for event in offers
-                )
-            if reconciled:
-                events = [*reconciled, *events]
-                timed_out = False
-        return response(events, timed_out)
-
     if _GLOBAL_KEEPALIVE is not None:
         keepalive_cues = _GLOBAL_KEEPALIVE.drain_cues(set(active))
         if keepalive_cues:
-            return await respond(keepalive_cues, False)
+            return response(keepalive_cues, False)
 
     async def poll_board(board_id: str, *, backlog: bool = False) -> list[dict]:
         meta = catchup_meta[board_id]
@@ -5728,14 +5562,6 @@ async def _wait_for_work_many(
             meta["event_counts"] = _event_kind_counts(events)
             relevant = compacted
         if backlog and not meta["partial"]:
-            reconciled = _reconciled_offer_events(
-                active_tickets or [],
-                agent_ids[board_id],
-                only_mine,
-                proj,
-                wait_for_by_board[board_id],
-                board_id,
-            )
             queued = await _scan_open_backlog(
                 views[board_id],
                 agent_ids[board_id],
@@ -5753,17 +5579,8 @@ async def _wait_for_work_many(
             }
             if not meta["compacted"]:
                 relevant.extend(
-                    event for event in reconciled
-                    if event.get("ticket_id") not in journal_ids
-                )
-                known_ids = {
-                    event.get("ticket_id")
-                    for event in relevant
-                    if event.get("ticket_id")
-                }
-                relevant.extend(
                     event for event in queued
-                    if event.get("ticket_id") not in known_ids
+                    if event.get("ticket_id") not in journal_ids
                 )
         return [{**event, "board_id": board_id} for event in relevant]
 
@@ -5789,11 +5606,11 @@ async def _wait_for_work_many(
             started,
         )
     if relevant:
-        return await respond(relevant, False)
+        return response(relevant, False)
     if any(meta["partial"] for meta in catchup_meta.values()):
-        return await respond([], False)
+        return response([], False)
     if not active:
-        return await respond([], True)
+        return response([], True)
 
     async def maintain(now: float) -> None:
         nonlocal next_progress
@@ -5929,19 +5746,19 @@ async def _wait_for_work_many(
                     elif kind == "keepalive" and isinstance(detail, dict):
                         found.append(detail)
                 if found:
-                    return await respond(found, False)
+                    return response(found, False)
 
                 now = time.monotonic()
                 await maintain(now)
                 backlog_found = await scan_due_backlog(now)
                 if backlog_found:
-                    return await respond(backlog_found, False)
+                    return response(backlog_found, False)
                 if fallback and now >= next_poll:
                     relevant = await poll_selected(
                         [board_id for board_id in active if board_id in fallback]
                     )
                     if relevant:
-                        return await respond(relevant, False)
+                        return response(relevant, False)
                     next_poll = now + DEFAULT_POLL_INTERVAL_S
         finally:
             for task in tasks.values():
@@ -5969,17 +5786,17 @@ async def _wait_for_work_many(
             await maintain(now)
             backlog_found = await scan_due_backlog(now)
             if backlog_found:
-                return await respond(backlog_found, False)
+                return response(backlog_found, False)
             if _GLOBAL_KEEPALIVE is not None:
                 cues = _GLOBAL_KEEPALIVE.drain_cues(set(active))
                 if cues:
-                    return await respond(cues, False)
+                    return response(cues, False)
             offset = cycle % len(active)
             interleaved = active[offset:] + active[:offset]
             cycle += 1
             relevant = await poll_selected(interleaved)
             if relevant:
-                return await respond(relevant, False)
+                return response(relevant, False)
 
     # A healthy subscription is the boundary authority; timeout does not
     # trigger an idle Central read. Explicit poll/fallback mode retains the
@@ -5987,8 +5804,8 @@ async def _wait_for_work_many(
     if final_poll:
         relevant = await poll_selected(final_poll)
         if relevant:
-            return await respond(relevant, False)
-    return await respond([], True)
+            return response(relevant, False)
+    return response([], True)
 
 
 async def _wait_for_work(
@@ -6050,6 +5867,19 @@ async def _wait_for_work(
     budget = clamp_timeout(timeout_s, role)
     deadline = started + budget
     selected_wait_for = _resolve_wait_for(wait_for, role)
+    if _GLOBAL_KEEPALIVE is not None:
+        cues = _GLOBAL_KEEPALIVE.drain_cues({BOARD_ID})
+        if cues:
+            return {
+                "new_seq": cursor,
+                "events": cues,
+                "waited_s": 0.0,
+                "timed_out": False,
+                "mode": "push",
+                "reason": "journal",
+                "resynced": resynced,
+            }
+
     def with_catchup_meta(result: dict[str, Any]) -> dict[str, Any]:
         if catchup_meta["compacted"]:
             result["compacted"] = True
@@ -6063,43 +5893,6 @@ async def _wait_for_work(
         if catchup_meta["warnings"]:
             result["warnings"] = list(catchup_meta["warnings"])
         return result
-
-    async def finalize(
-        result: dict[str, Any],
-        *,
-        tickets: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        if not any(
-            event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}
-            for event in result["events"]
-        ):
-            reconciled = await _reconcile_offers(
-                client,
-                my_agent_id,
-                only_mine,
-                proj,
-                selected_wait_for,
-                BOARD_ID,
-                tickets=tickets,
-            )
-            if reconciled:
-                result["events"] = [*reconciled, *result["events"]]
-                result["timed_out"] = False
-                result["reason"] = "reconciled"
-        return with_catchup_meta(result)
-
-    if _GLOBAL_KEEPALIVE is not None:
-        cues = _GLOBAL_KEEPALIVE.drain_cues({BOARD_ID})
-        if cues:
-            return await finalize({
-                "new_seq": cursor,
-                "events": cues,
-                "waited_s": 0.0,
-                "timed_out": False,
-                "mode": "push",
-                "reason": "journal",
-                "resynced": resynced,
-            })
 
     async def poll_once(*, scan_backlog: bool = False) -> list[dict]:
         nonlocal cursor, resynced, last_active_tickets
@@ -6167,7 +5960,7 @@ async def _wait_for_work(
     # backlog cues never carry or fabricate a sequence number.
     relevant = await poll_once(scan_backlog=True)
     if catchup_meta["partial"]:
-        return await finalize({
+        return with_catchup_meta({
             "new_seq": cursor,
             "events": relevant,
             "waited_s": round(time.monotonic() - started, 2),
@@ -6197,29 +5990,12 @@ async def _wait_for_work(
         event.get("ticket_id") for event in relevant if event.get("ticket_id")
     }
     if not catchup_meta["compacted"]:
-        reconciled = _reconciled_offer_events(
-            last_active_tickets or [],
-            my_agent_id,
-            only_mine,
-            proj,
-            selected_wait_for,
-            BOARD_ID,
-        )
-        relevant.extend(
-            event for event in reconciled
-            if event.get("ticket_id") not in journal_ticket_ids
-        )
-        known_ids = {
-            event.get("ticket_id")
-            for event in relevant
-            if event.get("ticket_id")
-        }
         relevant.extend(
             event for event in backlog
-            if event.get("ticket_id") not in known_ids
+            if event.get("ticket_id") not in journal_ticket_ids
         )
     if relevant:
-        return await finalize({
+        return with_catchup_meta({
             "new_seq": cursor,
             "events": relevant,
             "waited_s": 0.0,
@@ -6227,9 +6003,9 @@ async def _wait_for_work(
             "mode": "poll",
             "reason": _wait_reason(relevant),
             "resynced": resynced,
-        }, tickets=last_active_tickets)
+        })
     if catchup_meta["partial"]:
-        return await finalize({
+        return with_catchup_meta({
             "new_seq": cursor,
             "events": [],
             "waited_s": round(time.monotonic() - started, 2),
@@ -6308,7 +6084,7 @@ async def _wait_for_work(
                     now = time.monotonic()
                     remaining = deadline - now
                     if remaining <= 0:
-                        return await finalize({
+                        return {
                             "new_seq": cursor,
                             "events": [],
                             "waited_s": round(now - started, 2),
@@ -6316,7 +6092,7 @@ async def _wait_for_work(
                             "mode": actual_mode,
                             "reason": "timeout",
                             "resynced": resynced,
-                        })
+                        }
                     wait_slice = maintenance_due_in(now, remaining)
                     pending = {pending_event}
                     if pending_cue is not None:
@@ -6327,27 +6103,20 @@ async def _wait_for_work(
                         await maintain(now)
                         backlog_found = await scan_due_backlog(now)
                         if backlog_found:
-                            return await finalize({
+                            return {
                                 "new_seq": cursor,
                                 "events": backlog_found,
                                 "waited_s": round(now - started, 2),
                                 "timed_out": False,
                                 "mode": actual_mode,
-                                "reason": (
-                                    "reconciled"
-                                    if any(
-                                        event.get("reason") == "reconciled"
-                                        for event in backlog_found
-                                    )
-                                    else "backlog"
-                                ),
+                                "reason": "backlog",
                                 "resynced": resynced,
-                            })
+                            }
                         continue
                     if pending_cue is not None and pending_cue in done:
                         cue = pending_cue.result()
                         if str(cue.get("board_id") or BOARD_ID) == BOARD_ID:
-                            return await finalize({
+                            return {
                                 "new_seq": cursor,
                                 "events": [cue],
                                 "waited_s": round(time.monotonic() - started, 2),
@@ -6355,7 +6124,7 @@ async def _wait_for_work(
                                 "mode": "push",
                                 "reason": "journal",
                                 "resynced": resynced,
-                            })
+                            }
                         _GLOBAL_KEEPALIVE.cues.put_nowait(cue)
                         pending_cue = asyncio.create_task(
                             _GLOBAL_KEEPALIVE.cues.get()
@@ -6382,7 +6151,7 @@ async def _wait_for_work(
                             break
                         event = pending_event.result()
                     if found:
-                        return await finalize({
+                        return {
                             "new_seq": cursor,
                             "events": found,
                             "waited_s": round(time.monotonic() - started, 2),
@@ -6390,7 +6159,7 @@ async def _wait_for_work(
                             "mode": "push",
                             "reason": _wait_reason(found),
                             "resynced": resynced,
-                        })
+                        }
             finally:
                 pending_event.cancel()
                 await asyncio.gather(pending_event, return_exceptions=True)
@@ -6424,27 +6193,20 @@ async def _wait_for_work(
         await maintain(now)
         backlog_found = await scan_due_backlog(now)
         if backlog_found:
-            return await finalize({
+            return with_catchup_meta({
                 "new_seq": cursor,
                 "events": backlog_found,
                 "waited_s": round(now - started, 2),
                 "timed_out": False,
                 "mode": actual_mode,
-                "reason": (
-                    "reconciled"
-                    if any(
-                        event.get("reason") == "reconciled"
-                        for event in backlog_found
-                    )
-                    else "backlog"
-                ),
+                "reason": "backlog",
                 "resynced": resynced,
             })
 
         if _GLOBAL_KEEPALIVE is not None:
             cues = _GLOBAL_KEEPALIVE.drain_cues({BOARD_ID})
             if cues:
-                return await finalize({
+                return {
                     "new_seq": cursor,
                     "events": cues,
                     "waited_s": round(time.monotonic() - started, 2),
@@ -6452,11 +6214,11 @@ async def _wait_for_work(
                     "mode": actual_mode,
                     "reason": "journal",
                     "resynced": resynced,
-                })
+                }
 
         relevant = await poll_once()
         if relevant:
-            return await finalize({
+            return with_catchup_meta({
                 "new_seq": cursor,
                 "events": relevant,
                 "waited_s": round(time.monotonic() - started, 2),
@@ -6467,7 +6229,7 @@ async def _wait_for_work(
             })
 
     # 4. Timed out -- the re-arm cue.
-    return await finalize({
+    return with_catchup_meta({
         "new_seq": cursor,
         "events": [],
         "waited_s": round(time.monotonic() - started, 2),

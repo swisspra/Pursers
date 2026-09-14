@@ -267,7 +267,7 @@ class CatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["new_seq"], 100)
         self.assertEqual(
             [name for name, _arguments in client.calls],
-            ["board_catchup", "ticket_list", "ticket_list"],
+            ["board_catchup", "ticket_list"],
         )
 
     async def test_failed_ticket_projection_never_falls_back_per_event(self) -> None:
@@ -289,7 +289,7 @@ class CatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["new_seq"], 100)
         self.assertEqual(
             [name for name, _arguments in client.calls],
-            ["board_catchup", "ticket_list", "ticket_list"],
+            ["board_catchup", "ticket_list"],
         )
 
     async def test_ignored_ticket_filter_advances_once_and_does_not_replay(self) -> None:
