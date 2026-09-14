@@ -347,6 +347,10 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
     clean_environment = os.environ.copy()
     clean_environment.pop("PYTHONHOME", None)
     clean_environment.pop("PYTHONPATH", None)
+    clean_environment.pop("FORCE_COLOR", None)
+    clean_environment.pop("CLICOLOR_FORCE", None)
+    clean_environment["PYTHON_COLORS"] = "0"
+    clean_environment["NO_COLOR"] = "1"
     clean_environment.pop("ONBOARD_CENTRAL_TOKEN", None)
     clean_environment.pop("ONBOARD_CENTRAL_TOKEN_FILE", None)
     clean_environment["PURSERS_BRIDGE_STATE_DIR"] = str(tmp_path / "empty-state")

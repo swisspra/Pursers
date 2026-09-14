@@ -35,6 +35,10 @@ def test_cli_help_does_not_configure_authenticated_runtime(
     monkeypatch, capsys, tmp_path
 ) -> None:
     state_dir = tmp_path / "state"
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("CLICOLOR_FORCE", raising=False)
+    monkeypatch.setenv("PYTHON_COLORS", "0")
+    monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN", raising=False)
     monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN_FILE", raising=False)
     monkeypatch.setenv("PURSERS_BRIDGE_STATE_DIR", str(state_dir))
