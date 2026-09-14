@@ -6,6 +6,9 @@ import argparse
 import asyncio
 import inspect
 import json
+import os
+import shutil
+import subprocess
 import sys
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -16,9 +19,14 @@ from typing import Any, Protocol
 
 import httpx2
 from mcp import Client
+from mcp.client.stdio import StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 from pursers_client import BoardClient, PersonalProfileError, read_capability
-from pursers_client.personal_profile import select_personal_profile
+from pursers_client.personal_profile import (
+    default_profiles_root,
+    profile_path_for_project,
+    select_personal_profile,
+)
 
 JSON = dict[str, Any]
 ACP_VERSION = 1
@@ -48,6 +56,58 @@ class BoardSurface(Protocol):
 
 
 BoardFactory = Callable[[], BoardSurface | Awaitable[BoardSurface]]
+AuthSetup = Callable[[], None | Awaitable[None]]
+
+
+class WaitBridge(Protocol):
+    async def close(self) -> None: ...
+    async def wait(self, board_id: str, cursor: int | None) -> JSON: ...
+
+
+WaitBridgeFactory = Callable[[], WaitBridge | Awaitable[WaitBridge]]
+
+
+class StdioWaitBridge:
+    """One configured wait-bridge process owned by one ACP watch turn."""
+
+    def __init__(self, command: str, args: list[str], env: dict[str, str]) -> None:
+        self.command = command
+        self.args = args
+        self.env = env
+        self._stack = AsyncExitStack()
+        self._client: Client | None = None
+
+    @classmethod
+    async def connect(
+        cls, command: str, args: list[str], env: dict[str, str]
+    ) -> "StdioWaitBridge":
+        bridge = cls(command, args, env)
+        try:
+            params = StdioServerParameters(command=command, args=args, env=env)
+            bridge._client = await bridge._stack.enter_async_context(
+                Client(params, mode="2026-07-28", cache=None)
+            )
+            return bridge
+        except BaseException:
+            await bridge.close()
+            raise
+
+    async def close(self) -> None:
+        await self._stack.aclose()
+        self._client = None
+
+    async def wait(self, board_id: str, cursor: int | None) -> JSON:
+        if self._client is None:
+            raise RuntimeError("wait bridge is closed")
+        arguments: JSON = {
+            "boards": [board_id],
+            "only_mine": False,
+            "timeout_s": 180,
+        }
+        if cursor is not None:
+            arguments["since_seq"] = {board_id: cursor}
+        result = await self._client.call_tool("a2a_wait", arguments)
+        return BoardClient._decode(result)
 
 
 class PersonalBoardSurface:
@@ -60,6 +120,7 @@ class PersonalBoardSurface:
         self.agent_name = ""
         self._stack = AsyncExitStack()
         self._client: Client | None = None
+        self._wait_bridge_factory: WaitBridgeFactory | None = None
 
     @classmethod
     async def connect(
@@ -104,6 +165,17 @@ class PersonalBoardSurface:
                     "Personal setup has not initialized an identity on this board"
                 )
             board.agent_name = own_agents[0]["agent_name"]
+            identity = own_agents[0]
+            bridge_env = _wait_bridge_environment(profile, token, identity)
+
+            async def wait_bridge_factory() -> StdioWaitBridge:
+                return await StdioWaitBridge.connect(
+                    os.environ.get("PURSERS_WAIT_BRIDGE_COMMAND", "pursers-wait-bridge"),
+                    [],
+                    bridge_env,
+                )
+
+            board._wait_bridge_factory = wait_bridge_factory
             return board
         except BaseException:
             await board.close()
@@ -208,47 +280,16 @@ class PersonalBoardSurface:
             raise ValueError("mutation params must be an object")
         return await self._call(operation, dict(params))
 
-    async def _catchup(self, cursor: int) -> JSON:
-        return await self._call(
-            "board_catchup",
-            {
-                "agent_name": self.agent_name,
-                "cursor": cursor,
-                "limit": 100,
-                "ack": False,
-                "touch": False,
-            },
-        )
-
     async def watch(
         self, cursor: int | None, cancel: asyncio.Event
     ) -> AsyncIterator[tuple[int, JSON]]:
-        if self._client is None:
-            raise RuntimeError("board transport is closed")
-        journal = f"board://{self.board_id}/journal"
-        async with self._client.listen(resource_subscriptions=[journal]) as stream:
-            honored = set(stream.honored.resource_subscriptions or ())
-            if journal not in honored:
-                raise RuntimeError("Central did not honor the board journal subscription")
-            if cursor is None:
-                status = await self._status()
-                cursor = int(status.get("latest_seq", 0))
+        if self._wait_bridge_factory is None:
+            raise RuntimeError("wait bridge is unavailable")
+        selected = self._wait_bridge_factory()
+        bridge = await selected if inspect.isawaitable(selected) else selected
+        try:
             while not cancel.is_set():
-                page = await self._catchup(cursor)
-                if page.get("resync_required"):
-                    cursor = int(page["reset_cursor"])
-                    yield cursor, {
-                        "kind": "resync_required",
-                        "reset_cursor": cursor,
-                    }
-                    continue
-                else:
-                    cursor = int(page.get("next_cursor", cursor))
-                    for event in page.get("events", []):
-                        yield cursor, event
-                    if page.get("has_more"):
-                        continue
-                cue = asyncio.create_task(anext(stream))
+                cue = asyncio.create_task(bridge.wait(self.board_id, cursor))
                 stopped = asyncio.create_task(cancel.wait())
                 done, pending = await asyncio.wait(
                     {cue, stopped}, return_when=asyncio.FIRST_COMPLETED
@@ -258,6 +299,21 @@ class PersonalBoardSurface:
                 await asyncio.gather(*pending, return_exceptions=True)
                 if stopped in done:
                     return
+                page = cue.result()
+                raw_cursor = page.get("new_seq")
+                if isinstance(raw_cursor, Mapping):
+                    raw_cursor = raw_cursor.get(self.board_id)
+                if isinstance(raw_cursor, int) and not isinstance(raw_cursor, bool):
+                    if raw_cursor > 0:
+                        cursor = raw_cursor
+                resynced = page.get("resynced")
+                if isinstance(resynced, Mapping) and resynced.get(self.board_id):
+                    yield cursor or 0, {"kind": "resync_required"}
+                for event in page.get("events", []):
+                    if isinstance(event, dict):
+                        yield cursor or 0, event
+        finally:
+            await bridge.close()
 
 
 @dataclass
@@ -266,11 +322,16 @@ class Session:
     cursors: dict[str, int] = field(default_factory=dict)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     active: bool = False
+    mcp_stop: asyncio.Event | None = None
+    mcp_task: asyncio.Task[None] | None = None
 
 
 class PursersACPAgent:
-    def __init__(self, board_factory: BoardFactory) -> None:
+    def __init__(
+        self, board_factory: BoardFactory, *, auth_setup: AuthSetup | None = None
+    ) -> None:
         self.board_factory = board_factory
+        self.auth_setup = auth_setup
         self.board: BoardSurface | None = None
         self.auth_error: str | None = None
         self.initialized = False
@@ -289,6 +350,16 @@ class PursersACPAgent:
             task.cancel()
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
+        for session in self.sessions.values():
+            if session.mcp_stop is not None:
+                session.mcp_stop.set()
+        mcp_tasks = [
+            session.mcp_task
+            for session in self.sessions.values()
+            if session.mcp_task is not None
+        ]
+        if mcp_tasks:
+            await asyncio.gather(*mcp_tasks, return_exceptions=True)
         if self.board is not None:
             await self.board.close()
             self.board = None
@@ -397,9 +468,9 @@ class PursersACPAgent:
         ):
             auth_methods.append(
                 {
-                    "id": "pursers-personal-profile",
+                    "id": "pursers-personal-login",
                     "name": "Configure Pursers Personal",
-                    "description": "Select an existing human Personal profile",
+                    "description": "Run the local Pursers Personal setup flow",
                     "type": "terminal",
                     "args": ["--login"],
                 }
@@ -424,6 +495,11 @@ class PursersACPAgent:
             return
         if self.board is None:
             try:
+                if self.auth_setup is None:
+                    raise AuthRequired("Personal setup is unavailable")
+                configured = self.auth_setup()
+                if inspect.isawaitable(configured):
+                    await configured
                 board = self.board_factory()
                 self.board = await board if inspect.isawaitable(board) else board
                 self.auth_error = None
@@ -453,8 +529,20 @@ class PursersACPAgent:
         if not isinstance(cwd, str) or not Path(cwd).is_absolute():
             await self._error(request_id, -32602, "cwd must be absolute")
             return
+        try:
+            mcp_stop, mcp_task = await _start_stdio_mcp_servers(
+                params.get("mcpServers"), cwd
+            )
+        except ValueError as exc:
+            await self._error(request_id, -32602, str(exc))
+            return
+        except RuntimeError as exc:
+            await self._error(request_id, -32001, str(exc))
+            return
         session_id = f"pursers-{uuid.uuid4().hex}"
-        self.sessions[session_id] = Session(cwd=cwd)
+        self.sessions[session_id] = Session(
+            cwd=cwd, mcp_stop=mcp_stop, mcp_task=mcp_task
+        )
         await self._result(request_id, {"sessionId": session_id})
 
     async def _prompt(self, request_id: Any, params: JSON) -> None:
@@ -758,6 +846,176 @@ def _help() -> str:
     )
 
 
+def _wait_bridge_environment(
+    profile: Any, token: str, identity: Mapping[str, Any]
+) -> dict[str, str]:
+    """Build a narrow child environment from the selected human profile."""
+    capabilities = identity.get("capabilities")
+    if not isinstance(capabilities, Mapping):
+        capabilities = {}
+    role = identity.get("role")
+    if role not in {"worker", "reviewer", "orchestrator", "coordinator"}:
+        role = "worker"
+    environment = {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "ONBOARD_CENTRAL_URL": str(profile.central_url),
+        "ONBOARD_CENTRAL_TOKEN": token,
+        "ONBOARD_BOARD_ID": str(profile.board_id),
+        "ONBOARD_AGENT_NAME": str(identity["agent_name"]),
+        "PURSERS_ROLE": str(role),
+        "PURSERS_CAN_WORK": str(bool(capabilities.get("can_work", False))).lower(),
+        "PURSERS_CAN_REVIEW": str(bool(capabilities.get("can_review", False))).lower(),
+        "PURSERS_HOST": "ide-acp",
+    }
+    tier = capabilities.get("tier_max")
+    if isinstance(tier, int) and not isinstance(tier, bool) and tier in {1, 2, 3}:
+        environment["PURSERS_TIER_MAX"] = str(tier)
+    return environment
+
+
+def _stdio_mcp_spec(
+    server: Any, names: set[str], cwd: str
+) -> StdioServerParameters:
+    """Validate one descriptor from the official ACP v1 stdio schema."""
+    if not isinstance(server, dict):
+        raise ValueError("mcpServers entries must be objects")
+    if set(server) != {"name", "command", "args", "env"}:
+        raise ValueError("stdio mcpServers require exactly name, command, args, and env")
+    name = server.get("name")
+    command = server.get("command")
+    args = server.get("args")
+    env_rows = server.get("env")
+    if not isinstance(name, str) or not name or name in names:
+        raise ValueError("stdio MCP server names must be non-empty and unique")
+    if not isinstance(command, str) or not command or not Path(command).is_absolute():
+        raise ValueError("stdio MCP server command must be an absolute path")
+    if not isinstance(args, list) or not all(isinstance(value, str) for value in args):
+        raise ValueError("stdio MCP server args must be a string array")
+    if not isinstance(env_rows, list):
+        raise ValueError("stdio MCP server env must be an array")
+    env: dict[str, str] = {}
+    for row in env_rows:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"name", "value"}
+            or not isinstance(row.get("name"), str)
+            or not row["name"]
+            or not isinstance(row.get("value"), str)
+            or row["name"] in env
+        ):
+            raise ValueError(
+                "stdio MCP server env entries require unique name/value strings"
+            )
+        env[row["name"]] = row["value"]
+    names.add(name)
+    return StdioServerParameters(
+        command=command, args=list(args), env=env, cwd=cwd
+    )
+
+
+async def _start_stdio_mcp_servers(
+    raw: Any, cwd: str
+) -> tuple[asyncio.Event, asyncio.Task[None]]:
+    stop = asyncio.Event()
+    ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def supervise() -> None:
+        try:
+            if not isinstance(raw, list):
+                raise ValueError("mcpServers must be an array")
+            if not raw:
+                ready.set_result(None)
+                await stop.wait()
+                return
+
+            # Open and close every stdio transport in this same supervisor task.
+            stack = AsyncExitStack()
+            try:
+                names: set[str] = set()
+                for index, server in enumerate(raw):
+                    spec = _stdio_mcp_spec(server, names, cwd)
+                    try:
+                        connected = await stack.enter_async_context(
+                            Client(spec, mode="2026-07-28", cache=None)
+                        )
+                        await connected.list_tools()
+                    except BaseException as exc:
+                        if isinstance(exc, asyncio.CancelledError):
+                            raise
+                        raise RuntimeError(
+                            f"failed to initialize stdio MCP server {index + 1}"
+                        ) from exc
+                ready.set_result(None)
+                await stop.wait()
+            finally:
+                await stack.aclose()
+        except BaseException as exc:
+            if not ready.done():
+                ready.set_exception(exc)
+            elif isinstance(exc, asyncio.CancelledError):
+                raise
+
+    task = asyncio.create_task(supervise())
+    try:
+        await ready
+    except BaseException:
+        stop.set()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+    return stop, task
+
+
+def _setup_environment() -> dict[str, str]:
+    """Allow local setup necessities while excluding inherited board credentials."""
+    allowed = {
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "PATH",
+        "SHELL",
+        "SYSTEMROOT",
+        "TMPDIR",
+        "USER",
+    }
+    return {key: value for key, value in os.environ.items() if key in allowed}
+
+
+def _run_personal_setup(project_root: Path | None) -> None:
+    project = (project_root or Path.cwd()).expanduser().resolve(strict=True)
+    if not project.is_dir():
+        raise AuthRequired("Personal setup requires a project directory")
+    console = shutil.which("pursers-personal")
+    if console is None:
+        raise AuthRequired("pursers-personal setup command is unavailable")
+    host_config = profile_path_for_project(
+        project, default_profiles_root()
+    ).parent / "acp-host.json"
+    completed = subprocess.run(
+        [
+            console,
+            "setup",
+            "--project",
+            str(project),
+            "--apply",
+            "--activate",
+            "--host-id",
+            "pursers-acp",
+            "--session",
+            "ide",
+            "--host-config",
+            str(host_config),
+        ],
+        env=_setup_environment(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AuthRequired("Pursers Personal setup did not complete")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pursers-acp")
     parser.add_argument("--profile", type=Path)
@@ -773,7 +1031,10 @@ async def _stdio(args: argparse.Namespace) -> None:
             project_root=args.project,
         )
 
-    agent = PursersACPAgent(factory)
+    async def setup() -> None:
+        await asyncio.to_thread(_run_personal_setup, args.project)
+
+    agent = PursersACPAgent(factory, auth_setup=setup)
 
     async def receive() -> bytes:
         return await asyncio.to_thread(sys.stdin.buffer.readline, MAX_MESSAGE_BYTES + 1)
@@ -794,12 +1055,16 @@ def main() -> None:
                 explicit_profile=args.profile,
                 project_root=args.project,
             )
-        except PersonalProfileError as exc:
-            print(
-                f"No usable Personal profile: {exc}. Run pursers-personal setup first.",
-                file=sys.stderr,
-            )
-            raise SystemExit(1) from None
+        except PersonalProfileError:
+            try:
+                _run_personal_setup(args.project)
+                select_personal_profile(
+                    explicit_profile=args.profile,
+                    project_root=args.project,
+                )
+            except (AuthRequired, PersonalProfileError, OSError):
+                print("Pursers Personal setup did not complete.", file=sys.stderr)
+                raise SystemExit(1) from None
         print("Pursers Personal profile is ready.", file=sys.stderr)
         return
     asyncio.run(_stdio(args))
