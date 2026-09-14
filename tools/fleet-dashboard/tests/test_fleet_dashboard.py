@@ -1743,17 +1743,20 @@ def test_reconnect_banner_keeps_cached_fleet_and_recovers_silently() -> None:
 
     program = "\n".join(
         [
+            source("const connectionRecoveryHint="),
+            source("const connectionFailureDetail="),
             source("const connectionBannerText="),
             source("function updateConnectionState("),
             source("function markConnectionSuccess("),
             source("function markConnectionFailure("),
             source("async function refreshCentral("),
             "const banner={hidden:true,textContent:''},document={querySelector:()=>banner};",
-            "const connectionFailures=new Set();let lastSuccessAt=null;",
+            "const connectionFailures=new Set(),connectionFailureDetails=new Map();let lastSuccessAt=null;",
             "let fleetData={personal:{central:'personal',cached:true}},fleetErrors={},rendered=0;",
             "const CENTRAL_REQUEST_TIMEOUT_MS=4000;",
             "const apiCentral=x=>x,route=()=>null,renderFleet=()=>rendered++;",
-            "const fetchWithTimeout=async()=>{throw new Error('offline secret')};",
+            "const fakeError=new Error('offline private-credential');fakeError.connectionClass='ExceptionGroup';",
+            "const fetchWithTimeout=async()=>{throw fakeError};",
             "(async()=>{markConnectionSuccess('fleet:personal',new Date('2030-01-02T03:04:05Z'));await refreshCentral('personal');const failed={hidden:banner.hidden,text:banner.textContent,cached:fleetData.personal.cached,error:fleetErrors.personal,rendered};markConnectionSuccess('fleet:personal',new Date('2030-01-02T03:05:06Z'));console.log(JSON.stringify({failed,recovered:{hidden:banner.hidden,text:banner.textContent}}))})()",
         ]
     )
@@ -1767,9 +1770,48 @@ def test_reconnect_banner_keeps_cached_fleet_and_recovers_silently() -> None:
 
     assert result["failed"]["hidden"] is False
     assert result["failed"]["text"].startswith("reconnecting… last success ")
+    assert "Last error: ExceptionGroup." in result["failed"]["text"]
+    assert "remote Central must use https:// (http:// is loopback-only)" in result[
+        "failed"
+    ]["text"]
+    assert "verify token scope, then retry" in result["failed"]["text"]
+    assert "private-credential" not in result["failed"]["text"]
     assert result["failed"]["cached"] is True
+    assert result["failed"]["error"] == "ExceptionGroup"
     assert result["failed"]["rendered"] == 1
     assert result["recovered"] == {"hidden": True, "text": ""}
+
+
+def test_fetch_json_keeps_only_a_bounded_error_class() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            source("const connectionRecoveryHint="),
+            source("const connectionFailureDetail="),
+            source("async function fetchJson("),
+            "const responses=[{error:'ExceptionGroup',detail:'token=private-api-credential'},{error:'Error token=private-api-credential'}];",
+            "global.fetch=async()=>({ok:false,status:503,json:async()=>responses.shift()});",
+            "(async()=>{const details=[];for(let i=0;i<2;i++)try{await fetchJson('/api/fleet')}catch(error){details.push({message:error.message,...connectionFailureDetail(error)})}console.log(JSON.stringify(details))})()",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    details = json.loads(completed.stdout)
+
+    assert details[0]["message"] == "HTTP 503"
+    assert details[0]["errorClass"] == "ExceptionGroup"
+    assert details[1]["errorClass"] == "ConnectionError"
+    assert all("private-api-credential" not in json.dumps(item) for item in details)
+    assert all("https://" in item["hint"] and "http://" in item["hint"] for item in details)
 
 
 def test_help_theme_density_and_keyboard_controls_render() -> None:
@@ -1854,6 +1896,8 @@ def test_hung_central_times_out_after_healthy_central_renders() -> None:
 
     program = "\n".join(
         [
+            source("const connectionRecoveryHint="),
+            source("const connectionFailureDetail="),
             source("const CENTRAL_REQUEST_TIMEOUT_MS="),
             source("async function fetchJson("),
             source("async function fetchWithTimeout("),
@@ -1879,7 +1923,7 @@ def test_hung_central_times_out_after_healthy_central_renders() -> None:
 
     assert renders[0] == {"data": ["personal"], "errors": {}}
     assert renders[-1]["data"] == ["personal"]
-    assert renders[-1]["errors"] == {"work": "central request timed out"}
+    assert renders[-1]["errors"] == {"work": "TimeoutError"}
 
 
 def test_filter_behavior_removes_unrelated_home_rows_and_change_counts() -> None:
