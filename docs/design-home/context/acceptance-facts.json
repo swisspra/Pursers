@@ -1011,13 +1011,13 @@
       "surface": "aionui"
     },
     {
-      "action": "Navigate to or trigger Settings Navigation without relabelling another state.",
+      "action": "amended 2026-09-15 to product semantics: activate Open Quickstart and follow its visible #helper hash target without inventing a hidden settings panel.",
       "derivation": {
         "kind": "identifier",
-        "symbol": "settings page"
+        "symbol": "#open-quickstart -> #helper"
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "Activating the extension settings navigation changes the settings region from hidden to visible.",
+      "expected_fact": "Open Quickstart navigates to the already-visible Home helper section and marks that real hash target current.",
       "id": "extension.settings-navigation",
       "precondition": "Exact candidate and sandbox board are bound; arrange the extension.settings-navigation state on the real aionui surface.",
       "predicate": {
@@ -1026,9 +1026,9 @@
             "assertions": [
               {
                 "op": "eq",
-                "path": "/settings_hidden",
+                "path": "/navigation_current",
                 "phase": "before",
-                "value": true
+                "value": "false"
               },
               {
                 "op": "eq",
@@ -1038,9 +1038,15 @@
               },
               {
                 "op": "eq",
-                "path": "/settings_hidden",
+                "path": "/navigation_current",
                 "phase": "after",
-                "value": false
+                "value": "true"
+              },
+              {
+                "op": "contains",
+                "path": "/helper_heading",
+                "phase": "after",
+                "value": "Connect the Home helper"
               }
             ],
             "kind": "state_transition",
@@ -9537,13 +9543,13 @@
       "surface": "aionui"
     },
     {
-      "action": "Use the shipped controls in order: pause, resume, then confirm cooperative stop for the same seat.",
+      "action": "amended 2026-09-15 to product semantics: pause, then confirm cooperative stop for the same seat, and prove no unsupported Team Resume control is exposed.",
       "derivation": {
         "kind": "identifier",
         "symbol": "pause_resume_stop"
       },
       "evidence_source": "docs/design-home/acceptance.md",
-      "expected_fact": "The disposable seat is paused, resumed, then cooperatively stopped; no running row remains and stop is disabled.",
+      "expected_fact": "The disposable seat receives successful pause and cooperative-stop requests, and no unsupported Team Resume control is exposed.",
       "id": "pause_resume_stop",
       "precondition": "Exact candidate and sandbox board are bound; arrange the pause_resume_stop state on the real aionui surface.",
       "predicate": {
@@ -9564,27 +9570,27 @@
               },
               {
                 "op": "eq",
-                "path": "/resume",
-                "phase": "action",
-                "value": "clicked"
-              },
-              {
-                "op": "eq",
                 "path": "/stop",
                 "phase": "action",
                 "value": "clicked"
               },
               {
                 "op": "eq",
-                "path": "/running_count",
+                "path": "/pause_requested",
                 "phase": "after",
-                "value": 0
+                "value": "true"
               },
               {
                 "op": "eq",
-                "path": "/stop_disabled",
+                "path": "/stop_requested",
                 "phase": "after",
-                "value": true
+                "value": "true"
+              },
+              {
+                "op": "eq",
+                "path": "/resume_control_count",
+                "phase": "after",
+                "value": 0
               }
             ],
             "kind": "state_transition",
@@ -9610,7 +9616,7 @@
       "predicate": {
         "conjuncts": [
           {
-            "expected": "The disposable seat is paused, resumed, then cooperatively stopped; no running row remains and stop is disabled.",
+            "expected": "The disposable seat receives successful pause and cooperative-stop requests, and no unsupported Team Resume control is exposed.",
             "kind": "prior_state",
             "observation": "pause_resume_stop"
           },

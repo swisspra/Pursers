@@ -1722,12 +1722,14 @@ def _validate_transition_selectors(value: Any, label: str) -> list[dict[str, Any
             raise _fail(EXIT_USAGE, f"{label} selector fields do not match schema")
         path = item["path"]
         selector = item["selector"]
+        property_name = item["property"]
         if (
             not isinstance(path, str) or not path.startswith("/") or path in paths
             or not isinstance(selector, str) or not selector or len(selector) > 512
+            or not isinstance(property_name, str)
             or (
-                item["property"] not in TRANSITION_PROPERTIES
-                and SEMANTIC_ATTRIBUTE_PROPERTY.fullmatch(str(item["property"])) is None
+                property_name not in TRANSITION_PROPERTIES
+                and SEMANTIC_ATTRIBUTE_PROPERTY.fullmatch(property_name) is None
             )
         ):
             raise _fail(EXIT_USAGE, f"{label} selector is invalid")

@@ -149,8 +149,11 @@ ASSISTANT_BINDING_SOURCE_KEYS = BROWSER_STATE_SOURCE_KEYS | {
     "candidate_manifest", "candidate_manifest_sha256", "installed_manifest",
 }
 BROWSER_PROPERTIES = frozenset({
-    "text", "value", "checked", "disabled", "count", "class", "hidden",
+    "text", "value", "checked", "disabled", "count", "class", "hidden", "integer",
 })
+SEMANTIC_ATTRIBUTE_PROPERTY = re.compile(
+    r"attribute:(?:data|aria)-[a-z][a-z0-9-]{0,63}"
+)
 BROWSER_ACTION_KEYS = {
     "observe": {"kind", "path"},
     "click": {"kind", "selector", "path"},
@@ -525,10 +528,15 @@ def _browser_selectors(value: Any, label: str) -> list[dict[str, Any]]:
         _closed(selector, {"path", "selector", "property"}, f"{label} selector")
         path = selector["path"]
         css = selector["selector"]
+        property_name = selector["property"]
         if (
             not isinstance(path, str) or not path.startswith("/") or path in paths
             or not isinstance(css, str) or not css or len(css) > 512
-            or selector["property"] not in BROWSER_PROPERTIES
+            or not isinstance(property_name, str)
+            or (
+                property_name not in BROWSER_PROPERTIES
+                and SEMANTIC_ATTRIBUTE_PROPERTY.fullmatch(property_name) is None
+            )
         ):
             raise TypedEvidenceError(f"{label} selector is invalid")
         paths.add(path)

@@ -2903,6 +2903,33 @@ def test_all_kinds_reject_resigned_unknown_missing_and_wrong_nested_fields(
                 evaluate_evidence(changed, expected, trust)
 
 
+def test_browser_selectors_accept_bounded_semantic_properties() -> None:
+    selectors = [
+        {"path": "/count", "selector": "#roster", "property": "integer"},
+        {
+            "path": "/workers",
+            "selector": "#roster",
+            "property": "attribute:data-worker-count",
+        },
+        {
+            "path": "/busy",
+            "selector": "#roster",
+            "property": "attribute:aria-busy",
+        },
+    ]
+    assert typed_evidence._browser_selectors(selectors, "test") == selectors
+    with pytest.raises(TypedEvidenceError, match="selector is invalid"):
+        typed_evidence._browser_selectors(
+            [{"path": "/secret", "selector": "#roster", "property": "attribute:title"}],
+            "test",
+        )
+    with pytest.raises(TypedEvidenceError, match="selector is invalid"):
+        typed_evidence._browser_selectors(
+            [{"path": "/bad", "selector": "#roster", "property": {}}],
+            "test",
+        )
+
+
 def test_json_comparisons_keep_boolean_distinct_from_number(
     tmp_path: Path, http_server: str,
 ) -> None:

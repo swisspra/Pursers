@@ -14,6 +14,7 @@ import hmac
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -1480,6 +1481,124 @@ def test_prepare_expands_every_authoritative_observation_once(
     }
 
 
+def _copy_installed_extension(tmp_path: Path) -> Path:
+    installed = tmp_path / "installed-extension"
+    contexts = installed / "contexts"
+    contexts.mkdir(parents=True)
+    source = runner_module.REPOSITORY_ROOT / "tools/aionui-extension"
+    shutil.copyfile(source / "aion-extension.json", installed / "aion-extension.json")
+    shutil.copyfile(source / "contexts/worker.md", contexts / "worker.md")
+    shutil.copyfile(source / "contexts/reviewer.md", contexts / "reviewer.md")
+    return installed / "aion-extension.json"
+
+
+def _prepare_aionui_typed_test_plan(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> tuple[Path, dict[str, object], dict[str, object]]:
+    observer_dir, surfaces = _write_surface_observer(tmp_path)
+    manifest = _write_complete_observation_manifest(tmp_path, surfaces)
+    evidence = tmp_path / "evidence-plan"
+    assert runner_module.main([
+        "runner.py", "prepare", "--observer", str(observer_dir),
+        "--manifest", str(manifest), "--evidence", str(evidence),
+    ]) == 0
+    capsys.readouterr()
+    typed_dir = tmp_path / "verifier-typed"
+    assert runner_module.main([
+        "runner.py", "prepare-aionui-typed",
+        "--observer", str(observer_dir),
+        "--evidence", str(evidence),
+        "--dir", str(typed_dir),
+        "--installed-manifest", str(_copy_installed_extension(tmp_path)),
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    plan = json.loads((evidence / "aionui-typed-plan.json").read_text())
+    return evidence, result, plan
+
+
+def test_prepare_aionui_typed_wires_all_21_rows_and_24_records(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    evidence, result, plan = _prepare_aionui_typed_test_plan(tmp_path, capsys)
+    assert result == {
+        "adapters": {
+            "aionui_assistant_binding_v1": 4,
+            "trusted_browser_state_v1": 20,
+        },
+        "plan": str(evidence / "aionui-typed-plan.json"),
+        "records": 24,
+        "rows": 21,
+    }
+    assert len(plan["records"]) == len(plan["commands"]) == 24
+    assert len({row["record_id"] for row in plan["records"]}) == 24
+    assert len({row["observation_id"] for row in plan["records"]}) == 21
+    trust_path = Path(plan["trust"])
+    trust = json.loads(trust_path.read_text())
+    assert trust_path.stat().st_mode & 0o077 == 0
+    assert set(trust["state_sources"]) == {
+        row["conjunct"]["source_id"] for row in plan["records"]
+    }
+    for row in plan["records"]:
+        source = trust["state_sources"][row["conjunct"]["source_id"]]
+        assert source["recipe"] == {
+            "before": row["recorder"]["before"],
+            "actions": row["recorder"]["action"],
+            "after": row["recorder"]["after"],
+            "settle_milliseconds": source["recipe"]["settle_milliseconds"],
+        }
+        typed_evidence._browser_selectors(source["recipe"]["before"], "before")
+        typed_evidence._browser_actions(source["recipe"]["actions"])
+        typed_evidence._browser_selectors(source["recipe"]["after"], "after")
+        expected_paths = {
+            item["path"]
+            for item in (*source["recipe"]["before"], *source["recipe"]["after"])
+        }
+        for action in source["recipe"]["actions"]:
+            expected_paths.update(typed_evidence._browser_action_result_paths(action))
+        assert set(source["select_allowlist"]) == expected_paths
+        phase_paths = {
+            "before": {item["path"] for item in source["recipe"]["before"]},
+            "action": set().union(*(
+                typed_evidence._browser_action_result_paths(action)
+                for action in source["recipe"]["actions"]
+            )),
+            "after": {item["path"] for item in source["recipe"]["after"]},
+        }
+        assert all(
+            assertion["path"] in phase_paths[assertion["phase"]]
+            for assertion in row["conjunct"]["assertions"]
+        )
+
+
+def test_record_aionui_typed_executes_the_planned_external_recorder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    evidence, _result, plan = _prepare_aionui_typed_test_plan(tmp_path, capsys)
+    command = plan["commands"][0]
+    expected = plan["records"][0]
+
+    def run_recorder(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert Path(arguments[0]) == Path(plan["recorder"])
+        request_path = Path(arguments[arguments.index("--request") + 1])
+        output_path = Path(arguments[arguments.index("--output") + 1])
+        request = json.loads(request_path.read_text())
+        assert request["context"]["observation_id"] == expected["observation_id"]
+        assert request["context"]["issued_at"].endswith("Z")
+        assert request["recorder"] == expected["recorder"]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("{}", encoding="utf-8")
+        output_path.chmod(0o600)
+        return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", run_recorder)
+    assert runner_module.main(command[1:]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["record_id"] == expected["record_id"]
+    assert (evidence / expected["reference"]["evidence"]).is_file()
+
+
 def test_prepare_refuses_missing_typed_evidence_contract(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1750,6 +1869,10 @@ def test_transition_observer_reads_typed_semantic_attributes() -> None:
     with pytest.raises(observer_module.ObserverError, match="selector is invalid"):
         observer_module._validate_transition_selectors([
             {"path": "/secret", "selector": "body", "property": "attribute:value"},
+        ], "after")
+    with pytest.raises(observer_module.ObserverError, match="selector is invalid"):
+        observer_module._validate_transition_selectors([
+            {"path": "/bad", "selector": "body", "property": {}},
         ], "after")
 
 
