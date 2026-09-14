@@ -480,7 +480,7 @@ def _mcp_trust(tmp_path: Path, http_server: str) -> tuple[dict[str, Any], dict[s
         "adapter": "trusted_mcp_stdio_v1",
         "provenance": "personal-live-stdio",
         "runtime_id": "personal-mcp-runtime-1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "board_id": BOARD,
         "candidate_commit": CANDIDATE,
         "command": str(executable),
@@ -501,7 +501,7 @@ def _mcp_trust(tmp_path: Path, http_server: str) -> tuple[dict[str, Any], dict[s
         observation_id="personal-mcp.state.board-empty",
         action_id="board-snapshot",
         entity="personal-board",
-        surface="personal",
+        surface="mcp-app",
     )
     return trust, context
 
@@ -1238,7 +1238,7 @@ def _write_receipt(path: Path, **changes: Any) -> dict[str, Any]:
     value = {
         "schema_version": 1, "issuer": "personal-verifier", "runtime_id": "personal-runtime-1",
         "pid": os.getpid(), "candidate_commit": CANDIDATE, "board_id": BOARD,
-        "surface": "personal", "entity": "seat-3", "run_id": "run-1",
+        "surface": "mcp-app", "entity": "seat-3", "run_id": "run-1",
         "action_id": "read-role", "transport": "stdio", "role": "worker",
         "captured_at": _now(),
     }
@@ -1254,7 +1254,7 @@ def test_receipt_field_real_roundtrip_and_forgery(tmp_path: Path, http_server: s
     path = tmp_path / "receipt.json"
     _write_receipt(path)
     context = _context(
-        observation_id="personal.role", action_id="read-role", entity="seat-3", surface="personal"
+        observation_id="personal.role", action_id="read-role", entity="seat-3", surface="mcp-app"
     )
     trust = _trust(tmp_path, http_server)
     trust["receipt_sources"] = {"personal-receipt": _receipt_source(path)}
@@ -1285,7 +1285,7 @@ def test_parent_cli_replays_authenticated_canonical_conjunct(
     _write_receipt(receipt_path)
     context = _context(
         observation_id="personal.role", action_id="read-role",
-        entity="seat-3", surface="personal",
+        entity="seat-3", surface="mcp-app",
     )
     trust = _trust(tmp_path, http_server)
     trust["receipt_sources"] = {
@@ -1415,7 +1415,7 @@ def test_receipt_rejects_decoy_pid(tmp_path: Path, http_server: str) -> None:
         path = tmp_path / "receipt.json"
         _write_receipt(path, pid=process.pid + 1)
         context = _context(
-            observation_id="personal.role", action_id="read-role", entity="seat-3", surface="personal"
+            observation_id="personal.role", action_id="read-role", entity="seat-3", surface="mcp-app"
         )
         trust = _trust(tmp_path, http_server)
         process_trust = {
@@ -1458,7 +1458,7 @@ def test_receipt_rejects_unsigned_empty_container(
     trust["receipt_sources"] = {"personal-receipt": _receipt_source(path)}
     context = _context(
         observation_id="personal.role", action_id="read-role",
-        entity="seat-3", surface="personal",
+        entity="seat-3", surface="mcp-app",
     )
     with pytest.raises(TypedEvidenceError, match="document fields"):
         record_evidence(
@@ -1672,7 +1672,7 @@ def test_personal_receipt_real_producer_capture_adapter(
         }
         context = _context(
             observation_id="personal.runtime", action_id="capture-runtime",
-            entity="personal-mcp", surface="personal", board_id=profile_board,
+            entity="personal-mcp", surface="mcp-app", board_id=profile_board,
         )
         evidence = record_evidence(
             _request(
@@ -1711,7 +1711,7 @@ def test_personal_receipt_real_producer_capture_adapter(
             "adapter": "trusted_mcp_stdio_v1",
             "provenance": "personal-live-stdio",
             "runtime_id": "personal-mcp-tool-runtime-1",
-            "surface": "personal",
+            "surface": "mcp-app",
             "board_id": profile_board,
             "candidate_commit": CANDIDATE,
             "command": str(runtime_python),
@@ -1737,7 +1737,7 @@ def test_personal_receipt_real_producer_capture_adapter(
             observation_id="personal-mcp.state.board-empty",
             action_id="board-snapshot",
             entity="personal-board",
-            surface="personal",
+            surface="mcp-app",
             board_id=profile_board,
         )
         mcp_recorder = {
@@ -2824,7 +2824,7 @@ def test_all_kinds_reject_resigned_unknown_missing_and_wrong_nested_fields(
     trust["log_sources"] = {"central-log": log_source}
     receipt_context = _context(
         observation_id="personal.role", action_id="read-role",
-        entity="seat-3", surface="personal",
+        entity="seat-3", surface="mcp-app",
     )
     evidence = {
         "http_response": record_evidence(

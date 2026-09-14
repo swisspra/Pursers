@@ -292,13 +292,13 @@
   "artifactManifest": [
     {
       "path": "docs/design-home/check_artifacts.py",
-      "lines": 1281,
-      "bytes": 54158
+      "lines": 1296,
+      "bytes": 54887
     },
     {
       "path": "docs/design-home/context/acceptance-facts.json",
       "lines": 9703,
-      "bytes": 362677
+      "bytes": 362598
     },
     {
       "path": "docs/design-home/context/components.md",
@@ -398,12 +398,12 @@
     {
       "path": "docs/design-home/inventory.md",
       "lines": 367,
-      "bytes": 51394
+      "bytes": 51315
     }
   ],
   "artifactTotal": {
-    "lines": 15758,
-    "bytes": 783089,
+    "lines": 15773,
+    "bytes": 783660,
     "excludedPath": "docs/design-home/context/source-manifest.json"
   },
   "acceptanceFacts": "docs/design-home/context/acceptance-facts.json"

@@ -215,7 +215,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Shell without relabelling another state.",
@@ -236,7 +236,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Empty Tickets without relabelling another state.",
@@ -257,7 +257,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Error without relabelling another state.",
@@ -278,7 +278,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Loading without relabelling another state.",
@@ -299,7 +299,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Permission Denied without relabelling another state.",
@@ -336,7 +336,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Search Empty without relabelling another state.",
@@ -357,7 +357,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Stale without relabelling another state.",
@@ -378,7 +378,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Apply the dark host theme to the dashboard while it is rendered in the light theme.",
@@ -421,7 +421,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Bridge Missing without relabelling another state.",
@@ -5640,7 +5640,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "call fleet_snapshot through the live Personal MCP process",
@@ -5690,7 +5690,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Links Empty without relabelling another state.",
@@ -5725,7 +5725,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Memory Empty without relabelling another state.",
@@ -5755,7 +5755,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "call board_snapshot before any explicit board_onboard operation",
@@ -5805,7 +5805,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Call ticket_get for the verifier-owned absent ticket ID through the Personal MCP conversation and observe its rendered tool error.",
@@ -5836,7 +5836,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Surface without relabelling another state.",
@@ -5861,7 +5861,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "decode and render the snapshot",
@@ -5921,7 +5921,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Settings after rendering",
@@ -5975,7 +5975,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Activity",
@@ -6029,7 +6029,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Activity",
@@ -6083,7 +6083,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "allow refreshFeed to handle the rejection",
@@ -6131,7 +6131,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Activity",
@@ -6197,7 +6197,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "wait for the disconnected bridge fallback snapshot to render",
@@ -6251,7 +6251,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Activity Scope without relabelling another state.",
@@ -6272,7 +6272,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "render the snapshot",
@@ -6326,7 +6326,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Team",
@@ -6380,7 +6380,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Team",
@@ -6434,7 +6434,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Team",
@@ -6494,7 +6494,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Team",
@@ -6548,7 +6548,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Team",
@@ -6602,7 +6602,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Team",
@@ -6656,7 +6656,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Team",
@@ -6710,7 +6710,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Team",
@@ -6764,7 +6764,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Team",
@@ -6818,7 +6818,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Team",
@@ -6872,7 +6872,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Board Identity without relabelling another state.",
@@ -6903,7 +6903,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Connection Banner without relabelling another state.",
@@ -6924,7 +6924,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Data Provenance without relabelling another state.",
@@ -6945,7 +6945,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Projects",
@@ -6999,7 +6999,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Projects",
@@ -7071,7 +7071,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Projects",
@@ -7125,7 +7125,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Projects",
@@ -7175,7 +7175,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Fleet Projects without relabelling another state.",
@@ -7212,7 +7212,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Projects",
@@ -7266,7 +7266,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Projects",
@@ -7344,7 +7344,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Projects",
@@ -7398,7 +7398,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Projects",
@@ -7452,7 +7452,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Health without relabelling another state.",
@@ -7473,7 +7473,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Focus the selected Today tab, press ArrowRight through the verifier browser channel, and observe the Work panel.",
@@ -7516,7 +7516,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Activity > Links",
@@ -7588,7 +7588,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Activity > Links",
@@ -7642,7 +7642,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Activity > Links",
@@ -7696,7 +7696,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Activity > Links",
@@ -7750,7 +7750,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Activity > Links",
@@ -7810,7 +7810,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Activity > Links",
@@ -7864,7 +7864,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Links Unavailable without relabelling another state.",
@@ -7885,7 +7885,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Refresh without relabelling another state.",
@@ -7906,7 +7906,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "type the query",
@@ -7954,7 +7954,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Search Results without relabelling another state.",
@@ -8003,7 +8003,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "allow scheduled feed refresh",
@@ -8063,7 +8063,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "activate snapshot refresh",
@@ -8113,7 +8113,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Projects or activate refresh",
@@ -8163,7 +8163,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Links or activate refresh",
@@ -8218,7 +8218,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Theme without relabelling another state.",
@@ -8239,7 +8239,7 @@
         ]
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Today",
@@ -8311,7 +8311,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Today",
@@ -8383,7 +8383,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Today",
@@ -8437,7 +8437,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Today",
@@ -8491,7 +8491,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Today",
@@ -8551,7 +8551,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Today",
@@ -8617,7 +8617,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Work",
@@ -8671,7 +8671,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "Navigate to or trigger Work Lease without relabelling another state.",
@@ -8708,7 +8708,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Work",
@@ -8762,7 +8762,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open its Work detail",
@@ -8822,7 +8822,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Work",
@@ -8876,7 +8876,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Work",
@@ -8930,7 +8930,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Work",
@@ -8984,7 +8984,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Work",
@@ -9074,7 +9074,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     },
     {
       "action": "open Work",
@@ -9128,7 +9128,7 @@
         "operator": "all_of"
       },
       "status": "normative",
-      "surface": "personal"
+      "surface": "mcp-app"
     }
   ],
   "schema_version": 1,

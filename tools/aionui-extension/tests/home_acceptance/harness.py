@@ -75,11 +75,11 @@ CURRENT_OPERATOR_TOPOLOGY = {
     "codex_worker": {"count": 3, "model": "sol-high-fast", "tier_max": 2},
     "codex_reviewer": {"count": 3, "model": "sol-high-fast", "tier_max": 2},
 }
-SURFACE_IDS = frozenset({"aionui", "fleet", "personal"})
+SURFACE_IDS = frozenset({"aionui", "fleet", "mcp-app"})
 SURFACE_PRODUCTS = {
     "aionui": "AionUi",
     "fleet": "Pursers Fleet",
-    "personal": "Pursers Personal",
+    "mcp-app": "Pursers Personal",
 }
 SURFACE_IDENTITY_SOURCES = frozenset(
     {
@@ -353,7 +353,7 @@ class VerifierBrowserObserver:
         except (OSError, json.JSONDecodeError):
             raise AcceptanceError("observer.json is not readable JSON") from None
         surfaces = config.get("surfaces") if isinstance(config, dict) else None
-        personal = surfaces.get("personal") if isinstance(surfaces, dict) else None
+        personal = surfaces.get("mcp-app") if isinstance(surfaces, dict) else None
         runtime = personal.get("runtime") if isinstance(personal, dict) else None
         repository_root = config.get("repository_root") if isinstance(config, dict) else None
         if not isinstance(runtime, dict) or not isinstance(repository_root, str):
@@ -573,7 +573,7 @@ def _surface_for_identifier(identifier: str) -> str:
     # Personal dashboard.html live entrypoint, so they are Personal surface
     # observations and must use the Personal artifact trust adapter.
     if identifier.startswith(("personal.", "personal-mcp.", "dashboard-ui.")):
-        return "personal"
+        return "mcp-app"
     return "aionui"
 
 
@@ -587,7 +587,7 @@ def _validate_surface_bindings(
         return None
     if not isinstance(value, dict) or set(value) != SURFACE_IDS:
         raise AcceptanceError(
-            "surface bindings must contain exact aionui, fleet, and personal entries"
+            "surface bindings must contain exact aionui, fleet, and mcp-app entries"
         )
     bindings: dict[str, dict[str, Any]] = {}
     for surface_id in sorted(SURFACE_IDS):
@@ -664,7 +664,7 @@ def _validate_surface_bindings(
         )
     expected_sources = {
         "fleet": "verifier-pinned-process-artifact",
-        "personal": "verifier-pinned-personal-mcp-runtime",
+        "mcp-app": "verifier-pinned-personal-mcp-runtime",
     }
     for surface_id, expected_source in expected_sources.items():
         if bindings[surface_id]["runtime"]["identity_source"] != expected_source:
@@ -936,7 +936,7 @@ def _validate_evidence_report(
     surfaces = report.get("surfaces")
     if surfaces is None and not legacy_compat:
         raise AcceptanceError(
-            "final acceptance requires exact aionui, fleet, and personal surface "
+            "final acceptance requires exact aionui, fleet, and mcp-app surface "
             "bindings; the legacy single-surface schema cannot qualify"
         )
     surface_bindings = _validate_surface_bindings(
@@ -1244,6 +1244,25 @@ def _predicate_conjuncts(identifier: str) -> tuple[dict[str, Any], ...]:
     if predicate.get("operator") != "all_of":
         return ()
     return tuple(predicate["conjuncts"])
+
+
+def _catalogue_boundary_reason(identifier: str) -> str | None:
+    """Return an explicit non-pass reason for a fact with no real surface."""
+    value = REQUIRED_FACTS[identifier].get("catalogue_boundary")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"kind", "reason"}
+        or value.get("kind") != "unobservable_on_real_surface"
+        or not isinstance(value.get("reason"), str)
+        or not value["reason"].strip()
+        or len(value["reason"]) > 500
+    ):
+        raise AcceptanceError(
+            f"catalogue boundary for {identifier} does not match the closed schema"
+        )
+    return value["reason"].strip()
 
 
 def _canonical_browser_assertions(identifier: str) -> tuple[dict[str, Any], ...]:
@@ -1645,7 +1664,7 @@ def _validate_attestation_shape(
             f"browser observation {identifier} carries no exact attestation nonce"
         )
     attestation = receipt["attestation"]
-    if surface_id != "personal":
+    if surface_id != "mcp-app":
         if attestation is not None:
             raise AcceptanceError(
                 f"observation {identifier} carries an attestation for a surface that has no challenge"
@@ -2115,6 +2134,12 @@ def _passed_evidence_items(
             raise AcceptanceError(f"every {label} needs an id")
         if identifier not in REQUIRED_FACTS:
             raise AcceptanceError(f"{label} id is not authoritative")
+        boundary = _catalogue_boundary_reason(identifier)
+        if boundary is not None:
+            raise AcceptanceError(
+                f"{label} {identifier} is a catalogue boundary and cannot pass: "
+                f"{boundary}"
+            )
         if not isinstance(reference, str) or not EVIDENCE_REFERENCE.fullmatch(reference):
             raise AcceptanceError(f"every {label} needs a bounded relative evidence reference")
         if reference.startswith("/") or ".." in Path(reference).parts:

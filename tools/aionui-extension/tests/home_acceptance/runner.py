@@ -49,7 +49,7 @@ FULL_SHA = re.compile(r"[0-9a-f]{40}")
 SURFACE_PRODUCTS = {
     "aionui": "AionUi",
     "fleet": "Pursers Fleet",
-    "personal": "Pursers Personal",
+    "mcp-app": "Pursers Personal",
 }
 
 EXIT_OK = 0
@@ -137,20 +137,20 @@ def _load_surface_manifest(path_value: str) -> dict[str, Any]:
         raise RunnerError(EXIT_BLOCKED, "verification checkout must be clean at candidate_commit")
     surfaces = manifest["surfaces"]
     if not isinstance(surfaces, dict) or set(surfaces) != set(SURFACE_PRODUCTS):
-        raise RunnerError(EXIT_USAGE, "surface manifest needs exact aionui, fleet, personal entries")
+        raise RunnerError(EXIT_USAGE, "surface manifest needs exact aionui, fleet, mcp-app entries")
     normalized: dict[str, Any] = {}
     expected_adapters = {
         "aionui": "signed-aionui",
         "fleet": "pinned-process-artifact",
-        "personal": "pinned-signed-aionui-personal-mcp",
+        "mcp-app": "pinned-signed-aionui-personal-mcp",
     }
     for surface_id, product in SURFACE_PRODUCTS.items():
         row = surfaces[surface_id]
         required = {"adapter", "target"} if surface_id == "aionui" else {
             "adapter", "target", "artifact"
         }
-        if surface_id == "personal":
-            required.add("runtime")
+        if surface_id == "mcp-app":
+            required.update({"candidate_manifest_url", "runtime"})
         if not isinstance(row, dict) or set(row) != required:
             raise RunnerError(EXIT_USAGE, f"surface {surface_id} fields do not match schema")
         if row["adapter"] != expected_adapters[surface_id]:
@@ -175,6 +175,24 @@ def _load_surface_manifest(path_value: str) -> dict[str, Any]:
             "product": product,
             "candidate_commit": candidate,
         }
+        if surface_id == "mcp-app":
+            candidate_url = row["candidate_manifest_url"]
+            candidate_parsed = urlsplit(str(candidate_url))
+            if (
+                not isinstance(candidate_url, str)
+                or candidate_parsed.scheme != parsed.scheme
+                or candidate_parsed.netloc != parsed.netloc
+                or candidate_parsed.username
+                or candidate_parsed.password
+                or candidate_parsed.query
+                or candidate_parsed.fragment
+                or not candidate_parsed.path.endswith("/candidate.json")
+            ):
+                raise RunnerError(
+                    EXIT_USAGE,
+                    "Personal candidate_manifest_url must name same-origin candidate.json",
+                )
+            normalized_row["candidate_manifest_url"] = candidate_url
         if surface_id != "aionui":
             relative = row["artifact"]
             if not isinstance(relative, str) or relative.startswith("/") or ".." in Path(relative).parts:
@@ -190,7 +208,7 @@ def _load_surface_manifest(path_value: str) -> dict[str, Any]:
                 "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 "version": f"candidate-{candidate[:12]}",
             })
-        if surface_id == "personal":
+        if surface_id == "mcp-app":
             runtime = row["runtime"]
             if not isinstance(runtime, dict) or set(runtime) != {
                 "artifact", "challenge_key", "pid_file", "receipt"
@@ -256,7 +274,7 @@ def _load_surface_manifest(path_value: str) -> dict[str, Any]:
     personal_version = personal_meta.get("project", {}).get("version")
     if not isinstance(personal_version, str):
         raise RunnerError(EXIT_BLOCKED, "Personal package version is unavailable")
-    normalized["personal"]["version"] = personal_version
+    normalized["mcp-app"]["version"] = personal_version
     if normalized["fleet"]["target"]["base_url"] == normalized["aionui"]["target"]["base_url"]:
         raise RunnerError(EXIT_USAGE, "Fleet must use its actual distinct loopback origin")
     return normalized
@@ -453,6 +471,12 @@ def prepare(args: argparse.Namespace) -> int:
     evidence.mkdir(parents=True, exist_ok=True)
     commands: list[list[str]] = []
     for identifier in (*sequence, *inventory, *final_gates):
+        boundary = harness._catalogue_boundary_reason(identifier)
+        if boundary is not None:
+            raise RunnerError(
+                EXIT_BLOCKED,
+                f"catalogue boundary {identifier} cannot be captured: {boundary}",
+            )
         row = by_id[identifier]
         surface_id = _surface_for(identifier)
         surface = config["surfaces"][surface_id]
