@@ -230,6 +230,9 @@ ADMISSION_EVENT_FIELDS = frozenset(
 SCRUB_PROFILES = frozenset({"strict", "internal"})
 RESPONSE_VIEWS = frozenset({"compact", "full"})
 DEFAULT_RESPONSE_VIEW = "compact"
+TICKET_READ_VIEWS = frozenset({"summary", "work", "full"})
+DEFAULT_TICKET_READ_VIEW = "work"
+FULL_RESPONSE_ID_RE = re.compile(r"\b(?:AI|PR)-[0-9a-f]{64}\b")
 COMPACT_WRITE_TOOLS = frozenset(
     {
         "ticket_update",
@@ -584,6 +587,242 @@ def compact_write_response(
     return projected
 
 
+def _history_count(ticket: Mapping[str, Any], field: str) -> int:
+    entries = ticket.get(field)
+    inline = len(entries) if isinstance(entries, list) else 0
+    omitted = ticket.get(f"{field}_omitted_count", 0)
+    if isinstance(omitted, bool) or not isinstance(omitted, int) or omitted < 0:
+        omitted = 0
+    return inline + omitted
+
+
+def _latest_history_entry(
+    ticket: Mapping[str, Any], field: str
+) -> dict[str, Any] | None:
+    entries = ticket.get(field)
+    if not isinstance(entries, list):
+        return None
+    return next(
+        (
+            copy.deepcopy(dict(entry))
+            for entry in reversed(entries)
+            if isinstance(entry, Mapping)
+        ),
+        None,
+    )
+
+
+def _dispatch_history_for_read(
+    service: "CentralBoard", board_id: str, ticket: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    history = [
+        copy.deepcopy(dict(entry))
+        for entry in ticket.get("dispatch_history", [])
+        if isinstance(entry, Mapping)
+    ]
+    omitted = ticket.get("dispatch_history_omitted_count", 0)
+    if not isinstance(omitted, int) or isinstance(omitted, bool) or omitted <= 0:
+        return history
+    archived = service.load_archive_document(
+        board_id, str(ticket.get("ticket_id", ""))
+    )
+    overflow = (
+        archived.get("history_overflow", {}).get("dispatch_history", [])
+        if isinstance(archived, Mapping)
+        else []
+    )
+    if not isinstance(overflow, list):
+        return history
+    return [
+        copy.deepcopy(dict(entry))
+        for entry in overflow
+        if isinstance(entry, Mapping)
+    ] + history
+
+
+def _dispatch_summary(history: list[dict[str, Any]]) -> dict[str, Any]:
+    states = [str(entry.get("state") or "") for entry in history]
+    cycles = {
+        (str(entry.get("kind") or "work"), int(entry.get("cycle", 0) or 0))
+        for entry in history
+        if not isinstance(entry.get("cycle", 0), bool)
+        and isinstance(entry.get("cycle", 0), int)
+    }
+    return {
+        "cycles": len(cycles),
+        "offers": states.count("offered"),
+        "accepts": states.count("accepted"),
+        "expirations": states.count("expired"),
+        "broadcasts": states.count("broadcast"),
+        "last": copy.deepcopy(history[-3:]),
+    }
+
+
+def _ticket_assignment(ticket: Mapping[str, Any]) -> dict[str, Any] | None:
+    agent_name = ticket.get("assigned_to")
+    agent_id_value = ticket.get("assigned_to_agent_id")
+    kind = ticket.get("assigned_to_kind")
+    if agent_name is None and agent_id_value is None:
+        agent_name = ticket.get("claimed_by")
+        agent_id_value = ticket.get("claimed_by_agent_id")
+        kind = "work" if agent_name is not None or agent_id_value is not None else None
+    if agent_name is None and agent_id_value is None:
+        return None
+    return {
+        "agent_name": agent_name,
+        "agent_id": agent_id_value,
+        "kind": kind,
+    }
+
+
+def project_ticket_read(
+    ticket: Mapping[str, Any],
+    *,
+    view: str,
+    dispatch_history: list[dict[str, Any]],
+    include_dispatch_history: bool,
+) -> dict[str, Any]:
+    """Project one authorized ticket for model-facing read tools."""
+    summary: dict[str, Any] = {
+        "ticket_id": ticket.get("ticket_id"),
+        "title": ticket.get("title"),
+        "status": ticket.get("status"),
+        "priority": ticket.get("priority", "medium"),
+        "parked": bool(ticket.get("parked", False)),
+        "assigned": _ticket_assignment(ticket),
+        "updated_at": ticket.get("updated_at"),
+        "counts": {
+            "annotations": _history_count(ticket, "annotations"),
+            "submissions": _history_count(ticket, "submission_history"),
+            "reviews": _history_count(ticket, "review_history"),
+            "dispatch": len(dispatch_history),
+            "abandoned": int(ticket.get("abandoned_count", 0) or 0),
+            "rejections": int(ticket.get("rejection_count", 0) or 0),
+        },
+        "dispatch_summary": _dispatch_summary(dispatch_history),
+    }
+    if ticket.get("archived") is True:
+        summary["archived"] = True
+    if view == "summary":
+        return summary
+
+    if view == "full":
+        full = copy.deepcopy(dict(ticket))
+        full["dispatch_summary"] = _dispatch_summary(dispatch_history)
+        if include_dispatch_history:
+            full["dispatch_history"] = copy.deepcopy(dispatch_history)
+            full["dispatch_history_omitted_count"] = 0
+        else:
+            full.pop("dispatch_history", None)
+        return full
+
+    latest_verdict = _latest_history_entry(ticket, "review_history")
+    if latest_verdict is None and (
+        ticket.get("review_notes") is not None
+        or ticket.get("fix_instructions") is not None
+    ):
+        latest_verdict = {
+            "review_notes": ticket.get("review_notes"),
+            "fix_instructions": ticket.get("fix_instructions"),
+            "verdict": ticket.get("review_verdict"),
+        }
+    latest_submission = _latest_history_entry(ticket, "submission_history")
+    work = {
+        **summary,
+        "description": ticket.get("description", ""),
+        "scope": ticket.get("scope"),
+        "required_fields": copy.deepcopy(ticket.get("required_fields", [])),
+        "forbidden": copy.deepcopy(ticket.get("forbidden", [])),
+        "latest_verdict": latest_verdict,
+        "latest_submission": latest_submission,
+        "dispatch_state": copy.deepcopy(ticket.get("dispatch_state")),
+    }
+    # Keep the bounded operational fields consumed by wait-bridge and Fleet.
+    # Histories are reduced to their newest entry; dispatch history is always
+    # represented by dispatch_summary unless explicitly requested on full.
+    for key in (
+        "tags", "related_files", "target_url", "project", "tier",
+        "skills_required", "work_offer", "review_offer", "review_lease",
+        "review_state", "human_request", "claimed_by", "claimed_by_agent_id",
+        "last_claimed_by", "last_claimed_by_agent_id",
+        "last_claimed_by_principal_id", "last_claimed_at",
+        "last_release_reason", "lease_expires_at", "ttl_s", "payload_ref",
+        "annotations", "annotations_omitted_count", "annotation_count",
+        "coordinator_questions", "created_at", "created_by",
+        "created_by_agent_id", "created_by_principal_id", "closed_at",
+        "review_verdict", "review_notes", "fix_instructions",
+        "reviewed_by", "reviewed_by_agent_id", "reviewed_by_agent_name",
+        "reviewed_by_principal_id", "rejection_count", "abandoned_count",
+    ):
+        if key in ticket:
+            work[key] = copy.deepcopy(ticket[key])
+    work["submission_history"] = [latest_submission] if latest_submission else []
+    work["review_history"] = [latest_verdict] if latest_verdict else []
+    return work
+
+
+def project_ticket_read_response(
+    result: Mapping[str, Any],
+    *,
+    service: "CentralBoard",
+    board_id: str,
+    view: str,
+    include_dispatch_history: bool,
+) -> dict[str, Any]:
+    projected = copy.deepcopy(dict(result))
+    if isinstance(projected.get("ticket"), Mapping):
+        ticket = projected["ticket"]
+        projected["ticket"] = project_ticket_read(
+            ticket,
+            view=view,
+            dispatch_history=_dispatch_history_for_read(service, board_id, ticket),
+            include_dispatch_history=include_dispatch_history,
+        )
+    tickets = projected.get("tickets")
+    if isinstance(tickets, list):
+        projected["tickets"] = [
+            project_ticket_read(
+                ticket,
+                view=view,
+                dispatch_history=_dispatch_history_for_read(service, board_id, ticket),
+                include_dispatch_history=include_dispatch_history,
+            )
+            for ticket in tickets
+            if isinstance(ticket, Mapping)
+        ]
+    projected["view"] = view
+    projected["include_dispatch_history"] = include_dispatch_history
+    return projected
+
+
+def abbreviate_response_ids(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Deduplicate canonical AI-/PR- IDs into one trailing id_map."""
+    id_map: dict[str, str] = {}
+
+    def visit(item: Any) -> Any:
+        if isinstance(item, Mapping):
+            return {key: visit(nested) for key, nested in item.items()}
+        if isinstance(item, list):
+            return [visit(nested) for nested in item]
+        if isinstance(item, tuple):
+            return [visit(nested) for nested in item]
+        if not isinstance(item, str):
+            return item
+
+        def replace(match: re.Match[str]) -> str:
+            full = match.group(0)
+            short = full[:11]
+            id_map.setdefault(short, full)
+            return short
+
+        return FULL_RESPONSE_ID_RE.sub(replace, item)
+
+    projected = visit(value)
+    assert isinstance(projected, dict)
+    projected["id_map"] = id_map
+    return projected
+
+
 def project_model_tool_result(
     result: HandlerResult,
     *,
@@ -605,6 +844,23 @@ def project_model_tool_result(
 
     projected: Any = strip_response_recipient_identities(structured)
     board_id = arguments.get("board_id")
+    if (
+        not is_error
+        and structured.get("ok") is not False
+        and tool_name in {"ticket_get", "ticket_list"}
+        and isinstance(board_id, str)
+        and ID_RE.fullmatch(board_id)
+    ):
+        projected = project_ticket_read_response(
+            projected,
+            service=service,
+            board_id=board_id,
+            view=str(arguments.get("view", DEFAULT_TICKET_READ_VIEW)),
+            include_dispatch_history=bool(
+                arguments.get("include_dispatch_history", False)
+            ),
+        )
+        projected = abbreviate_response_ids(projected)
     if (
         not is_error
         and structured.get("ok") is not False
@@ -7692,10 +7948,19 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     @tool()
-    async def ticket_get(board_id: str, ticket_id: str) -> dict[str, Any]:
-        """Refetch one full authorized ticket after a resource-updated cue."""
+    async def ticket_get(
+        board_id: str,
+        ticket_id: str,
+        view: str = DEFAULT_TICKET_READ_VIEW,
+        include_dispatch_history: bool = False,
+    ) -> dict[str, Any]:
+        """Refetch one authorized ticket using a bounded response view."""
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
+        if view not in TICKET_READ_VIEWS:
+            raise ValueError("view must be summary, work, or full")
+        if type(include_dispatch_history) is not bool:
+            raise ValueError("include_dispatch_history must be a boolean")
         principal = current_principal()
         require_scope(principal, "board:read")
         document = service.load(board_id)
@@ -10605,6 +10870,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         agent_name: str | None = None,
         review_unclaimed_only: bool = False,
         ticket_ids: list[str] | None = None,
+        view: str = DEFAULT_TICKET_READ_VIEW,
+        include_dispatch_history: bool = False,
     ) -> dict[str, Any]:
         """List authorized tickets with bounded server-side filters.
 
@@ -10614,6 +10881,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ``include_archived=False`` restricts results to the hot document.
         """
         board_id = require_id("board_id", board_id)
+        if view not in TICKET_READ_VIEWS:
+            raise ValueError("view must be summary, work, or full")
+        if type(include_dispatch_history) is not bool:
+            raise ValueError("include_dispatch_history must be a boolean")
         if type(include_archived) is not bool:
             raise ValueError("include_archived must be a boolean")
         if status is not None and status not in ACTIVE_TICKET_STATES | TERMINAL_TICKET_STATES:

@@ -5,6 +5,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -116,6 +117,37 @@ class FakeClient:
 class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         wait_server._BACKLOG_SEEN.clear()
+
+    async def test_board_view_reconciles_offers_with_work_read_view(self) -> None:
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        class RawClient:
+            async def call_tool(
+                self, name: str, arguments: dict[str, Any], **_kwargs: Any
+            ) -> SimpleNamespace:
+                calls.append((name, arguments))
+                payload = {"ok": True, "ticket": {}} if name == "ticket_get" else {
+                    "ok": True, "tickets": []
+                }
+                return SimpleNamespace(
+                    is_error=False, structured_content=payload, content=[]
+                )
+
+        parent = SimpleNamespace(
+            _client=RawClient(),
+            agent_name="env-default",
+            role="worker",
+            identity=None,
+            generation_token=None,
+            meter=None,
+        )
+        view = wait_server._BoardView(parent, "pursers")
+
+        await view.ticket_get("TK-offer")
+        await view.ticket_list(include_closed=False)
+
+        self.assertEqual(calls[0][1]["view"], "work")
+        self.assertEqual(calls[1][1]["view"], "work")
 
     async def test_omitted_name_uses_default_without_extra_join(self) -> None:
         client = FakeClient()
