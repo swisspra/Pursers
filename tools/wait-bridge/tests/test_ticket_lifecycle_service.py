@@ -27,6 +27,17 @@ class FakeClient:
 
     async def ticket_get(self, ticket_id):
         self.calls.append(("get", ticket_id))
+        if ticket_id == "TK-compact":
+            return {
+                "ticket": {
+                    "ticket_id": ticket_id,
+                    "status": "claimed",
+                    "claimed_by": "worker-one",
+                    "claimed_by_agent_id": "AI-worker",
+                    "claimed_by_principal_id": "PR-worker",
+                },
+                "latest_seq": 11,
+            }
         return {"ticket": {"ticket_id": ticket_id, "status": "open"}, "latest_seq": 10}
 
     async def ticket_create(self, ticket_id, title, **kwargs):
@@ -37,6 +48,16 @@ class FakeClient:
         self.calls.append((operation, payload))
         if payload["ticket_id"] == "TK-expired":
             raise BoardClientError(OFFER_REFUSAL)
+        if payload["ticket_id"] == "TK-compact":
+            return {
+                "ok": True,
+                "ticket_id": payload["ticket_id"],
+                "status": "claimed",
+                "dispatch_state": {
+                    "state": "claimed",
+                    "agent_name": payload["agent_name"],
+                },
+            }
         return {
             "ticket": {
                 "ticket_id": payload["ticket_id"],
@@ -116,6 +137,36 @@ def test_claim_uses_explicit_offer_identity_and_forwards_central_refusal() -> No
     assert client.calls == [
         ("ticket_claim", {"agent_name": "worker-one", "ticket_id": "TK-live"}),
         ("ticket_claim", {"agent_name": "worker-one", "ticket_id": "TK-expired"}),
+    ]
+
+
+def test_claim_refetches_authoritative_ticket_after_compact_receipt() -> None:
+    client = FakeClient()
+    service = TicketLifecycleService(client, "demo")
+
+    claimed = asyncio.run(service.dispatch("claim", {
+        "board": "demo", "ticket_id": "TK-compact", "agent_name": "worker-one",
+    }))
+
+    assert claimed == {
+        "ok": True,
+        "board": "demo",
+        "ticket": {
+            "ticket_id": "TK-compact",
+            "status": "claimed",
+            "claimed_by": "worker-one",
+            "claimed_by_agent_id": "AI-worker",
+            "claimed_by_principal_id": "PR-worker",
+        },
+        "identity": {
+            "agent_id": "AI-worker",
+            "principal_id": "PR-worker",
+            "agent_name": "worker-one",
+        },
+    }
+    assert client.calls == [
+        ("ticket_claim", {"agent_name": "worker-one", "ticket_id": "TK-compact"}),
+        ("get", "TK-compact"),
     ]
 
 

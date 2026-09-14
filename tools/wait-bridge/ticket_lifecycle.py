@@ -85,11 +85,17 @@ class TicketLifecycleService:
                             "ticket_id": payload["ticket_id"],
                         },
                     )
+                    ticket = result.get("ticket")
+                    if not isinstance(ticket, dict):
+                        # Compact mutation receipts intentionally omit the record;
+                        # refetch committed state before reporting claim success.
+                        ticket = (
+                            await self.client.ticket_get(payload["ticket_id"])
+                        )["ticket"]
                 except (
                     BoardClientError, KeyError, OSError, RuntimeError, ValueError
                 ) as exc:
                     return _classify_claim(exc)
-                ticket = result["ticket"]
                 identity = result.get("actor") or {
                     "agent_id": ticket["claimed_by_agent_id"],
                     "principal_id": ticket["claimed_by_principal_id"],
