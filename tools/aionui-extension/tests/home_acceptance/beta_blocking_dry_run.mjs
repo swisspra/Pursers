@@ -70,7 +70,7 @@ try {
       await page.waitForFunction(() => document.querySelector("#connection-pill")?.textContent?.trim() === "Connected", undefined, { timeout: 10_000 });
     } else if (row.surface === "fleet") {
       await page.waitForFunction(() => document.querySelector("#state")?.textContent?.includes("Updated"), undefined, { timeout: 10_000 });
-    } else if (row.surface === "personal") {
+    } else if (row.surface === "mcp-app") {
       await page.waitForSelector("#tab-fleet", { state: "visible" });
     }
     const recipe = row.trust_source_recipe_fragment.recipe;

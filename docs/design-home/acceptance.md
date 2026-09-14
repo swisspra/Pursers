@@ -219,7 +219,7 @@ are:
   "surfaces": {
     "aionui": {"target": {}, "runtime": {}, "candidate_commit": "FULL_40_HEX_CANDIDATE_SHA"},
     "fleet": {"target": {}, "runtime": {}, "candidate_commit": "FULL_40_HEX_CANDIDATE_SHA"},
-    "personal": {"target": {}, "runtime": {}, "candidate_commit": "FULL_40_HEX_CANDIDATE_SHA"}
+    "mcp-app": {"target": {}, "runtime": {}, "candidate_commit": "FULL_40_HEX_CANDIDATE_SHA"}
   },
   "operator_topology": {
     "goose_worker": {"count": 2, "model": "vertex_ai/gemini-3.8-flash", "tier_max": 1},

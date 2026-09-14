@@ -174,7 +174,7 @@ new one. `--task-space` pins capture to the already authenticated isolated
 ego-browser task space instead of creating an unrelated browser context. All
 observations in one report must share a single `observer_id`.
 
-The surface manifest has exactly `aionui`, `fleet`, and `personal`. The installer
+The surface manifest has exactly `aionui`, `fleet`, and `mcp-app`. The installer
 derives the candidate from clean `git HEAD`, hashes tracked Fleet and Personal
 artifacts itself, and persists those values in its private config. A signed-origin
 shortcut is intentionally rejected for Fleet: the real Fleet UI is a distinct
@@ -184,12 +184,19 @@ origin, so serving or labelling it as AionUi would erase actual-product provenan
 {"schema_version":1,"candidate_commit":"FULL_SHA","surfaces":{
   "aionui":{"adapter":"signed-aionui","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"}},
   "fleet":{"adapter":"pinned-process-artifact","target":{"base_url":"http://127.0.0.1:18821","board_id":"sandbox-home"},"artifact":"tools/fleet-dashboard/fleet_dashboard.py"},
-  "personal":{"adapter":"pinned-signed-aionui-personal-mcp","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"},"artifact":"packages/personal/src/pursers_personal/resources/dashboard.html","runtime":{"artifact":"packages/personal/src/pursers_personal/apps_server.py","challenge_key":"/PATH/TO/verifier-runtime/personal-acceptance-challenge.key","pid_file":"/PATH/TO/verifier-runtime/personal.pid","receipt":"/PATH/TO/verifier-runtime/personal-runtime.json"}}
+  "mcp-app":{"adapter":"pinned-signed-aionui-personal-mcp","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"},"candidate_manifest_url":"http://127.0.0.1:18822/PATH/TO/installed-extension/candidate.json","artifact":"packages/personal/src/pursers_personal/resources/dashboard.html","runtime":{"artifact":"packages/personal/src/pursers_personal/apps_server.py","challenge_key":"/PATH/TO/verifier-runtime/personal-acceptance-challenge.key","pid_file":"/PATH/TO/verifier-runtime/personal.pid","receipt":"/PATH/TO/verifier-runtime/personal-runtime.json"}}
 }}
 ```
 
-For Personal, the isolated browser hashes the fetched page bytes and the observer
-also requires one live `pursers_personal.cli mcp` process whose exact command,
+For Personal, the capture URL is the real AionUi conversation page with the
+Personal MCP App open. The observer requires exactly one child frame whose
+title and shell selectors match the shipped App. It reads the selected sandbox
+board, visual predicates, transitions, and fetched document digest inside an
+isolated world in that frame. Signed host status and the installed
+`candidate.json` at the manifest's same-origin `candidate_manifest_url` remain
+bound from a separate isolated main-frame world. The
+captured Personal document bytes must hash to the pinned dashboard artifact.
+The observer also requires one live `pursers_personal.cli mcp` process whose exact command,
 candidate source, sandbox board, PID and private process-authored runtime receipt
 match the clean verifier checkout. A stale or unrelated MCP process is rejected.
 For Fleet, the observer requires one
@@ -239,11 +246,11 @@ python3 tools/aionui-extension/tests/home_acceptance/runner.py capture \
   --observer /PATH/TO/verifier-observer \
   --evidence /PATH/TO/evidence \
   --observation <observation-id> \
-  --surface personal \
+  --surface mcp-app \
   --target http://127.0.0.1:18822 \
   --board sandbox-home \
   --commit <full-40-hex-candidate-sha> \
-  --page http://127.0.0.1:18822/PATH/TO/home-entry \
+  --page http://127.0.0.1:18822/PATH/TO/conversation-with-personal-app-open \
   --assertions /PATH/TO/assertions.json \
   --attestation-nonce <the-same-nonce>
 ```
