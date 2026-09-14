@@ -332,7 +332,11 @@ class FleetClient(Protocol):
     ) -> dict[str, Any]: ...
 
     async def ticket_list(
-        self, *, include_closed: bool = False, limit: int = 100
+        self,
+        *,
+        include_closed: bool = False,
+        limit: int = 100,
+        view: str | None = None,
     ) -> dict[str, Any]: ...
 
     async def board_dispatch_policy_set(
@@ -3625,7 +3629,9 @@ class FleetFetcher:
         async with self._client(board_id) as client:
             status = await client.board_status()
             listed = await client.ticket_list(
-                include_closed=False, limit=DISPATCH_TICKET_LIMIT
+                include_closed=False,
+                limit=DISPATCH_TICKET_LIMIT,
+                view="work",
             )
             dispatch_events = await client.board_dispatch_events(limit=25)
             events = dispatch_events.get("events", [])
@@ -3667,6 +3673,9 @@ class FleetFetcher:
                 "dispatch_state": ticket.get("dispatch_state")
                 if isinstance(ticket.get("dispatch_state"), dict)
                 else None,
+                "dispatch_summary": ticket.get("dispatch_summary")
+                if isinstance(ticket.get("dispatch_summary"), dict)
+                else None,
                 "dispatch_history": [
                     {
                         "state": h.get("state"),
@@ -3675,7 +3684,14 @@ class FleetFetcher:
                         "at": h.get("at") or h.get("offered_at"),
                         "reason": h.get("reason"),
                     }
-                    for h in (ticket.get("dispatch_history") or [])
+                    for h in (
+                        ticket.get("dispatch_history")
+                        or (
+                            ticket.get("dispatch_summary", {}).get("last", [])
+                            if isinstance(ticket.get("dispatch_summary"), dict)
+                            else []
+                        )
+                    )
                     if isinstance(h, dict)
                 ],
             }
