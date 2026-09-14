@@ -175,6 +175,7 @@ function createPostJoinGuidance(result) {
 }
 
 function renderPostJoinGuidance(guidance, ui, documentRef) {
+  if (!ui || !ui.card || !ui.title || !ui.summary || !ui.presetList) return;
   ui.card.hidden = !guidance;
   ui.presetList.replaceChildren();
   if (!guidance) return;

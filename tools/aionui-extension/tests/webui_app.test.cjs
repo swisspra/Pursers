@@ -179,6 +179,8 @@ test('post-join guidance stays hidden without a successful supported-role join',
 });
 
 test('submit flow reveals guidance only after join success', async () => {
+  const connectionCard = new FakeElement('section');
+  connectionCard.querySelector = () => new FakeElement('span');
   const elements = {
     '#join-form': new FakeElement('form'),
     '#door': new FakeElement('input'),
@@ -188,6 +190,9 @@ test('submit flow reveals guidance only after join success', async () => {
     '#status-title': new FakeElement('h2'),
     '#status-summary': new FakeElement('p'),
     '#seat-list': new FakeElement('div'),
+    '#connection-card': connectionCard,
+    '#connection-title': new FakeElement('h2'),
+    '#recover': new FakeElement('button'),
     '#next-step': new FakeElement('section'),
     '#next-step-title': new FakeElement('h2'),
     '#next-step-summary': new FakeElement('p'),
