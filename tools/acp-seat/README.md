@@ -48,7 +48,7 @@ sandboxing, and submission belong to the separate seat runtime below.
 
 The seat runtime keeps the mode-`0600` board token in the parent process,
 verifies both identity IDs returned by Central, consumes wait-bridge offers,
-creates one isolated Git worktree per ticket, sends only ticket scope and
+creates one standalone Git clone per ticket, sends only ticket scope and
 decision annotations to ACP, renews the lease independently, and projects
 bounded updates and permission decisions to board checkpoints. On `end_turn`,
 it validates structured completion against the actual branch, full commit, and
@@ -58,10 +58,12 @@ creates a checkpoint and safely unclaims the ticket.
 
 The production runtime is macOS-only because it fails closed unless
 `sandbox-exec` is available. Its OS profile denies network access and writes
-outside the ticket worktree and temporary directory. The ACP permission broker
+outside the ticket clone and temporary directory. Mutable Git metadata stays
+inside that clone, so the sandboxed agent can stage and commit without access
+to the source repository. The ACP permission broker
 also canonicalizes requested paths, rejects protected Git/credential paths,
 never selects `allow_always`, and permits terminal requests only with an argv
-and cwd inside the worktree.
+and cwd inside the clone.
 
 The focused coverage lives in
 [`tests/test_acp_client.py`](tests/test_acp_client.py) and

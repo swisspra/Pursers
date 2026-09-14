@@ -204,6 +204,8 @@ def sandboxed_agent_command(
         if candidate.exists():
             readable.add(candidate.resolve())
     scratch = Path(tempfile.gettempdir()).resolve()
+    if (work_dir / ".git").exists():
+        _require_git_metadata_within(work_dir, (work_dir, scratch))
     readable.add(scratch)
     reads = "\n".join(
         f"(allow file-read* (subpath {json.dumps(str(path))}))"
@@ -236,8 +238,40 @@ def _inside(path: Path, root: Path) -> bool:
     return True
 
 
+def _git_metadata_paths(work_dir: Path) -> dict[str, Path]:
+    """Return every Git metadata path that must remain writable for a commit."""
+    commands = {
+        "git-dir": ("rev-parse", "--absolute-git-dir"),
+        "common-dir": ("rev-parse", "--path-format=absolute", "--git-common-dir"),
+        "index": ("rev-parse", "--path-format=absolute", "--git-path", "index"),
+    }
+    return {
+        label: Path(_git(work_dir, *command)).resolve()
+        for label, command in commands.items()
+    }
+
+
+def _require_git_metadata_within(
+    work_dir: Path, writable_roots: Sequence[Path]
+) -> dict[str, Path]:
+    """Fail closed when a sandboxed checkout stores mutable Git state elsewhere."""
+    roots = tuple(path.resolve() for path in writable_roots)
+    metadata = _git_metadata_paths(work_dir.resolve())
+    escaped = [
+        label
+        for label, path in metadata.items()
+        if not any(_inside(path, root) for root in roots)
+    ]
+    if escaped:
+        raise RuntimeError(
+            "ACP seat Git metadata escapes writable sandbox roots: "
+            + ", ".join(sorted(escaped))
+        )
+    return metadata
+
+
 class SeatPermissionPolicy:
-    """Fail-closed ACP permission policy for one ticket worktree."""
+    """Fail-closed ACP permission policy for one ticket checkout."""
 
     def __init__(self, work_dir: Path, document: JSON | None = None) -> None:
         self.work_dir = work_dir.resolve()
@@ -455,27 +489,38 @@ def validate_completion(work_dir: Path, completion: JSON) -> JSON:
     return {"summary": summary.strip(), "files_changed": files, "notes": notes}
 
 
-def publish_branch(work_dir: Path, completion: JSON) -> None:
+def publish_branch(
+    work_dir: Path,
+    completion: JSON,
+    *,
+    publish_repository: Path | None = None,
+) -> None:
     """Publish the validated branch outside the no-network child sandbox."""
-    origin = subprocess.run(
-        ["git", "config", "--get", "remote.origin.url"],
-        cwd=work_dir,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if origin.returncode != 0 or not origin.stdout.strip():
-        return
     match = BRANCH_AND_COMMIT_RE.search(str(completion["notes"]))
     if match is None:  # validate_completion has already checked this.
         raise ValueError("completion notes need literal branch_and_commit")
     branch, commit = match.groups()
+    if publish_repository is None:
+        origin = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=work_dir,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if origin.returncode != 0 or not origin.stdout.strip():
+            return
+        publish_target = "origin"
+        push_options = ["--set-upstream"]
+    else:
+        publish_target = str(publish_repository.resolve())
+        push_options = []
     subprocess.run(
         [
             "git",
             "push",
-            "--set-upstream",
-            "origin",
+            *push_options,
+            publish_target,
             f"HEAD:refs/heads/{branch}",
         ],
         cwd=work_dir,
@@ -484,13 +529,57 @@ def publish_branch(work_dir: Path, completion: JSON) -> None:
         text=True,
     )
     remote = subprocess.run(
-        ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch}"],
+        [
+            "git",
+            "ls-remote",
+            "--heads",
+            publish_target,
+            f"refs/heads/{branch}",
+        ],
         cwd=work_dir,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.split()
     if not remote or remote[0] != commit:
+        raise RuntimeError("published ACP ticket branch does not match the tested commit")
+    if publish_repository is None:
+        return
+    local_commit = _git(
+        publish_repository, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"
+    )
+    if local_commit != commit:
+        raise RuntimeError("ACP source repository branch does not match the tested commit")
+    upstream = subprocess.run(
+        ["git", "config", "--get", "remote.origin.url"],
+        cwd=publish_repository,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if upstream.returncode != 0 or not upstream.stdout.strip():
+        return
+    subprocess.run(
+        [
+            "git",
+            "push",
+            "--set-upstream",
+            "origin",
+            f"refs/heads/{branch}:refs/heads/{branch}",
+        ],
+        cwd=publish_repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    published = subprocess.run(
+        ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch}"],
+        cwd=publish_repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    if not published or published[0] != commit:
         raise RuntimeError("published ACP ticket branch does not match the tested commit")
 
 
@@ -630,7 +719,12 @@ class ACPSeatRuntime:
             ):
                 raise RuntimeError("seat no longer holds the ticket claim")
             validated = validate_completion(work_dir, completion)
-            await asyncio.to_thread(publish_branch, work_dir, validated)
+            await asyncio.to_thread(
+                publish_branch,
+                work_dir,
+                validated,
+                publish_repository=self.repository,
+            )
             await self.board.submit(ticket_id, validated)
             return "submitted"
         except asyncio.CancelledError:
@@ -674,10 +768,11 @@ class ACPSeatRuntime:
             root = _git(work_dir, "rev-parse", "--show-toplevel")
             current = _git(work_dir, "branch", "--show-current")
             if Path(root).resolve() != work_dir or current != branch:
-                raise RuntimeError("existing ACP ticket worktree is not reusable")
+                raise RuntimeError("existing ACP ticket checkout is not reusable")
+            _require_git_metadata_within(work_dir, (work_dir,))
             return work_dir
         work_dir.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
+        base_commit = subprocess.run(
             [
                 "git",
                 "-C",
@@ -689,23 +784,53 @@ class ACPSeatRuntime:
             check=True,
             capture_output=True,
             text=True,
-        )
+        ).stdout.strip()
         subprocess.run(
             [
                 "git",
-                "-C",
+                "clone",
+                "--no-checkout",
+                "--no-local",
+                "--",
                 str(self.repository),
-                "worktree",
-                "add",
-                "-b",
-                branch,
                 str(work_dir),
-                self.base_ref,
             ],
             check=True,
             capture_output=True,
             text=True,
         )
+        if (
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{base_commit}^{{commit}}"],
+                cwd=work_dir,
+                check=False,
+                capture_output=True,
+                text=True,
+            ).returncode
+            != 0
+        ):
+            subprocess.run(
+                ["git", "fetch", "--no-tags", "origin", base_commit],
+                cwd=work_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        subprocess.run(
+            ["git", "checkout", "-B", branch, base_commit],
+            cwd=work_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "remote", "remove", "origin"],
+            cwd=work_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        _require_git_metadata_within(work_dir, (work_dir,))
         return work_dir
 
 

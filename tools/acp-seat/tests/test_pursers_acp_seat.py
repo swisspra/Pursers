@@ -375,7 +375,7 @@ def test_fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
     asyncio.run(fake_agent_submits_through_in_process_central(tmp_path))
 
 
-def test_runtime_creates_isolated_ticket_worktree(tmp_path: Path) -> None:
+def test_runtime_creates_standalone_ticket_clone(tmp_path: Path) -> None:
     repository = tmp_path / "source"
     repository.mkdir()
     git("init", "-b", "main", cwd=repository)
@@ -399,6 +399,94 @@ def test_runtime_creates_isolated_ticket_worktree(tmp_path: Path) -> None:
     assert work == (tmp_path / "tickets" / "tk-worktree").resolve()
     assert git("branch", "--show-current", cwd=work) == "acp/seat-one-tk-worktree"
     assert git("rev-parse", "HEAD", cwd=work) == git("rev-parse", "main", cwd=repository)
+    assert git("remote", cwd=work) == ""
+    assert (work / ".git").is_dir()
+    assert all(
+        path.is_relative_to(work)
+        for path in seat._git_metadata_paths(work).values()
+    )
+
+
+def test_production_sandbox_boundary_allows_standalone_clone_commit(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "source"
+    repository.mkdir()
+    git("init", "-b", "main", cwd=repository)
+    git("config", "user.name", "ACP Test", cwd=repository)
+    git("config", "user.email", "acp-test@example.invalid", cwd=repository)
+    (repository / "README.md").write_text("base\n", encoding="utf-8")
+    git("add", "README.md", cwd=repository)
+    git("commit", "-m", "base", cwd=repository)
+    runtime = seat.ACPSeatRuntime(
+        FakeBoard(base_ticket("TK-sandbox-commit")),
+        [sys.executable, str(FAKE)],
+        tmp_path / "tickets",
+        repository=repository,
+        base_ref="main",
+        seat_name="seat-one",
+    )
+    work = runtime._prepare_work_dir("TK-sandbox-commit")
+    git("config", "user.name", "ACP Test", cwd=work)
+    git("config", "user.email", "acp-test@example.invalid", cwd=work)
+    agent_code = (
+        "from pathlib import Path; import subprocess; "
+        "Path('result.txt').write_text('complete\\n'); "
+        "subprocess.run(['git','add','result.txt'],check=True); "
+        "subprocess.run(['git','commit','-m','complete work'],check=True)"
+    )
+    sandbox_available = seat._sandbox_available()
+    with patch.object(seat, "_sandbox_available", return_value=True):
+        command = seat.sandboxed_agent_command(
+            [sys.executable, "-c", agent_code], work
+        )
+
+    # CI hosts without a usable sandbox-exec still exercise the same generated
+    # boundary preflight, which resolves the real index/git-dir/common-dir and
+    # fails before launch if any mutable Git metadata is outside writable roots.
+    run_command = command if sandbox_available else command[3:]
+    subprocess.run(run_command, cwd=work, check=True, capture_output=True, text=True)
+    commit = git("rev-parse", "--verify", "HEAD^{commit}", cwd=work)
+    completion = {
+        "summary": "sandboxed commit",
+        "files_changed": ["result.txt"],
+        "notes": "\n".join(
+            [
+                f"branch_and_commit: acp/seat-one-tk-sandbox-commit@{commit}",
+                "test-command: git commit",
+                "test-output: passed",
+                "observations: standalone clone metadata stayed writable",
+            ]
+        ),
+    }
+    assert seat.validate_completion(work, completion) == completion
+
+
+def test_sandbox_boundary_rejects_linked_worktree_metadata(tmp_path: Path) -> None:
+    repository = tmp_path / "source"
+    repository.mkdir()
+    git("init", "-b", "main", cwd=repository)
+    git("config", "user.name", "ACP Test", cwd=repository)
+    git("config", "user.email", "acp-test@example.invalid", cwd=repository)
+    (repository / "README.md").write_text("base\n", encoding="utf-8")
+    git("add", "README.md", cwd=repository)
+    git("commit", "-m", "base", cwd=repository)
+    linked = tmp_path / "tickets" / "linked"
+    linked.parent.mkdir()
+    git("worktree", "add", "-b", "linked", str(linked), cwd=repository)
+    scratch = tmp_path / "separate-scratch"
+    scratch.mkdir()
+
+    with (
+        patch.object(seat, "_sandbox_available", return_value=True),
+        patch.object(seat.tempfile, "gettempdir", return_value=str(scratch)),
+    ):
+        try:
+            seat.sandboxed_agent_command(["/usr/bin/true"], linked)
+        except RuntimeError as exc:
+            assert "Git metadata escapes writable sandbox roots" in str(exc)
+        else:
+            raise AssertionError("linked worktree metadata escaped the sandbox guard")
 
 
 def test_sandbox_profile_denies_network_and_protects_token(tmp_path: Path) -> None:
@@ -451,3 +539,54 @@ def test_parent_runtime_publishes_validated_branch(tmp_path: Path) -> None:
     seat.publish_branch(work, validated)
 
     assert git("rev-parse", f"refs/heads/{branch}", cwd=remote) == commit
+
+
+def test_parent_runtime_publishes_clone_through_source_repository(
+    tmp_path: Path,
+) -> None:
+    upstream = tmp_path / "upstream.git"
+    upstream.mkdir()
+    git("init", "--bare", cwd=upstream)
+    repository = tmp_path / "source"
+    repository.mkdir()
+    git("init", "-b", "main", cwd=repository)
+    git("config", "user.name", "ACP Test", cwd=repository)
+    git("config", "user.email", "acp-test@example.invalid", cwd=repository)
+    (repository / "README.md").write_text("base\n", encoding="utf-8")
+    git("add", "README.md", cwd=repository)
+    git("commit", "-m", "base", cwd=repository)
+    git("remote", "add", "origin", str(upstream), cwd=repository)
+    git("push", "-u", "origin", "main", cwd=repository)
+    runtime = seat.ACPSeatRuntime(
+        FakeBoard(base_ticket("TK-publish-clone")),
+        [sys.executable, str(FAKE)],
+        tmp_path / "tickets",
+        repository=repository,
+        base_ref="main",
+        seat_name="seat-one",
+    )
+    work = runtime._prepare_work_dir("TK-publish-clone")
+    git("config", "user.name", "ACP Test", cwd=work)
+    git("config", "user.email", "acp-test@example.invalid", cwd=work)
+    (work / "result.txt").write_text("complete\n", encoding="utf-8")
+    git("add", "result.txt", cwd=work)
+    git("commit", "-m", "complete work", cwd=work)
+    branch = git("branch", "--show-current", cwd=work)
+    commit = git("rev-parse", "--verify", "HEAD^{commit}", cwd=work)
+    completion = {
+        "summary": "publish standalone clone",
+        "files_changed": ["result.txt"],
+        "notes": "\n".join(
+            [
+                f"branch_and_commit: {branch}@{commit}",
+                "test-command: true",
+                "test-output: passed",
+                "observations: parent-only two-hop publication",
+            ]
+        ),
+    }
+
+    validated = seat.validate_completion(work, completion)
+    seat.publish_branch(work, validated, publish_repository=repository)
+
+    assert git("rev-parse", f"refs/heads/{branch}", cwd=upstream) == commit

@@ -356,14 +356,15 @@ ticket normally. Never restart at cursor zero to look for work.
 
 `tools/acp-seat/pursers_acp_seat.py` turns one ACP v1 subprocess into one
 Pursers worker seat. It waits for that seat's offers, claims one ticket at a
-time, creates an isolated Git worktree, and sends the ticket plus every current
+time, creates a standalone Git clone, and sends the ticket plus every current
 coordinator decision to a new ACP session. Central remains authoritative for
 identity, leases, submission, and review; the ACP process never receives the
 board token or a principal ID.
 
 This source-checkout feature is intended for the same trusted Mac as Central.
 The runtime requires macOS `sandbox-exec`: network access is denied, file writes
-are limited to the ticket worktree and temporary directory, and the immutable
+are limited to the ticket clone and temporary directory. The clone keeps its
+mutable Git metadata inside the same writable boundary, while the immutable
 ACP permission policy separately rejects paths outside its configured roots.
 Terminal permission is enabled by default and every permission decision is
 written as a bounded board checkpoint. Keep any provider login directory out of
