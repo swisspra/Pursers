@@ -39,12 +39,20 @@ This release includes `pursers-central==0.1.0a30`,
 `pursers-personal==5.0.0b1`, `pursers==5.0.0b1`, and
 `pursers-wait-bridge==0.1.0a16`.
 
+Built from
+[`dc5847395e619359f6ba06e6f8d19fd2a7ec7bd5`](https://github.com/swisspra/Pursers/commit/dc5847395e619359f6ba06e6f8d19fd2a7ec7bd5)
+on branch `codex/TK-f5c5239432d4-b1-rc2`; exact-SHA verification passed in
+[CI run 34821395493](https://github.com/swisspra/Pursers/actions/runs/34821395493)
+and [CodeQL run 34774462558](https://github.com/swisspra/Pursers/actions/runs/34774462558).
+
 ### Changed
 
 - Beta release boundary: prepare the reviewed Home integration for final
   exact-candidate source, browser, 201-behavior, CI, and CodeQL verification.
   GitHub release create and edit paths now preserve prerelease status and
   prevent beta tags from becoming the stable latest release.
+- Fleet dashboard: rc6 reuses its viewer board client so repeated `/api/fleet`
+  requests work.
 - Client and seat kit: project-registry entries may declare an exact,
   board-scoped HTTPS `repository_url` for ticket routing. Generated seats fail
   before claim or verification when URL, checkout, board, or operator-ownership
