@@ -167,6 +167,49 @@ A release may proceed only when all of these conditions hold:
 The executable reference is the candidate
 [`next-train-ship-plan.md`](https://github.com/swisspra/Pursers/blob/28f81308d1cf3d40c4ed38091cc02d9c7d0827aa/docs/release/next-train-ship-plan.md).
 
+### Browser201 acceptance result for this beta
+
+Independent Browser201 verification at
+`dc5847395e619359f6ba06e6f8d19fd2a7ec7bd5` executed all 29 AionUi extension
+browser observations. Visual assertions passed for 23 and failed for 6:
+
+- `extension-join.state.bridge-missing` — state copy "Install it, then retry."
+  was not observed in the rc6 capture.
+- `extension-join.state.error` — state copy "Join failed" was not observed in
+  the rc6 capture.
+- `extension-join.state.initial` — state copy "Not checked" was not observed in
+  the rc6 capture.
+- `extension-join.state.joining` — state copy "Joining" was not observed in the
+  rc6 capture.
+- `extension-join.state.status-empty` — state copy "Project not connected" was
+  not observed in the rc6 capture.
+- `extension.bounded-errors` — state copy "That ticket is not present in the
+  bounded board response. Refresh and retry." was not observed in the rc6
+  capture.
+
+These are capture boundaries, not confirmed product defects. Evidence reference:
+`CQ-3eddc8f73c6e7671`.
+
+Strict evaluation recorded 2 passes, 6 failures, and 21 blocked AionUi rows.
+The 21 blocked rows had visually passing browser captures but lacked their
+required typed-evidence records; a visual pass alone is not a strict pass.
+
+The verified beta surface is therefore the 29-row AionUi visual capture, not
+the complete 201-row Browser201 gate. Fleet's 93 rows were not captured because
+the live dashboard exposed none of the stable board selectors required by the
+harness. Personal's 79 rows were not captured because this build exposed no
+Personal browser route on the AionUi origin. Those surfaces, and typed evidence
+for the 21 affected AionUi rows, remain explicitly not yet verified.
+
+The beta.2 work is tracked as **Fleet dashboard: expose stable board selectors
+the acceptance harness requires ([data-board-id], board selection state)**,
+**Personal: provide the browser route the acceptance catalogue expects
+(Personal MCP App / dashboard page on the AionUi origin) or re-scope the
+personal.* rows**, and **Typed-evidence pipeline: make visual passes count -
+wire typed evidence for the 21 AionUi rows strict-blocked without it**. These
+boundaries preserve release-gate condition 4: unsupported or incomplete host
+evidence remains a gap rather than a pass.
+
 ## Known gaps
 
 All items below are tracked for beta.2. Titles are reproduced without internal
