@@ -14,13 +14,18 @@ Read this together with the [release train guide](../release-train.md), the
 [release body](v5.0.0b1.md), and the
 [release workflow](../../.github/workflows/release.yml).
 
+Run every shell block below with `/bin/sh` (the equivalent script shebang is
+`#!/bin/sh`), not by pasting it into an interactive zsh session.
+
 ## Rehearsal result and release gates
 
-The non-publishing rehearsal built all six wheels from a `git archive` of the
-exact candidate with Python 3.12 and the pinned build toolchain. The generated
-hashes matched the approved set byte for byte. It also verified the separately
-archived 30-wheel Home runtime wheelhouse: every recorded wheel passes its
-checksum, and the wheelhouse `SHA256SUMS` file hashes to
+On 2026-09-14, the non-publishing rehearsal reproduced the six-wheel build,
+checksum, and Home runtime wheelhouse procedures exactly. It built all six
+wheels from a `git archive` of the exact candidate with Python 3.12 and the
+pinned build toolchain, and their generated `SHA256SUMS.txt` matched the
+approved set byte for byte. It also verified the separately archived 30-wheel
+Home runtime wheelhouse: all 30 wheels passed their recorded checksums, and the
+wheelhouse `SHA256SUMS` file hashed to
 `a34844ff32687fb8b30b9c03c990db35eec74dd88296dfcb0dd450001bbac4c5`.
 
 | Artifact | Rehearsed SHA-256 | Result |
@@ -32,13 +37,13 @@ checksum, and the wheelhouse `SHA256SUMS` file hashes to
 | `pursers_personal_import-5.0.0a3-py3-none-any.whl` | `34e7d992dffc7b50560706ecdb4c51a5ce67e50edb5c24ec8de2cd48259ed590` | match |
 | `pursers_wait_bridge-0.1.0a16-py3-none-any.whl` | `102d6eb35daae393c8fef589c8b3e60b02ab985d01856f64afb99ba3ba94834f` | match |
 
-Two documentation/automation gates remain. Do not publish until both are
-resolved and reviewed:
+Two documentation/automation gates govern publication. Do not publish until
+both are resolved and reviewed:
 
-1. `docs/releases/v5.0.0b1.md` names
-   `28f81308d1cf3d40c4ed38091cc02d9c7d0827aa` as the reviewed candidate. The
-   release tag in this runbook selects rc6, so the body must name
-   `dc5847395e619359f6ba06e6f8d19fd2a7ec7bd5` before it is used.
+1. `docs/releases/v5.0.0b1.md` must name
+   `dc5847395e619359f6ba06e6f8d19fd2a7ec7bd5` in its `Built from` provenance.
+   The `grep` in step 6 is the hard gate against the prior body, which named
+   `28f81308d1cf3d40c4ed38091cc02d9c7d0827aa`.
 2. The tag-triggered workflow renders `release-notes.md` from `CHANGELOG.md`.
    It does not use `docs/releases/v5.0.0b1.md`; the two rendered bodies differ.
    Decide and review which body is authoritative before pushing the tag.
@@ -65,9 +70,9 @@ REPOSITORY=https://github.com/swisspra/Pursers.git
 mkdir -p "$STAGING"
 git clone --no-checkout "$REPOSITORY" "$STAGING/repository"
 git -C "$STAGING/repository" fetch origin \
-  "refs/heads/$RC_BRANCH:refs/remotes/origin/$RC_BRANCH"
+  "refs/heads/${RC_BRANCH}:refs/remotes/origin/${RC_BRANCH}"
 test "$(git -C "$STAGING/repository" rev-parse --verify \
-  "refs/remotes/origin/$RC_BRANCH^{commit}")" = "$CANDIDATE"
+  "refs/remotes/origin/${RC_BRANCH}^{commit}")" = "$CANDIDATE"
 git -C "$STAGING/repository" checkout --detach "$CANDIDATE"
 test "$(git -C "$STAGING/repository" rev-parse --verify HEAD^{commit})" = "$CANDIDATE"
 test -z "$(git -C "$STAGING/repository" status --porcelain)"
@@ -81,37 +86,7 @@ HEAD is now at dc58473 chore(release): freeze rc6 integration manifest
 
 The two `test` commands are silent and exit zero. If either fails, stop.
 
-## 2. Rehearse manifest and GitHub Release flags
-
-```sh
-cd "$STAGING/repository"
-python3 tools/release_train.py check
-python3 tools/release_publish.py "$TAG" create
-python3 tools/release_publish.py "$TAG" edit
-```
-
-Expected output:
-
-```text
-release versions OK: product=5.0.0b1
---prerelease
---latest=false
---prerelease
---latest=false
-```
-
-Before the tag exists, this check is expected to fail because it deliberately
-requires `refs/tags/v5.0.0b1`:
-
-```sh
-python3 tools/release_publish.py "$TAG" verify-checkout
-```
-
-Do not create a temporary tag just to make the rehearsal pass. Run the same
-command again after the operator creates the real signed tag in step 7; its
-only expected output then is the full candidate SHA.
-
-## 3. Build the six-wheel cohort
+## 2. Build the six-wheel cohort
 
 Use Python 3.12 and exactly the versions pinned in
 `tools/release_versions.toml`:
@@ -171,6 +146,40 @@ Expected cohort output:
 ```text
 release_wheels=pursers-5.0.0b1-py3-none-any.whl,pursers_central-0.1.0a30-py3-none-any.whl,pursers_client-0.1.0a23-py3-none-any.whl,pursers_personal-5.0.0b1-py3-none-any.whl,pursers_personal_import-5.0.0a3-py3-none-any.whl,pursers_wait_bridge-0.1.0a16-py3-none-any.whl
 ```
+
+## 3. Rehearse manifest and GitHub Release flags
+
+Run the release tools with the build environment from step 2. It contains the
+pinned `packaging==25.0`; an unprepared system Python is not sufficient.
+
+```sh
+cd "$STAGING/repository"
+"$STAGING/build-venv/bin/python" tools/release_train.py check
+"$STAGING/build-venv/bin/python" tools/release_publish.py "$TAG" create
+"$STAGING/build-venv/bin/python" tools/release_publish.py "$TAG" edit
+```
+
+Expected output:
+
+```text
+release versions OK: product=5.0.0b1
+--prerelease
+--latest=false
+--prerelease
+--latest=false
+```
+
+Before the tag exists, this check is expected to fail because it deliberately
+requires `refs/tags/v5.0.0b1`:
+
+```sh
+"$STAGING/build-venv/bin/python" tools/release_publish.py \
+  "$TAG" verify-checkout
+```
+
+Do not create a temporary tag just to make the rehearsal pass. Run the same
+command again after the operator creates the real signed tag in step 7; its
+only expected output then is the full candidate SHA.
 
 ## 4. Generate and verify `SHA256SUMS.txt`
 
@@ -263,7 +272,7 @@ printf 'release_body_commit=%s\n' "$DOCS_COMMIT"
 ```
 
 Expected output includes the full candidate SHA and a reviewed docs commit.
-The `grep` currently fails on the unrevised body; that is an intentional
+The `grep` must pass on the reviewed correction and remains an intentional
 pre-publish gate. Do not substitute the shorter CHANGELOG body without review.
 
 ## 7. Operator-only tag creation
@@ -275,7 +284,8 @@ green and the exact candidate has passed the required CI and review:
 cd "$STAGING/repository"
 git tag -s "$TAG" "$CANDIDATE" -m "Pursers $VERSION"
 test "$(git rev-parse --verify "$TAG^{commit}")" = "$CANDIDATE"
-python3 tools/release_publish.py "$TAG" verify-checkout
+"$STAGING/build-venv/bin/python" tools/release_publish.py \
+  "$TAG" verify-checkout
 git push origin "refs/tags/$TAG"
 ```
 
@@ -328,7 +338,8 @@ for local_asset in dist/*.whl dist/SHA256SUMS.txt; do
   name=$(basename "$local_asset")
   existing="$STAGING/existing-release-assets/$name"
   if test -e "$existing"; then
-    python3 tools/release_publish.py "$TAG" verify-asset \
+    "$STAGING/build-venv/bin/python" tools/release_publish.py \
+      "$TAG" verify-asset \
       --local "$local_asset" --existing "$existing"
   else
     gh release upload "$TAG" "$local_asset"
@@ -407,7 +418,7 @@ than claiming the seven GitHub assets are sufficient.
 
 ## Rehearsal observations
 
-- `python3 tools/release_train.py check` passed at rc6 with
+- `"$STAGING/build-venv/bin/python" tools/release_train.py check` passed at rc6 with
   `release versions OK: product=5.0.0b1`.
 - `release_publish.py` emitted `--prerelease` and `--latest=false` for both
   create and edit modes.
@@ -425,9 +436,10 @@ than claiming the seven GitHub assets are sufficient.
   cohort is not a complete dependency wheelhouse.
 - `verify-checkout` correctly failed before the tag existed. It becomes an
   effective exact-SHA gate only after the signed tag is created.
-- The curated release body is absent from rc6, still names an older candidate,
-  and differs from the CHANGELOG-derived body used by the workflow. Those are
-  release-day blockers, not reasons to bypass the body review.
+- The curated release body is absent from rc6. Its reviewed docs correction
+  must name the exact candidate, and it differs from the CHANGELOG-derived body
+  used by the workflow. Body provenance remains a release-day gate, not a
+  reason to bypass review.
 - A manual `gh release create` can race the tag-triggered workflow. Use the
   workflow normally; use the manual path only after a stopped pre-create run
   and an explicit recovery decision.
