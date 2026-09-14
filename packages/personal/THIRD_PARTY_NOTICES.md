@@ -8,7 +8,7 @@ upstream source releases of those packages.
 ## MCP Apps SDK
 
 - Package: `@modelcontextprotocol/ext-apps`
-- Version used to build the View: `1.7.5`
+- Version used to build the View: `2.0.0`
 - Project: <https://github.com/modelcontextprotocol/ext-apps>
 - License: upstream licensing-transition terms covering Apache-2.0, MIT, and
   CC-BY-4.0 documentation
@@ -18,8 +18,8 @@ The complete upstream license text shipped with this distribution is at
 
 ## Model Context Protocol TypeScript SDK
 
-- Package: `@modelcontextprotocol/sdk`
-- Version used to build the View: `1.30.0`
+- Packages: `@modelcontextprotocol/client`, `@modelcontextprotocol/core`
+- Versions used to build the View: `2.0.0`
 - Project: <https://github.com/modelcontextprotocol/typescript-sdk>
 - License: MIT
 
