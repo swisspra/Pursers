@@ -1669,6 +1669,32 @@ class LiveDashboard:
 
     @classmethod
     def _ticket_view(cls, ticket: dict[str, Any]) -> dict[str, Any]:
+        review_offer = ticket.get("review_offer")
+        if not isinstance(review_offer, dict):
+            review_offer = {}
+        review_lease = ticket.get("review_lease")
+        if not isinstance(review_lease, dict):
+            review_lease = {}
+        raw_annotations = ticket.get("annotations")
+        annotations: list[dict[str, Any]] = []
+        if isinstance(raw_annotations, list):
+            for item in raw_annotations[-8:]:
+                if not isinstance(item, dict):
+                    continue
+                author = item.get("by")
+                if not isinstance(author, dict):
+                    author = {}
+                annotations.append(
+                    {
+                        "id": item.get("annotation_id"),
+                        "kind": item.get("kind") or "note",
+                        "text": str(item.get("text") or "")[:4_096],
+                        "author": author.get("agent_name")
+                        or author.get("agent_id"),
+                        "author_agent_id": author.get("agent_id"),
+                        "at": item.get("at"),
+                    }
+                )
         return {
             "id": ticket["ticket_id"],
             "project": cls._project_from_target(ticket.get("target_url")),
@@ -1678,10 +1704,18 @@ class LiveDashboard:
             "priority": ticket.get("priority", "medium"),
             "assigned_to": ticket.get("assigned_to"),
             "assigned_agent_id": ticket.get("assigned_to_agent_id"),
+            "claimed_by": ticket.get("claimed_by"),
             "claimed_agent_id": ticket.get("claimed_by_agent_id"),
             "lease_expires_at": ticket.get("lease_expires_at"),
-            "review_offer": bool(ticket.get("review_offer")),
-            "review_lease": bool(ticket.get("review_lease")),
+            "review_offer": bool(review_offer),
+            "review_offer_name": review_offer.get("agent_name"),
+            "review_offer_agent_id": review_offer.get("agent_id"),
+            "review_offer_expires_at": review_offer.get("expires_at"),
+            "review_lease": bool(review_lease),
+            "reviewer_name": review_lease.get("reviewer_agent_name"),
+            "reviewer_agent_id": review_lease.get("reviewer_agent_id"),
+            "review_lease_expires_at": review_lease.get("expires_at"),
+            "annotations": annotations,
             "ttl_s": ticket.get("ttl_s"),
             "rejected": ticket.get("status") == "rejected",
             "abandoned_count": int(ticket.get("abandoned_count", 0)),
@@ -1723,6 +1757,38 @@ class LiveDashboard:
     @staticmethod
     def _ticket_source_from_view(ticket: dict[str, Any]) -> dict[str, Any]:
         """Recover assignment fields when a test supplied only a projection."""
+        review_offer = None
+        if ticket.get("review_offer"):
+            review_offer = {
+                "agent_name": ticket.get("review_offer_name"),
+                "agent_id": ticket.get("review_offer_agent_id"),
+                "expires_at": ticket.get("review_offer_expires_at"),
+            }
+        review_lease = None
+        if ticket.get("review_lease"):
+            review_lease = {
+                "reviewer_agent_name": ticket.get("reviewer_name"),
+                "reviewer_agent_id": ticket.get("reviewer_agent_id"),
+                "expires_at": ticket.get("review_lease_expires_at"),
+            }
+        raw_annotations = ticket.get("annotations")
+        annotations = []
+        if isinstance(raw_annotations, list):
+            for item in raw_annotations:
+                if not isinstance(item, dict):
+                    continue
+                annotations.append(
+                    {
+                        "annotation_id": item.get("id"),
+                        "kind": item.get("kind"),
+                        "text": item.get("text"),
+                        "by": {
+                            "agent_name": item.get("author"),
+                            "agent_id": item.get("author_agent_id"),
+                        },
+                        "at": item.get("at"),
+                    }
+                )
         return {
             "ticket_id": ticket.get("id"),
             "target_url": ticket.get("project"),
@@ -1732,10 +1798,12 @@ class LiveDashboard:
             "priority": ticket.get("priority"),
             "assigned_to": ticket.get("assigned_to"),
             "assigned_to_agent_id": ticket.get("assigned_agent_id"),
+            "claimed_by": ticket.get("claimed_by"),
             "claimed_by_agent_id": ticket.get("claimed_agent_id"),
             "lease_expires_at": ticket.get("lease_expires_at"),
-            "review_offer": bool(ticket.get("review_offer")),
-            "review_lease": bool(ticket.get("review_lease")),
+            "review_offer": review_offer,
+            "review_lease": review_lease,
+            "annotations": annotations,
             "ttl_s": ticket.get("ttl_s"),
             "abandoned_count": ticket.get("abandoned_count", 0),
             "rejection_count": ticket.get("rejection_count", 0),

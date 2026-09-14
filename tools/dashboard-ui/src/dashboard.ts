@@ -7,7 +7,14 @@ import {
   type McpUiHostContext,
 } from "@modelcontextprotocol/ext-apps";
 import "./dashboard.css";
-import { ticketReviewLabel, ticketWorkStage, workCounts, type WorkStage } from "./work-state.js";
+import {
+  ticketBlocker,
+  ticketNow,
+  ticketReviewLabel,
+  ticketWorkStage,
+  workCounts,
+  type WorkStage,
+} from "./work-state.js";
 
 type DataMode = "live" | "stale" | "demo" | "demo-error";
 type ViewName = "today" | "work" | "agents" | "fleet" | "links" | "activity";
@@ -37,10 +44,18 @@ type Ticket = {
   priority: string;
   assigned_to: string | null;
   assigned_agent_id: string | null;
+  claimed_by: string | null;
   claimed_agent_id: string | null;
   lease_expires_at: string | null;
   review_offer: boolean;
+  review_offer_name: string | null;
+  review_offer_agent_id: string | null;
+  review_offer_expires_at: string | null;
   review_lease: boolean;
+  reviewer_name: string | null;
+  reviewer_agent_id: string | null;
+  review_lease_expires_at: string | null;
+  annotations: TicketAnnotation[];
   rejected: boolean;
   abandoned_count: number;
   rejection_count: number;
@@ -48,6 +63,14 @@ type Ticket = {
   updated_at: string | null;
   submitted_at: string | null;
   closed_at: string | null;
+};
+type TicketAnnotation = {
+  id: string | null;
+  kind: string;
+  text: string;
+  author: string | null;
+  author_agent_id: string | null;
+  at: string | null;
 };
 type BoardEvent = {
   id: string;
@@ -173,8 +196,8 @@ const fallback: Snapshot = {
     { id: "AI-DEMO-2", name: "reviewer-β", status: "idle", role: "reviewer", focus: "Accessibility & special characters", platform: "synthetic", idle_minutes: 18, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null, stale: false },
   ],
   tickets: [
-    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:01:00Z", submitted_at: null, closed_at: null },
-    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "reviewer-β", assigned_agent_id: "AI-DEMO-2", claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:02:00Z", submitted_at: "2099-01-01T00:02:00Z", closed_at: null },
+    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: "agent-alpha", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_offer_name: null, review_offer_agent_id: null, review_offer_expires_at: null, review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:01:00Z", submitted_at: null, closed_at: null },
+    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: null, claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_offer_name: "reviewer-β", review_offer_agent_id: "AI-DEMO-2", review_offer_expires_at: "2099-01-01T00:12:00Z", review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:02:00Z", submitted_at: "2099-01-01T00:02:00Z", closed_at: null },
   ],
   highlights: {
     latest_handoff: { id: "MEM-DEMO-HANDOFF", type: "handoff", title: "UI shell ready for review", summary: "Synthetic handoff with the next checks for the Personal Preview.", author: "agent-alpha", created_at: "2099-01-01T00:03:00Z", next_steps: ["Check narrow layout", "Verify keyboard navigation"], warnings: [] },
@@ -316,10 +339,21 @@ function decodeTicket(value: unknown): Ticket | null {
     priority: text(value.priority, "medium"),
     assigned_to: optionalText(value.assigned_to),
     assigned_agent_id: optionalText(value.assigned_agent_id),
+    claimed_by: optionalText(value.claimed_by),
     claimed_agent_id: optionalText(value.claimed_agent_id),
     lease_expires_at: optionalText(value.lease_expires_at),
     review_offer: boolean(value.review_offer),
+    review_offer_name: optionalText(value.review_offer_name),
+    review_offer_agent_id: optionalText(value.review_offer_agent_id),
+    review_offer_expires_at: optionalText(value.review_offer_expires_at),
     review_lease: boolean(value.review_lease),
+    reviewer_name: optionalText(value.reviewer_name),
+    reviewer_agent_id: optionalText(value.reviewer_agent_id),
+    review_lease_expires_at: optionalText(value.review_lease_expires_at),
+    annotations: (Array.isArray(value.annotations) ? value.annotations : [])
+      .slice(-8)
+      .map(decodeTicketAnnotation)
+      .filter((item): item is TicketAnnotation => item !== null),
     rejected: boolean(value.rejected),
     abandoned_count: nonNegative(value.abandoned_count),
     rejection_count: nonNegative(value.rejection_count),
@@ -327,6 +361,18 @@ function decodeTicket(value: unknown): Ticket | null {
     updated_at: optionalText(value.updated_at),
     submitted_at: optionalText(value.submitted_at),
     closed_at: optionalText(value.closed_at),
+  };
+}
+
+function decodeTicketAnnotation(value: unknown): TicketAnnotation | null {
+  if (!record(value)) return null;
+  return {
+    id: optionalText(value.id),
+    kind: text(value.kind, "note", 32),
+    text: text(value.text, "", MAX_LONG_TEXT_LENGTH),
+    author: optionalText(value.author),
+    author_agent_id: optionalText(value.author_agent_id),
+    at: optionalText(value.at),
   };
 }
 
@@ -821,44 +867,19 @@ function renderLifecycleRail(ticket: Ticket, data: Snapshot): HTMLElement {
   return rail;
 }
 
-function ticketActor(ticket: Ticket): string {
-  return ticket.assigned_to ?? ticket.claimed_agent_id ?? ticket.assigned_agent_id ?? "Not supplied";
-}
-
-function ticketNow(ticket: Ticket): string {
-  const status = ticket.status.toLowerCase();
-  const actor = ticketActor(ticket);
-  if (["claimed", "in_progress", "creating_report"].includes(status)) {
-    return `${actor} is working · ${ticket.lease_expires_at ? leaseText(ticket.lease_expires_at) : "lease Not observed"}`;
-  }
-  if (ticket.review_lease) return `${actor} is reviewing`;
-  if (ticket.review_offer) return `Review offered · ${actor}`;
-  if (status === "submitted") return "Submitted · reviewer Not supplied";
-  if (status === "rejected") return `Rejected · ${actor}`;
-  if (["closed", "canceled", "terminated"].includes(status)) return status;
-  if (["open", "assigned"].includes(status)) return `Open · worker ${actor}`;
-  return `${ticket.status || "Not observed"} · owner ${actor}`;
-}
-
-function ticketBlocker(ticket: Ticket, data: Snapshot): string {
-  const blocker = ticketEvents(data, ticket.id).find((event) => {
-    const kind = event.kind.toLowerCase();
-    return kind.includes("blocker") || kind.includes("blocked");
-  });
-  if (blocker) return blocker.text;
-  if (ticket.status.toLowerCase() === "rejected" || ticket.rejected) return "Rejected by independent review";
-  return "None recorded";
-}
-
 function renderTicketSummary(ticket: Ticket, data: Snapshot): HTMLElement {
   const wrapper = element("section", "ticket-coordination");
   wrapper.setAttribute("aria-label", `Current coordination for ${ticket.id}`);
   if (data.stale || data.data_mode === "stale") wrapper.append(element("p", "ticket-data-state", "Last-known data"));
   const summary = element("dl", "ticket-summary");
   const cells = [
-    ["Now", ticketNow(ticket)],
+    ["Now", ticketNow(
+      ticket,
+      ticket.lease_expires_at ? leaseText(ticket.lease_expires_at) : "lease Not observed",
+      ticket.review_lease_expires_at ? leaseText(ticket.review_lease_expires_at) : "lease Not observed",
+    )],
     ["Next", NEXT_BY_STATUS[ticket.status.toLowerCase()] ?? "Not supplied"],
-    ["Blocked", ticketBlocker(ticket, data)],
+    ["Blocked", ticketBlocker(ticket, ticketEvents(data, ticket.id))],
   ];
   cells.forEach(([label, value]) => {
     const cell = element("div", "ticket-summary-cell");

@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "f531c62aa98cfdffc49f9247f12429fdbb38e33366bd8fd0dc7598f364fed1d4"
-    assert len(payload) == 413138
+    expected = "00c8411b347944cd61c4f97e9ba141396d0f99136ba1e076cd9450dfb6365d1e"
+    assert len(payload) == 415028
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a26"
     assert lock["view"] == {
@@ -112,7 +112,7 @@ def test_dashboard_work_state_synthetic_ticket_harness() -> None:
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "pass 6" in completed.stdout
+    assert "pass 8" in completed.stdout
 
 
 def test_ticket_projection_preserves_distinct_review_activity() -> None:
@@ -121,12 +121,34 @@ def test_ticket_projection_preserves_distinct_review_activity() -> None:
         {
             "ticket_id": "TK-OFFERED",
             "status": "submitted",
-            "review_offer": {"agent_id": "AI-REVIEWER"},
+            "assigned_to": "original-worker",
+            "review_offer": {
+                "agent_id": "AI-REVIEWER",
+                "agent_name": "offered-reviewer",
+                "expires_at": "2030-01-01T00:10:00+00:00",
+            },
         },
         {
             "ticket_id": "TK-ACTIVE",
             "status": "submitted",
-            "review_lease": {"agent_id": "AI-REVIEWER"},
+            "assigned_to": "original-worker",
+            "review_lease": {
+                "reviewer_agent_id": "AI-REVIEWER",
+                "reviewer_agent_name": "active-reviewer",
+                "expires_at": "2030-01-01T00:15:00+00:00",
+            },
+            "annotations": [
+                {
+                    "annotation_id": "AN-000000000001",
+                    "kind": "decision",
+                    "text": "Use the amended contract",
+                    "by": {
+                        "agent_id": "AI-COORDINATOR",
+                        "agent_name": "coordinator-a",
+                    },
+                    "at": "2030-01-01T00:05:00+00:00",
+                }
+            ],
         },
     ]
     projected = [LiveDashboard._ticket_view(ticket) for ticket in tickets]
@@ -140,6 +162,50 @@ def test_ticket_projection_preserves_distinct_review_activity() -> None:
         ("submitted", True, False),
         ("submitted", False, True),
     ]
+    assert projected[1]["review_offer_name"] == "offered-reviewer"
+    assert projected[1]["review_offer_agent_id"] == "AI-REVIEWER"
+    assert projected[1]["review_offer_expires_at"] == "2030-01-01T00:10:00+00:00"
+    assert projected[2]["assigned_to"] == "original-worker"
+    assert projected[2]["reviewer_name"] == "active-reviewer"
+    assert projected[2]["reviewer_agent_id"] == "AI-REVIEWER"
+    assert projected[2]["review_lease_expires_at"] == "2030-01-01T00:15:00+00:00"
+    assert projected[2]["annotations"] == [
+        {
+            "id": "AN-000000000001",
+            "kind": "decision",
+            "text": "Use the amended contract",
+            "author": "coordinator-a",
+            "author_agent_id": "AI-COORDINATOR",
+            "at": "2030-01-01T00:05:00+00:00",
+        }
+    ]
+    repository = Path(__file__).resolve().parents[3]
+    rendered = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "--eval",
+            """
+import { readFileSync } from "node:fs";
+import { ticketBlocker, ticketNow } from "./tools/dashboard-ui/src/work-state.js";
+const ticket = JSON.parse(readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify({
+  now: ticketNow(ticket, undefined, "12m left"),
+  blocked: ticketBlocker(ticket, []),
+}));
+""",
+        ],
+        cwd=repository,
+        input=json.dumps(projected[2]),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    assert json.loads(rendered.stdout) == {
+        "now": "active-reviewer is reviewing · 12m left",
+        "blocked": "Decision: Use the amended contract · coordinator-a",
+    }
 
 
 @pytest.fixture
