@@ -16,6 +16,9 @@ dependencies = [
   "uvicorn>=0.30,<1",
 ]
 
+[project.scripts]
+pursers-central = "pursers_central.pursers_central_runtime:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["pursers_central*"]
