@@ -839,6 +839,12 @@ class BoardClient:
             arguments["ticket_ids"] = ticket_ids
         return await self._call("ticket_list", arguments)
 
+    async def dispatch_my_offers(self) -> dict[str, Any]:
+        """Read the active offers scoped to this exact joined seat."""
+        return await self._call(
+            "dispatch_my_offers", {"agent_name": self.agent_name}
+        )
+
     async def memory_write(
         self,
         title: str,

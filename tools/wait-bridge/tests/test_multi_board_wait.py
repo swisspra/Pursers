@@ -139,6 +139,24 @@ class FakeTransport:
                     if ticket.get("status") == payload["status"]
                 ]
             return FakeResult({"tickets": tickets})
+        if name == "dispatch_my_offers":
+            selected_agent_id = wait_server._derived_agent_id(
+                self.principal_id, payload["agent_name"], board_id
+            )
+            tickets = []
+            for ticket in self.tickets[board_id].values():
+                offer_key = (
+                    "review_offer"
+                    if ticket.get("status") == "submitted"
+                    else "work_offer"
+                )
+                offer = ticket.get(offer_key)
+                if (
+                    isinstance(offer, dict)
+                    and offer.get("agent_id") == selected_agent_id
+                ):
+                    tickets.append(ticket)
+            return FakeResult({"tickets": tickets})
         if name == "lease_renew":
             self.renewed.append((board_id, payload["ticket_id"]))
             return FakeResult({"lease_expires_at": "later"})
@@ -300,12 +318,17 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
 
         data_calls = [
             call for call in transport.calls
-            if call[0] in {"board_catchup", "ticket_list", "ticket_get"}
+            if call[0] in {
+                "board_catchup",
+                "ticket_list",
+                "ticket_get",
+                "dispatch_my_offers",
+            }
         ]
         self.assertLess(len(data_calls), 20)
         self.assertEqual(
             [name for name, _board, _arguments in data_calls],
-            ["board_catchup", "ticket_list"],
+            ["board_catchup", "ticket_list", "dispatch_my_offers"],
         )
         self.assertEqual(result["new_seq"], {"alpha": 500})
         self.assertEqual(result["compacted"], {"alpha": True})
@@ -376,6 +399,20 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             result["events"][0]["offer"]["ticket_id"], "TK-missed-offer"
+        )
+        offer_reads = [
+            arguments
+            for name, board_id, arguments in transport.calls
+            if name == "dispatch_my_offers" and board_id == "alpha"
+        ]
+        self.assertEqual(len(offer_reads), 2)
+        self.assertEqual(
+            {arguments["agent_name"] for arguments in offer_reads},
+            {wait_server.AGENT_NAME},
+        )
+        self.assertEqual(
+            sum(name == "ticket_list" for name, _board, _args in transport.calls),
+            1,
         )
 
     async def test_reviewer_auto_surfaces_submitted_registry_backlog(self) -> None:
@@ -533,7 +570,10 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         final_calls = transport.calls[calls_after_subscribe_drain:]
         self.assertEqual(
             [(name, board_id) for name, board_id, _arguments in final_calls],
-            [("ticket_list", "alpha"), ("ticket_list", "beta")],
+            [
+                ("dispatch_my_offers", "alpha"),
+                ("dispatch_my_offers", "beta"),
+            ],
         )
         self.assertEqual(transport.renewed, [])
 

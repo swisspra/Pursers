@@ -388,6 +388,7 @@ MIN_CATCHUP_MAX_BYTES = MIN_SNAPSHOT_MAX_BYTES
 DEFAULT_DISPATCH_PROJECTION_LIMIT = 25
 MAX_DISPATCH_PROJECTION_LIMIT = 100
 MAX_DISPATCH_PROJECTION_SCAN_EVENTS = 10_000
+MAX_DISPATCH_MY_OFFERS = 10
 MAX_CATCHUP_MAX_BYTES = MAX_SNAPSHOT_MAX_BYTES
 BRIEFING_OPEN_TICKET_LIMIT = 20
 BRIEFING_PINNED_DIGEST_LIMIT = 8
@@ -10210,6 +10211,96 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "release_events": release_events,
             "implicitly_renewed": changed["renewed"],
             "scrub_audit": changed["scrub_audit"],
+        }
+
+    @tool()
+    async def dispatch_my_offers(
+        board_id: str,
+        agent_name: str,
+    ) -> dict[str, Any]:
+        """Return only current, valid dispatch offers for one caller-owned seat.
+
+        This is a pure recovery read for clients that missed a recipient-scoped
+        push notification.  The projection is deliberately minimal and never
+        exposes another seat's offer.
+        """
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        principal = current_principal()
+        require_scope(principal, "board:read")
+        document = service.load(board_id)
+        selected_agent_id = agent_id(
+            board_id, principal.principal_id, agent_name
+        )
+        owned_ids = {
+            member["agent_id"]
+            for member in service.principal_members(
+                document, principal.principal_id
+            )
+        }
+        if selected_agent_id not in owned_ids:
+            raise PermissionError("agent is not a member of this board")
+
+        now = time.time()
+        projected: list[dict[str, Any]] = []
+        for ticket in document["tickets"].values():
+            kind = (
+                "work" if ticket.get("status") == "open"
+                else "review" if ticket.get("status") == "submitted"
+                else None
+            )
+            if kind is None:
+                continue
+            offer_key = f"{kind}_offer"
+            offer = ticket.get(offer_key)
+            expires_epoch = (
+                offer.get("expires_at_epoch")
+                if isinstance(offer, Mapping)
+                else None
+            )
+            if (
+                not isinstance(offer, Mapping)
+                or offer.get("agent_id") != selected_agent_id
+                or isinstance(expires_epoch, bool)
+                or not isinstance(expires_epoch, (int, float))
+                or float(expires_epoch) <= now
+                or invalid_dispatch_offer_reason(
+                    document, ticket, offer, now, kind
+                ) is not None
+            ):
+                continue
+            projected.append(
+                {
+                    "ticket_id": ticket["ticket_id"],
+                    "status": ticket["status"],
+                    "target_url": ticket.get("target_url", ""),
+                    "tier": ticket.get("tier", 2),
+                    "skills_required": list(
+                        ticket.get("skills_required") or []
+                    ),
+                    "updated_at": ticket.get("updated_at"),
+                    "payload_ref": resource_uri(
+                        board_id, "ticket", ticket["ticket_id"]
+                    ),
+                    "dispatch_state": {
+                        "state": "offered",
+                        "kind": kind,
+                    },
+                    offer_key: copy.deepcopy(dict(offer)),
+                }
+            )
+        projected.sort(key=lambda item: str(item["ticket_id"]))
+        total_matching = len(projected)
+        projected = projected[:MAX_DISPATCH_MY_OFFERS]
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "agent_id": selected_agent_id,
+            "tickets": projected,
+            "count": len(projected),
+            "total_matching": total_matching,
+            "truncated": total_matching > len(projected),
+            "latest_seq": latest_seq(board_id),
         }
 
     @tool()

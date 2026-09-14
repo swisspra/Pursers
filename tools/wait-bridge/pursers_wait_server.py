@@ -282,7 +282,12 @@ POLL_SAMPLE_LIMIT = 24
 WAIT_HOUR_RETENTION = 48
 WAIT_RETURN_SAMPLE_LIMIT = 256
 CONTEXT_READ_TOOLS = frozenset(
-    {"board_onboard", "board_snapshot", "board_catchup"}
+    {
+        "board_onboard",
+        "board_snapshot",
+        "board_catchup",
+        "dispatch_my_offers",
+    }
 )
 HOST_TIMEOUTS_S = {
     "codex": 620,
@@ -1281,6 +1286,16 @@ class _BoardView:
 
     async def ticket_list(self, **arguments: Any) -> dict[str, Any]:
         return await self._call("ticket_list", arguments)
+
+    async def dispatch_my_offers(self) -> dict[str, Any]:
+        selected_name = (
+            self.identity.agent_name
+            if self.identity is not None
+            else self.agent_name
+        )
+        return await self._call(
+            "dispatch_my_offers", {"agent_name": selected_name}
+        )
 
     async def lease_renew(
         self,
@@ -5080,7 +5095,23 @@ async def _reconcile_offers(
     board_id: str,
     *,
     tickets: list[dict[str, Any]] | None = None,
+    prefer_server: bool = False,
 ) -> list[dict[str, Any]]:
+    if prefer_server or tickets is None:
+        read_offers = getattr(client, "dispatch_my_offers", None)
+        if callable(read_offers):
+            try:
+                offered = await asyncio.wait_for(
+                    read_offers(), timeout=OFFER_RECONCILE_TIMEOUT_S
+                )
+                tickets = list(offered.get("tickets", []))
+            except Exception as exc:
+                _LOGGER.debug(
+                    "server offer reconciliation unavailable board_id=%s "
+                    "reason=%s",
+                    board_id,
+                    type(exc).__name__,
+                )
     if tickets is None:
         arguments: dict[str, Any] = {
             "include_closed": False,
@@ -5738,13 +5769,15 @@ async def _wait_for_work_many(
             relevant = compacted
         if backlog and not meta["partial"]:
             entry_ticket_snapshots[board_id] = list(active_tickets or [])
-            reconciled = _reconciled_offer_events(
-                active_tickets or [],
+            reconciled = await _reconcile_offers(
+                views[board_id],
                 agent_ids[board_id],
                 only_mine,
                 proj,
                 wait_for_by_board[board_id],
                 board_id,
+                tickets=active_tickets or [],
+                prefer_server=True,
             )
             queued = await _scan_open_backlog(
                 views[board_id],
@@ -6235,13 +6268,15 @@ async def _wait_for_work(
         event.get("ticket_id") for event in relevant if event.get("ticket_id")
     }
     if not catchup_meta["compacted"]:
-        reconciled = _reconciled_offer_events(
-            last_active_tickets or [],
+        reconciled = await _reconcile_offers(
+            client,
             my_agent_id,
             only_mine,
             proj,
             selected_wait_for,
             BOARD_ID,
+            tickets=last_active_tickets or [],
+            prefer_server=True,
         )
         relevant.extend(
             event for event in reconciled
