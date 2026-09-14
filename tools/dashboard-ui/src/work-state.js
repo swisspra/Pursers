@@ -55,6 +55,7 @@ export function ticketNow(
   ticket,
   leaseLabel = 'lease Not observed',
   reviewLeaseLabel = 'lease Not observed',
+  workOfferExpiryLabel = 'offer expiry Not observed',
 ) {
   const status = ticket.status.toLowerCase();
   const worker = firstSupplied(
@@ -66,17 +67,37 @@ export function ticketNow(
   const reviewer = ticket.review_lease === true
     ? firstSupplied(ticket.reviewer_name, ticket.reviewer_agent_id)
     : firstSupplied(ticket.review_offer_name, ticket.review_offer_agent_id);
+  const offeredWorker = firstSupplied(ticket.work_offer_name, ticket.work_offer_agent_id);
 
   if (['claimed', 'in_progress', 'creating_report'].includes(status)) {
     return `${worker} is working · ${leaseLabel}`;
   }
   if (ticket.review_lease === true) return `${reviewer} is reviewing · ${reviewLeaseLabel}`;
   if (ticket.review_offer === true) return `Review offered · ${reviewer}`;
+  if (ticket.work_offer === true) return `Work offered · ${offeredWorker} · ${workOfferExpiryLabel}`;
   if (status === 'submitted') return 'Submitted · reviewer Not supplied';
   if (status === 'rejected') return `Rejected · ${worker}`;
   if (['closed', 'canceled', 'terminated'].includes(status)) return status;
   if (['open', 'assigned'].includes(status)) return `Open · worker ${worker}`;
   return `${ticket.status || 'Not observed'} · owner ${worker}`;
+}
+
+export function ticketLifecycleStage(ticket) {
+  if (ticket.review_lease === true || ticket.review_offer === true) return 'review';
+  if (ticket.work_offer === true) return 'offered';
+  const status = ticket.status.toLowerCase();
+  if (status === 'open' || status === 'assigned') return 'open';
+  if (['claimed', 'in_progress', 'creating_report'].includes(status)) return 'working';
+  if (status === 'submitted') return 'submitted';
+  if (status === 'reviewing' || status === 'in_review') return 'review';
+  if (['closed', 'canceled', 'terminated'].includes(status)) return 'resolved';
+  return null;
+}
+
+export function ticketOfferObservedAt(ticket) {
+  return typeof ticket.work_offer_offered_at === 'string' && ticket.work_offer_offered_at.length > 0
+    ? ticket.work_offer_offered_at
+    : null;
 }
 
 function newestCoordinationAnnotation(annotations) {

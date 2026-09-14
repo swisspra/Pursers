@@ -9,7 +9,9 @@ import {
 import "./dashboard.css";
 import {
   ticketBlocker,
+  ticketLifecycleStage,
   ticketNow,
+  ticketOfferObservedAt,
   ticketReviewLabel,
   ticketWorkStage,
   workCounts,
@@ -47,6 +49,11 @@ type Ticket = {
   claimed_by: string | null;
   claimed_agent_id: string | null;
   lease_expires_at: string | null;
+  work_offer: boolean;
+  work_offer_name: string | null;
+  work_offer_agent_id: string | null;
+  work_offer_offered_at: string | null;
+  work_offer_expires_at: string | null;
   review_offer: boolean;
   review_offer_name: string | null;
   review_offer_agent_id: string | null;
@@ -198,8 +205,8 @@ const fallback: Snapshot = {
     { id: "AI-DEMO-2", name: "reviewer-β", status: "idle", role: "reviewer", focus: "Accessibility & special characters", platform: "synthetic", idle_minutes: 18, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null, stale: false },
   ],
   tickets: [
-    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: "agent-alpha", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_offer_name: null, review_offer_agent_id: null, review_offer_expires_at: null, review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], annotation_count: 0, annotations_omitted_count: 0, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:01:00Z", submitted_at: null, closed_at: null },
-    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: null, claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_offer_name: "reviewer-β", review_offer_agent_id: "AI-DEMO-2", review_offer_expires_at: "2099-01-01T00:12:00Z", review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], annotation_count: 0, annotations_omitted_count: 0, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:02:00Z", submitted_at: "2099-01-01T00:02:00Z", closed_at: null },
+    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: "agent-alpha", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, work_offer: false, work_offer_name: null, work_offer_agent_id: null, work_offer_offered_at: null, work_offer_expires_at: null, review_offer: false, review_offer_name: null, review_offer_agent_id: null, review_offer_expires_at: null, review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], annotation_count: 0, annotations_omitted_count: 0, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:01:00Z", submitted_at: null, closed_at: null },
+    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: null, claimed_agent_id: null, lease_expires_at: null, work_offer: false, work_offer_name: null, work_offer_agent_id: null, work_offer_offered_at: null, work_offer_expires_at: null, review_offer: true, review_offer_name: "reviewer-β", review_offer_agent_id: "AI-DEMO-2", review_offer_expires_at: "2099-01-01T00:12:00Z", review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], annotation_count: 0, annotations_omitted_count: 0, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:02:00Z", submitted_at: "2099-01-01T00:02:00Z", closed_at: null },
   ],
   highlights: {
     latest_handoff: { id: "MEM-DEMO-HANDOFF", type: "handoff", title: "UI shell ready for review", summary: "Synthetic handoff with the next checks for the Personal Preview.", author: "agent-alpha", created_at: "2099-01-01T00:03:00Z", next_steps: ["Check narrow layout", "Verify keyboard navigation"], warnings: [] },
@@ -349,6 +356,11 @@ function decodeTicket(value: unknown): Ticket | null {
     claimed_by: optionalText(value.claimed_by),
     claimed_agent_id: optionalText(value.claimed_agent_id),
     lease_expires_at: optionalText(value.lease_expires_at),
+    work_offer: boolean(value.work_offer),
+    work_offer_name: optionalText(value.work_offer_name),
+    work_offer_agent_id: optionalText(value.work_offer_agent_id),
+    work_offer_offered_at: optionalText(value.work_offer_offered_at),
+    work_offer_expires_at: optionalText(value.work_offer_expires_at),
     review_offer: boolean(value.review_offer),
     review_offer_name: optionalText(value.review_offer_name),
     review_offer_agent_id: optionalText(value.review_offer_agent_id),
@@ -835,9 +847,7 @@ function ticketEvents(data: Snapshot, ticketId: string): BoardEvent[] {
 }
 
 function lifecycleStageFor(ticket: Ticket): LifecycleStage["id"] | null {
-  if (ticket.review_lease || ticket.review_offer) return "review";
-  const status = ticket.status.toLowerCase();
-  return LIFECYCLE_STAGES.find((stage) => stage.statuses.includes(status))?.id ?? null;
+  return ticketLifecycleStage(ticket);
 }
 
 function lifecycleObservedAt(stage: LifecycleStage, ticket: Ticket, events: BoardEvent[]): string | null {
@@ -846,6 +856,7 @@ function lifecycleObservedAt(stage: LifecycleStage, ticket: Ticket, events: Boar
     || stage.eventKinds.includes(item.kind.toLowerCase())
   ));
   if (event?.occurred_at) return event.occurred_at;
+  if (stage.id === "offered") return ticketOfferObservedAt(ticket);
   if (stage.id === "open") return ticket.created_at;
   if (stage.id === "submitted") return ticket.submitted_at;
   if (stage.id === "resolved") return ticket.closed_at;
@@ -886,6 +897,7 @@ function renderTicketSummary(ticket: Ticket, data: Snapshot): HTMLElement {
       ticket,
       ticket.lease_expires_at ? leaseText(ticket.lease_expires_at) : "lease Not observed",
       ticket.review_lease_expires_at ? leaseText(ticket.review_lease_expires_at) : "lease Not observed",
+      ticket.work_offer_expires_at ? leaseText(ticket.work_offer_expires_at) : "offer expiry Not observed",
     )],
     ["Next", NEXT_BY_STATUS[ticket.status.toLowerCase()] ?? "Not supplied"],
     ["Blocked", ticketBlocker(ticket, ticketEvents(data, ticket.id))],

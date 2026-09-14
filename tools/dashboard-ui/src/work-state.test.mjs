@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 
 import {
   ticketBlocker,
+  ticketLifecycleStage,
   ticketNow,
+  ticketOfferObservedAt,
   ticketReviewLabel,
   ticketWorkStage,
   workCounts,
@@ -65,6 +67,21 @@ test('coordination NOW uses the actual work or review lease holder', () => {
     review_offer: true,
     review_lease: false,
   }), 'Review offered · Not supplied');
+  const workOffer = {
+    status: 'open',
+    work_offer: true,
+    work_offer_name: 'offered-worker',
+    work_offer_agent_id: 'AI-OFFERED',
+    work_offer_offered_at: '2030-01-01T00:05:00Z',
+    review_offer: false,
+    review_lease: false,
+  };
+  assert.equal(
+    ticketNow(workOffer, undefined, undefined, '3m left'),
+    'Work offered · offered-worker · 3m left',
+  );
+  assert.equal(ticketLifecycleStage(workOffer), 'offered');
+  assert.equal(ticketOfferObservedAt(workOffer), '2030-01-01T00:05:00Z');
 });
 
 test('coordination BLOCKED selects the newest decision or blocker deterministically', () => {

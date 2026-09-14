@@ -1668,8 +1668,51 @@ class LiveDashboard:
         project = target_url.strip().partition("/")[0].strip().lower()
         return project or None
 
+    @staticmethod
+    def _active_work_offer(ticket: dict[str, Any]) -> dict[str, Any]:
+        candidates: list[dict[str, Any]] = []
+        work_offer = ticket.get("work_offer")
+        if isinstance(work_offer, dict):
+            candidates.append(work_offer)
+        dispatch_state = ticket.get("dispatch_state")
+        if (
+            isinstance(dispatch_state, dict)
+            and str(dispatch_state.get("state") or "").lower() == "offered"
+        ):
+            candidates.append(dispatch_state)
+        if not candidates:
+            history = ticket.get("dispatch_history")
+            if isinstance(history, list):
+                work_events = [
+                    item
+                    for item in history
+                    if isinstance(item, dict)
+                    and str(item.get("kind") or "work").lower() == "work"
+                ]
+                if (
+                    work_events
+                    and str(work_events[-1].get("state") or "").lower()
+                    == "offered"
+                ):
+                    candidates.append(work_events[-1])
+
+        for candidate in candidates:
+            if str(candidate.get("kind") or "work").lower() != "work":
+                continue
+            return {
+                "agent_name": candidate.get("agent_name")
+                or candidate.get("offered_agent_name"),
+                "agent_id": candidate.get("agent_id")
+                or candidate.get("offered_agent_id"),
+                "offered_at": candidate.get("offered_at") or candidate.get("at"),
+                "expires_at": candidate.get("expires_at")
+                or candidate.get("offer_expires_at"),
+            }
+        return {}
+
     @classmethod
     def _ticket_view(cls, ticket: dict[str, Any]) -> dict[str, Any]:
+        work_offer = cls._active_work_offer(ticket)
         review_offer = ticket.get("review_offer")
         if not isinstance(review_offer, dict):
             review_offer = {}
@@ -1740,6 +1783,11 @@ class LiveDashboard:
             "claimed_by": ticket.get("claimed_by"),
             "claimed_agent_id": ticket.get("claimed_by_agent_id"),
             "lease_expires_at": ticket.get("lease_expires_at"),
+            "work_offer": bool(work_offer),
+            "work_offer_name": work_offer.get("agent_name"),
+            "work_offer_agent_id": work_offer.get("agent_id"),
+            "work_offer_offered_at": work_offer.get("offered_at"),
+            "work_offer_expires_at": work_offer.get("expires_at"),
             "review_offer": bool(review_offer),
             "review_offer_name": review_offer.get("agent_name"),
             "review_offer_agent_id": review_offer.get("agent_id"),
@@ -1792,6 +1840,15 @@ class LiveDashboard:
     @staticmethod
     def _ticket_source_from_view(ticket: dict[str, Any]) -> dict[str, Any]:
         """Recover assignment fields when a test supplied only a projection."""
+        work_offer = None
+        if ticket.get("work_offer"):
+            work_offer = {
+                "kind": "work",
+                "agent_name": ticket.get("work_offer_name"),
+                "agent_id": ticket.get("work_offer_agent_id"),
+                "offered_at": ticket.get("work_offer_offered_at"),
+                "expires_at": ticket.get("work_offer_expires_at"),
+            }
         review_offer = None
         if ticket.get("review_offer"):
             review_offer = {
@@ -1836,6 +1893,7 @@ class LiveDashboard:
             "claimed_by": ticket.get("claimed_by"),
             "claimed_by_agent_id": ticket.get("claimed_agent_id"),
             "lease_expires_at": ticket.get("lease_expires_at"),
+            "work_offer": work_offer,
             "review_offer": review_offer,
             "review_lease": review_lease,
             "annotations": annotations,
