@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -231,6 +232,7 @@ class FakeRootClient:
 class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         wait_server._BACKLOG_SEEN.clear()
+        wait_server._IMMEDIATE_SYNTHETIC_CURSORS.clear()
         wait_server._BOARD_DENIALS.clear()
 
     async def test_single_board_function_keeps_original_response_shape(self) -> None:
@@ -419,7 +421,11 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
             },
         }
 
-        with patch.object(wait_server, "WAIT_MODE", "push"):
+        stderr = io.StringIO()
+        with (
+            redirect_stderr(stderr),
+            patch.object(wait_server, "WAIT_MODE", "push"),
+        ):
             result = await wait_server._wait_for_work_many(
                 FakeRootClient(transport),
                 boards=["alpha"],
@@ -434,6 +440,30 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call[0] for call in transport.calls if call[0] == "ticket_list"],
             ["ticket_list"],
+        )
+
+        started = asyncio.get_running_loop().time()
+        with (
+            redirect_stderr(stderr),
+            patch.object(wait_server, "WAIT_MODE", "push"),
+            patch.object(wait_server, "clamp_timeout", return_value=0.03),
+        ):
+            repeated = await wait_server._wait_for_work_many(
+                FakeRootClient(transport),
+                boards=["alpha"],
+                since_seq=result["new_seq"],
+                timeout_s=1,
+                only_mine=True,
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertGreaterEqual(elapsed, 0.02, repeated)
+        self.assertEqual(repeated["new_seq"], result["new_seq"])
+        self.assertEqual(repeated["events"][0]["kind"], "ticket_offered")
+        self.assertEqual(repeated["mode"], "push")
+        self.assertIn("immediate return reason=offer", stderr.getvalue())
+        self.assertIn(
+            "deferred repeated immediate synthetic return", stderr.getvalue()
         )
 
     async def test_push_cue_refetches_only_the_cued_board(self) -> None:
