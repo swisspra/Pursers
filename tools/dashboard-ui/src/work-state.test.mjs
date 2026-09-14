@@ -84,6 +84,10 @@ test('coordination BLOCKED selects the newest decision or blocker deterministica
     'Decision: Use the amended contract · coordinator-a',
   );
   assert.equal(ticketBlocker({ ...ticket, annotations: [] }, []), 'None recorded');
+  assert.equal(
+    ticketBlocker({ ...ticket, annotations: [], annotations_omitted_count: 2 }, []),
+    'Not observed · 2 older annotations omitted',
+  );
 });
 
 test('ticket lifecycle and coordination source preserve truthful empty states', () => {

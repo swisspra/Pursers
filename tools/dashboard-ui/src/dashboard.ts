@@ -56,6 +56,8 @@ type Ticket = {
   reviewer_agent_id: string | null;
   review_lease_expires_at: string | null;
   annotations: TicketAnnotation[];
+  annotation_count: number;
+  annotations_omitted_count: number;
   rejected: boolean;
   abandoned_count: number;
   rejection_count: number;
@@ -196,8 +198,8 @@ const fallback: Snapshot = {
     { id: "AI-DEMO-2", name: "reviewer-β", status: "idle", role: "reviewer", focus: "Accessibility & special characters", platform: "synthetic", idle_minutes: 18, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null, stale: false },
   ],
   tickets: [
-    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: "agent-alpha", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_offer_name: null, review_offer_agent_id: null, review_offer_expires_at: null, review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:01:00Z", submitted_at: null, closed_at: null },
-    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: null, claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_offer_name: "reviewer-β", review_offer_agent_id: "AI-DEMO-2", review_offer_expires_at: "2099-01-01T00:12:00Z", review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:02:00Z", submitted_at: "2099-01-01T00:02:00Z", closed_at: null },
+    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: "agent-alpha", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_offer_name: null, review_offer_agent_id: null, review_offer_expires_at: null, review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], annotation_count: 0, annotations_omitted_count: 0, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:01:00Z", submitted_at: null, closed_at: null },
+    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: null, claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_offer_name: "reviewer-β", review_offer_agent_id: "AI-DEMO-2", review_offer_expires_at: "2099-01-01T00:12:00Z", review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], annotation_count: 0, annotations_omitted_count: 0, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:02:00Z", submitted_at: "2099-01-01T00:02:00Z", closed_at: null },
   ],
   highlights: {
     latest_handoff: { id: "MEM-DEMO-HANDOFF", type: "handoff", title: "UI shell ready for review", summary: "Synthetic handoff with the next checks for the Personal Preview.", author: "agent-alpha", created_at: "2099-01-01T00:03:00Z", next_steps: ["Check narrow layout", "Verify keyboard navigation"], warnings: [] },
@@ -331,6 +333,11 @@ function decodeAgent(value: unknown): Agent | null {
 
 function decodeTicket(value: unknown): Ticket | null {
   if (!record(value) || typeof value.id !== "string") return null;
+  const annotations = (Array.isArray(value.annotations) ? value.annotations : [])
+    .slice(0, 8)
+    .map(decodeTicketAnnotation)
+    .filter((item): item is TicketAnnotation => item !== null);
+  const annotationsOmitted = nonNegative(value.annotations_omitted_count);
   return {
     id: text(value.id),
     title: text(value.title, "(untitled)"),
@@ -350,10 +357,12 @@ function decodeTicket(value: unknown): Ticket | null {
     reviewer_name: optionalText(value.reviewer_name),
     reviewer_agent_id: optionalText(value.reviewer_agent_id),
     review_lease_expires_at: optionalText(value.review_lease_expires_at),
-    annotations: (Array.isArray(value.annotations) ? value.annotations : [])
-      .slice(-8)
-      .map(decodeTicketAnnotation)
-      .filter((item): item is TicketAnnotation => item !== null),
+    annotations,
+    annotation_count: Math.max(
+      annotations.length + annotationsOmitted,
+      nonNegative(value.annotation_count),
+    ),
+    annotations_omitted_count: annotationsOmitted,
     rejected: boolean(value.rejected),
     abandoned_count: nonNegative(value.abandoned_count),
     rejection_count: nonNegative(value.rejection_count),

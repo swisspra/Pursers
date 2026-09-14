@@ -24,6 +24,7 @@ export type CoordinationTicket = ReviewAwareTicket & {
   review_offer_agent_id?: string | null;
   rejected?: boolean;
   annotations?: readonly CoordinationAnnotation[];
+  annotations_omitted_count?: number;
 };
 
 export type CoordinationEvent = {

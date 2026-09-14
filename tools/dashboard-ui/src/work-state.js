@@ -116,5 +116,11 @@ export function ticketBlocker(ticket, events) {
   if (ticket.status.toLowerCase() === 'rejected' || ticket.rejected === true) {
     return 'Rejected by independent review';
   }
+  const omitted = Number.isFinite(ticket.annotations_omitted_count)
+    ? Math.max(0, ticket.annotations_omitted_count)
+    : 0;
+  if (omitted > 0) {
+    return `Not observed · ${omitted} older annotation${omitted === 1 ? '' : 's'} omitted`;
+  }
   return 'None recorded';
 }

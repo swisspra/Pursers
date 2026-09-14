@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "00c8411b347944cd61c4f97e9ba141396d0f99136ba1e076cd9450dfb6365d1e"
-    assert len(payload) == 415028
+    expected = "5d28c8783c8f9903ca490a0315e909f58c1c263e0c4d117755359b29fd783da0"
+    assert len(payload) == 415443
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a26"
     assert lock["view"] == {
@@ -146,8 +146,21 @@ def test_ticket_projection_preserves_distinct_review_activity() -> None:
                         "agent_id": "AI-COORDINATOR",
                         "agent_name": "coordinator-a",
                     },
-                    "at": "2030-01-01T00:05:00+00:00",
-                }
+                    "at": "2030-01-01T00:00:00+00:00",
+                },
+                *[
+                    {
+                        "annotation_id": f"AN-{index:012d}",
+                        "kind": "review_note",
+                        "text": f"Later reviewer note {index}",
+                        "by": {
+                            "agent_id": "AI-REVIEWER",
+                            "agent_name": "active-reviewer",
+                        },
+                        "at": f"2030-01-01T00:{index:02d}:00+00:00",
+                    }
+                    for index in range(2, 11)
+                ],
             ],
         },
     ]
@@ -169,16 +182,12 @@ def test_ticket_projection_preserves_distinct_review_activity() -> None:
     assert projected[2]["reviewer_name"] == "active-reviewer"
     assert projected[2]["reviewer_agent_id"] == "AI-REVIEWER"
     assert projected[2]["review_lease_expires_at"] == "2030-01-01T00:15:00+00:00"
-    assert projected[2]["annotations"] == [
-        {
-            "id": "AN-000000000001",
-            "kind": "decision",
-            "text": "Use the amended contract",
-            "author": "coordinator-a",
-            "author_agent_id": "AI-COORDINATOR",
-            "at": "2030-01-01T00:05:00+00:00",
-        }
+    assert [item["id"] for item in projected[2]["annotations"]] == [
+        "AN-000000000001",
+        *[f"AN-{index:012d}" for index in range(4, 11)],
     ]
+    assert projected[2]["annotation_count"] == 10
+    assert projected[2]["annotations_omitted_count"] == 2
     repository = Path(__file__).resolve().parents[3]
     rendered = subprocess.run(
         [
