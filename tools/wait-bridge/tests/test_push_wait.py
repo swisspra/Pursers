@@ -629,6 +629,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         wait_server._BACKLOG_SEEN.clear()
+        wait_server._IMMEDIATE_SYNTHETIC_CURSORS.clear()
         self.temp_dir = tempfile.TemporaryDirectory(dir=ROOT)
         self.root = Path(self.temp_dir.name)
         jwks_path = self.root / "jwks.json"
@@ -668,6 +669,70 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         await client.board_join()
         await client.board_join(agent_name="push-actor")
         return client
+
+    async def test_same_cursor_reconciled_offer_blocks_before_repeat(self) -> None:
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
+            client = await self._joined_client(raw, role="worker")
+            await client._call(
+                "agent_capabilities_set",
+                agent_name="push-listener",
+                capabilities={
+                    "can_work": True,
+                    "can_review": False,
+                    "tier_max": 2,
+                },
+            )
+            await client._call(
+                "agent_capabilities_set",
+                agent_name="push-actor",
+                capabilities={"can_work": False, "can_review": False},
+            )
+            created = await client._call(
+                "ticket_create",
+                agent_name="push-actor",
+                title="same cursor offer",
+                description="in-process repeated synthetic return regression",
+                target_url="pursers/tools/wait-bridge",
+                scope="interactive-no-send",
+                required_fields=["test_output"],
+                prefer_agents=[client.identity.agent_id],
+            )
+            self.assertEqual(
+                created["ticket"]["work_offer"]["agent_id"],
+                client.identity.agent_id,
+            )
+            cursor = int(
+                self.service.journal.read_after(wait_server.BOARD_ID, 0)[
+                    "latest_cursor"
+                ]
+            )
+            first = await wait_server._wait_for_work(
+                client,
+                since_seq=cursor,
+                timeout_s=1,
+                only_mine=True,
+                wait_for="claimable",
+            )
+            started = time.monotonic()
+            with (
+                patch.object(wait_server, "WAIT_MODE", "poll"),
+                patch.object(wait_server, "clamp_timeout", return_value=0.03),
+                patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.01),
+            ):
+                repeated = await wait_server._wait_for_work(
+                    client,
+                    since_seq=first["new_seq"],
+                    timeout_s=1,
+                    only_mine=True,
+                    wait_for="claimable",
+                )
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(first["reason"], "reconciled")
+        self.assertEqual(first["new_seq"], cursor)
+        self.assertGreaterEqual(elapsed, 0.02, repeated)
+        self.assertEqual(repeated["new_seq"], cursor)
+        self.assertEqual(repeated["events"][0]["kind"], "ticket_offered")
 
     async def test_dispatch_central_wait_matrix_isolated_offers_and_legacy(
         self,

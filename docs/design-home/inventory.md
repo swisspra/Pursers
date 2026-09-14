@@ -326,7 +326,7 @@ required for text marks.
 | `@modelcontextprotocol/sdk` | 1.30.0 | MIT | Dashboard-UI (MCP client) |
 | `vite` | 8.2.1 | MIT | Dashboard-UI (build) |
 | `vite-plugin-singlefile` | 2.3.3 | MIT | Dashboard-UI (single-file output) |
-| `mcp` (Python) | 2.1.1 | MIT | Wait bridge, Personal MCP server |
+| `mcp` (Python) | 2.2.0 | MIT | Wait bridge, Personal MCP server |
 
 ## Deterministic artifact manifest
 

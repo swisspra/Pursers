@@ -18,11 +18,11 @@ jobs:
   python-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 2
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -82,8 +82,8 @@ jobs:
           python - <<'PY'
           import importlib.metadata as metadata
 
-          assert metadata.version("mcp") == "2.1.1"
-          print("mcp=2.1.1")
+          assert metadata.version("mcp") == "2.2.0"
+          print("mcp=2.2.0")
           PY
 
       - name: Scan repository for secrets and identifying paths
@@ -143,9 +143,9 @@ jobs:
       run:
         working-directory: tools/dashboard-ui
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm

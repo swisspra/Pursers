@@ -11,9 +11,9 @@
   "components": {
     "pursers-central": {
       "version": "0.1.0a30",
-      "wheel_sha256": "a4a594ead0f562b5ed34d01e8e7047f46900d22ba389cbb79e46723bc83a551b",
+      "wheel_sha256": "f35cf80e79964b6aaf350641409766e82af0ea539d74724f3bab53b738f850db",
       "members": {
-        "pursers_central-0.1.0a30.dist-info/METADATA": "83774ca87e71ef77ef98cf95b3f71a48b9c6fbdf0aa5c46dc1eb21c9b7c77d1a",
+        "pursers_central-0.1.0a30.dist-info/METADATA": "a53bedc2c0c84606aa0c9ae0415d6095827298664b0d38820fa83bf905a1c0f7",
         "pursers_central-0.1.0a30.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
         "pursers_central-0.1.0a30.dist-info/entry_points.txt": "1ae83629668ca4cbed9de309e64ec2541178c1766cdaab1342ed38e45ed7bd64",
         "pursers_central-0.1.0a30.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
@@ -35,9 +35,9 @@
     },
     "pursers-client": {
       "version": "0.1.0a23",
-      "wheel_sha256": "7c74bec967aa4a55a43e528c989424aaf4f5b9f94d2ce1bcee0f61808b5890a9",
+      "wheel_sha256": "ab33a1431f8dba5f9f8005f04b46147cae934fabc9795550a00a41c5f0508ae5",
       "members": {
-        "pursers_client-0.1.0a23.dist-info/METADATA": "1393f43795b2ab42fb48d2e4f47e436a892dc9be9b6693b09c24ef0f2bd02e3a",
+        "pursers_client-0.1.0a23.dist-info/METADATA": "4c5bcf5f2f3a648c86ebb57e45d979367a289837793c33a73e5d5e57318f371e",
         "pursers_client-0.1.0a23.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
         "pursers_client-0.1.0a23.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
         "pursers_client-0.1.0a23.dist-info/top_level.txt": "f1c543c98535c0f218812ac0a8b29ce27e28b6430eda69116c789ecc853cf7b4",
@@ -52,7 +52,7 @@
   },
   "view": {
     "resource": "pursers_personal/resources/dashboard.html",
-    "size_bytes": 449175,
-    "sha256": "1d214c246857e1771c1ea16b5862f332023c91dd085c49d5de10def4a8acf682"
+    "size_bytes": 449187,
+    "sha256": "a8419ca05f4d00a652465dcc6a1ba1fb60ae5e3f0d90a35f1d3480b2859161f0"
   }
 }

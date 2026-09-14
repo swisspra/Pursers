@@ -37,7 +37,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ steps.release.outputs.tag }}
           fetch-depth: 0
@@ -47,7 +47,7 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: python tools/release_publish.py "$TAG" verify-checkout
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
