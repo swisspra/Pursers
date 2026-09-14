@@ -5,9 +5,9 @@ candidates, and research so that an experiment is never mistaken for a
 commitment. Items move only after implementation, independent review, and the
 applicable release gates pass.
 
-> **Publication note:** The `v5.0.0b1` tag and release publication are pending.
-> The coordinator removes this note when the operator publishes the approved
-> candidate.
+The first public beta is available from the published
+[`v5.0.0b1` GitHub prerelease](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1),
+which contains six wheels and `SHA256SUMS.txt`.
 
 ## Shipped in `v5.0.0b1`
 

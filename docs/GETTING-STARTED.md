@@ -78,7 +78,8 @@ wheels are `pursers_client` and `pursers_wait_bridge`; the other wheels are
 locked dependencies for CPython 3.12 on Apple silicon. That wheelhouse is not
 the install source for this six-product quickstart.
 
-> **Publication note:** Release v5.0.0b1 publication pending; hashes above are the approved build.
+The published [`v5.0.0b1` prerelease](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1)
+contains exactly these six wheel assets and `SHA256SUMS.txt`.
 
 Use a dedicated environment. Installing all six wheels together lets the
 installer resolve their exact cross-package versions:
@@ -384,8 +385,8 @@ ticket normally. Never restart at cursor zero to look for work.
 Build `pursers-aionui-0.1.0.zip` from the exact release tag; the wheel checksum
 file does not cover this locally built artifact:
 
-This section is runnable only after the `v5.0.0b1` tag exists on GitHub; a
-publication-pending checkout cannot build or verify the exact-tag ZIP.
+The [`v5.0.0b1` tag](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1)
+is published. Clone that exact tag so the locally built ZIP matches the release.
 
 ```bash
 git clone --branch v5.0.0b1 --depth 1 https://github.com/swisspra/Pursers.git pursers-source

@@ -730,12 +730,15 @@ walkthroughs:
 export PIP_CACHE_DIR="$XDG_CACHE_HOME/pip"
 ```
 
-### P1 — state the pre-publication AionUi boundary before the clone command
+### Resolved — exact-tag AionUi source is published
 
-Add:
+Post-publish update (2026-09-14): the
+[`v5.0.0b1` tag and prerelease](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1)
+now exist. Clone that exact tag before building or verifying the AionUi ZIP:
 
-> This section is runnable only after the `v5.0.0b1` tag exists on GitHub; a
-> publication-pending checkout cannot build or verify the exact-tag ZIP.
+```bash
+git clone --branch v5.0.0b1 --depth 1 https://github.com/swisspra/Pursers.git pursers-source
+```
 
 ## Teardown
 

@@ -150,12 +150,13 @@
         <div class="shell quickstart-grid">
           <div>
             <p class="kicker">Quickstart</p>
-            <h2>Prepare for the verified beta setup.</h2>
+            <h2>Install the verified beta.</h2>
             <p>
-              The six v5.0.0b1 wheel assets are approved but not yet published.
-              When the prerelease is live, download and verify every wheel from
-              that tag, then follow the exact profile and Central steps in the
-              getting-started guide.
+              The published
+              <a href="https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1">v5.0.0b1 prerelease</a>
+              contains six wheel assets and SHA256SUMS.txt. Download and verify
+              all seven files, then follow the exact profile and Central steps
+              in the getting-started guide.
             </p>
             <div class="doc-links">
               <a href="https://github.com/swisspra/Pursers/blob/main/docs/GETTING-STARTED.md">
@@ -171,10 +172,10 @@
               <span></span><span></span><span></span>
               <small>terminal</small>
             </div>
-            <pre><code><span class="comment"># After the v5.0.0b1 prerelease is published:</span>
+            <pre><code><span class="prompt">$</span> gh release download v5.0.0b1 -R swisspra/Pursers
+<span class="prompt">$</span> shasum -a 256 -c SHA256SUMS.txt
 <span class="prompt">$</span> python3 -m venv .venv
 <span class="prompt">$</span> . .venv/bin/activate
-<span class="comment"># Download + verify all six wheels per Getting Started</span>
 <span class="prompt">$</span> python -m pip install ./*.whl
 <span class="prompt">$</span> pursers-personal setup --project "$PWD" --apply
 <span class="prompt">$</span> pursers-personal central --project "$PWD"</code></pre>
@@ -215,7 +216,7 @@
         </div>
         <p>Local-first coordination for AI agent fleets.</p>
         <div class="footer-links">
-          <a href="https://github.com/swisspra/Pursers/releases">Releases</a>
+          <a href="https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1">Release v5.0.0b1</a>
           <a href="https://github.com/swisspra/Pursers/tree/main/docs">Docs</a>
           <a href="https://github.com/swisspra/Pursers">Source</a>
         </div>
