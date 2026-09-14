@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import warnings
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -65,6 +66,36 @@ STATUS_ICONS = {
     "terminated": "⛔",
 }
 PRIORITY_ICONS = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}
+SHORT_RESPONSE_ID_RE = re.compile(r"\b(?:AI|PR)-[0-9a-f]{8}\b")
+
+
+def expand_response_id_map(value: dict[str, Any]) -> dict[str, Any]:
+    """Restore compact response IDs before existing client consumers inspect them."""
+    raw_map = value.get("id_map")
+    if not isinstance(raw_map, dict):
+        return value
+    id_map = {
+        short: full
+        for short, full in raw_map.items()
+        if isinstance(short, str) and isinstance(full, str)
+    }
+
+    def visit(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {
+                key: nested if key == "id_map" else visit(nested)
+                for key, nested in item.items()
+            }
+        if isinstance(item, list):
+            return [visit(nested) for nested in item]
+        if not isinstance(item, str):
+            return item
+        return SHORT_RESPONSE_ID_RE.sub(
+            lambda match: id_map.get(match.group(0), match.group(0)), item
+        )
+
+    expanded = visit(value)
+    return expanded if isinstance(expanded, dict) else value
 
 
 def _subscription_loss(exc: BaseException) -> SubscriptionLost | None:
@@ -272,7 +303,7 @@ class BoardClient:
             value = json.loads(result.content[0].text)
         if not isinstance(value, dict):
             raise BoardClientError("server returned a non-object tool result")
-        return value
+        return expand_response_id_map(value)
 
     def _refresh_generation(self, result: dict[str, Any]) -> None:
         """Replace the write generation after a join/onboard refresh.
@@ -508,8 +539,19 @@ class BoardClient:
     async def board_list(self) -> dict[str, Any]:
         return await self._call_unscoped("board_list", {})
 
-    async def ticket_get(self, ticket_id: str) -> dict[str, Any]:
-        result = await self._call("ticket_get", {"ticket_id": ticket_id})
+    async def ticket_get(
+        self,
+        ticket_id: str,
+        *,
+        view: str | None = None,
+        include_dispatch_history: bool = False,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {"ticket_id": ticket_id}
+        if view is not None:
+            arguments["view"] = view
+        if include_dispatch_history:
+            arguments["include_dispatch_history"] = True
+        result = await self._call("ticket_get", arguments)
         payload_ref = result.get("ticket", {}).get("payload_ref")
         if payload_ref:
             self.watch_resource(payload_ref)
@@ -853,6 +895,8 @@ class BoardClient:
         limit: int = 100,
         review_unclaimed_only: bool = False,
         ticket_ids: list[str] | None = None,
+        view: str | None = None,
+        include_dispatch_history: bool = False,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -867,6 +911,10 @@ class BoardClient:
             arguments["assigned_to"] = assigned_to
         if ticket_ids is not None:
             arguments["ticket_ids"] = ticket_ids
+        if view is not None:
+            arguments["view"] = view
+        if include_dispatch_history:
+            arguments["include_dispatch_history"] = True
         return await self._call("ticket_list", arguments)
 
     async def dispatch_my_offers(self) -> dict[str, Any]:
