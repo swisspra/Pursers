@@ -42,6 +42,17 @@ button {
   font-weight: 700;
 }
 
+button.secondary {
+  margin-top: 1rem;
+  background: transparent;
+  color: #7dd3fc;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 section {
   margin-top: 2rem;
   padding: 1.25rem;

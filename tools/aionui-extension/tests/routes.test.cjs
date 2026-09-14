@@ -58,6 +58,63 @@ test('join stores through the fake bridge and imports an env-free MCP server', a
   assert.equal(JSON.stringify(payload).includes(secretDoor), false);
 });
 
+test('partial legacy join exposes redacted recovery target and recover uses no door', async () => {
+  const calls = [];
+  let importCalls = 0;
+  const runBridge = async (args) => {
+    calls.push([...args]);
+    if (args[0] === 'join') {
+      return 'board=demo\nrole=worker\nseat_name=worker-host-1\npush=yes\n';
+    }
+    return calls.length === 1
+      ? 'push_mode=push\n'
+      : 'push_mode=push\nboard=demo role=worker kid=door-1 exp=2000000000 seat_names_used=worker-host-1\n';
+  };
+  const handlers = createHandlers({
+    runBridge,
+    fetchImpl: async () => ({
+      ok: ++importCalls > 1,
+      json: async () => ({ success: true }),
+    }),
+  });
+  const secretDoor = door();
+  const joined = await handlers.handle(new Request('http://127.0.0.1:8765/pursers/join', {
+    method: 'POST',
+    body: JSON.stringify({ door: secretDoor, seat_name: 'worker-host-1' }),
+  }));
+  const partial = await joined.json();
+
+  assert.equal(joined.status, 502);
+  assert.equal(partial.outcome, 'partial');
+  assert.equal(partial.joined, true);
+  assert.deepEqual(partial.status, {
+    board: 'demo',
+    role: 'worker',
+    seat_name: 'worker-host-1',
+    push_mode: 'push',
+    kid: 'door-1',
+    exp: 2000000000,
+  });
+  assert.equal(JSON.stringify(partial).includes(secretDoor), false);
+
+  const recoveryBody = {
+    board: partial.status.board,
+    role: partial.status.role,
+    seat_name: partial.status.seat_name,
+    tier_max: 2,
+  };
+  const recovered = await handlers.handle(new Request('http://127.0.0.1:8765/pursers/onboarding/recover', {
+    method: 'POST',
+    body: JSON.stringify(recoveryBody),
+  }));
+
+  assert.equal(recovered.status, 200);
+  assert.equal((await recovered.json()).outcome, 'recovered');
+  assert.equal(Object.hasOwn(recoveryBody, 'door'), false);
+  assert.equal(importCalls, 2);
+  assert.equal(calls.filter((args) => args[0] === 'join').length, 1);
+});
+
 test('status returns only redacted bridge fields', async () => {
   const handlers = createHandlers({
     runBridge: async (args) => {
