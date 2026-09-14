@@ -34,6 +34,12 @@ import tomllib
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+try:
+    from .pair_aionui import tool_sha256, validate_pairing_proof
+except ImportError:  # Direct runner.py execution.
+    from pair_aionui import tool_sha256, validate_pairing_proof
 
 HERE = Path(__file__).resolve().parent
 REPOSITORY_ROOT = HERE.parents[3]
@@ -714,6 +720,24 @@ def capture(args: argparse.Namespace) -> int:
     command = _observer_command(Path(args.observer).expanduser())
     evidence_root = Path(args.evidence).expanduser().resolve()
     evidence_root.mkdir(parents=True, exist_ok=True)
+    pairing_proof = None
+    if args.pairing_proof:
+        if args.surface != "aionui":
+            raise RunnerError(
+                EXIT_USAGE, "--pairing-proof is valid only for the aionui surface"
+            )
+        try:
+            proof_value = json.loads(
+                Path(args.pairing_proof).expanduser().read_text(encoding="utf-8")
+            )
+            target_port = urlsplit(args.target).port
+            pairing_proof = validate_pairing_proof(
+                proof_value,
+                expected_port=target_port,
+                expected_tool_sha256=tool_sha256(),
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            raise RunnerError(EXIT_USAGE, f"invalid --pairing-proof: {exc}") from None
     spec = {
         "schema_version": SCHEMA_VERSION,
         "observation_id": args.observation,
@@ -766,6 +790,8 @@ def capture(args: argparse.Namespace) -> int:
         "attestation": payload["attestation"],
         "attestation_nonce": payload["attestation_nonce"],
     }
+    if pairing_proof is not None:
+        receipt["pairing"] = pairing_proof
     reference = f"observations/{args.observation}.json"
     receipt_path = evidence_root / reference
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -785,19 +811,17 @@ def capture(args: argparse.Namespace) -> int:
     (evidence_root / surface_host_reference).write_text(
         json.dumps(host_receipt, sort_keys=True), encoding="utf-8"
     )
-    json.dump(
-        {
-            "observation_id": payload["observation_id"],
-            "evidence": reference,
-            "host_identity_evidence": surface_host_reference,
-            "page_url": payload["page_url"],
-            "screenshot_sha256": screenshot_artifact["sha256"],
-            "snapshot_sha256": snapshot_artifact["sha256"],
-        },
-        sys.stdout,
-        indent=2,
-        sort_keys=True,
-    )
+    summary = {
+        "observation_id": payload["observation_id"],
+        "evidence": reference,
+        "host_identity_evidence": surface_host_reference,
+        "page_url": payload["page_url"],
+        "screenshot_sha256": screenshot_artifact["sha256"],
+        "snapshot_sha256": snapshot_artifact["sha256"],
+    }
+    if pairing_proof is not None:
+        summary["pairing"] = pairing_proof
+    json.dump(summary, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return EXIT_OK
 
@@ -891,6 +915,10 @@ def build_parser() -> argparse.ArgumentParser:
     shot.add_argument(
         "--attestation-nonce",
         help="verifier-selected nonce already answered in the AionUi conversation",
+    )
+    shot.add_argument(
+        "--pairing-proof",
+        help="JSON proof printed by pair_aionui.py for this AionUi core",
     )
     shot.set_defaults(handler=capture)
 
