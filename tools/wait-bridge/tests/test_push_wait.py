@@ -439,6 +439,101 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             ))
             self.assertEqual(event["reason"], "broadcast")
 
+    async def test_authoritative_offer_overrides_raw_routing_hints(self) -> None:
+        mine = "AI-seat"
+        client = SimpleNamespace(board_id=wait_server.BOARD_ID)
+        fixtures = (
+            (
+                "normal",
+                {
+                    "kind": "ticket_offered",
+                    "ticket_id": "TK-normal",
+                    "offered_agent_id": mine,
+                    "recipient_identities": [mine],
+                },
+                {},
+            ),
+            (
+                "pinned-missing-offered-agent",
+                {
+                    "kind": "ticket_offered",
+                    "ticket_id": "TK-pinned",
+                    "recipient_identities": ["AI-coordinator"],
+                },
+                {
+                    "coordinator_assignment": {
+                        "assigned_to_agent_id": mine,
+                    },
+                    "assigned_to_agent_id": mine,
+                },
+            ),
+            (
+                "exclusion-fenced-recipient",
+                {
+                    "kind": "ticket_offered",
+                    "ticket_id": "TK-excluded",
+                    "offered_agent_id": mine,
+                    "recipient_identities": ["AI-other"],
+                },
+                {"exclude_agents": ["AI-other"]},
+            ),
+        )
+        for label, event, ticket_fields in fixtures:
+            with self.subTest(label=label):
+                ticket = {
+                    "ticket_id": event["ticket_id"],
+                    "status": "open",
+                    "dispatch_state": {"state": "offered", "kind": "work"},
+                    "work_offer": {
+                        "agent_id": mine,
+                        "expires_at": "2026-01-01T00:00:00Z",
+                    },
+                    "target_url": "pursers/tools/wait-bridge",
+                    **ticket_fields,
+                }
+
+                selected = await wait_server._is_relevant(
+                    client,
+                    event,
+                    mine,
+                    True,
+                    "pursers",
+                    tickets_by_id={event["ticket_id"]: ticket},
+                )
+
+                self.assertTrue(selected)
+                self.assertEqual(event["reason"], "offer")
+                self.assertEqual(event["offer"]["ticket_id"], event["ticket_id"])
+
+    async def test_dropped_offer_logs_event_kind_and_authoritative_reason(self) -> None:
+        event = {
+            "kind": "ticket_offered",
+            "ticket_id": "TK-other",
+            "offered_agent_id": "AI-seat",
+        }
+        ticket = {
+            "ticket_id": event["ticket_id"],
+            "status": "open",
+            "dispatch_state": {"state": "offered", "kind": "work"},
+            "work_offer": {"agent_id": "AI-other"},
+        }
+
+        with self.assertLogs(wait_server._LOGGER, level="DEBUG") as captured:
+            selected = await wait_server._is_relevant(
+                SimpleNamespace(board_id=wait_server.BOARD_ID),
+                event,
+                "AI-seat",
+                True,
+                "pursers",
+                tickets_by_id={event["ticket_id"]: ticket},
+            )
+
+        self.assertFalse(selected)
+        self.assertIn("kind=ticket_offered", captured.output[0])
+        self.assertIn(
+            "reason=authoritative_offer_for_other_agent", captured.output[0]
+        )
+
     def test_review_lease_events_are_push_wait_cues(self) -> None:
         self.assertEqual(
             wait_server.SUBMITTED_RELEVANT_KINDS, SUBMITTED_RELEVANT_KINDS
@@ -592,6 +687,10 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             "PR-live-review-b", "live-review-b",
             frozenset({"board:read", "board:write", "board:review"}),
         )
+        coordinator = central.Principal(
+            "PR-live-coordinator", "live-coordinator",
+            frozenset({"board:read", "board:coordinate"}),
+        )
 
         async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
             async def join(
@@ -623,6 +722,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 (worker_b, "member"),
                 (reviewer_a, "reviewer"),
                 (reviewer_b, "reviewer"),
+                (coordinator, "admin"),
             ):
                 self.principal = admin
                 await admin_client._call(
@@ -642,6 +742,82 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 reviewer_b, "live-reviewer-b",
                 {"can_work": False, "can_review": True},
                 role="reviewer",
+            )
+            coord = await join(
+                coordinator, "live-coordinator",
+                {"can_work": False, "can_review": False},
+                role="coordinator",
+            )
+
+            # Capture the exact events emitted by a throwaway Central for the
+            # two dispatch fences implicated in the production report.  Main's
+            # Central emits the same targeted routing fields for both shapes;
+            # the bridge must nevertheless treat the ticket offer as authority.
+            self.principal = admin
+            pinned_created = await admin_client._call(
+                "ticket_create", agent_name="live-admin",
+                title="pinned raw offer", description="capture pinned offer JSON",
+                target_url="pursers/tools/wait-bridge", scope="interactive-no-send",
+                required_fields=["test_output"], tier=1, unassigned=True,
+            )
+            self.principal = coordinator
+            pinned = await coord._call(
+                "ticket_assign", agent_name="live-coordinator",
+                ticket_id=pinned_created["ticket"]["ticket_id"],
+                assigned_to_agent_id=a.identity.agent_id,
+                expected_status="open", coordinator_op_key="pin-raw-offer",
+                reason="capture coordinator-pinned offer JSON",
+            )
+            pinned_event = next(
+                event for event in pinned["dispatch_events"]
+                if event["kind"] == "ticket_offered"
+            )
+            pinned_json = json.dumps(pinned_event, sort_keys=True)
+            self.assertEqual(
+                pinned["ticket"]["coordinator_assignment"][
+                    "assigned_to_agent_id"
+                ],
+                a.identity.agent_id,
+            )
+            self.assertEqual(pinned_event["kind"], "ticket_offered", pinned_json)
+            self.assertEqual(
+                pinned_event["offered_agent_id"], a.identity.agent_id, pinned_json
+            )
+            self.assertEqual(
+                pinned_event["recipient_identities"], [a.identity.agent_id],
+                pinned_json,
+            )
+            self.principal = admin
+            await admin_client._call(
+                "ticket_cancel", agent_name="live-admin",
+                ticket_id=pinned["ticket"]["ticket_id"], reason="fixture complete",
+            )
+
+            excluded = await admin_client._call(
+                "ticket_create", agent_name="live-admin",
+                title="exclusion-fenced raw offer",
+                description="capture exclusion-fenced offer JSON",
+                target_url="pursers/tools/wait-bridge", scope="interactive-no-send",
+                required_fields=["test_output"], tier=1,
+                exclude_agents=[b.identity.agent_id],
+            )
+            excluded_event = excluded["dispatch_event"]
+            excluded_json = json.dumps(excluded_event, sort_keys=True)
+            self.assertEqual(
+                excluded["ticket"]["exclude_agents"], [b.identity.agent_id]
+            )
+            self.assertEqual(excluded_event["kind"], "ticket_offered", excluded_json)
+            self.assertEqual(
+                excluded_event["offered_agent_id"], a.identity.agent_id,
+                excluded_json,
+            )
+            self.assertEqual(
+                excluded_event["recipient_identities"], [a.identity.agent_id],
+                excluded_json,
+            )
+            await admin_client._call(
+                "ticket_cancel", agent_name="live-admin",
+                ticket_id=excluded["ticket"]["ticket_id"], reason="fixture complete",
             )
 
             legacy_cursor = int(
@@ -1549,6 +1725,8 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["events"][0]["ticket_id"], "TK-starved")
         self.assertEqual(second["reason"], "backlog")
         self.assertEqual(second["waited_s"], 0.5)
+        # First return, second entry scan, and the resurfacing cadence each
+        # perform one list. Offer reconciliation reuses the matching scan.
         self.assertEqual(client.ticket_list_calls, 3)
 
 

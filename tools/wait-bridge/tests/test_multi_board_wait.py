@@ -339,6 +339,45 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["reason"], "timeout")
 
+    async def test_missed_push_offer_is_reconciled_before_timeout_return(self) -> None:
+        transport = FakeTransport(["alpha"])
+        mine = wait_server._derived_agent_id(
+            transport.principal_id, wait_server.AGENT_NAME, "alpha"
+        )
+
+        with (
+            patch.object(wait_server, "WAIT_MODE", "push"),
+            patch.object(wait_server, "clamp_timeout", return_value=0.05),
+        ):
+            waiting = asyncio.create_task(wait_server._wait_for_work_many(
+                FakeRootClient(transport),
+                boards=["alpha"],
+                timeout_s=1,
+                only_mine=True,
+            ))
+            await asyncio.wait_for(transport.ready["alpha"].wait(), timeout=1)
+            transport.tickets["alpha"]["TK-missed-offer"] = {
+                "ticket_id": "TK-missed-offer",
+                "status": "open",
+                "target_url": "alpha/work",
+                "dispatch_state": {"state": "offered", "kind": "work"},
+                "work_offer": {
+                    "agent_id": mine,
+                    "expires_at": "2099-01-01T00:00:00Z",
+                },
+            }
+            result = await waiting
+
+        self.assertFalse(result["timed_out"], (result, transport.calls))
+        self.assertEqual(result["reason"], "reconciled")
+        self.assertEqual(result["events"][0]["kind"], "ticket_offered")
+        self.assertEqual(
+            result["events"][0]["source"], "offer_reconciliation"
+        )
+        self.assertEqual(
+            result["events"][0]["offer"]["ticket_id"], "TK-missed-offer"
+        )
+
     async def test_reviewer_auto_surfaces_submitted_registry_backlog(self) -> None:
         transport = FakeTransport(["alpha"])
         transport.roles["alpha"] = "reviewer"
@@ -457,7 +496,7 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         sample = next(iter(document["model_wait"].values()))["returns"][0]
         self.assertEqual(sample["mode"], "mixed")
 
-    async def test_idle_push_wait_makes_no_central_calls_after_subscribe_drain(self) -> None:
+    async def test_idle_push_wait_only_reconciles_after_subscribe_drain(self) -> None:
         transport = FakeTransport(["alpha", "beta"])
         with patch.object(wait_server, "WAIT_MODE", "push"):
             waiting = asyncio.create_task(
@@ -491,7 +530,11 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result["mode_by_board"], {"alpha": "push", "beta": "push"}
         )
-        self.assertEqual(len(transport.calls), calls_after_subscribe_drain)
+        final_calls = transport.calls[calls_after_subscribe_drain:]
+        self.assertEqual(
+            [(name, board_id) for name, board_id, _arguments in final_calls],
+            [("ticket_list", "alpha"), ("ticket_list", "beta")],
+        )
         self.assertEqual(transport.renewed, [])
 
     async def test_denied_board_is_reported_and_does_not_abort(self) -> None:
