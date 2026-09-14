@@ -105,6 +105,30 @@ class SQLiteStore(Store[Any]):
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS journal_rows (
+                    path TEXT NOT NULL,
+                    seq INTEGER NOT NULL CHECK (seq >= 1),
+                    event JSON NOT NULL,
+                    PRIMARY KEY (path, seq),
+                    FOREIGN KEY (path) REFERENCES documents(path) ON DELETE CASCADE
+                ) WITHOUT ROWID
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS journal_state (
+                    path TEXT PRIMARY KEY,
+                    source_version INTEGER NOT NULL CHECK (source_version >= 1),
+                    board_id TEXT NOT NULL,
+                    next_seq INTEGER NOT NULL CHECK (next_seq >= 1),
+                    compacted_through INTEGER NOT NULL CHECK (compacted_through >= 0),
+                    retained_count INTEGER NOT NULL CHECK (retained_count >= 0),
+                    FOREIGN KEY (path) REFERENCES documents(path) ON DELETE CASCADE
+                )
+                """
+            )
         finally:
             connection.close()
 
@@ -202,6 +226,218 @@ class SQLiteStore(Store[Any]):
         ).fetchall()
         return [(str(row[0]), row[1]) for row in rows]
 
+    @staticmethod
+    def _is_journal_key(key: str) -> bool:
+        return key.startswith("journals/") and key.endswith(".json")
+
+    def _sync_journal_index(
+        self,
+        connection: sqlite3.Connection,
+        key: str,
+        document: Any,
+        version: int,
+    ) -> None:
+        """Synchronize a journal's bounded row index in the write transaction."""
+        if not self._is_journal_key(key):
+            return
+        if not isinstance(document, dict):
+            raise ValueError("journal document must be an object")
+        board_id = document.get("board_id")
+        rows = document.get("rows")
+        if not isinstance(board_id, str) or not isinstance(rows, list):
+            raise ValueError("journal document metadata is corrupt")
+        next_seq = int(document.get("next_seq", 0))
+        compacted_through = int(document.get("compacted_through", 0))
+        expected_count = next_seq - compacted_through - 1
+        contiguous = (
+            next_seq >= 1
+            and compacted_through >= 0
+            and compacted_through < next_seq
+            and len(rows) == expected_count
+            and (
+                not rows
+                or (
+                    int(rows[0].get("seq", 0)) == compacted_through + 1
+                    and int(rows[-1].get("seq", 0)) == next_seq - 1
+                )
+            )
+        )
+        if not contiguous:
+            raise ValueError("journal rows are not a contiguous sequence")
+
+        state = connection.execute(
+            "SELECT source_version, board_id, next_seq, compacted_through, "
+            "retained_count FROM journal_state WHERE path = ?",
+            (key,),
+        ).fetchone()
+        if state is not None and int(state[0]) == version:
+            return
+        incremental = (
+            state is not None
+            and str(state[1]) == board_id
+            and int(state[2]) <= next_seq
+            and int(state[3]) <= compacted_through
+            and int(state[4]) == int(state[2]) - int(state[3]) - 1
+            and (
+                int(state[2]) < next_seq
+                or int(state[3]) < compacted_through
+            )
+        )
+        if incremental:
+            prior_next_seq = int(state[2])
+            connection.execute(
+                "DELETE FROM journal_rows WHERE path = ? AND seq <= ?",
+                (key, compacted_through),
+            )
+            first_seq = compacted_through + 1
+            offset = max(0, prior_next_seq - first_seq)
+            new_rows = rows[offset:]
+        else:
+            connection.execute("DELETE FROM journal_rows WHERE path = ?", (key,))
+            new_rows = rows
+        encoded_rows = []
+        for row in new_rows:
+            if not isinstance(row, dict):
+                raise ValueError("journal row must be an object")
+            encoded_rows.append(
+                (
+                    key,
+                    int(row["seq"]),
+                    json.dumps(
+                        row,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+        connection.executemany(
+            "INSERT OR REPLACE INTO journal_rows(path, seq, event) VALUES (?, ?, ?)",
+            encoded_rows,
+        )
+        indexed_count = int(
+            connection.execute(
+                "SELECT count(*) FROM journal_rows WHERE path = ?", (key,)
+            ).fetchone()[0]
+        )
+        if indexed_count != len(rows):
+            raise ValueError("journal row index is inconsistent")
+        connection.execute(
+            "INSERT INTO journal_state(path, source_version, board_id, next_seq, "
+            "compacted_through, retained_count) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(path) DO UPDATE SET source_version=excluded.source_version, "
+            "board_id=excluded.board_id, next_seq=excluded.next_seq, "
+            "compacted_through=excluded.compacted_through, "
+            "retained_count=excluded.retained_count",
+            (key, version, board_id, next_seq, compacted_through, len(rows)),
+        )
+
+    @staticmethod
+    def _journal_read_result(
+        connection: sqlite3.Connection,
+        key: str,
+        board_id: str,
+        cursor: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        state = connection.execute(
+            "SELECT board_id, next_seq, compacted_through FROM journal_state "
+            "WHERE path = ?",
+            (key,),
+        ).fetchone()
+        if state is None:
+            latest_cursor = 0
+            compacted_through = 0
+        else:
+            if str(state[0]) != board_id:
+                raise ValueError("journal board hash collision or corrupt document")
+            latest_cursor = int(state[1]) - 1
+            compacted_through = int(state[2])
+        if cursor > latest_cursor:
+            raise ValueError("cursor is ahead of journal")
+        if cursor < compacted_through:
+            return {
+                "board_id": board_id,
+                "events": [],
+                "next_cursor": cursor,
+                "latest_cursor": latest_cursor,
+                "has_more": False,
+                "resync_required": True,
+                "compacted_through": compacted_through,
+                "reset_cursor": latest_cursor,
+            }
+        rows = connection.execute(
+            "SELECT event FROM journal_rows WHERE path = ? AND seq > ? "
+            "ORDER BY seq LIMIT ?",
+            (key, cursor, limit),
+        ).fetchall()
+        events = [json.loads(row[0]) for row in rows]
+        next_cursor = int(events[-1]["seq"]) if events else cursor
+        return {
+            "board_id": board_id,
+            "events": events,
+            "next_cursor": next_cursor,
+            "latest_cursor": latest_cursor,
+            "has_more": next_cursor < latest_cursor,
+            "resync_required": False,
+            "compacted_through": compacted_through,
+            "reset_cursor": None,
+        }
+
+    def journal_read_after(
+        self,
+        path: str | Path,
+        board_id: str,
+        cursor: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        """Read a bounded journal page from the durable ``(path, seq)`` index."""
+        key = self._key(path)
+        read_connection = self._read_connection()
+        indexed_result: dict[str, Any] | None = None
+        try:
+            # Keep version, journal state, and page rows on one WAL snapshot.
+            read_connection.execute("BEGIN")
+            versions = read_connection.execute(
+                "SELECT d.version, s.source_version FROM documents d "
+                "LEFT JOIN journal_state s ON s.path = d.path WHERE d.path = ?",
+                (key,),
+            ).fetchone()
+            if versions is None or (
+                versions[1] is not None and int(versions[0]) == int(versions[1])
+            ):
+                indexed_result = self._journal_read_result(
+                    read_connection, key, board_id, cursor, limit
+                )
+            read_connection.commit()
+        except BaseException:
+            if read_connection.in_transaction:
+                read_connection.rollback()
+            raise
+        if indexed_result is not None:
+            return indexed_result
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT doc, version FROM documents WHERE path = ?", (key,)
+            ).fetchone()
+            if row is not None:
+                self._sync_journal_index(
+                    connection, key, json.loads(row[0]), int(row[1])
+                )
+            result = self._journal_read_result(
+                connection, key, board_id, cursor, limit
+            )
+            connection.commit()
+            return result
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def load(self, path: str | Path, default: DefaultFactory[T]) -> T:
         key = self._key(path)
         connection = self._read_connection()
@@ -259,6 +495,7 @@ class SQLiteStore(Store[Any]):
             )
             if row is not None and encoded == stored_blob:
                 # No-op mutation: never bump the version or rewrite the blob.
+                self._sync_journal_index(connection, key, updated, version)
                 connection.commit()
                 return copy.deepcopy(updated)
             next_version = version + 1
@@ -274,6 +511,7 @@ class SQLiteStore(Store[Any]):
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("optimistic version conflict inside write transaction")
+            self._sync_journal_index(connection, key, updated, next_version)
             self._before_commit(connection, key, updated, next_version)
             connection.commit()
             self._record_activity(self._save_activity, key)
