@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -288,67 +289,106 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                     text="decision-marker",
                 )
 
-                class InProcessBoard:
-                    agent_id = str(joined["agent_id"])
-                    principal_id = worker.principal_id
+                class InProcessClient:
+                    agent_name = "acp-seat"
                     renewals = 0
+                    mutation_names: list[tuple[str, str]] = []
 
-                    async def claim(self, ticket_id: str) -> dict[str, object]:
-                        return await call(
-                            worker,
-                            "ticket_claim",
-                            ticket_id=ticket_id,
-                            agent_name="acp-seat",
+                    async def _call(
+                        self, name: str, arguments: dict[str, object]
+                    ) -> dict[str, object]:
+                        selected_name = str(
+                            arguments.get("agent_name", self.agent_name)
                         )
+                        who = worker if selected_name == "acp-seat" else admin
+                        if name in {"ticket_claim", "lease_renew", "ticket_submit"}:
+                            self.mutation_names.append((name, selected_name))
+                        return await call(who, name, **arguments)
+
+                    async def ticket_claim(
+                        self, ticket_id: str, *, agent_name: str | None = None
+                    ) -> dict[str, object]:
+                        result = await self._call(
+                            "ticket_claim",
+                            {
+                                "ticket_id": ticket_id,
+                                "agent_name": (
+                                    self.agent_name
+                                    if agent_name is None
+                                    else agent_name
+                                ),
+                            },
+                        )
+                        # Model a shared transport whose default seat changes after
+                        # the claim. Later mutations must carry the claim identity.
+                        self.agent_name = "admin-acp"
+                        return result
 
                     async def ticket_get(self, ticket_id: str) -> dict[str, object]:
                         result = await call(worker, "ticket_get", ticket_id=ticket_id)
-                        return result["ticket"]  # type: ignore[return-value]
+                        return result
 
-                    async def checkpoint(
+                    async def memory_checkpoint(
                         self,
-                        ticket_id: str,
                         summary: str,
                         *,
                         files: list[str] | None = None,
-                    ) -> None:
-                        await call(
+                        remaining_tasks: list[str] | None = None,
+                    ) -> dict[str, object]:
+                        return await call(
                             worker,
                             "memory_checkpoint",
                             agent_name="acp-seat",
                             summary=summary,
-                            remaining_tasks=[ticket_id],
+                            remaining_tasks=remaining_tasks or [],
                             files=files or [],
                         )
 
-                    async def renew(self, ticket_id: str) -> None:
+                    async def lease_renew(
+                        self, ticket_id: str, *, agent_name: str | None = None
+                    ) -> dict[str, object]:
                         self.renewals += 1
-                        await call(
-                            worker,
+                        return await self._call(
                             "lease_renew",
-                            ticket_id=ticket_id,
-                            agent_name="acp-seat",
+                            {
+                                "ticket_id": ticket_id,
+                                "agent_name": (
+                                    self.agent_name
+                                    if agent_name is None
+                                    else agent_name
+                                ),
+                            },
                         )
 
-                    async def submit(self, ticket_id: str, completion: dict[str, object]) -> None:
-                        await call(
-                            worker,
+                    async def ticket_submit(
+                        self,
+                        ticket_id: str,
+                        *,
+                        agent_name: str | None = None,
+                        stay_active: bool = False,
+                        **completion: object,
+                    ) -> dict[str, object]:
+                        return await self._call(
                             "ticket_submit",
-                            ticket_id=ticket_id,
-                            agent_name="acp-seat",
-                            stay_active=False,
-                            **completion,
+                            {
+                                "ticket_id": ticket_id,
+                                "agent_name": (
+                                    self.agent_name
+                                    if agent_name is None
+                                    else agent_name
+                                ),
+                                "stay_active": stay_active,
+                                **completion,
+                            },
                         )
 
-                    async def unclaim(self, ticket_id: str) -> None:
-                        await call(
-                            worker,
-                            "ticket_unclaim",
-                            ticket_id=ticket_id,
-                            agent_name="acp-seat",
-                        )
-
-                board = InProcessBoard()
+                client = InProcessClient()
+                board = object.__new__(seat.CentralBoard)
+                board.config = SimpleNamespace(agent_name="acp-seat")
+                board.client = client
+                board.agent_id = str(joined["agent_id"])
+                board.principal_id = worker.principal_id
+                board._claim_identities = {}
                 runtime = seat.ACPSeatRuntime(
                     board,
                     [sys.executable, str(FAKE), "--script", str(script)],
@@ -360,8 +400,17 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                 ticket = final["ticket"]
                 assert ticket["status"] == "submitted"
                 assert ticket["files_changed"] == ["result.txt"]
+                assert ticket["claimed_by_agent_id"] == joined["agent_id"]
+                assert ticket["claimed_by_principal_id"] == worker.principal_id
+                assert ticket["claimed_by"] == "acp-seat"
                 assert ticket["submitted_by_principal_id"] == worker.principal_id
-                assert board.renewals >= 1
+                assert client.renewals >= 1
+                assert client.mutation_names[0] == ("ticket_claim", "acp-seat")
+                assert client.mutation_names[-1] == ("ticket_submit", "acp-seat")
+                assert all(
+                    agent_name == "acp-seat"
+                    for _operation, agent_name in client.mutation_names
+                )
         finally:
             central.current_principal = original
 
