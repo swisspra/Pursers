@@ -117,6 +117,26 @@ section {
   margin-top: 0;
 }
 
+.next-step-label {
+  margin: 0 0 0.4rem;
+  color: #4ade80;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+#next-step h2 {
+  margin: 0;
+}
+
+.preset-list {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 0;
+  padding-left: 1.4rem;
+}
+
 dl {
   display: grid;
   grid-template-columns: minmax(7rem, 1fr) minmax(12rem, 2fr);

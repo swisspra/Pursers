@@ -2,8 +2,16 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const manifest = require('../aion-extension.json');
 const { createHandlers } = require('../webui/routes.js');
-const { createStartupView, renderStartupView } = require('../webui/app.js');
+const {
+  PRESETS_BY_ROLE,
+  createPostJoinGuidance,
+  createStartupView,
+  initialize,
+  renderPostJoinGuidance,
+  renderStartupView,
+} = require('../webui/app.js');
 
 class FakeElement {
   constructor(tagName = 'div') {
@@ -13,6 +21,8 @@ class FakeElement {
     this.hidden = true;
     this.textContent = '';
     this.className = '';
+    this.value = '';
+    this.listeners = {};
   }
 
   append(...children) {
@@ -21,6 +31,10 @@ class FakeElement {
 
   replaceChildren(...children) {
     this.children = children;
+  }
+
+  addEventListener(type, listener) {
+    this.listeners[type] = listener;
   }
 }
 
@@ -37,6 +51,15 @@ function uiFixture() {
     title: new FakeElement('h2'),
     summary: new FakeElement('p'),
     seatList: new FakeElement('div'),
+  };
+}
+
+function nextStepFixture() {
+  return {
+    card: new FakeElement('section'),
+    title: new FakeElement('h2'),
+    summary: new FakeElement('p'),
+    presetList: new FakeElement('ul'),
   };
 }
 
@@ -125,4 +148,81 @@ test('join status shape normalizes into the same ready view', () => {
   assert.equal(view.state, 'ready');
   assert.equal(view.icon, '✓');
   assert.equal(view.seats[0].seat_name, 'worker-one');
+});
+
+test('post-join guidance uses the exact contributed preset labels', () => {
+  const assistants = manifest.contributes.assistants;
+  assert.deepEqual(
+    [...PRESETS_BY_ROLE.worker, ...PRESETS_BY_ROLE.reviewer],
+    assistants.map((assistant) => assistant.name),
+  );
+
+  const guidance = createPostJoinGuidance({ ok: true, status: { role: 'reviewer' } });
+  const ui = nextStepFixture();
+  renderPostJoinGuidance(guidance, ui, documentRef);
+  assert.equal(ui.card.hidden, false);
+  assert.equal(ui.title.textContent, 'Start a new conversation');
+  assert.match(ui.summary.textContent, /reviewer preset/);
+  assert.deepEqual(
+    ui.presetList.children.map((item) => item.textContent),
+    ['Pursers Reviewer (Codex)', 'Pursers Reviewer (Claude)'],
+  );
+});
+
+test('post-join guidance stays hidden without a successful supported-role join', () => {
+  const ui = nextStepFixture();
+  for (const result of [null, { ok: false }, { ok: true }, { ok: true, status: { role: 'admin' } }]) {
+    renderPostJoinGuidance(createPostJoinGuidance(result), ui, documentRef);
+    assert.equal(ui.card.hidden, true);
+    assert.equal(ui.presetList.children.length, 0);
+  }
+});
+
+test('submit flow reveals guidance only after join success', async () => {
+  const elements = {
+    '#join-form': new FakeElement('form'),
+    '#door': new FakeElement('input'),
+    '#message': new FakeElement('p'),
+    '#status-card': new FakeElement('section'),
+    '#status-icon': new FakeElement('span'),
+    '#status-title': new FakeElement('h2'),
+    '#status-summary': new FakeElement('p'),
+    '#seat-list': new FakeElement('div'),
+    '#next-step': new FakeElement('section'),
+    '#next-step-title': new FakeElement('h2'),
+    '#next-step-summary': new FakeElement('p'),
+    '#preset-list': new FakeElement('ul'),
+  };
+  const interactiveDocument = {
+    ...documentRef,
+    querySelector(selector) {
+      return elements[selector];
+    },
+  };
+  let joinResult = { ok: false, error: 'invalid_door' };
+  const fetchImpl = async (url) => {
+    if (url === '/pursers/status') {
+      return new Response(JSON.stringify({ ok: true, push_mode: 'push', seats: [] }));
+    }
+    return new Response(JSON.stringify(joinResult), { status: joinResult.ok ? 200 : 400 });
+  };
+  initialize(interactiveDocument, fetchImpl);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  elements['#door'].value = 'invalid';
+  await elements['#join-form'].listeners.submit({ preventDefault() {} });
+  assert.equal(elements['#next-step'].hidden, true);
+
+  joinResult = {
+    ok: true,
+    mcp_server: 'Pursers worker demo',
+    status: { board: 'demo', role: 'worker', seat_name: 'worker-one', push_mode: 'push' },
+  };
+  elements['#door'].value = 'synthetic';
+  await elements['#join-form'].listeners.submit({ preventDefault() {} });
+  assert.equal(elements['#next-step'].hidden, false);
+  assert.deepEqual(
+    elements['#preset-list'].children.map((item) => item.textContent),
+    ['Pursers Worker (Codex)', 'Pursers Worker (Claude)'],
+  );
 });

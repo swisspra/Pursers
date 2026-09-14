@@ -1,5 +1,10 @@
 'use strict';
 
+const PRESETS_BY_ROLE = Object.freeze({
+  worker: Object.freeze(['Pursers Worker (Codex)', 'Pursers Worker (Claude)']),
+  reviewer: Object.freeze(['Pursers Reviewer (Codex)', 'Pursers Reviewer (Claude)']),
+});
+
 function valueOrDash(value) {
   return value === undefined || value === null || value === '' ? '—' : String(value);
 }
@@ -157,6 +162,32 @@ function connectionState(result) {
   return null;
 }
 
+function createPostJoinGuidance(result) {
+  if (!result || !result.ok || !result.status) return null;
+  const role = String(result.status.role || '').toLowerCase();
+  const presets = PRESETS_BY_ROLE[role];
+  if (!presets) return null;
+  return {
+    title: 'Start a new conversation',
+    summary: `Choose a matching ${role} preset:`,
+    presets,
+  };
+}
+
+function renderPostJoinGuidance(guidance, ui, documentRef) {
+  ui.card.hidden = !guidance;
+  ui.presetList.replaceChildren();
+  if (!guidance) return;
+  ui.title.textContent = guidance.title;
+  ui.summary.textContent = guidance.summary;
+  const items = guidance.presets.map((preset) => {
+    const item = documentRef.createElement('li');
+    item.textContent = preset;
+    return item;
+  });
+  ui.presetList.replaceChildren(...items);
+}
+
 async function readJson(response) {
   try {
     return await response.json();
@@ -180,7 +211,12 @@ function initialize(documentRef, fetchImpl) {
   const connectionTitle = documentRef.querySelector('#connection-title');
   const recoverButton = documentRef.querySelector('#recover');
   let recoveryTarget = null;
-
+  const nextStepUi = {
+    card: documentRef.querySelector('#next-step'),
+    title: documentRef.querySelector('#next-step-title'),
+    summary: documentRef.querySelector('#next-step-summary'),
+    presetList: documentRef.querySelector('#preset-list'),
+  };
   const showResult = (result) => renderStartupView(
     createStartupView(result), ui, documentRef,
   );
@@ -209,6 +245,7 @@ function initialize(documentRef, fetchImpl) {
     const door = doorInput.value.trim();
     doorInput.value = '';
     message.textContent = 'Joining…';
+    renderPostJoinGuidance(null, nextStepUi, documentRef);
     const response = await fetchImpl('/pursers/join', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -228,6 +265,7 @@ function initialize(documentRef, fetchImpl) {
     showConnection(state);
     message.textContent = `Joined and registered ${result.mcp_server}.`;
     showStatus(result.status, result.push_mode);
+    renderPostJoinGuidance(createPostJoinGuidance(result), nextStepUi, documentRef);
   });
 
   recoverButton.addEventListener('click', async () => {
@@ -269,11 +307,15 @@ function initialize(documentRef, fetchImpl) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    PRESETS_BY_ROLE,
     connectionState,
+    createPostJoinGuidance,
     createStartupView,
+    initialize,
     mount: initialize,
     normalizeSeat,
     recoveryPayload,
+    renderPostJoinGuidance,
     renderStartupView,
   };
 }
