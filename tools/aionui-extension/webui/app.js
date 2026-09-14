@@ -1,19 +1,94 @@
 'use strict';
 
-const form = document.querySelector('#join-form');
-const doorInput = document.querySelector('#door');
-const message = document.querySelector('#message');
-const card = document.querySelector('#status-card');
+function valueOrDash(value) {
+  return value === undefined || value === null || value === '' ? '—' : String(value);
+}
 
-function showStatus(status) {
-  for (const [field, value] of Object.entries(status)) {
-    const target = card.querySelector(`[data-field="${field}"]`);
-    if (!target) continue;
-    target.textContent = field === 'exp' && value
-      ? new Date(Number(value) * 1000).toLocaleString()
-      : String(value || '—');
+function normalizeSeat(seat, pushMode) {
+  const names = Array.isArray(seat.seat_names)
+    ? seat.seat_names
+    : (seat.seat_name ? [seat.seat_name] : []);
+  return {
+    board: valueOrDash(seat.board),
+    role: valueOrDash(seat.role),
+    seat_name: names.join(', ') || 'Reserved on first session',
+    push_mode: valueOrDash(seat.push_mode || pushMode),
+    kid: valueOrDash(seat.kid),
+    exp: seat.exp ? new Date(Number(seat.exp) * 1000).toLocaleString() : '—',
+  };
+}
+
+function createStartupView(result) {
+  if (!result || !result.ok) {
+    if (result && result.error === 'bridge_not_installed') {
+      return {
+        state: 'bridge-missing',
+        icon: '↓',
+        title: 'Wait bridge missing',
+        summary: result.install_hint || 'Install pursers-wait-bridge, then reload this page.',
+        seats: [],
+      };
+    }
+    return {
+      state: 'unavailable',
+      icon: '!',
+      title: 'Status unavailable',
+      summary: 'Pursers could not read wait-bridge status. Check the bridge, then reload this page.',
+      seats: [],
+    };
   }
-  card.hidden = false;
+
+  const seats = Array.isArray(result.seats)
+    ? result.seats.map((seat) => normalizeSeat(seat, result.push_mode))
+    : [];
+  if (seats.length === 0) {
+    return {
+      state: 'empty',
+      icon: '○',
+      title: 'No connected seats',
+      summary: 'No worker or reviewer seat is connected yet. Paste a door to get started.',
+      seats,
+    };
+  }
+  return {
+    state: 'ready',
+    icon: '✓',
+    title: `${seats.length} connected seat${seats.length === 1 ? '' : 's'}`,
+    summary: `Wait bridge status is available. Push mode: ${valueOrDash(result.push_mode)}.`,
+    seats,
+  };
+}
+
+function appendField(documentRef, list, label, value) {
+  const term = documentRef.createElement('dt');
+  term.textContent = label;
+  const detail = documentRef.createElement('dd');
+  detail.textContent = value;
+  list.append(term, detail);
+}
+
+function renderStartupView(view, ui, documentRef) {
+  ui.card.hidden = false;
+  ui.card.dataset.state = view.state;
+  ui.icon.textContent = view.icon;
+  ui.title.textContent = view.title;
+  ui.summary.textContent = view.summary;
+  const cards = view.seats.map((seat) => {
+    const article = documentRef.createElement('article');
+    article.className = 'seat-card';
+    const heading = documentRef.createElement('h3');
+    heading.textContent = seat.seat_name;
+    const list = documentRef.createElement('dl');
+    appendField(documentRef, list, 'Board', seat.board);
+    appendField(documentRef, list, 'Role', seat.role);
+    appendField(documentRef, list, 'Seat name', seat.seat_name);
+    appendField(documentRef, list, 'Push mode', seat.push_mode);
+    appendField(documentRef, list, 'Key ID', seat.kid);
+    appendField(documentRef, list, 'Expires', seat.exp);
+    article.append(heading, list);
+    return article;
+  });
+  ui.seatList.replaceChildren(...cards);
 }
 
 async function readJson(response) {
@@ -24,37 +99,55 @@ async function readJson(response) {
   }
 }
 
-form.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const door = doorInput.value.trim();
-  doorInput.value = '';
-  message.textContent = 'Joining…';
-  const response = await fetch('/pursers/join', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ door }),
-  });
-  const result = await readJson(response);
-  if (!response.ok || !result.ok) {
-    message.textContent = result.install_hint || 'Join failed. Ask your coordinator to check the door.';
-    return;
-  }
-  message.textContent = `Joined and registered ${result.mcp_server}.`;
-  showStatus(result.status);
-});
+function initialize(documentRef, fetchImpl) {
+  const form = documentRef.querySelector('#join-form');
+  const doorInput = documentRef.querySelector('#door');
+  const message = documentRef.querySelector('#message');
+  const ui = {
+    card: documentRef.querySelector('#status-card'),
+    icon: documentRef.querySelector('#status-icon'),
+    title: documentRef.querySelector('#status-title'),
+    summary: documentRef.querySelector('#status-summary'),
+    seatList: documentRef.querySelector('#seat-list'),
+  };
+  const showResult = (result) => renderStartupView(
+    createStartupView(result), ui, documentRef,
+  );
 
-fetch('/pursers/status')
-  .then(readJson)
-  .then((result) => {
-    if (!result.ok || !result.seats || result.seats.length === 0) return;
-    const seat = result.seats[0];
-    showStatus({
-      board: seat.board,
-      role: seat.role,
-      seat_name: seat.seat_names.join(', ') || 'reserved on first session',
-      push_mode: result.push_mode,
-      kid: seat.kid,
-      exp: seat.exp,
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const door = doorInput.value.trim();
+    doorInput.value = '';
+    message.textContent = 'Joining…';
+    const response = await fetchImpl('/pursers/join', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ door }),
     });
-  })
-  .catch(() => {});
+    const result = await readJson(response);
+    if (!response.ok || !result.ok) {
+      message.textContent = result.install_hint || 'Join failed. Ask your coordinator to check the door.';
+      if (result.error === 'bridge_not_installed') showResult(result);
+      return;
+    }
+    message.textContent = `Joined and registered ${result.mcp_server}.`;
+    showResult({
+      ok: true,
+      push_mode: result.status && result.status.push_mode,
+      seats: result.status ? [result.status] : [],
+    });
+  });
+
+  fetchImpl('/pursers/status')
+    .then(readJson)
+    .then(showResult)
+    .catch(() => showResult({ ok: false, error: 'status_unavailable' }));
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { createStartupView, normalizeSeat, renderStartupView };
+}
+
+if (typeof document !== 'undefined' && typeof fetch !== 'undefined') {
+  initialize(document, fetch);
+}
