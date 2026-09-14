@@ -252,11 +252,13 @@ claim offers, read or edit the project, or accept a seat token. Its commands are
 `watch <board>`.
 
 For development before the registry package is published, install it from the
-same checkout and validate the selected profile:
+same checkout and validate the selected profile. With `--project`, `--login`
+runs the existing Personal setup when the profile is missing:
 
 ```bash
 .venv/bin/python -m pip install ./tools/acp-agent
 ONBOARD_PERSONAL_PROFILE="$PURSERS_PROFILE" .venv/bin/pursers-acp --login
+.venv/bin/pursers-acp --project /PATH/TO/PROJECT --login
 ```
 
 Zed's current custom-agent configuration launches the same executable over
@@ -287,7 +289,11 @@ does not claim built-in VS Code registry support.
 Every ticket creation and annotation opens an ACP permission prompt containing
 the exact board operation and payload. Only **Allow once** performs the write.
 Cancelling a `watch` turn closes its live subscription. The agent advertises no
-filesystem, terminal, MCP, image, code-edit, or session-loading capability.
+filesystem, terminal, image, code-edit, or session-loading capability. ACP v1
+stdio MCP servers supplied by the IDE in `session/new` are initialized for that
+session and closed during teardown; this baseline support does not expose an
+additional Pursers editing capability. Watches call `a2a_wait` through the
+configured wait bridge and reuse only its returned positive cursor.
 
 Protocol and host configuration were checked against the official
 [ACP v1 documentation](https://agentclientprotocol.com/protocol/v1/overview)

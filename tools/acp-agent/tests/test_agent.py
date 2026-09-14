@@ -3,15 +3,19 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
+from argparse import Namespace
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from mcp import Client
 from pursers_client import BoardClient
-from pursers_acp.agent import ACP_VERSION, PursersACPAgent
-from pursers_acp.agent import PersonalBoardSurface
+import pursers_acp.agent as agent_module
+from pursers_acp.agent import ACP_VERSION, AuthRequired, PursersACPAgent
+from pursers_acp.agent import PersonalBoardSurface, StdioWaitBridge
 from pursers_central import central
 
 JSON = dict[str, Any]
@@ -129,9 +133,13 @@ class FakeACPClient:
             },
         )
 
-    async def new_session(self, cwd: Path) -> str:
+    async def new_session(self, cwd: Path, mcp_servers: list[JSON] | None = None) -> str:
         result = await self.request(
-            "session/new", {"cwd": str(cwd.resolve()), "mcpServers": []}
+            "session/new",
+            {
+                "cwd": str(cwd.resolve()),
+                "mcpServers": [] if mcp_servers is None else mcp_servers,
+            },
         )
         return result["sessionId"]
 
@@ -225,6 +233,269 @@ async def _watch_streams_then_cancel_stops_prompt(tmp_path: Path) -> None:
         assert await prompt == {"stopReason": "cancelled"}
     finally:
         await client.close()
+
+
+def _stdio_server_script(path: Path, source: str) -> None:
+    path.write_text(
+        "from mcp.server.mcpserver import MCPServer\n"
+        + source
+        + "\nserver.run(transport='stdio')\n",
+        encoding="utf-8",
+    )
+
+
+def test_personal_watch_uses_wait_bridge_cursor_and_cancel_teardown(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_personal_watch_uses_wait_bridge_cursor_and_cancel_teardown(tmp_path))
+
+
+async def _personal_watch_uses_wait_bridge_cursor_and_cancel_teardown(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "wait-calls.jsonl"
+    script = tmp_path / "wait_bridge.py"
+    _stdio_server_script(
+        script,
+        """import asyncio, json, os
+from pathlib import Path
+server = MCPServer('wait-bridge-stub')
+@server.tool()
+async def a2a_wait(boards: list[str], only_mine: bool, timeout_s: int, since_seq: dict[str, int] | None = None):
+    marker = Path(os.environ['WAIT_MARKER'])
+    with marker.open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps({'boards': boards, 'only_mine': only_mine, 'timeout_s': timeout_s, 'since_seq': since_seq}, sort_keys=True) + '\\n')
+    if since_seq is None:
+        return {'new_seq': {'pursers': 7}, 'events': [{'seq': 7, 'kind': 'ticket_created', 'ticket_id': 'TK-live'}], 'timed_out': False, 'resynced': {'pursers': False}}
+    await asyncio.sleep(60)
+    return {'new_seq': since_seq, 'events': [], 'timed_out': True, 'resynced': {'pursers': False}}
+""",
+    )
+    profile = SimpleNamespace(board_id="pursers", principal_id="PR-human")
+    board = PersonalBoardSurface(profile)
+    board.agent_name = "human-personal"
+    bridges: list[StdioWaitBridge] = []
+
+    class RejectDirectWatchClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def call_tool(self, name: str, _arguments: JSON) -> None:
+            self.calls.append(name)
+            raise AssertionError("watch bypassed the configured wait bridge")
+
+        def listen(self, **_kwargs: object) -> None:
+            self.calls.append("listen")
+            raise AssertionError("watch opened Central's journal directly")
+
+    central = RejectDirectWatchClient()
+    board._client = central  # type: ignore[assignment]
+
+    async def factory() -> StdioWaitBridge:
+        bridge = await StdioWaitBridge.connect(
+            sys.executable, [str(script)], {"WAIT_MARKER": str(marker)}
+        )
+        bridges.append(bridge)
+        return bridge
+
+    board._wait_bridge_factory = factory
+    client = FakeACPClient(PursersACPAgent(lambda: board))
+    try:
+        await client.initialize()
+        session = await client.new_session(tmp_path)
+        prompt = asyncio.create_task(client.prompt(session, "watch pursers"))
+        async with asyncio.timeout(5):
+            while not marker.exists() or len(marker.read_text().splitlines()) < 2:
+                await asyncio.sleep(0.01)
+        await client.notify("session/cancel", {"sessionId": session})
+        assert await prompt == {"stopReason": "cancelled"}
+    finally:
+        await client.close()
+
+    calls = [json.loads(line) for line in marker.read_text().splitlines()]
+    assert calls[0] == {
+        "boards": ["pursers"],
+        "only_mine": False,
+        "since_seq": None,
+        "timeout_s": 180,
+    }
+    assert calls[1]["since_seq"] == {"pursers": 7}
+    assert bridges and bridges[0]._client is None
+    assert central.calls == []
+
+
+def test_nonempty_stdio_mcp_servers_initialize_and_close(tmp_path: Path) -> None:
+    asyncio.run(_nonempty_stdio_mcp_servers_initialize_and_close(tmp_path))
+
+
+async def _nonempty_stdio_mcp_servers_initialize_and_close(tmp_path: Path) -> None:
+    marker = tmp_path / "mcp-marker.txt"
+    script = tmp_path / "mcp_server.py"
+    _stdio_server_script(
+        script,
+        """import os
+from pathlib import Path
+Path(os.environ['MCP_MARKER']).write_text(os.environ['PRIVATE_VALUE'], encoding='utf-8')
+server = MCPServer('acp-session-mcp-stub')
+""",
+    )
+    secret = "mcp-private-value"
+    board = FakeBoard()
+    client = FakeACPClient(PursersACPAgent(lambda: board))
+    try:
+        await client.initialize()
+        session = await client.new_session(
+            tmp_path,
+            [
+                {
+                    "name": "fixture",
+                    "command": sys.executable,
+                    "args": [str(script)],
+                    "env": [
+                        {"name": "MCP_MARKER", "value": str(marker)},
+                        {"name": "PRIVATE_VALUE", "value": secret},
+                    ],
+                }
+            ],
+        )
+        assert session.startswith("pursers-")
+        assert marker.read_text(encoding="utf-8") == secret
+        rendered = json.dumps(
+            {"updates": client.updates, "permissions": client.permissions},
+            sort_keys=True,
+        )
+        assert secret not in rendered
+    finally:
+        await client.close()
+    assert board.closed
+
+
+def test_authenticate_runs_setup_without_exposing_credentials(tmp_path: Path) -> None:
+    asyncio.run(_authenticate_runs_setup_without_exposing_credentials(tmp_path))
+
+
+async def _authenticate_runs_setup_without_exposing_credentials(tmp_path: Path) -> None:
+    secret = "seat-token-must-not-escape"
+    board = FakeBoard()
+    configured = False
+    settings: JSON = {}
+
+    def board_factory() -> FakeBoard:
+        if not configured:
+            raise AuthRequired("profile missing")
+        return board
+
+    async def setup() -> None:
+        nonlocal configured
+        configured = True
+        settings["profile"] = "/PATH/TO/profile.json"
+
+    client = FakeACPClient(PursersACPAgent(board_factory, auth_setup=setup))
+    try:
+        initialized = await client.initialize()
+        assert [row["id"] for row in initialized["authMethods"]] == [
+            "pursers-personal-profile",
+            "pursers-personal-login",
+        ]
+        await client.request(
+            "authenticate", {"methodId": "pursers-personal-profile"}
+        )
+        await client.new_session(tmp_path)
+        rendered = json.dumps(
+            {
+                "initialized": initialized,
+                "updates": client.updates,
+                "permissions": client.permissions,
+                "settings": settings,
+            },
+            sort_keys=True,
+        )
+        assert secret not in rendered
+        assert "TOKEN" not in settings
+    finally:
+        await client.close()
+
+
+def test_login_invokes_personal_setup_when_profile_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = Namespace(profile=None, project=tmp_path, login=True)
+    calls: list[Path | None] = []
+    selections = 0
+
+    class Parser:
+        def parse_args(self) -> Namespace:
+            return args
+
+    def select(**_kwargs: object) -> object:
+        nonlocal selections
+        selections += 1
+        if selections == 1:
+            raise agent_module.PersonalProfileError("missing")
+        return object()
+
+    monkeypatch.setattr(agent_module, "_parser", lambda: Parser())
+    monkeypatch.setattr(agent_module, "select_personal_profile", select)
+    monkeypatch.setattr(
+        agent_module, "_run_personal_setup", lambda project: calls.append(project)
+    )
+    agent_module.main()
+    assert calls == [tmp_path]
+    assert selections == 2
+
+
+def test_setup_environment_excludes_inherited_seat_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "seat-secret")
+    monkeypatch.setenv("ONBOARD_TOKEN_FILE", "/secret/token")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    environment = agent_module._setup_environment()
+    assert environment["PATH"] == "/usr/bin"
+    assert "ONBOARD_CENTRAL_TOKEN" not in environment
+    assert "ONBOARD_TOKEN_FILE" not in environment
+
+
+def test_personal_setup_command_has_no_inherited_board_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "seat-secret")
+    monkeypatch.setenv("ONBOARD_TOKEN_FILE", "/secret/token")
+    monkeypatch.setattr(agent_module.shutil, "which", lambda _name: "/bin/setup")
+    monkeypatch.setattr(
+        agent_module, "default_profiles_root", lambda: tmp_path / "profiles"
+    )
+    monkeypatch.setattr(
+        agent_module,
+        "profile_path_for_project",
+        lambda _project, root: root / "project-fixture" / "profile.json",
+    )
+
+    def run(command: list[str], **kwargs: Any) -> SimpleNamespace:
+        calls.append((command, kwargs["env"]))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(agent_module.subprocess, "run", run)
+    agent_module._run_personal_setup(tmp_path)
+    command, environment = calls[0]
+    assert command == [
+        "/bin/setup",
+        "setup",
+        "--project",
+        str(tmp_path.resolve()),
+        "--apply",
+        "--activate",
+        "--host-id",
+        "pursers-acp",
+        "--session",
+        "ide",
+        "--host-config",
+        str(tmp_path / "profiles" / "project-fixture" / "acp-host.json"),
+    ]
+    assert "seat-secret" not in json.dumps(command)
+    assert "ONBOARD_CENTRAL_TOKEN" not in environment
+    assert "ONBOARD_TOKEN_FILE" not in environment
 
 
 class InProcessPersonalBoard(PersonalBoardSurface):
