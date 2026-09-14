@@ -21,10 +21,10 @@ PYTHON_DETAILS = {
 def _lock_text(source_hash: str) -> str:
     return (
         "# Pursers Home runtime wheelhouse lock. Regenerate deliberately; do not hand-edit.\n"
-        "# schema: 1\n"
+        "# schema: 2\n"
         "# python: 3.12\n"
-        "# platform: test_platform_arm64\n"
         f"# source-requirements-sha256: {source_hash}\n\n"
+        "# platform: test_platform_arm64\n"
         f"example==1.2.3 --hash=sha256:{'a' * 64}\n"
     )
 
@@ -58,6 +58,41 @@ def test_lock_requires_exact_versions_and_hashes(tmp_path: Path) -> None:
 
     with pytest.raises(builder.WheelhouseError, match="name==version"):
         builder._validate_lock(lock, PYTHON_DETAILS)
+
+
+def test_lock_selects_runtime_platform_and_validates_other_sections(tmp_path: Path) -> None:
+    lock = tmp_path / "wheelhouse.lock"
+    lock.write_text(
+        _lock_text(builder._source_requirements_sha256())
+        + "\n# platform: other_platform_x86_64\n"
+        + f"other==4.5.6 --hash=sha256:{'b' * 64}\n"
+    )
+
+    assert builder._validate_lock(lock, PYTHON_DETAILS) == (
+        ("example", "1.2.3", "a" * 64),
+    )
+
+    missing = {**PYTHON_DETAILS, "platform_tag": "missing_platform"}
+    with pytest.raises(builder.WheelhouseError, match="no section for missing_platform"):
+        builder._validate_lock(lock, missing)
+
+    lock.write_text(lock.read_text().replace("other==4.5.6", "other>=4.5.6"))
+    with pytest.raises(builder.WheelhouseError, match="name==version"):
+        builder._validate_lock(lock, PYTHON_DETAILS)
+
+
+def test_cross_platform_refresh_uses_linux_binary_tags() -> None:
+    assert builder._target_pip_args("linux-x86_64", "macosx-11.0-arm64") == [
+        "--platform",
+        "manylinux2014_x86_64",
+        "--python-version",
+        "3.12",
+        "--implementation",
+        "cp",
+        "--abi",
+        "cp312",
+    ]
+    assert builder._target_pip_args("macosx-11.0-arm64", "macosx-11.0-arm64") == []
 
 
 def test_rendered_lock_is_sorted_and_hashes_exact_wheels(tmp_path: Path) -> None:
@@ -104,7 +139,10 @@ def test_two_builds_from_same_lock_have_identical_checksums(
         source_wheels: tuple[Path, Path],
         environment: dict[str, str],
     ) -> None:
-        del resolver, selected_python, selected_lock, environment
+        del resolver, selected_python, environment
+        assert selected_lock.read_text() == (
+            f"example==1.2.3 --hash=sha256:{'a' * 64}\n"
+        )
         for wheel in source_wheels:
             shutil.copy2(wheel, wheelhouse / wheel.name)
         (wheelhouse / "example-1.2.3-py3-none-any.whl").write_bytes(

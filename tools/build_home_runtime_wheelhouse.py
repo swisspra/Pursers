@@ -187,13 +187,86 @@ def _lock_headers(lock: Path) -> dict[str, str]:
     return headers
 
 
-def _validate_lock(lock: Path, python_details: dict[str, str]) -> tuple[tuple[str, str, str], ...]:
+def _parse_entries(lines: list[str], platform_tag: str) -> tuple[tuple[str, str, str], ...]:
+    entries: list[tuple[str, str, str]] = []
+    names: set[str] = set()
+    for line in lines:
+        match = LOCK_LINE.fullmatch(line)
+        if match is None:
+            raise WheelhouseError(
+                "wheelhouse lock entries must use name==version --hash=sha256:<digest>"
+            )
+        name, version, digest = match.groups()
+        normalized = _normalized_name(name)
+        if normalized in names:
+            raise WheelhouseError(
+                f"wheelhouse lock section {platform_tag} contains duplicate package "
+                f"{normalized}"
+            )
+        names.add(normalized)
+        entries.append((normalized, version, digest))
+    if not entries:
+        raise WheelhouseError(
+            f"wheelhouse lock section {platform_tag} contains no packages"
+        )
+    return tuple(entries)
+
+
+def _lock_sections(
+    lock: Path, *, allow_legacy: bool = False
+) -> tuple[dict[str, str], dict[str, tuple[tuple[str, str, str], ...]]]:
     if not lock.is_file():
         raise WheelhouseError(f"lock file does not exist: {lock}")
     headers = _lock_headers(lock)
-    expected_requirements = _source_requirements_sha256()
-    if headers.get("schema") != "1":
+    schema = headers.get("schema")
+    raw_lines = lock.read_text().splitlines()
+    if schema == "1" and allow_legacy:
+        platform_tag = headers.get("platform")
+        if not platform_tag:
+            raise WheelhouseError("wheelhouse lock platform is missing")
+        lines = [
+            line.strip()
+            for line in raw_lines
+            if line.strip() and not line.startswith("#")
+        ]
+        return headers, {platform_tag: _parse_entries(lines, platform_tag)}
+    if schema != "2":
         raise WheelhouseError("wheelhouse lock schema is invalid; run --refresh-lock")
+
+    sections: dict[str, tuple[tuple[str, str, str], ...]] = {}
+    platform_tag: str | None = None
+    section_lines: list[str] = []
+    for raw_line in raw_lines:
+        line = raw_line.strip()
+        if line.startswith("# platform: "):
+            if platform_tag is not None:
+                if platform_tag in sections:
+                    raise WheelhouseError(
+                        f"wheelhouse lock contains duplicate platform section {platform_tag}"
+                    )
+                sections[platform_tag] = _parse_entries(section_lines, platform_tag)
+            platform_tag = line.removeprefix("# platform: ")
+            if not platform_tag:
+                raise WheelhouseError("wheelhouse lock platform is missing")
+            section_lines = []
+        elif line and not line.startswith("#"):
+            if platform_tag is None:
+                raise WheelhouseError("wheelhouse lock entry appears before a platform section")
+            section_lines.append(line)
+    if platform_tag is not None:
+        if platform_tag in sections:
+            raise WheelhouseError(
+                f"wheelhouse lock contains duplicate platform section {platform_tag}"
+            )
+        sections[platform_tag] = _parse_entries(section_lines, platform_tag)
+    if not sections:
+        raise WheelhouseError("wheelhouse lock contains no platform sections")
+    return headers, sections
+
+
+def _validate_lock(lock: Path, python_details: dict[str, str]) -> tuple[tuple[str, str, str], ...]:
+    headers, sections = _lock_sections(lock)
+    expected_requirements = _source_requirements_sha256()
     if headers.get("source-requirements-sha256") != expected_requirements:
         raise WheelhouseError(
             "wheelhouse lock is stale for current source requirements; run --refresh-lock"
@@ -204,35 +277,23 @@ def _validate_lock(lock: Path, python_details: dict[str, str]) -> tuple[tuple[st
             f"wheelhouse lock targets Python {headers.get('python')}, not {python_minor}; "
             "run --refresh-lock"
         )
-    if headers.get("platform") != python_details["platform_tag"]:
+    platform_tag = python_details["platform_tag"]
+    if platform_tag not in sections:
         raise WheelhouseError(
-            f"wheelhouse lock targets {headers.get('platform')}, not "
-            f"{python_details['platform_tag']}; run --refresh-lock"
+            f"wheelhouse lock has no section for {platform_tag}; "
+            f"run --refresh-lock --platform {platform_tag}"
         )
-
-    entries: list[tuple[str, str, str]] = []
-    names: set[str] = set()
-    for raw_line in lock.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        match = LOCK_LINE.fullmatch(line)
-        if match is None:
-            raise WheelhouseError(
-                "wheelhouse lock entries must use name==version --hash=sha256:<digest>"
-            )
-        name, version, digest = match.groups()
-        normalized = _normalized_name(name)
-        if normalized in names:
-            raise WheelhouseError(f"wheelhouse lock contains duplicate package {normalized}")
-        names.add(normalized)
-        entries.append((normalized, version, digest))
-    if not entries:
-        raise WheelhouseError("wheelhouse lock contains no packages")
-    return tuple(entries)
+    return sections[platform_tag]
 
 
-def _render_lock(wheels: list[Path], python_details: dict[str, str]) -> str:
+def _render_requirements(entries: tuple[tuple[str, str, str], ...]) -> str:
+    return "".join(
+        f"{name}=={version} --hash=sha256:{digest}\n"
+        for name, version, digest in entries
+    )
+
+
+def _entries_from_wheels(wheels: list[Path]) -> tuple[tuple[str, str, str], ...]:
     entries: dict[str, tuple[str, str]] = {}
     for wheel in wheels:
         name, version = _wheel_identity(wheel)
@@ -241,20 +302,35 @@ def _render_lock(wheels: list[Path], python_details: dict[str, str]) -> str:
         entries[name] = (version, _sha256(wheel))
     if not entries:
         raise WheelhouseError("resolver produced no third-party wheels")
-    python_minor = ".".join(python_details["version"].split(".")[:2])
-    lines = [
-        "# Pursers Home runtime wheelhouse lock. Regenerate deliberately; do not hand-edit.",
-        "# schema: 1",
-        f"# python: {python_minor}",
-        f"# platform: {python_details['platform_tag']}",
-        f"# source-requirements-sha256: {_source_requirements_sha256()}",
-        "",
-    ]
-    lines.extend(
-        f"{name}=={version} --hash=sha256:{digest}"
+    return tuple(
+        (name, version, digest)
         for name, (version, digest) in sorted(entries.items())
     )
+
+
+def _render_multi_platform_lock(
+    sections: dict[str, tuple[tuple[str, str, str], ...]], python_minor: str
+) -> str:
+    lines = [
+        "# Pursers Home runtime wheelhouse lock. Regenerate deliberately; do not hand-edit.",
+        "# schema: 2",
+        f"# python: {python_minor}",
+        f"# source-requirements-sha256: {_source_requirements_sha256()}",
+    ]
+    for platform_tag in sorted(sections):
+        lines.extend(["", f"# platform: {platform_tag}"])
+        lines.extend(
+            f"{name}=={version} --hash=sha256:{digest}"
+            for name, version, digest in sections[platform_tag]
+        )
     return "\n".join(lines) + "\n"
+
+
+def _render_lock(wheels: list[Path], python_details: dict[str, str]) -> str:
+    python_minor = ".".join(python_details["version"].split(".")[:2])
+    return _render_multi_platform_lock(
+        {python_details["platform_tag"]: _entries_from_wheels(wheels)}, python_minor
+    )
 
 
 def _build_source_wheels(
@@ -458,7 +534,7 @@ def build(
     python = python.resolve(strict=True)
     lock = lock.resolve(strict=True)
     python_details = _python_details(python)
-    _validate_lock(lock, python_details)
+    entries = _validate_lock(lock, python_details)
     commit, dirty = _source_commit(allow_dirty)
     uv = shutil.which("uv")
     if uv is None:
@@ -469,6 +545,8 @@ def build(
         wheelhouse = temp / "wheelhouse"
         wheelhouse.mkdir()
         wheelhouse.chmod(0o700)
+        selected_lock = temp / "selected-requirements.lock"
+        selected_lock.write_text(_render_requirements(entries))
         source_wheels = _build_source_wheels(
             temp, python, uv, _build_environment(python)
         )
@@ -477,12 +555,12 @@ def build(
             wheelhouse,
             temp / "resolver",
             python,
-            lock,
+            selected_lock,
             source_wheels,
             environment,
         )
         verification = _verify_install(
-            temp, wheelhouse, python, lock, source_wheels, environment
+            temp, wheelhouse, python, selected_lock, source_wheels, environment
         )
         manifest = _write_metadata(
             wheelhouse,
@@ -496,13 +574,50 @@ def build(
     return manifest
 
 
-def refresh_lock(lock: Path, python: Path) -> dict[str, object]:
+def _target_pip_args(target_platform: str, native_platform: str) -> list[str]:
+    if target_platform == native_platform:
+        return []
+    pip_platform = {
+        "linux-x86_64": "manylinux2014_x86_64",
+    }.get(target_platform)
+    if pip_platform is None:
+        raise WheelhouseError(
+            f"cross-platform lock refresh does not support {target_platform}"
+        )
+    return [
+        "--platform",
+        pip_platform,
+        "--python-version",
+        "3.12",
+        "--implementation",
+        "cp",
+        "--abi",
+        "cp312",
+    ]
+
+
+def refresh_lock(
+    lock: Path, python: Path, target_platform: str | None = None
+) -> dict[str, object]:
     if not lock.is_absolute():
         raise WheelhouseError("--lock must be an absolute path")
     if not lock.parent.is_dir():
         raise WheelhouseError("--lock parent must be an existing directory")
     python = python.resolve(strict=True)
     python_details = _python_details(python)
+    platform_tag = target_platform or python_details["platform_tag"]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", platform_tag):
+        raise WheelhouseError("--platform is invalid")
+    python_minor = ".".join(python_details["version"].split(".")[:2])
+    sections: dict[str, tuple[tuple[str, str, str], ...]] = {}
+    if lock.is_file():
+        headers, sections = _lock_sections(lock, allow_legacy=True)
+        if headers.get("python") != python_minor:
+            raise WheelhouseError(
+                f"wheelhouse lock targets Python {headers.get('python')}, not {python_minor}"
+            )
+        if headers.get("source-requirements-sha256") != _source_requirements_sha256():
+            sections = {}
     uv = shutil.which("uv")
     if uv is None:
         raise WheelhouseError("uv is required")
@@ -532,6 +647,7 @@ def refresh_lock(lock: Path, python: Path) -> dict[str, object]:
                 "--dest",
                 str(resolved),
                 "--only-binary=:all:",
+                *_target_pip_args(platform_tag, python_details["platform_tag"]),
                 *(str(wheel) for wheel in source_wheels),
             ],
             env=environment,
@@ -546,14 +662,17 @@ def refresh_lock(lock: Path, python: Path) -> dict[str, object]:
         dependency_wheels = [
             wheel for wheel in sorted(resolved.glob("*.whl")) if wheel.name not in source_names
         ]
-        rendered = _render_lock(dependency_wheels, python_details)
+        sections[platform_tag] = _entries_from_wheels(dependency_wheels)
+        rendered = _render_multi_platform_lock(sections, python_minor)
         temporary_lock = lock.with_name(f".{lock.name}.tmp")
         temporary_lock.write_text(rendered)
         os.replace(temporary_lock, lock)
-    entries = _validate_lock(lock, python_details)
+    selected_details = {**python_details, "platform_tag": platform_tag}
+    entries = _validate_lock(lock, selected_details)
     return {
         "path": str(lock),
         "sha256": _sha256(lock),
+        "platform": platform_tag,
         "packages": len(entries),
         "source_requirements_sha256": _source_requirements_sha256(),
     }
@@ -567,6 +686,7 @@ def main() -> int:
     parser.add_argument("--python", type=Path, required=True)
     parser.add_argument("--lock", type=Path, default=LOCK_PATH)
     parser.add_argument("--refresh-lock", action="store_true")
+    parser.add_argument("--platform")
     parser.add_argument("--allow-dirty", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     lock = args.lock.expanduser().absolute()
@@ -574,8 +694,13 @@ def main() -> int:
         if args.refresh_lock:
             if args.output is not None:
                 raise WheelhouseError("--output cannot be used with --refresh-lock")
-            result = {"ok": True, "lock": refresh_lock(lock, args.python)}
+            result = {
+                "ok": True,
+                "lock": refresh_lock(lock, args.python, args.platform),
+            }
         else:
+            if args.platform is not None:
+                raise WheelhouseError("--platform can only be used with --refresh-lock")
             if args.output is None:
                 raise WheelhouseError("--output is required unless --refresh-lock is used")
             manifest = build(args.output, args.python, lock, args.allow_dirty)

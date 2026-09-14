@@ -109,6 +109,22 @@ then verifies an offline install, imports, command help, hashes, and
 `wheelhouse.json`. See the candidate
 [`build_home_runtime_wheelhouse.py`](https://github.com/swisspra/Pursers/blob/28f81308d1cf3d40c4ed38091cc02d9c7d0827aa/tools/build_home_runtime_wheelhouse.py).
 
+Its approved-hash lock contains separate sections for each supported runtime
+platform. Refresh both Python 3.12 sections deliberately from a macOS arm64 host;
+the Linux command uses pip's binary-only cross-platform resolver and does not
+execute downloaded wheels:
+
+```sh
+python3 tools/build_home_runtime_wheelhouse.py --python /PATH/TO/python3.12 \
+  --refresh-lock --platform macosx-11.0-arm64
+python3 tools/build_home_runtime_wheelhouse.py --python /PATH/TO/python3.12 \
+  --refresh-lock --platform linux-x86_64
+```
+
+The builder selects only the exact section matching `sysconfig.get_platform()`
+and passes its pinned versions and hashes to pip. Linux CI remains the verifier
+for the `linux-x86_64` section.
+
 The AionUi ZIP does not need a time-related environment variable. Its
 [`build.py`](https://github.com/swisspra/Pursers/blob/28f81308d1cf3d40c4ed38091cc02d9c7d0827aa/tools/aionui-extension/build.py)
 uses an explicit member allowlist, fixed `1980-01-01` timestamps, mode
