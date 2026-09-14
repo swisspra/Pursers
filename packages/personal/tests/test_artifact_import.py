@@ -78,6 +78,80 @@ def test_hashless_local_wheel_receipt_uses_exact_member_inventory(
         artifacts.verify_component_artifacts({"fixture"})
 
 
+def test_only_locked_console_script_is_an_approved_external_member(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    site_packages = tmp_path / "venv/lib/python/site-packages"
+    package_path = site_packages / "fixture_pkg/__init__.py"
+    metadata_path = site_packages / "fixture-1.dist-info/METADATA"
+    entry_points_path = site_packages / "fixture-1.dist-info/entry_points.txt"
+    scripts_dir = tmp_path / "venv/bin"
+    script_path = scripts_dir / "fixture-cli"
+    package_path.parent.mkdir(parents=True)
+    metadata_path.parent.mkdir(parents=True)
+    scripts_dir.mkdir(parents=True)
+    package_path.write_text("VALUE = 1\n", encoding="utf-8")
+    metadata_path.write_text("Name: fixture\nVersion: 1\n", encoding="utf-8")
+    entry_points_path.write_text(
+        "[console_scripts]\nfixture-cli = fixture_pkg:main\n", encoding="utf-8"
+    )
+    script_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    members = {
+        "fixture_pkg/__init__.py": artifacts._digest(package_path),
+        "fixture-1.dist-info/METADATA": artifacts._digest(metadata_path),
+        "fixture-1.dist-info/entry_points.txt": artifacts._digest(entry_points_path),
+    }
+
+    class Distribution:
+        version = "1"
+        files = [*members, "../../../bin/fixture-cli"]
+
+        @staticmethod
+        def read_text(name: str) -> str | None:
+            if name == "direct_url.json":
+                return '{"archive_info": {}, "url": "file:///fixture.whl"}'
+            return None
+
+        @staticmethod
+        def locate_file(relative: str) -> Path:
+            return site_packages / relative
+
+    monkeypatch.setattr(
+        artifacts,
+        "_lock_document",
+        lambda: {
+            "schema_version": 1,
+            "components": {
+                "fixture": {
+                    "version": "1",
+                    "wheel_sha256": "f" * 64,
+                    "members": members,
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        artifacts.importlib.metadata,
+        "distribution",
+        lambda _name: Distribution(),
+    )
+    monkeypatch.setattr(
+        artifacts.sysconfig,
+        "get_path",
+        lambda name: str(scripts_dir) if name == "scripts" else None,
+    )
+
+    assert artifacts.verify_component_artifacts({"fixture"})["fixture"]["version"] == "1"
+
+    stray_path = scripts_dir / "stray-cli"
+    stray_path.write_text("#!/bin/sh\n", encoding="utf-8")
+    Distribution.files = [*Distribution.files, "../../../bin/stray-cli"]
+    with pytest.raises(
+        artifacts.ArtifactVerificationError, match="unapproved distribution members"
+    ):
+        artifacts.verify_component_artifacts({"fixture"})
+
+
 def test_verified_import_ignores_timestamp_valid_malicious_pyc(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

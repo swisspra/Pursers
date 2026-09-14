@@ -1,5 +1,8 @@
 'use strict';
 
+const MAX_JOIN_ATTEMPTS = 3;
+const RETRY_COUNTDOWN_SECONDS = 3;
+
 if (typeof document !== 'undefined' && typeof fetch !== 'undefined') {
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -1469,13 +1472,68 @@ function connectionState(result) {
   return null;
 }
 
-async function compatReadJson(response) {
+async function readJson(response) {
   try { return await response.json(); } catch (_error) { return { ok: false, error: 'invalid_response' }; }
 }
 
-function mount(documentRef, fetchImpl) {
+function joinFailure(response, result, transportError) {
+  const code = result && (result.error || result.code);
+  if (transportError) {
+    return {
+      retryable: true,
+      title: 'Pursers helper is unreachable.',
+      action: 'Keep AionUi open or restart it.',
+    };
+  }
+  if (response.status === 401 || response.status === 403 || code === 'auth_rejected') {
+    return {
+      retryable: false,
+      title: 'Authentication was rejected.',
+      action: 'Sign in to AionUi again and reload this page.',
+    };
+  }
+  if (code === 'server_unreachable') {
+    return {
+      retryable: true,
+      title: 'Central is unreachable.',
+      action: 'Check the Central URL and network.',
+    };
+  }
+  if (code === 'bridge_status_failed') {
+    return {
+      retryable: true,
+      title: 'Pursers helper status is unavailable.',
+      action: 'Restart the wait bridge.',
+    };
+  }
+  return {
+    retryable: false,
+    title: (result && result.install_hint) || 'Join failed.',
+    action: 'Ask your coordinator to check the door.',
+  };
+}
+
+function failureMessage(failure, attempts) {
+  return `${failure.title} ${failure.action} Automatic retries stopped after ${attempts} attempts; paste the door again to retry.`;
+}
+
+async function waitForRetry(failure, nextAttempt, message, sleep) {
+  for (let seconds = RETRY_COUNTDOWN_SECONDS; seconds > 0; seconds -= 1) {
+    message.textContent = `${failure.title} ${failure.action} Retrying in ${seconds}s (attempt ${nextAttempt} of ${MAX_JOIN_ATTEMPTS}).`;
+    await sleep(1000);
+  }
+  message.textContent = `Retrying… (attempt ${nextAttempt} of ${MAX_JOIN_ATTEMPTS})`;
+}
+
+function initialize(documentRef, fetchImpl, dependencies = {}) {
+  const sleep = dependencies.sleep || ((milliseconds) => new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  }));
   const form = documentRef.querySelector('#join-form');
   const doorInput = documentRef.querySelector('#door');
+  const submitButton = typeof form.querySelector === 'function'
+    ? form.querySelector('button[type="submit"]')
+    : null;
   const message = documentRef.querySelector('#message');
   const ui = {
     card: documentRef.querySelector('#status-card'), icon: documentRef.querySelector('#status-icon'),
@@ -1487,11 +1545,13 @@ function mount(documentRef, fetchImpl) {
   const recoverButton = documentRef.querySelector('#recover');
   let recoveryTarget = null;
   const showResult = (result) => renderStartupView(createStartupView(result), ui, documentRef);
+  let joining = false;
+  let viewGeneration = 0;
   const showStatus = (status, pushMode) => showResult({
     ok: true, push_mode: status.push_mode || pushMode, seats: [status],
   });
   function showConnection(state) {
-    if (!state) return;
+    if (!state || !connectionCard || !connectionTitle || !recoverButton) return;
     connectionTitle.textContent = state.title;
     for (const field of ['central', 'board', 'helper']) {
       connectionCard.querySelector(`[data-connection="${field}"]`).textContent = state[field];
@@ -1500,49 +1560,116 @@ function mount(documentRef, fetchImpl) {
     recoverButton.hidden = !recoveryTarget;
     connectionCard.hidden = false;
   }
-  form.addEventListener('submit', async (event) => {
+  const setBusy = (busy) => {
+    joining = busy;
+    if (typeof form.setAttribute === 'function') form.setAttribute('aria-busy', busy ? 'true' : 'false');
+    doorInput.disabled = busy;
+    if (submitButton) {
+      submitButton.disabled = busy;
+      submitButton.textContent = busy ? 'Joining…' : 'Join';
+    }
+  };
+  const submitJoin = async (event) => {
     event.preventDefault();
+    if (joining) return;
     const door = doorInput.value.trim();
     doorInput.value = '';
-    message.textContent = 'Joining…';
-    const response = await fetchImpl('/pursers/join', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ door }),
-    });
-    const result = await compatReadJson(response);
-    const state = connectionState(result);
-    if (!response.ok || !result.ok) {
-      showConnection(state);
-      if (result.status) showStatus(result.status);
-      else if (result.error === 'bridge_not_installed') showResult(result);
-      message.textContent = (state && state.message) || result.install_hint || 'Join failed.';
-      return;
+    viewGeneration += 1;
+    setBusy(true);
+    message.textContent = `Joining… (attempt 1 of ${MAX_JOIN_ATTEMPTS})`;
+    try {
+      for (let attempt = 1; attempt <= MAX_JOIN_ATTEMPTS; attempt += 1) {
+        let response;
+        let result;
+        let transportError;
+        try {
+          response = await fetchImpl('/pursers/join', {
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ door }),
+          });
+          result = await readJson(response);
+        } catch (error) {
+          transportError = error;
+        }
+        if (response && response.ok && result.ok) {
+          showConnection(connectionState(result));
+          message.textContent = `Joined and registered ${result.mcp_server}.`;
+          showStatus(result.status, result.push_mode);
+          return;
+        }
+        const state = connectionState(result);
+        showConnection(state);
+        if (result && result.status) showStatus(result.status);
+        const failure = joinFailure(response || { status: 0 }, result, transportError);
+        if (!failure.retryable || attempt === MAX_JOIN_ATTEMPTS) {
+          message.textContent = (state && state.message) || (failure.retryable
+            ? failureMessage(failure, attempt)
+            : `${failure.title} ${failure.action}`);
+          if (result && result.error === 'bridge_not_installed') showResult(result);
+          return;
+        }
+        await waitForRetry(failure, attempt + 1, message, sleep);
+      }
+    } finally {
+      setBusy(false);
     }
-    showConnection(state);
-    message.textContent = `Joined and registered ${result.mcp_server}.`;
-    showStatus(result.status, result.push_mode);
-  });
-  recoverButton.addEventListener('click', async () => {
+  };
+  form.addEventListener('submit', submitJoin);
+  if (recoverButton) recoverButton.addEventListener('click', async () => {
     if (!recoveryTarget) return;
     recoverButton.disabled = true;
+    message.textContent = 'Recovering…';
     try {
       const response = await fetchImpl('/pursers/onboarding/recover', {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(recoveryTarget),
       });
-      const result = await compatReadJson(response);
-      showConnection(connectionState(result));
+      const result = await readJson(response);
+      const state = connectionState(result);
+      showConnection(state);
       if (result.status) showStatus(result.status);
       message.textContent = response.ok && result.ok
-        ? 'Recovered and registered without re-entering the door.' : 'Recovery failed.';
-    } finally { recoverButton.disabled = false; }
+        ? 'Recovered and registered without re-entering the door.'
+        : (state && state.message) || 'Recovery failed. Check the helper and try again.';
+    } catch (_error) {
+      message.textContent = 'Recovery could not reach the local helper. Try again.';
+    } finally {
+      recoverButton.disabled = false;
+    }
   });
-  fetchImpl('/pursers/status').then(compatReadJson).then((result) => {
+  const startupGeneration = viewGeneration;
+  const statusReady = fetchImpl('/pursers/status').then(readJson).then((result) => {
+    if (viewGeneration !== startupGeneration) return;
     showResult(result);
-    if (!result.ok) showConnection(connectionState(result));
-  }).catch(() => showResult({ ok: false, error: 'status_unavailable' }));
+    if (!result.ok) {
+      const state = connectionState(result);
+      showConnection(state);
+      if (state) message.textContent = state.message;
+    }
+  }).catch(() => {
+    if (viewGeneration !== startupGeneration) return;
+    const result = { ok: false, error: 'status_unavailable' };
+    showResult(result);
+    const state = connectionState(result);
+    showConnection(state);
+    if (state) message.textContent = state.message;
+  });
+  return { statusReady, submitJoin };
 }
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    connectionState, createStartupView, mount, normalizeSeat, recoveryPayload, renderStartupView,
+    connectionState,
+    MAX_JOIN_ATTEMPTS,
+    RETRY_COUNTDOWN_SECONDS,
+    createStartupView,
+    initialize,
+    joinFailure,
+    mount: initialize,
+    normalizeSeat,
+    recoveryPayload,
+    renderStartupView,
   };
+}
+
+if (typeof document !== 'undefined' && typeof fetch !== 'undefined' && document.querySelector('#join-form')) {
+  initialize(document, fetch);
 }
