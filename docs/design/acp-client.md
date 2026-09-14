@@ -1,12 +1,12 @@
-# Central as an ACP client
+# ACP in both directions
 
 Status: design spike, 2026-09-14
 
-This proposal makes any Agent Client Protocol (ACP) agent eligible to run as a
-Pursers seat. Central remains the authority for identity, dispatch, durability,
-and independent review. A small seat runtime acts as the ACP client and owns one
-agent subprocess. ACP is an execution interface; it does not replace the board
-protocol or its trust boundaries.
+This proposal covers Central as an ACP client, so any ACP agent can run as a
+Pursers seat, and Pursers as an ACP agent, so a human can use a board from an
+ACP-capable IDE. Central remains the authority for identity, dispatch,
+durability, and independent review. ACP is an interface; it does not replace
+the board protocol or its trust boundaries.
 
 This revives the operator idea in section 2 of the earlier discussion and
 supersedes the 2026-09-14 zero-ACP decision.
@@ -18,6 +18,14 @@ protocol is version 1. The official repository was inspected at commit
 `205918585fc99d97aa10b0d3619d5678dfcda712`; its latest stable schema artifact
 was `schema-v1.21.0`, published 2026-08-20. The schema artifact version must not
 be confused with the negotiated integer wire protocol version.
+
+That snapshot also contains `schema-v2.0.0-alpha.3` with
+`protocolVersion: 2`. The official migration guide still labels the whole v2
+surface draft. Both implementations therefore target stable v1 first. They may
+later offer v2 behind a feature flag, negotiate each connection independently,
+and retain v1. A v2 path must account for prompt acceptance no longer ending a
+turn, completion moving to `state_update`, `session/load` becoming replaying
+`session/resume`, and removal of client filesystem and execution methods.
 
 ACP uses JSON-RPC 2.0, normally between a client and an agent subprocess. The
 client starts with `initialize`, advertising its filesystem and terminal
@@ -46,8 +54,13 @@ The authoritative references are:
 - [pinned protocol repository](https://github.com/agentclientprotocol/agent-client-protocol/tree/205918585fc99d97aa10b0d3619d5678dfcda712)
 - [`schema-v1.21.0` release](https://github.com/agentclientprotocol/agent-client-protocol/releases/tag/schema-v1.21.0)
 - [pinned v1 method schema](https://github.com/agentclientprotocol/agent-client-protocol/blob/205918585fc99d97aa10b0d3619d5678dfcda712/schema/v1/meta.json)
+- [v1-to-v2 migration](https://agentclientprotocol.com/protocol/v2/migration)
+- [current ACP clients](https://agentclientprotocol.com/get-started/clients)
+- [current ACP Registry](https://agentclientprotocol.com/get-started/registry)
 
-## Boundary and mapping
+## Direction A: Central as an ACP client
+
+### Boundary and mapping
 
 The adapter translates workflow events; it must not equate protocols more
 strongly than their guarantees allow.
@@ -162,8 +175,8 @@ pending permission requests receive `cancelled` and no command starts afterward.
 ## Candidate agents
 
 Registry metadata was inspected at commit
-`fd2cc1d622a88e2e8f1fc9c8807417c4856b1ca2`, release
-`v2026.09.14-fd2cc1d`. Advertised features are discovery hints; the runtime's
+`134db9fa124273eed9133d0fd26a8d3039ea2f2a`, release
+`v2026.09.14-134db9f`. Advertised features are discovery hints; the runtime's
 actual `initialize` response is authoritative and is saved with the run.
 
 | Agent | Registry version | Advertised ACP surface | Position |
@@ -172,24 +185,109 @@ actual `initialize` response is authoritative and is saved with the run.
 | Codex ACP | 1.11.0 | Auth, models/modes, shell/files/permissions, MCP, terminals, plans, web/image and review events | Second target; broad coverage is valuable after the boundary is proven. |
 | Claude Agent ACP | 0.76.0 | Permissions, edits, tasks, nested agents, foreground/background terminals, client MCP and extensions | Third target; broad proprietary adapter increases the initial test matrix. |
 
-Sources: [pinned registry](https://github.com/agentclientprotocol/registry/tree/fd2cc1d622a88e2e8f1fc9c8807417c4856b1ca2),
-[registry release](https://github.com/agentclientprotocol/registry/releases/tag/v2026.09.14-fd2cc1d),
-[Gemini entry](https://github.com/agentclientprotocol/registry/blob/fd2cc1d622a88e2e8f1fc9c8807417c4856b1ca2/gemini/agent.json),
+Sources: [pinned registry](https://github.com/agentclientprotocol/registry/tree/134db9fa124273eed9133d0fd26a8d3039ea2f2a),
+[registry release](https://github.com/agentclientprotocol/registry/releases/tag/v2026.09.14-134db9f),
+[Gemini entry](https://github.com/agentclientprotocol/registry/blob/134db9fa124273eed9133d0fd26a8d3039ea2f2a/gemini/agent.json),
 [Gemini ACP mode](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/acp-mode.md),
-[Codex entry](https://github.com/agentclientprotocol/registry/blob/fd2cc1d622a88e2e8f1fc9c8807417c4856b1ca2/codex-acp/agent.json),
+[Codex entry](https://github.com/agentclientprotocol/registry/blob/134db9fa124273eed9133d0fd26a8d3039ea2f2a/codex-acp/agent.json),
 [Codex ACP](https://github.com/agentclientprotocol/codex-acp),
-[Claude entry](https://github.com/agentclientprotocol/registry/blob/fd2cc1d622a88e2e8f1fc9c8807417c4856b1ca2/claude-acp/agent.json), and
+[Claude entry](https://github.com/agentclientprotocol/registry/blob/134db9fa124273eed9133d0fd26a8d3039ea2f2a/claude-acp/agent.json), and
 [Claude Agent ACP](https://github.com/agentclientprotocol/claude-agent-acp).
+
+## Direction B: Pursers as an ACP agent
+
+`pursers-acp` is a second executable that an IDE launches as its ACP agent. It
+is a board assistant, not a coding agent: it lists and changes board records and
+streams board events, but never reads, edits, builds, or runs the user's source
+tree. This is the IDE-native replacement for the read-only preview in
+[`apps_server.py`](../../packages/personal/src/pursers_personal/apps_server.py),
+not another seat runtime or a path around Central authorization.
+
+### Process, identity, and authentication
+
+One IDE-spawned process may own multiple ACP sessions. Each process loads the
+human's existing Personal profile and mode-0600 token file and uses the same
+Personal/Central MCP tool surface, backed by
+[`client.py`](../../packages/client/src/pursers_client/client.py). It never
+calls `board_onboard`, creates an agent name, or accepts a seat token. Central
+derives `principal_id` from the human token on every request; ACP `agentInfo`
+identifies only the `pursers-acp` implementation.
+
+If no Personal credential is usable, v1 `initialize` returns an `authMethods`
+entry. Protocol-driven `authenticate` starts the existing door/pairing setup;
+terminal authentication may reproduce `pursers-acp login` only when the IDE
+advertises `clientCapabilities.auth.terminal`. v2 renames this to `auth/login`.
+The flow writes the Personal token/profile through the existing credential
+helper, then reconnects and initializes; tokens never appear in prompts, ACP
+updates, command arguments, project settings, or registry metadata.
+
+The v1 capability response advertises text and resource-link prompts, bounded
+session loading only if implemented, and implementation information. It does
+not claim client filesystem, terminal, MCP, image, or code-edit capabilities.
+Unknown prompt intents return a help card rather than guessing a board write.
+
+### IDE prompt mapping
+
+| Human intent | ACP and board mapping | Guardrail |
+| --- | --- | --- |
+| Start or restore | `initialize` + `session/new`; optional `session/load` restores only IDE dialogue, then refetches board state. | The authenticated Personal principal and Central membership decide visible boards. |
+| List my tickets/offers | `session/prompt` calls `ticket_list` with principal-scoped filters and emits bounded `session/update` cards. | Read-only; never claim an offer or fabricate a seat identity. |
+| Create a ticket | Request permission, then call `ticket_create` once with the displayed board, title, scope, and body. | Reject if the approved payload differs byte-for-byte from the call. |
+| Annotate a ticket | Request permission, then call `ticket_annotate`; return the durable annotation ID. | No hidden coordinator decision or memory write. |
+| Watch a board | Open `a2a_wait` through the push subscription used by [`pursers_wait_server.py`](../../tools/wait-bridge/pursers_wait_server.py); translate each authorized event to `session/update`. | Persist and reuse its positive cursor; no polling, cursor reset, or cross-board widening. |
+| Review | After permission, compare authenticated and submission `principal_id` before any review claim or verdict. | Politely refuse same-principal/self-review and any unauthorized role; ACP never weakens independent review. |
+| Cancel | `session/cancel` closes the active subscription/request and resolves pending permissions as cancelled. | It does not unclaim seat work, because this Personal process owns no seat claim. |
+
+Board state is authoritative after crash or reconnect. ACP replay supplies UI
+context only. A watch task reconnects from its saved cursor and publishes a
+bounded gap/update card; it never turns a timer into synthetic progress.
+
+### Permission policy for the human-facing agent
+
+Reads that Central authorizes need no interactive prompt. Every mutation uses
+`session/request_permission` with the exact board, operation, and bounded
+payload shown to the human. `allow_once` authorizes exactly that one request;
+deny or cancellation makes no board call. P0/P1 do not offer or remember
+`allow_always`. Authentication, membership, ACP permission, and board policy
+are cumulative gates: ACP consent cannot grant a missing board scope.
+
+`pursers-acp` needs network access only to the configured Central/door endpoint
+and writes only its Personal credential and bounded session/cursor state. It
+never asks an IDE for filesystem or terminal access. Read-only watches remain
+push subscriptions; create, annotate, and permitted review actions are the only
+initial write intents.
+
+### IDE discovery and packaging
+
+Publish one `pursers/agent.json` entry conforming to the official
+[registry format](https://github.com/agentclientprotocol/registry/blob/134db9fa124273eed9133d0fd26a8d3039ea2f2a/FORMAT.md),
+with pinned distributions, platform/architecture targets, launch command,
+version, license, repository, icon, and authentication metadata. Registry CI
+must validate the handshake and advertised auth methods.
+
+| Host | Installation metadata |
+| --- | --- |
+| Zed | Use the ACP Registry. For development only, document a custom `agent_servers` command; [Zed agent-server extensions](https://zed.dev/docs/ai/external-agents) are deprecated. |
+| JetBrains IDEs | Use the same global ACP Registry entry; document its [custom-agent JSON](https://www.jetbrains.com/help/webstorm/use-ai-agents-with-webstorm.html) fallback and organization policy requirement. |
+| VS Code | The [official ACP client list](https://agentclientprotocol.com/get-started/clients) currently points to marketplace extensions rather than a built-in client. Document compatible client extensions and the custom launch command; do not claim native registry ingestion. |
+| Other ACP hosts | Prefer the registry entry; otherwise publish only host marketplace discovery/configuration metadata that launches the same executable, never a host-specific board adapter. |
+
+The registry is for ACP agents, so direction A's Gemini/Codex/Claude selection
+consumes it while direction B's `pursers-acp` publishes to it. Zed and
+JetBrains can consume that shared record; hosts without registry support need
+configuration instructions, not a protocol fork.
 
 ## Delivery phases
 
 ### P0: fake-agent conformance harness
 
-Build a deterministic stdio agent and fake Board API. Exercise JSON-RPC framing,
+Build a deterministic stdio agent, fake IDE client, and fake Board API. Exercise
+JSON-RPC framing,
 invalid/out-of-order/oversize messages, capability negotiation, every permission
 branch, cancel during permission and terminal work, crash before and after a
 stop response, load/no-load recovery, lease timing, bounded update projection,
-and absence of tokens from prompts, environment, logs, and state.
+push-watch cursor recovery, Personal write consent, self-review refusal, and
+absence of tokens from prompts, environment, logs, and state.
 
 ### P1: one real agent, one sandbox ticket
 
@@ -199,6 +297,11 @@ initialize capability snapshot, offer/claim/prompt/update/renew/submit trace,
 exact commit and tests, permission decisions, and crash-free teardown. A
 different principal reviews the result.
 
+In parallel, launch `pursers-acp` from one sandbox IDE client: authenticate a
+disposable human principal, list offers, create and annotate one ticket after
+two explicit permissions, receive one pushed board event, refuse self-review,
+cancel the watch, and prove the source worktree was untouched.
+
 ### P2: adapters without governance drift
 
 Exercise pinned Codex and Claude implementations through the same generic ACP
@@ -207,6 +310,9 @@ extensions may have policy profiles but must not require per-host dispatch
 adapters. Worker and reviewer remain distinct board identities. ACP modes,
 provider authentication, extensions, and model choice cannot relax ticket
 scope, permission policy, evidence requirements, or independent review.
+Publish the validated `pursers-acp` registry entry, exercise Zed and JetBrains
+registry installs plus one VS Code client extension, and keep host behavior
+limited to Personal board operations rather than code-editing tools.
 
 ## Preconditions, risks, and non-goals
 
@@ -237,5 +343,5 @@ Primary risks and mitigations are:
   design explicitly adopts another major version.
 
 Non-goals are embedding an ACP process in Central, replacing the board API with
-ACP, remote multi-user ACP transport, interactive permission prompts, weakening
-review independence, or adopting an unstable ACP v2 surface.
+ACP, remote multi-user ACP transport, interactive permissions for direction A,
+weakening review independence, or adopting an unstable ACP v2 surface.
