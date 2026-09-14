@@ -725,6 +725,7 @@ def project_ticket_read(
         "tags", "related_files", "target_url", "project", "tier",
         "skills_required", "work_offer", "review_offer", "review_lease",
         "review_state", "human_request", "claimed_by", "claimed_by_agent_id",
+        "claimed_by_principal_id",
         "last_claimed_by", "last_claimed_by_agent_id",
         "last_claimed_by_principal_id", "last_claimed_at",
         "last_release_reason", "lease_expires_at", "ttl_s", "payload_ref",
