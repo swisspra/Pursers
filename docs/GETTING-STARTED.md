@@ -352,7 +352,82 @@ ticket normally. Never restart at cursor zero to look for work.
 > offer-reconcile follow-up: keep one ticket_list per backlog cadence”, and
 > “central+bridge: make offer events recoverable via catch-up”.
 
-## 8. Install the AionUi extension ZIP
+## 8. Run an ACP agent as a seat
+
+`tools/acp-seat/pursers_acp_seat.py` turns one ACP v1 subprocess into one
+Pursers worker seat. It waits for that seat's offers, claims one ticket at a
+time, creates an isolated Git worktree, and sends the ticket plus every current
+coordinator decision to a new ACP session. Central remains authoritative for
+identity, leases, submission, and review; the ACP process never receives the
+board token or a principal ID.
+
+This source-checkout feature is intended for the same trusted Mac as Central.
+The runtime requires macOS `sandbox-exec`: network access is denied, file writes
+are limited to the ticket worktree and temporary directory, and the immutable
+ACP permission policy separately rejects paths outside its configured roots.
+Terminal permission is enabled by default and every permission decision is
+written as a bounded board checkpoint. Keep any provider login directory out of
+`fs_roots` unless the chosen ACP agent needs it to authenticate.
+
+Create a private policy file:
+
+```json
+{
+  "fs_roots": [],
+  "network": false,
+  "terminal": true
+}
+```
+
+Create a private runtime configuration. Copy both identity values literally
+from a verified `board_onboard` response for this exact seat; the runtime stops
+if either value changes. `repository` is a clean source checkout with the
+configured base ref, not the operator's working checkout.
+
+```json
+{
+  "seat": {
+    "central_url": "http://127.0.0.1:8766/mcp",
+    "board_id": "BOARD_ID",
+    "agent_name": "gemini-worker-1",
+    "expected_agent_id": "AI-VERIFIED",
+    "expected_principal_id": "PR-VERIFIED",
+    "token_file": "/PATH/TO/private/gemini-worker.jwt"
+  },
+  "acp": {
+    "command": ["gemini", "--acp"],
+    "repository": "/PATH/TO/isolated/pursers-source",
+    "base_ref": "origin/main",
+    "work_root": "/PATH/TO/isolated/acp-work",
+    "policy_file": "/PATH/TO/private/acp-policy.json"
+  },
+  "lease_interval_s": 300,
+  "wait_timeout_s": 180
+}
+```
+
+Protect all three inputs, then start the seat:
+
+```bash
+chmod 600 /PATH/TO/private/gemini-worker.jwt \
+  /PATH/TO/private/acp-policy.json \
+  /PATH/TO/private/acp-seat.json
+python3 tools/acp-seat/pursers_acp_seat.py \
+  --config /PATH/TO/private/acp-seat.json
+```
+
+The documented command uses Gemini CLI's native `gemini --acp` mode. The
+runtime targets ACP wire protocol v1 and follows the official initialization,
+session, prompt, update, permission, and stop-reason flow documented in the
+[ACP v1 specification](https://agentclientprotocol.com/protocol/v1/overview),
+[tool-call specification](https://agentclientprotocol.com/protocol/v1/tool-calls),
+and [official protocol repository](https://github.com/agentclientprotocol/agent-client-protocol),
+all rechecked on 2026-09-14. A deterministic in-process Central plus fake ACP
+agent test covers offer/claim context, updates, lease renewal, exact Git
+completion validation, submission, permission denial, and crash release. It is
+not evidence that a provider-authenticated Gemini session ran successfully.
+
+## 9. Install the AionUi extension ZIP
 
 Build `pursers-aionui-0.1.0.zip` from the exact release tag; the wheel checksum
 file does not cover this locally built artifact:
