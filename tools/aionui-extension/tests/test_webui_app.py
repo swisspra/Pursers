@@ -13,4 +13,4 @@ def test_node_webui_app_contract() -> None:
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "pass 6" in completed.stdout
+    assert "pass 10" in completed.stdout
