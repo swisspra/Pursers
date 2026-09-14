@@ -281,9 +281,9 @@ Only the release operator performs these commands, after all gates above are
 green and the exact candidate has passed the required CI and review:
 
 ```sh
-cd "$STAGING/repository"
-git config --get user.signingkey || echo "no signing key: use -a"
-git tag -a "$TAG" "$CANDIDATE" -m "Pursers $VERSION" &&
+cd "$STAGING/repository" &&
+  { git config --get user.signingkey || echo "no signing key: use -a"; } &&
+  git tag -a "$TAG" "$CANDIDATE" -m "Pursers $VERSION" &&
   test "$(git rev-parse --verify "$TAG^{commit}")" = "$CANDIDATE" &&
   "$STAGING/build-venv/bin/python" tools/release_publish.py \
     "$TAG" verify-checkout &&
@@ -302,6 +302,39 @@ Use a signed tag only when the release host has either GPG configured or
 project-owned. Verify those prerequisites before creating the tag, replace
 `git tag -a` above with `git tag -s`, and insert `git tag -v "$TAG" &&` before
 the candidate-SHA check. Do not push unless `git tag -v` succeeds.
+
+### Fail-closed dry check
+
+This executable check starts outside a repository, points `STAGING` at a
+missing directory, and uses Git tracing to prove that the failed `cd` prevents
+the preflight, tag, verification, and push commands from running:
+
+```sh
+CHECK_ROOT=$(mktemp -d)
+TRACE_LOG="$CHECK_ROOT/git.trace"
+if (
+  cd "$CHECK_ROOT"
+  STAGING="$CHECK_ROOT/missing"
+  TAG=test-only VERSION=test-only CANDIDATE=0000000000000000000000000000000000000000
+  export STAGING TAG VERSION CANDIDATE
+  GIT_TRACE="$TRACE_LOG"
+  export GIT_TRACE
+
+  cd "$STAGING/repository" &&
+    { git config --get user.signingkey || echo "no signing key: use -a"; } &&
+    git tag -a "$TAG" "$CANDIDATE" -m "Pursers $VERSION" &&
+    test "$(git rev-parse --verify "$TAG^{commit}")" = "$CANDIDATE" &&
+    "$STAGING/build-venv/bin/python" tools/release_publish.py \
+      "$TAG" verify-checkout &&
+    git push origin "refs/tags/$TAG"
+); then
+  echo "ERROR: missing staging repository unexpectedly passed" >&2
+  exit 1
+fi
+test ! -s "$TRACE_LOG"
+```
+
+The final `test` must be silent and exit zero.
 
 Expected `verify-checkout` output:
 
