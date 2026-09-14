@@ -16,6 +16,15 @@
         <button type="submit">Join</button>
       </form>
       <p id="message" role="status" aria-live="polite"></p>
+      <section id="connection-card" aria-labelledby="connection-title" hidden>
+        <h2 id="connection-title">Connection state</h2>
+        <dl>
+          <dt>Central</dt><dd data-connection="central">—</dd>
+          <dt>Board join</dt><dd data-connection="board">—</dd>
+          <dt>AionUi helper</dt><dd data-connection="helper">—</dd>
+        </dl>
+        <button id="recover" class="secondary" type="button" hidden>Recover</button>
+      </section>
       <section id="status-card" aria-labelledby="status-title" hidden>
         <div class="status-heading">
           <span id="status-icon" class="status-icon" aria-hidden="true"></span>

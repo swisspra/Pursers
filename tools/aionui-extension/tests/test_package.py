@@ -34,6 +34,16 @@ def test_package_build_is_byte_deterministic(tmp_path: Path) -> None:
     assert first.read_bytes() == second.read_bytes()
 
 
+def test_partial_connection_controls_are_packaged() -> None:
+    page = (ROOT / "webui" / "index.html").read_text(encoding="utf-8")
+
+    assert 'id="connection-card"' in page
+    assert 'data-connection="central"' in page
+    assert 'data-connection="board"' in page
+    assert 'data-connection="helper"' in page
+    assert 'id="recover"' in page
+
+
 def test_package_has_no_secrets_home_paths_or_private_identifiers(tmp_path: Path) -> None:
     builder = load_builder()
     archive_path = builder.build(tmp_path / builder.ARCHIVE_NAME)
