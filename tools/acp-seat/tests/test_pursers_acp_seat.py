@@ -5,6 +5,7 @@ import contextvars
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -429,22 +430,69 @@ def test_production_sandbox_boundary_allows_standalone_clone_commit(
         seat_name="seat-one",
     )
     work = runtime._prepare_work_dir("TK-sandbox-commit")
-    git("config", "user.name", "ACP Test", cwd=work)
-    git("config", "user.email", "acp-test@example.invalid", cwd=work)
-    agent_code = (
-        "from pathlib import Path; import subprocess; "
-        "Path('result.txt').write_text('complete\\n'); "
-        "subprocess.run(['git','add','result.txt'],check=True); "
-        "subprocess.run(['git','commit','-m','complete work'],check=True)"
-    )
+    operator_home = tmp_path / "operator-home"
+    operator_home.mkdir()
+    operator_git_config = operator_home / ".gitconfig"
+    operator_git_config.write_text("operator work identity\n", encoding="utf-8")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    agent_code = f"""
+import os
+import subprocess
+from pathlib import Path
+
+assert Path.home() != Path({str(operator_home)!r})
+try:
+    (Path.home() / ".gitconfig").read_text(encoding="utf-8")
+except OSError:
+    pass
+else:
+    raise AssertionError("scratch HOME unexpectedly exposed ~/.gitconfig")
+try:
+    Path({str(operator_git_config)!r}).read_text(encoding="utf-8")
+except PermissionError:
+    pass
+else:
+    raise AssertionError("operator Git config escaped the sandbox")
+Path("result.txt").write_text("complete\\n")
+subprocess.run(["git", "add", "result.txt"], check=True)
+subprocess.run(["git", "commit", "-m", "complete work"], check=True)
+"""
     if not seat._sandbox_available():
         pytest.skip("macOS sandbox-exec is unavailable on this host")
-    with patch.object(seat, "_sandbox_available", return_value=True):
+    with (
+        patch.object(seat, "_sandbox_available", return_value=True),
+        patch.object(seat.tempfile, "gettempdir", return_value=str(scratch)),
+    ):
+        environment, agent_home = seat.isolated_agent_env(
+            "ACP Seat Worker", "acp-seat-worker@example.invalid",
+            {
+                "HOME": str(operator_home),
+                "PATH": os.environ["PATH"],
+                "LANG": "en_US.UTF-8",
+                "ONBOARD_CENTRAL_TOKEN": "must-not-pass",
+            },
+        )
         command = seat.sandboxed_agent_command(
-            [sys.executable, "-c", agent_code], work
+            [sys.executable, "-c", agent_code],
+            work,
+            protected_files=[operator_git_config],
         )
 
-    subprocess.run(command, cwd=work, check=True, capture_output=True, text=True)
+    assert Path(environment["HOME"]) == agent_home
+    assert agent_home.parent == scratch
+    assert "ONBOARD_CENTRAL_TOKEN" not in environment
+    subprocess.run(
+        command,
+        cwd=work,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert git("log", "-1", "--format=%an <%ae>", cwd=work) == (
+        "ACP Seat Worker <acp-seat-worker@example.invalid>"
+    )
     commit = git("rev-parse", "--verify", "HEAD^{commit}", cwd=work)
     completion = {
         "summary": "sandboxed commit",
@@ -504,6 +552,66 @@ def test_sandbox_profile_denies_network_and_protects_token(tmp_path: Path) -> No
     assert f'(deny file-read* (literal "{token}"))' in profile
 
 
+def test_isolated_agent_env_uses_scratch_home_and_explicit_allowlist(
+    tmp_path: Path,
+) -> None:
+    operator_home = tmp_path / "operator"
+    operator_home.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    source = {
+        "HOME": str(operator_home),
+        "PATH": "/usr/bin:/bin",
+        "LANG": "en_US.UTF-8",
+        "TMPDIR": "/operator/tmp",
+        "TERM": "xterm-256color",
+        "ONBOARD_AGENT_NAME": "acp-worker-1",
+        "ONBOARD_BOARD_ID": "pursers",
+        "ONBOARD_CENTRAL_TOKEN": "must-not-pass",
+        "PURSERS_ROLE": "worker",
+        "PURSERS_MODEL": "test-model",
+        "PURSERS_BOARD_CONNECTOR_TOKEN": "must-not-pass",
+        "SHELL": "/bin/zsh",
+        "SSH_AUTH_SOCK": "/operator/agent.sock",
+    }
+
+    with patch.object(seat.tempfile, "gettempdir", return_value=str(scratch)):
+        environment, agent_home = seat.isolated_agent_env(
+            'ACP "Worker"', "acp-worker@example.invalid", source
+        )
+
+    assert agent_home.parent == scratch
+    assert agent_home != operator_home
+    assert environment == {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "en_US.UTF-8",
+        "TMPDIR": str(scratch),
+        "TERM": "xterm-256color",
+        "ONBOARD_AGENT_NAME": "acp-worker-1",
+        "ONBOARD_BOARD_ID": "pursers",
+        "PURSERS_ROLE": "worker",
+        "PURSERS_MODEL": "test-model",
+        "HOME": str(agent_home),
+        "XDG_CONFIG_HOME": str(agent_home),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": str(agent_home / "gitconfig"),
+    }
+    assert stat.S_IMODE(agent_home.stat().st_mode) == 0o700
+    assert stat.S_IMODE((agent_home / "gitconfig").stat().st_mode) == 0o600
+    assert not (agent_home / ".gitconfig").exists()
+    configured = subprocess.run(
+        ["git", "config", "--global", "--get-regexp", r"^user\."],
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert configured == [
+        'user.name ACP "Worker"',
+        "user.email acp-worker@example.invalid",
+    ]
+
+
 def test_sandbox_profile_allows_lexical_and_real_interpreter_prefixes(
     tmp_path: Path,
 ) -> None:
@@ -536,6 +644,13 @@ def test_sandbox_profile_allows_lexical_and_real_interpreter_prefixes(
     assert '(allow file-read* (literal "/"))' in profile
     assert '(allow file-read* (subpath "/private/etc"))' in profile
     assert '(allow file-read* (subpath "/private/var/db"))' in profile
+    assert '(allow file-read* (subpath "/private/var/select"))' in profile
+    assert '(allow file-read* (literal "/var/select"))' in profile
+    assert '(allow file-read-metadata (literal "/var"))' in profile
+    assert '(allow file-read-metadata (literal "/private/var"))' in profile
+    assert '(allow file-read-metadata (literal "/private"))' in profile
+    assert '(allow file-read* file-write* (literal "/dev/null"))' in profile
+    assert '(allow file-read* (literal "/etc"))' in profile
     for _lexical_prefix, _real_prefix, executable in prefixes:
         for path in (*executable.parents, *executable.resolve().parents):
             assert f'(allow file-read-metadata (literal "{path}"))' in profile

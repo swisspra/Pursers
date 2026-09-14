@@ -449,12 +449,15 @@ board token or a principal ID.
 
 This source-checkout feature is intended for the same trusted Mac as Central.
 The runtime requires macOS `sandbox-exec`: network access is denied, file writes
-are limited to the ticket clone and temporary directory. The clone keeps its
-mutable Git metadata inside the same writable boundary, while the immutable
-ACP permission policy separately rejects paths outside its configured roots.
-Terminal permission is enabled by default and every permission decision is
-written as a bounded board checkpoint. Keep any provider login directory out of
-`fs_roots` unless the chosen ACP agent needs it to authenticate.
+are limited to the ticket clone and temporary directory. Each agent run gets a
+scratch `HOME`, `XDG_CONFIG_HOME`, and global Git config containing only the
+configured seat commit identity; the operator's home and Git identity are never
+inherited. The clone keeps its mutable Git metadata inside the same writable
+boundary, while the immutable ACP permission policy separately rejects paths
+outside its configured roots. Terminal permission is enabled by default and
+every permission decision is written as a bounded board checkpoint. Put any
+provider login material in a dedicated narrow `fs_roots` entry rather than the
+operator home.
 
 Create a private policy file:
 
@@ -479,6 +482,8 @@ configured base ref, not the operator's working checkout.
     "agent_name": "gemini-worker-1",
     "expected_agent_id": "AI-VERIFIED",
     "expected_principal_id": "PR-VERIFIED",
+    "git_user_name": "gemini-worker-1",
+    "git_user_email": "gemini-worker-1@example.invalid",
     "token_file": "/PATH/TO/private/gemini-worker.jwt"
   },
   "acp": {
