@@ -273,7 +273,7 @@ class ArchiveBenchmarkTests(unittest.IsolatedAsyncioTestCase):
             )
         return time.perf_counter() - started
 
-    async def test_migrated_document_reduces_read_work_with_zero_writes(
+    async def test_migrated_document_reads_ten_times_faster_with_zero_writes(
         self,
     ) -> None:
         ticket_count, member_count = self.seed_legacy_document()
