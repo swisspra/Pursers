@@ -556,11 +556,21 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             set(compact_checkpoint.structured_content),
             {
-                "ok", "ticket_id", "status", "parked", "generation",
-                "dispatch_state", "revoked_offer", "at",
+                "ok", "memory_id", "scope", "generation", "at",
             },
         )
-        self.assertIsNone(compact_checkpoint.structured_content["ticket_id"])
+        self.assertEqual(compact_checkpoint.structured_content["scope"], "project")
+        self.assertEqual(
+            set(memory_written.structured_content),
+            {"ok", "memory_id", "scope", "generation", "at"},
+        )
+        self.assertEqual(memory_written.structured_content["scope"], "project")
+        self.assertEqual(
+            set(renewed.structured_content),
+            {"ok", "ticket_id", "lease_expires_at", "at"},
+        )
+        self.assertEqual(renewed.structured_content["ticket_id"], ticket_id)
+        self.assertIsNotNone(renewed.structured_content["lease_expires_at"])
         for compact_only in (claimed, renewed, unclaimed, memory_written):
             self.assertLessEqual(
                 len(
@@ -578,6 +588,28 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
                 f"{name}={before}/{after}"
                 for name, (before, after) in observed.items()
             )
+        )
+
+    async def test_scrub_rejected_memory_write_preserves_error_contract(self) -> None:
+        rejected = await self.protocol_call(
+            "memory_write",
+            agent_name="admin-agent",
+            title="unsafe memory",
+            content="Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            scope="project",
+        )
+
+        self.assertFalse(rejected.is_error)
+        self.assertEqual(rejected.structured_content["ok"], False)
+        self.assertEqual(
+            rejected.structured_content["error"],
+            "write rejected by scrub policy",
+        )
+        self.assertEqual(rejected.structured_content["fields"], ["content"])
+        self.assertEqual(rejected.structured_content["rules"], ["bearer_token"])
+        self.assertNotIn(
+            "recipient_identities",
+            json.dumps(rejected.structured_content, ensure_ascii=False),
         )
 
     async def test_full_response_view_restores_shape_but_not_routing_lists(self) -> None:
@@ -613,6 +645,7 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
                     "ticket_id": "TK-review",
                     "status": "submitted",
                     "parked": False,
+                    "updated_at": "2026-09-14T16:45:00+00:00",
                     "dispatch_state": {
                         "state": "review_claimed",
                         "kind": "review",
@@ -628,17 +661,22 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
 
         receipt = central.compact_write_response(
             "lease_renew",
-            {"ok": True},
+            {
+                "ok": True,
+                "ticket_id": "TK-review",
+                "lease_expires_at": "2026-09-14T17:00:00+00:00",
+            },
             document,
             {"board_id": "pursers", "ticket_id": "TK-review"},
         )
 
         self.assertEqual(
-            receipt["dispatch_state"],
+            receipt,
             {
-                "state": "review_claimed",
-                "agent_name": "reviewer-one",
-                "expires_at": "2026-09-14T17:00:00+00:00",
+                "ok": True,
+                "ticket_id": "TK-review",
+                "lease_expires_at": "2026-09-14T17:00:00+00:00",
+                "at": "2026-09-14T16:45:00+00:00",
             },
         )
         self.assertLessEqual(

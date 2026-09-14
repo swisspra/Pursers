@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from pursers_client import (
     BoardClient,
     DISPATCH_KINDS,
@@ -10,9 +12,33 @@ from pursers_client import (
     JoinedIdentity,
     REVIEWER_WAIT_KINDS,
     REVIEW_LEASE_EXPIRED,
+    ScrubRejectedError,
     SUBMITTED_RELEVANT_KINDS,
     WORKER_WAIT_KINDS,
 )
+
+
+def test_memory_write_preserves_typed_scrub_rejection() -> None:
+    async def exercise() -> None:
+        board = BoardClient(
+            "http://central.invalid/mcp", "TOKEN_PLACEHOLDER", "pursers"
+        )
+
+        async def rejected(_name, _arguments):
+            return {
+                "ok": False,
+                "error": "write rejected by scrub policy",
+                "fields": ["content"],
+                "rules": ["bearer_token"],
+            }
+
+        board._call = rejected  # type: ignore[method-assign]
+        with pytest.raises(ScrubRejectedError) as caught:
+            await board.memory_write("unsafe", "secret", "project")
+        assert caught.value.fields == ("content",)
+        assert caught.value.rules == ("bearer_token",)
+
+    asyncio.run(exercise())
 
 
 def test_holder_wait_contract_uses_only_central_emitted_kinds() -> None:

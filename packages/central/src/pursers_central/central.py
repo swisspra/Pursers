@@ -534,6 +534,22 @@ def compact_write_response(
         or ticket.get("lease_renewed_at")
         or ticket.get("updated_at")
     )
+    if tool_name in {"memory_write", "memory_checkpoint"}:
+        return {
+            "ok": bool(result.get("ok", True)),
+            "memory_id": memory.get("memory_id"),
+            "scope": memory.get("scope"),
+            "generation": int(document.get("generation_revision", 0)),
+            "at": at,
+        }
+    if tool_name == "lease_renew":
+        return {
+            "ok": bool(result.get("ok", True)),
+            "ticket_id": ticket_id_value,
+            "lease_expires_at": result.get("lease_expires_at"),
+            "at": at,
+        }
+
     projected: dict[str, Any] = {
         "ok": bool(result.get("ok", True)),
         "ticket_id": ticket_id_value,
@@ -572,6 +588,7 @@ def project_model_tool_result(
     board_id = arguments.get("board_id")
     if (
         not is_error
+        and structured.get("ok") is not False
         and tool_name in COMPACT_WRITE_TOOLS
         and isinstance(board_id, str)
         and ID_RE.fullmatch(board_id)

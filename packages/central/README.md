@@ -44,11 +44,14 @@ receipt instead of repeating the complete affected record and its histories.
 Use the corresponding read tool, such as `ticket_get` or `memory_read`, when the
 complete current state is needed.
 
-The ticket mutation receipt contains the ticket ID, current status and parked
-state, board generation, a bounded dispatch-state summary, the last revoked
-offer when applicable, and the mutation timestamp. Annotation receipts also
-contain `annotation_id`; memory receipts use the same envelope with a null
-`ticket_id`. Routing-only
+Ticket mutation receipts contain `ok`, `ticket_id`, current `status` and
+`parked` state, board `generation`, a bounded `dispatch_state`, the last
+`revoked_offer` when applicable, and `at`; annotation receipts also contain
+`annotation_id`. Lease renewal receipts contain `ok`, `ticket_id`,
+`lease_expires_at`, and `at`. Memory write and checkpoint receipts contain
+`ok`, `memory_id`, `scope`, `generation`, and `at`. Unsuccessful structured
+results retain their error details instead of being projected as successful
+receipts. Routing-only
 `recipient_identities` fields are never included in MCP responses, including
 when the full response view is selected. They remain in the durable journal so
 Central can authorize and filter events before returning them.
