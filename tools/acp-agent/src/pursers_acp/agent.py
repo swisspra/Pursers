@@ -40,6 +40,10 @@ class AuthRequired(RuntimeError):
     """No usable human Personal profile is available."""
 
 
+class PromptCancelled(Exception):
+    """The client cancelled the active prompt."""
+
+
 class BoardSurface(Protocol):
     board_id: str
 
@@ -562,28 +566,59 @@ class PursersACPAgent:
         session.active = True
         session.cancel.clear()
         try:
-            stop = await self._dispatch(session_id, session, text)
+            try:
+                stop = await self._dispatch(session_id, session, text)
+            except PromptCancelled:
+                stop = "cancelled"
+            if session.cancel.is_set():
+                stop = "cancelled"
             await self._result(request_id, {"stopReason": stop})
         finally:
             session.active = False
+
+    async def _run_cancelable(
+        self, session: Session, operation: Callable[[], Awaitable[Any]]
+    ) -> Any:
+        if session.cancel.is_set():
+            raise PromptCancelled
+        work = asyncio.ensure_future(operation())
+        stopped = asyncio.create_task(session.cancel.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {work, stopped}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if stopped in done:
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+                raise PromptCancelled
+            return work.result()
+        except BaseException:
+            if not work.done():
+                work.cancel()
+                await asyncio.gather(work, return_exceptions=True)
+            raise
+        finally:
+            stopped.cancel()
+            await asyncio.gather(stopped, return_exceptions=True)
 
     async def _dispatch(self, session_id: str, session: Session, text: str) -> str:
         assert self.board is not None
         normalized = " ".join(text.strip().split())
         lowered = normalized.casefold()
         if lowered == "my tickets":
-            rows = await self.board.my_tickets()
+            rows = await self._run_cancelable(session, self.board.my_tickets)
             await self._message(session_id, _format_tickets(rows))
             return "end_turn"
         if lowered == "my offers":
-            rows = await self.board.my_offers()
+            rows = await self._run_cancelable(session, self.board.my_offers)
             await self._message(session_id, _format_offers(rows))
             return "end_turn"
         if lowered == "board status":
+            status = await self._run_cancelable(session, self.board.board_status)
             await self._message(
                 session_id,
                 "Board status\n\n```json\n"
-                + json.dumps(await self.board.board_status(), sort_keys=True, indent=2)
+                + json.dumps(status, sort_keys=True, indent=2)
                 + "\n```",
             )
             return "end_turn"
@@ -652,7 +687,21 @@ class PursersACPAgent:
             },
         )
         assert self.board is not None
-        result = await self.board.mutate(action)
+        try:
+            result = await self._run_cancelable(
+                session, lambda: self.board.mutate(action)
+            )
+        except PromptCancelled:
+            await self._update(
+                session_id,
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": tool_call_id,
+                    "status": "failed",
+                    "content": [_content("Board write was cancelled.")],
+                },
+            )
+            raise
         summary = _mutation_summary(action, result)
         await self._update(
             session_id,

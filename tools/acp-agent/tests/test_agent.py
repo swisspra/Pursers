@@ -69,6 +69,33 @@ class FakeBoard:
         await cancel.wait()
 
 
+class BlockingBoard(FakeBoard):
+    def __init__(self) -> None:
+        super().__init__()
+        self.read_started = asyncio.Event()
+        self.read_cancelled = asyncio.Event()
+        self.mutate_started = asyncio.Event()
+        self.mutate_cancelled = asyncio.Event()
+
+    async def my_tickets(self) -> list[JSON]:
+        self.read_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.read_cancelled.set()
+            raise
+        raise AssertionError("unreachable")
+
+    async def mutate(self, action: JSON) -> JSON:
+        self.mutate_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.mutate_cancelled.set()
+            raise
+        raise AssertionError("unreachable")
+
+
 class FakeACPClient:
     """Small fake IDE client derived from the P0 ACP client harness."""
 
@@ -368,6 +395,58 @@ server = MCPServer('acp-session-mcp-stub')
     finally:
         await client.close()
     assert board.closed
+
+
+def test_cancel_stops_in_flight_read_and_returns_cancelled(tmp_path: Path) -> None:
+    asyncio.run(_cancel_stops_in_flight_read_and_returns_cancelled(tmp_path))
+
+
+async def _cancel_stops_in_flight_read_and_returns_cancelled(
+    tmp_path: Path,
+) -> None:
+    board = BlockingBoard()
+    client = FakeACPClient(PursersACPAgent(lambda: board))
+    try:
+        await client.initialize()
+        session = await client.new_session(tmp_path)
+        prompt = asyncio.create_task(client.prompt(session, "my tickets"))
+        await asyncio.wait_for(board.read_started.wait(), 1)
+        await client.notify("session/cancel", {"sessionId": session})
+        assert await asyncio.wait_for(prompt, 1) == {"stopReason": "cancelled"}
+        assert board.read_cancelled.is_set()
+    finally:
+        await client.close()
+
+
+def test_cancel_stops_approved_in_flight_write(tmp_path: Path) -> None:
+    asyncio.run(_cancel_stops_approved_in_flight_write(tmp_path))
+
+
+async def _cancel_stops_approved_in_flight_write(tmp_path: Path) -> None:
+    board = BlockingBoard()
+    client = FakeACPClient(PursersACPAgent(lambda: board))
+    try:
+        await client.initialize()
+        session = await client.new_session(tmp_path)
+        prompt = asyncio.create_task(
+            client.prompt(session, "create ticket Title :: Description")
+        )
+        await asyncio.wait_for(board.mutate_started.wait(), 1)
+        await client.notify("session/cancel", {"sessionId": session})
+        assert await asyncio.wait_for(prompt, 1) == {"stopReason": "cancelled"}
+        assert board.mutate_cancelled.is_set()
+        updates = [row["update"] for row in client.updates]
+        assert any(
+            row.get("sessionUpdate") == "tool_call_update"
+            and row.get("status") == "failed"
+            and row.get("content", [{}])[0]
+            .get("content", {})
+            .get("text")
+            == "Board write was cancelled."
+            for row in updates
+        )
+    finally:
+        await client.close()
 
 
 def test_authenticate_runs_setup_without_exposing_credentials(tmp_path: Path) -> None:
