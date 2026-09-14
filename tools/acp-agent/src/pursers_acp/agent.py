@@ -326,6 +326,7 @@ class Session:
     cursors: dict[str, int] = field(default_factory=dict)
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     active: bool = False
+    prompt_request_id: Any | None = None
     mcp_stop: asyncio.Event | None = None
     mcp_task: asyncio.Task[None] | None = None
 
@@ -404,11 +405,23 @@ class PursersACPAgent:
             return
         if method == "session/cancel":
             session = self.sessions.get(params.get("sessionId"))
-            if session is not None:
+            if session is not None and session.prompt_request_id is not None:
                 session.cancel.set()
             return
         if request_id is None:
             return
+        if method == "session/prompt":
+            session = self.sessions.get(params.get("sessionId"))
+            if session is not None:
+                if session.prompt_request_id is not None:
+                    await self._error(
+                        request_id, -32600, "session prompt already active"
+                    )
+                    return
+                # Reserve and bind cancellation to this turn before scheduling
+                # _request. A cancel notification may arrive before the task runs.
+                session.prompt_request_id = request_id
+                session.cancel = asyncio.Event()
         task = asyncio.create_task(self._request(request_id, method, params))
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
@@ -555,17 +568,16 @@ class PursersACPAgent:
         if session is None:
             await self._error(request_id, -32602, "unknown session")
             return
-        if session.active:
-            await self._error(request_id, -32600, "session prompt already active")
-            return
-        try:
-            text = _prompt_text(params.get("prompt"))
-        except ValueError as exc:
-            await self._error(request_id, -32602, str(exc))
+        if session.prompt_request_id != request_id:
+            await self._error(request_id, -32600, "session prompt is not reserved")
             return
         session.active = True
-        session.cancel.clear()
         try:
+            try:
+                text = _prompt_text(params.get("prompt"))
+            except ValueError as exc:
+                await self._error(request_id, -32602, str(exc))
+                return
             try:
                 stop = await self._dispatch(session_id, session, text)
             except PromptCancelled:
@@ -575,6 +587,9 @@ class PursersACPAgent:
             await self._result(request_id, {"stopReason": stop})
         finally:
             session.active = False
+            if session.prompt_request_id == request_id:
+                session.prompt_request_id = None
+                session.cancel = asyncio.Event()
 
     async def _run_cancelable(
         self, session: Session, operation: Callable[[], Awaitable[Any]]

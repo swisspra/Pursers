@@ -401,6 +401,74 @@ def test_cancel_stops_in_flight_read_and_returns_cancelled(tmp_path: Path) -> No
     asyncio.run(_cancel_stops_in_flight_read_and_returns_cancelled(tmp_path))
 
 
+def test_cancel_before_prompt_task_starts_is_bound_to_that_turn(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_cancel_before_prompt_task_starts_is_bound_to_that_turn(tmp_path))
+
+
+async def _cancel_before_prompt_task_starts_is_bound_to_that_turn(
+    tmp_path: Path,
+) -> None:
+    board = BlockingBoard()
+    agent = PursersACPAgent(lambda: board)
+    agent.initialized = True
+    agent.board = board
+    agent.sessions["session"] = agent_module.Session(cwd=str(tmp_path))
+    sent: list[JSON] = []
+    response_sent = asyncio.Event()
+
+    async def send(message: JSON) -> None:
+        sent.append(message)
+        if message.get("id") in {1, 2}:
+            response_sent.set()
+
+    agent.send = send
+    await agent.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "session",
+                "prompt": [{"type": "text", "text": "my tickets"}],
+            },
+        }
+    )
+    await agent.handle(
+        {
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": {"sessionId": "session"},
+        }
+    )
+    await asyncio.wait_for(response_sent.wait(), 1)
+
+    response = next(message for message in sent if message.get("id") == 1)
+    assert response["result"] == {"stopReason": "cancelled"}
+    assert not board.read_started.is_set()
+    assert not agent.sessions["session"].active
+
+    # Cancellation belongs only to request 1; the next turn gets a fresh event.
+    agent.board = FakeBoard()
+    response_sent.clear()
+    await agent.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": "session",
+                "prompt": [{"type": "text", "text": "my tickets"}],
+            },
+        }
+    )
+    await asyncio.wait_for(response_sent.wait(), 1)
+    second = next(message for message in sent if message.get("id") == 2)
+    assert second["result"] == {"stopReason": "end_turn"}
+    await agent.close()
+
+
 async def _cancel_stops_in_flight_read_and_returns_cancelled(
     tmp_path: Path,
 ) -> None:
