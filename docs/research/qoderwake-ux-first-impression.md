@@ -139,15 +139,17 @@ changing the hero artifact to match each product.
 | JetBrains | The same split-card grammar pairs an IDE screenshot with one browser CTA; four backend-intelligence claims sit in a dashed horizontal grid. | Screenshot comes first; CTA remains full width; the four claims become a single dashed vertical list. | [1440px](qoderwake-ux/landing-and-showcase/jetbrains__1440x900__site-default.png), [400px](qoderwake-ux/landing-and-showcase/jetbrains__400x844__site-default.png) |
 | CLI | Terminal screenshot and install commands share a split hero; metrics, four claims, and an SDK panel follow. | Screenshot, install commands, four claims, and SDK installers stack without losing their labels. | [1440px](qoderwake-ux/landing-and-showcase/cli__1440x900__site-default.png), [400px](qoderwake-ux/landing-and-showcase/cli__400x844__site-default.png) |
 | Agent SDK | A centred statement leads into a large three-column comparison table, then capability grids, ecosystem cards, steps, and scenario cards. | Most later grids stack, but the comparison table remains wider than the 400px viewport and is visibly clipped rather than reformatted. | [1440px](qoderwake-ux/landing-and-showcase/agent-sdk__1440x900__site-default.png), [400px](qoderwake-ux/landing-and-showcase/agent-sdk__400x844__site-default.png) |
-| Cloud Agents | A centred two-line promise and three CTAs lead into a large system diagram; comparison rows and two four-item grids follow. | Diagram regions, comparisons, and claims collapse into a long vertical sequence; the hierarchy survives but becomes dense. | [1440px](qoderwake-ux/landing-and-showcase/cloud-agents__1440x900__site-default.png), [400px](qoderwake-ux/landing-and-showcase/cloud-agents__400x844__site-default.png) |
+| Cloud Agents | A centred two-line promise and three CTAs lead into a large system diagram; comparison rows and two four-item grids follow. | The system diagram and later claim grids stack, but the “Integrate in minutes. Ship in hours.” comparison table remains horizontally clipped: the desktop “BUILD IT YOURSELF” column is omitted while the row labels and “CLOUD AGENTS” column remain visible. | [1440px](qoderwake-ux/landing-and-showcase/cloud-agents__1440x900__site-default.png), [400px](qoderwake-ux/landing-and-showcase/cloud-agents__400x844__site-default.png) |
 
 Across these pages, the repeated visual grammar is an off-white shell, dark
 rounded sans-serif headings, pale-grey card grounds, one product-specific
 green/teal/blue accent, generous desktop spacing, and mostly faithful mobile
-stacking. Agent SDK's clipped comparison table is the visible exception
+stacking. The Agent SDK and Cloud Agents comparison tables are both visibly
+clipped at 400px
 ([Qoder 1440px](qoderwake-ux/landing-and-showcase/qoder__1440x900__site-default.png),
 [IDE 1440px](qoderwake-ux/landing-and-showcase/ide__1440x900__site-default.png),
-[Agent SDK 400px](qoderwake-ux/landing-and-showcase/agent-sdk__400x844__site-default.png)).
+[Agent SDK 400px](qoderwake-ux/landing-and-showcase/agent-sdk__400x844__site-default.png),
+[Cloud Agents 400px](qoderwake-ux/landing-and-showcase/cloud-agents__400x844__site-default.png)).
 
 ## Side-by-side with Pursers today
 
@@ -305,9 +307,10 @@ prefers-reduced-motion: all frames visible, no transition
   product pages; Pursers should improve evidence order while retaining its own
   identity ([QoderWake](qoderwake-ux/landing-and-showcase/qoderwake__1440x900__site-default.png),
   [IDE](qoderwake-ux/landing-and-showcase/ide__1440x900__site-default.png)).
-- Do not copy the Agent SDK comparison table's narrow-screen behaviour. Its
-  right-hand content is visibly clipped at 400px
-  ([capture](qoderwake-ux/landing-and-showcase/agent-sdk__400x844__site-default.png)).
+- Do not copy the comparison tables' narrow-screen behaviour. Agent SDK and
+  Cloud Agents both clip right-hand content at 400px
+  ([Agent SDK](qoderwake-ux/landing-and-showcase/agent-sdk__400x844__site-default.png),
+  [Cloud Agents](qoderwake-ux/landing-and-showcase/cloud-agents__400x844__site-default.png)).
 - Do not replace real captures with fabricated dashboard mockups. Pursers'
   strongest showcase material is already traceable to documented synthetic
   runs ([showcase notes](../showcase/README.md)).
