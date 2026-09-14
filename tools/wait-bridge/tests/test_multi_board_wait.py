@@ -413,7 +413,10 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
             "status": "open",
             "target_url": "alpha/work",
             "dispatch_state": {"state": "offered"},
-            "work_offer": {"agent_id": agent_id, "expires_at": "later"},
+            "work_offer": {
+                "agent_id": agent_id,
+                "expires_at": "2099-01-01T00:00:00Z",
+            },
         }
 
         with patch.object(wait_server, "WAIT_MODE", "push"):
@@ -428,6 +431,10 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["events"][0]["kind"], "ticket_offered")
         self.assertEqual(result["mode"], "immediate")
         self.assertEqual(result["mode_by_board"], {"alpha": "immediate"})
+        self.assertEqual(
+            [call[0] for call in transport.calls if call[0] == "ticket_list"],
+            ["ticket_list"],
+        )
 
     async def test_push_cue_refetches_only_the_cued_board(self) -> None:
         transport = FakeTransport(["alpha", "beta"])

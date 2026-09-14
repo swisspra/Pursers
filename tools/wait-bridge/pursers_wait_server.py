@@ -5739,14 +5739,17 @@ async def _wait_for_work_many(
             relevant = compacted
         if backlog and not meta["partial"]:
             entry_ticket_snapshots[board_id] = list(active_tickets or [])
-            reconciled = _reconciled_offer_events(
-                active_tickets or [],
-                agent_ids[board_id],
-                only_mine,
-                proj,
-                wait_for_by_board[board_id],
-                board_id,
-            )
+            reconciled = [
+                {**event, "reason": "offer"}
+                for event in _reconciled_offer_events(
+                    active_tickets or [],
+                    agent_ids[board_id],
+                    only_mine,
+                    proj,
+                    wait_for_by_board[board_id],
+                    board_id,
+                )
+            ]
             queued = await _scan_open_backlog(
                 views[board_id],
                 agent_ids[board_id],
