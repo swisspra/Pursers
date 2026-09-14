@@ -138,18 +138,19 @@ class TransactionalSQLiteStore(SQLiteStore):
         cursor: int,
         limit: int,
     ) -> dict[str, Any]:
-        connection = self._transaction_connection.get()
-        if connection is None:
+        transaction_state = self._transaction_state.get()
+        if transaction_state is None or transaction_state.closed:
             return super().journal_read_after(path, board_id, cursor, limit)
+        connection = transaction_state.connection
         key = self._key(path)
         row = connection.execute(
             "SELECT doc, version FROM documents WHERE path = ?", (key,)
         ).fetchone()
         if row is not None:
-            state = connection.execute(
+            index_state = connection.execute(
                 "SELECT source_version FROM journal_state WHERE path = ?", (key,)
             ).fetchone()
-            if state is None or int(state[0]) != int(row[1]):
+            if index_state is None or int(index_state[0]) != int(row[1]):
                 self._sync_journal_index(
                     connection, key, json.loads(row[0]), int(row[1])
                 )
