@@ -143,6 +143,13 @@ pressure without exposing credentials.
 > command above for beta.1. `pursers-personal central` is the Personal-embedded
 > service and its `/healthz` returning 404 is expected in beta.1.
 
+> **Known b1 shutdown noise:** Central can log
+> `offer_deadline_error ... Cannot operate on a closed database` when a
+> dispatcher offer-deadline task finishes during shutdown. The message is
+> harmless to board data. The fix is tracked for beta.2 as “central:
+> dispatcher offer-deadline task uses a closed sqlite connection
+> (ProgrammingError x212 in live log)”.
+
 ## 4. Connect Claude Desktop
 
 Claude Desktop can reach the HTTP MCP server through `mcp-remote`. Make a
@@ -324,6 +331,15 @@ a2a_wait(boards=["BOARD_ID"], only_mine=true, timeout_s=180,
 `reason="offer"` and `mode="poll"` is only a mode label; claim the offered
 ticket normally. Never restart at cursor zero to look for work.
 
+> **Known b1 offer catch-up limitation:** Offer events are push-only. A seat
+> that misses the push can see only `offer_expired`. After a wait returns, call
+> `ticket_get` for the pinned ticket and claim only when its current offer is
+> unexpired and belongs to this exact seat; never claim from the expired event.
+> The beta.2 fix is tracked as “wait-bridge: ticket_offered dropped for pinned
+> / exclusion-fenced offers (seat sees only offer_expired)”, “wait-bridge
+> offer-reconcile follow-up: keep one ticket_list per backlog cadence”, and
+> “central+bridge: make offer events recoverable via catch-up”.
+
 ## 8. Install the AionUi extension ZIP
 
 Build `pursers-aionui-0.1.0.zip` from the exact release tag; the wheel checksum
@@ -404,7 +420,7 @@ extension ZIP does not bundle Python or `pursers-wait-bridge`.
 4. Rejection returns the ticket with concrete review notes for another offered claim.
 5. Only an approving independent review closes the ticket under the strict policy.
 
-## Troubleshooting the five common setup failures
+## Troubleshooting common beta setup failures
 
 ### `invalid_token` or HTTP 401
 
@@ -469,6 +485,21 @@ Another process already owns the chosen port. Stop the duplicate Central, or
 create a new profile with a different explicit port and update the Central URL,
 issuer, audience, Claude configuration, Codex configuration, and newly issued
 doors together. Do not point an existing token at a different audience.
+
+### Fleet dashboard fails against a TLS Central
+
+The beta.1 Fleet dashboard defaults to
+`http://127.0.0.1:8766/mcp`. If Central uses TLS, pass the HTTPS URL explicitly:
+
+```bash
+python3 tools/fleet-dashboard/fleet_dashboard.py \
+  --url https://127.0.0.1:8766/mcp
+```
+
+Beta.1 does not provide a fail-fast hint when the URL scheme is wrong. The fix
+is tracked for beta.2 as “P0 fleet-dashboard: /api/fleet and /api/workers
+always 503 ExceptionGroup (httpx2.ReadError) in server mode against live
+Central”.
 
 ### Expired offer
 
