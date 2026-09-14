@@ -1,10 +1,10 @@
 # ACP seat protocol harness
 
-This directory contains the ACP v1 protocol client and the P1 Pursers seat
-runtime. `acp_client.py` is a dependency-free asyncio ACP client,
-`pursers_acp_seat.py` maps one configured ACP subprocess to one verified board
-seat, and `tests/fake_acp_agent.py` is a scriptable subprocess used for
-conformance and in-process Central tests.
+This directory contains the protocol-only P0 for running an Agent Client
+Protocol agent as a Pursers seat. It deliberately has no board integration.
+`acp_client.py` is a dependency-free asyncio ACP client and
+`tests/fake_acp_agent.py` is a scriptable agent subprocess used for conformance
+tests.
 
 ## Protocol baseline
 
@@ -42,65 +42,15 @@ params object. It may return an offered option ID, an ACP outcome object, or
 protocol error. Cancelling a prompt preempts an asynchronous callback and
 returns ACP's `cancelled` permission outcome.
 
-The `ACPClient` library remains intentionally narrow: filesystem and terminal
-client methods are not advertised. Board dispatch, identity, lease renewal,
-sandboxing, and submission belong to the separate seat runtime below.
+The library is intentionally narrow. Filesystem and terminal client methods,
+board dispatch, identity, lease renewal, sandboxing, persistence, and submission
+belong to later phases.
 
-The seat runtime keeps the mode-`0600` board token in the parent process,
-verifies both identity IDs returned by Central, consumes wait-bridge offers,
-creates one standalone Git clone per ticket, sends only ticket scope and
-decision annotations to ACP, renews the lease independently, and projects
-bounded updates and permission decisions to board checkpoints. On `end_turn`,
-it validates structured completion against the actual branch, full commit, and
-tip diff, publishes the branch from the parent process, and verifies the remote
-commit before submitting. Cancellation, agent failure, or invalid evidence
-creates a checkpoint and safely unclaims the ticket.
-
-The production runtime is macOS-only because it fails closed unless
-`sandbox-exec` is available. Its OS profile denies network access and writes
-outside the ticket clone and temporary directory. Every run receives a scratch
-`HOME`, `XDG_CONFIG_HOME`, and global Git config containing only the seat's
-configured commit identity; operator Git configuration is explicitly denied.
-Mutable Git metadata stays inside that clone, so the sandboxed agent can stage
-and commit without access to the source repository. The ACP permission broker
-also canonicalizes requested paths, rejects protected Git/credential paths,
-never selects `allow_always`, and permits terminal requests only with an argv
-and cwd inside the clone.
-
-The focused coverage lives in
-[`tests/test_acp_client.py`](tests/test_acp_client.py) and
-[`tests/test_pursers_acp_seat.py`](tests/test_pursers_acp_seat.py). The latter
-uses the actual in-process Central server and MCP tools for create, offer,
-claim, checkpoint, renewal, and submit; only the ACP subprocess is fake. This
-proves the adapter path, not provider-authenticated browser or Gemini
-acceptance. See [Getting started](../../docs/GETTING-STARTED.md#8-run-an-acp-agent-as-a-seat)
-for the private config and `gemini --acp` command.
-
-## Manual real-agent smoke
-
-Follow the private config recipe in Getting started, choose a throwaway board,
-and create a ticket that permits one harmless documentation edit. If Gemini CLI
-needs existing login material, copy only that material to a dedicated narrow
-path and add it to the policy's `fs_roots`; never add the operator home. Start
-the seat with:
-
-```sh
-gemini --version
-python3 tools/acp-seat/pursers_acp_seat.py \
-  --config /PATH/TO/private/acp-seat.json
-```
-
-Offer the throwaway ticket to the configured seat, then verify that Central
-records a claim, at least one bounded ACP checkpoint, lease renewal, and a
-submitted exact branch/commit. Verify separately that a network permission is
-rejected and an agent crash leaves the ticket open with a release checkpoint.
-Delete the throwaway board data only after preserving non-secret test evidence.
-
-**Sandbox execution status (2026-09-14):** not executed in sandbox: gemini not
-installed, Ego Lite unavailable. Per coordinator decision, the deterministic
-fake-agent/in-process-Central test is the executed P1 acceptance path; the
-coordinator or operator runs this provider-authenticated smoke later. Do not
-install Gemini or launch Ego Lite merely to run the repository suite.
+Repository integration is limited to the required suite entry in
+[`tools/ci_manifest.py`](../ci_manifest.py). The focused coverage lives in
+[`tests/test_acp_client.py`](tests/test_acp_client.py) and exercises the
+subprocess fake directly; it does not fabricate board responses or claim board
+acceptance.
 
 ## Fake-agent scripts
 

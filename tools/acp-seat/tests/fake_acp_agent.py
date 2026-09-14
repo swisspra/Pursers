@@ -142,20 +142,6 @@ class FakeAgent:
         if not isinstance(session_id, str) or session_id not in self.sessions:
             await self.error(request_id, -32602, "unknown session")
             return
-        prompt = params.get("prompt")
-        prompt_text = "\n".join(
-            str(block.get("text", ""))
-            for block in prompt or []
-            if isinstance(block, dict) and block.get("type") == "text"
-        )
-        for expected in self.script.get("promptMustContain", []):
-            if str(expected) not in prompt_text:
-                await self.error(request_id, -32602, f"prompt missing {expected!r}")
-                return
-        for forbidden in self.script.get("promptMustNotContain", []):
-            if str(forbidden) in prompt_text:
-                await self.error(request_id, -32602, f"prompt leaked {forbidden!r}")
-                return
         event = self.cancel_events.setdefault(session_id, asyncio.Event())
         event.clear()
         try:

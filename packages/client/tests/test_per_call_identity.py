@@ -455,39 +455,6 @@ async def test_review_lease_calls_carry_the_seat_identity(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
-async def test_work_lifecycle_calls_accept_a_claim_scoped_identity(monkeypatch) -> None:
-    board = client()
-    calls: list[tuple[str, dict[str, Any]]] = []
-
-    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        calls.append((name, arguments))
-        return {"ok": True}
-
-    monkeypatch.setattr(board, "_call", call)
-
-    await board.ticket_claim("TK-work", agent_name="claim-seat")
-    await board.lease_renew("TK-work", agent_name="claim-seat")
-    await board.ticket_submit(
-        "TK-work", agent_name="claim-seat", summary="done", stay_active=False
-    )
-
-    assert calls == [
-        ("ticket_claim", {"agent_name": "claim-seat", "ticket_id": "TK-work"}),
-        ("lease_renew", {"agent_name": "claim-seat", "ticket_id": "TK-work"}),
-        (
-            "ticket_submit",
-            {
-                "agent_name": "claim-seat",
-                "ticket_id": "TK-work",
-                "stay_active": False,
-                "summary": "done",
-            },
-        ),
-    ]
-    assert board.agent_name == "env-default"
-
-
-@pytest.mark.anyio
 async def test_claim_ttl_set_carries_admin_seat_identity(monkeypatch) -> None:
     board = client()
     captured: dict[str, Any] = {}
