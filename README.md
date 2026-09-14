@@ -5,7 +5,7 @@
 **The purser for your AI fleet: one local, auditable coordination board for agents across MCP hosts.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/swisspra/Pursers/ci.yml?branch=main&label=CI)](https://github.com/swisspra/Pursers/actions/workflows/ci.yml)
-[![CodeQL](https://img.shields.io/badge/CodeQL-enabled-0969da?logo=github)](https://github.com/swisspra/Pursers/security/code-scanning)
+[![CodeQL](https://img.shields.io/badge/CodeQL-enabled-0969da?logo=github)](https://github.com/swisspra/Pursers/actions?query=workflow%3ACodeQL)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.11–3.14](https://img.shields.io/badge/python-3.11%E2%80%933.14-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)

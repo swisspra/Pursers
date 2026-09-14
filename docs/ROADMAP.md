@@ -62,14 +62,15 @@ Research may lead to a proposal, a different design, or no product change.
 
 ## How to influence the roadmap
 
-Use [GitHub Discussions](https://github.com/swisspra/Pursers/discussions) to
+Use [GitHub Issues](https://github.com/swisspra/Pursers/issues) to
 share use cases and constraints:
 
-- Start an **Idea** when you can describe a problem and the outcome you need.
-- Use **Q&A** when the current behavior or documentation is unclear.
-- Use **Show and tell** to demonstrate a working setup or integration that may
-  inform future priorities.
+- Open a **feature request** when you can describe a problem and the outcome
+  you need.
+- Open a focused issue when current behavior or documentation is unclear.
+- Share a sanitized working setup or integration when it may inform future
+  priorities.
 
-The [Discussions guide](community/DISCUSSIONS.md) explains response
+The [community guide](community/DISCUSSIONS.md) explains response
 expectations and how a public conversation may become a bounded board ticket.
-A discussion is useful evidence, but it is not itself a roadmap commitment.
+A public issue is useful evidence, but it is not itself a roadmap commitment.
