@@ -33,3 +33,41 @@ curl --fail --silent http://127.0.0.1:8766/healthz
 ```
 
 A healthy response has `"status":"ok"` and `"store_backend":"sqlite"`.
+
+## Tool response views
+
+Central keeps complete tickets, memories, and journal events in its SQLite
+ledger, but its default model-facing response view is `compact`. Successful
+calls to `ticket_update`, `ticket_annotate`, `ticket_claim`, `ticket_unclaim`,
+`lease_renew`, `memory_write`, and `memory_checkpoint` return a small mutation
+receipt instead of repeating the complete affected record and its histories.
+Use the corresponding read tool, such as `ticket_get` or `memory_read`, when the
+complete current state is needed.
+
+The ticket mutation receipt contains the ticket ID, current status and parked
+state, board generation, a bounded dispatch-state summary, the last revoked
+offer when applicable, and the mutation timestamp. Annotation receipts also
+contain `annotation_id`; memory receipts use the same envelope with a null
+`ticket_id`. Routing-only
+`recipient_identities` fields are never included in MCP responses, including
+when the full response view is selected. They remain in the durable journal so
+Central can authorize and filter events before returning them.
+
+A board administrator can restore the legacy response shape for compatibility:
+
+```text
+board_response_view_set(
+  board_id="BOARD_ID",
+  agent_name="ADMIN_AGENT_NAME",
+  response_view="full"
+)
+```
+
+Set `response_view="compact"` to restore the default. The setting is durable and
+reported by `board_list`, `board_snapshot`, and `board_status`.
+
+Structured schema-v2 checkpoint and handoff memories are returned through their
+named fields (`summary`, `remaining_tasks`, `next_steps`, `files`, `blockers`,
+and `warnings` as applicable). Their legacy rendered `content` copy remains in
+storage but is omitted from memory read projections, so the same information is
+not sent twice.
