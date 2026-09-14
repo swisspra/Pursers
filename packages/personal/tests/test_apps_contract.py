@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "4a61b709ec3829d577a3b15feee5cc5fc88c9d5b2a5afb7160b126518db2ba1e"
-    assert len(payload) == 321130
+    expected = "cf89d063b7cd1705e5b9f284aec9db4b1abee21a797ad98230f8ec2c721d3f2e"
+    assert len(payload) == 335354
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0b1"
     assert lock["view"] == {
@@ -112,7 +112,7 @@ def test_dashboard_work_state_synthetic_ticket_harness() -> None:
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "pass 2" in completed.stdout
+    assert "pass 8" in completed.stdout
 
 
 def test_ticket_projection_preserves_distinct_review_activity() -> None:
@@ -121,12 +121,59 @@ def test_ticket_projection_preserves_distinct_review_activity() -> None:
         {
             "ticket_id": "TK-OFFERED",
             "status": "submitted",
-            "review_offer": {"agent_id": "AI-REVIEWER"},
+            "assigned_to": "original-worker",
+            "review_offer": {
+                "agent_id": "AI-REVIEWER",
+                "agent_name": "offered-reviewer",
+                "expires_at": "2030-01-01T00:10:00+00:00",
+            },
         },
         {
             "ticket_id": "TK-ACTIVE",
             "status": "submitted",
-            "review_lease": {"agent_id": "AI-REVIEWER"},
+            "assigned_to": "original-worker",
+            "review_lease": {
+                "reviewer_agent_id": "AI-REVIEWER",
+                "reviewer_agent_name": "active-reviewer",
+                "expires_at": "2030-01-01T00:15:00+00:00",
+            },
+            "annotations": [
+                {
+                    "annotation_id": "AN-000000000001",
+                    "kind": "decision",
+                    "text": "Use the amended contract",
+                    "by": {
+                        "agent_id": "AI-COORDINATOR",
+                        "agent_name": "coordinator-a",
+                    },
+                    "at": "2030-01-01T00:00:00+00:00",
+                },
+                *[
+                    {
+                        "annotation_id": f"AN-{index:012d}",
+                        "kind": "review_note",
+                        "text": f"Later reviewer note {index}",
+                        "by": {
+                            "agent_id": "AI-REVIEWER",
+                            "agent_name": "active-reviewer",
+                        },
+                        "at": f"2030-01-01T00:{index:02d}:00+00:00",
+                    }
+                    for index in range(2, 11)
+                ],
+            ],
+        },
+        {
+            "ticket_id": "TK-WORK-OFFERED",
+            "status": "open",
+            "dispatch_state": {
+                "state": "offered",
+                "kind": "work",
+                "agent_id": "AI-OFFERED-WORKER",
+                "agent_name": "offered-worker",
+                "offered_at": "2030-01-01T00:20:00+00:00",
+                "expires_at": "2030-01-01T00:23:00+00:00",
+            },
         },
     ]
     projected = [LiveDashboard._ticket_view(ticket) for ticket in tickets]
@@ -139,7 +186,212 @@ def test_ticket_projection_preserves_distinct_review_activity() -> None:
         ("submitted", False, False),
         ("submitted", True, False),
         ("submitted", False, True),
+        ("open", False, False),
     ]
+    assert projected[1]["review_offer_name"] == "offered-reviewer"
+    assert projected[1]["review_offer_agent_id"] == "AI-REVIEWER"
+    assert projected[1]["review_offer_expires_at"] == "2030-01-01T00:10:00+00:00"
+    assert projected[2]["assigned_to"] == "original-worker"
+    assert projected[2]["reviewer_name"] == "active-reviewer"
+    assert projected[2]["reviewer_agent_id"] == "AI-REVIEWER"
+    assert projected[2]["review_lease_expires_at"] == "2030-01-01T00:15:00+00:00"
+    assert [item["id"] for item in projected[2]["annotations"]] == [
+        "AN-000000000001",
+        *[f"AN-{index:012d}" for index in range(4, 11)],
+    ]
+    assert projected[2]["annotation_count"] == 10
+    assert projected[2]["annotations_omitted_count"] == 2
+    repository = Path(__file__).resolve().parents[3]
+    rendered = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "--eval",
+            """
+import { readFileSync } from "node:fs";
+import { ticketBlocker, ticketNow } from "./tools/dashboard-ui/src/work-state.js";
+const ticket = JSON.parse(readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify({
+  now: ticketNow(ticket, undefined, "12m left"),
+  blocked: ticketBlocker(ticket, []),
+}));
+""",
+        ],
+        cwd=repository,
+        input=json.dumps(projected[2]),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rendered.returncode == 0, rendered.stdout + rendered.stderr
+    assert json.loads(rendered.stdout) == {
+        "now": "active-reviewer is reviewing · 12m left",
+        "blocked": "Decision: Use the amended contract · coordinator-a",
+    }
+    offered = projected[3]
+    assert offered["work_offer"] is True
+    assert offered["work_offer_name"] == "offered-worker"
+    assert offered["work_offer_agent_id"] == "AI-OFFERED-WORKER"
+    assert offered["work_offer_offered_at"] == "2030-01-01T00:20:00+00:00"
+    assert offered["work_offer_expires_at"] == "2030-01-01T00:23:00+00:00"
+    offer_render = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "--eval",
+            """
+import { readFileSync } from "node:fs";
+import {
+  ticketLifecycleStage,
+  ticketNow,
+  ticketOfferObservedAt,
+} from "./tools/dashboard-ui/src/work-state.js";
+const ticket = JSON.parse(readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify({
+  now: ticketNow(ticket, undefined, undefined, "3m left"),
+  stage: ticketLifecycleStage(ticket),
+  observedAt: ticketOfferObservedAt(ticket),
+}));
+""",
+        ],
+        cwd=repository,
+        input=json.dumps(offered),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert offer_render.returncode == 0, offer_render.stdout + offer_render.stderr
+    assert json.loads(offer_render.stdout) == {
+        "now": "Work offered · offered-worker · 3m left",
+        "stage": "offered",
+        "observedAt": "2030-01-01T00:20:00+00:00",
+    }
+
+    offer_fields = {
+        "kind": "work",
+        "agent_id": "AI-HISTORY-WORKER",
+        "agent_name": "history-worker",
+        "offered_at": "2030-01-01T00:30:00+00:00",
+        "expires_at": "2030-01-01T00:33:00+00:00",
+    }
+    direct_offer = LiveDashboard._ticket_view(
+        {"ticket_id": "TK-DIRECT", "status": "open", "work_offer": offer_fields}
+    )
+    history_offer = LiveDashboard._ticket_view(
+        {
+            "ticket_id": "TK-HISTORY",
+            "status": "open",
+            "dispatch_history": [
+                {
+                    "state": "offered",
+                    "kind": "work",
+                    "offered_agent_id": "AI-HISTORY-WORKER",
+                    "offered_agent_name": "history-worker",
+                    "at": "2030-01-01T00:30:00+00:00",
+                    "offer_expires_at": "2030-01-01T00:33:00+00:00",
+                }
+            ],
+        }
+    )
+    assert direct_offer["work_offer_name"] == "history-worker"
+    assert history_offer["work_offer_name"] == "history-worker"
+    assert history_offer["work_offer_agent_id"] == "AI-HISTORY-WORKER"
+    assert history_offer["work_offer_offered_at"] == "2030-01-01T00:30:00+00:00"
+    assert history_offer["work_offer_expires_at"] == "2030-01-01T00:33:00+00:00"
+
+
+@pytest.mark.anyio
+async def test_handoff_projection_uses_explicit_ticket_and_current_reviewer() -> None:
+    handoff = {
+        "memory_id": "MEM-HANDOFF-NEW",
+        "memory_type": "handoff",
+        "title": "Ready for review",
+        "pinned_summary": "Validate the accountable handoff card.",
+        "author_agent_name": "worker-source-with-a-long-name",
+        "created_at": "2030-01-02T03:04:05+00:00",
+        "related_tickets": ["TK-HANDOFF"],
+        "next_steps": ["Check 400px", "Check 1440px"],
+    }
+
+    class ProjectionReader:
+        async def board_status(self) -> dict[str, Any]:
+            return {"agents": [], "latest_seq": 9}
+
+        async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "tickets": [
+                    {
+                        "ticket_id": "TK-HANDOFF",
+                        "status": "submitted",
+                        "review_offer": {
+                            "agent_id": "AI-REVIEWER",
+                            "agent_name": "reviewer-destination-with-a-long-name",
+                        },
+                    }
+                ],
+                "total_matching": 1,
+                "latest_seq": 9,
+            }
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=FakeClientError,
+    )
+    await state._load_projection(
+        ProjectionReader(),
+        snapshot={
+            "board": {"board_id": "board-personal-test"},
+            "state": {
+                "briefing": {
+                    "value": json.dumps({"latest_handoff": handoff})
+                }
+            },
+            "latest_seq": 9,
+        },
+    )
+
+    assert state._projection is not None
+    assert state._projection["highlights"]["latest_handoff"] == {
+        "id": "MEM-HANDOFF-NEW",
+        "type": "handoff",
+        "title": "Ready for review",
+        "summary": "Validate the accountable handoff card.",
+        "author": "worker-source-with-a-long-name",
+        "created_at": "2030-01-02T03:04:05+00:00",
+        "ticket_ids": ["TK-HANDOFF"],
+        "next_steps": ["Check 400px", "Check 1440px"],
+        "warnings": [],
+    }
+    assert state._projection["tickets"][0]["reviewer"] == (
+        "reviewer-destination-with-a-long-name"
+    )
+
+
+def test_handoff_view_has_wide_row_narrow_stack_and_literal_empty_states() -> None:
+    root = Path(__file__).resolve().parents[3]
+    source = (root / "tools/dashboard-ui/src/dashboard.ts").read_text(
+        encoding="utf-8"
+    )
+    styles = (root / "tools/dashboard-ui/src/dashboard.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)" in styles
+    assert '@media (max-width: 620px)' in styles
+    assert '.handoff-route[data-connected="false"]' in styles
+    assert "grid-template-columns: 1fr" in styles
+    assert "overflow-wrap: anywhere" in styles
+    for literal in (
+        "Not observed",
+        "None recorded",
+        "Not supplied",
+        "reviewer unassigned",
+    ):
+        assert literal in source
+    assert 'role", "img"' in source
+    assert 'if (value.author && ticket?.reviewer)' in source
+    assert 'copyButton("Copy memory ID", value.id)' in source
 
 
 @pytest.fixture
