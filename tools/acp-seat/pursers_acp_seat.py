@@ -1020,6 +1020,7 @@ class CentralBoard:
         )
         self.agent_id = ""
         self.principal_id = ""
+        self._claim_identities: dict[str, tuple[str, str, str]] = {}
 
     async def __aenter__(self) -> "CentralBoard":
         await self.client.__aenter__()
@@ -1060,7 +1061,36 @@ class CentralBoard:
         )
 
     async def claim(self, ticket_id: str) -> JSON:
-        return await self.client.ticket_claim(ticket_id)
+        result = await self.client.ticket_claim(
+            ticket_id, agent_name=self.config.agent_name
+        )
+        try:
+            ticket = (await self.client.ticket_get(ticket_id)).get("ticket")
+            if not isinstance(ticket, dict):
+                raise PermissionError(
+                    "Central claim response omitted the claimed ticket"
+                )
+            identity = (
+                str(ticket.get("claimed_by_agent_id", "")),
+                str(ticket.get("claimed_by_principal_id", "")),
+                str(ticket.get("claimed_by", "")),
+            )
+            expected = (self.agent_id, self.principal_id, self.config.agent_name)
+            if identity != expected:
+                raise PermissionError(
+                    "Central claim response used a different seat identity"
+                )
+        except Exception:
+            try:
+                await self.client._call(
+                    "ticket_unclaim",
+                    {"agent_name": self.config.agent_name, "ticket_id": ticket_id},
+                )
+            except Exception:
+                pass
+            raise
+        self._claim_identities[ticket_id] = identity
+        return result
 
     async def ticket_get(self, ticket_id: str) -> JSON:
         return (await self.client.ticket_get(ticket_id))["ticket"]
@@ -1075,14 +1105,34 @@ class CentralBoard:
         )
 
     async def renew(self, ticket_id: str) -> None:
-        await self.client.lease_renew(ticket_id)
+        identity = self._claim_identities.get(ticket_id)
+        if identity is None:
+            raise PermissionError("ACP seat has no claim identity for lease renewal")
+        if identity[:2] != (self.agent_id, self.principal_id):
+            raise PermissionError(
+                "ACP seat claim identity changed before lease renewal"
+            )
+        await self.client.lease_renew(ticket_id, agent_name=identity[2])
 
     async def submit(self, ticket_id: str, completion: JSON) -> None:
-        await self.client.ticket_submit(ticket_id, **completion, stay_active=False)
+        identity = self._claim_identities.get(ticket_id)
+        if identity is None:
+            raise PermissionError("ACP seat has no claim identity for submission")
+        await self.client.ticket_submit(
+            ticket_id, agent_name=identity[2], **completion, stay_active=False
+        )
+        self._claim_identities.pop(ticket_id, None)
 
     async def unclaim(self, ticket_id: str) -> None:
+        identity = self._claim_identities.pop(ticket_id, None)
         await self.client._call(
-            "ticket_unclaim", {"agent_name": self.config.agent_name, "ticket_id": ticket_id}
+            "ticket_unclaim",
+            {
+                "agent_name": (
+                    identity[2] if identity is not None else self.config.agent_name
+                ),
+                "ticket_id": ticket_id,
+            },
         )
 
 
