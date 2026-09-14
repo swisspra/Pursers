@@ -783,10 +783,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 pinned_event["offered_agent_id"], a.identity.agent_id, pinned_json
             )
-            self.assertEqual(
-                pinned_event["recipient_identities"], [a.identity.agent_id],
-                pinned_json,
-            )
+            self.assertNotIn("recipient_identities", pinned_event, pinned_json)
             self.principal = admin
             await admin_client._call(
                 "ticket_cancel", agent_name="live-admin",
@@ -811,10 +808,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 excluded_event["offered_agent_id"], a.identity.agent_id,
                 excluded_json,
             )
-            self.assertEqual(
-                excluded_event["recipient_identities"], [a.identity.agent_id],
-                excluded_json,
-            )
+            self.assertNotIn("recipient_identities", excluded_event, excluded_json)
             await admin_client._call(
                 "ticket_cancel", agent_name="live-admin",
                 ticket_id=excluded["ticket"]["ticket_id"], reason="fixture complete",

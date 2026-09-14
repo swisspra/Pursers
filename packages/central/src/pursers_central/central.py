@@ -228,6 +228,19 @@ ADMISSION_EVENT_FIELDS = frozenset(
     }
 )
 SCRUB_PROFILES = frozenset({"strict", "internal"})
+RESPONSE_VIEWS = frozenset({"compact", "full"})
+DEFAULT_RESPONSE_VIEW = "compact"
+COMPACT_WRITE_TOOLS = frozenset(
+    {
+        "ticket_update",
+        "ticket_annotate",
+        "ticket_claim",
+        "ticket_unclaim",
+        "lease_renew",
+        "memory_write",
+        "memory_checkpoint",
+    }
+)
 SCRUB_EVENT_FIELDS = frozenset(
     {
         "scrub_profile_from",
@@ -428,6 +441,182 @@ def current_principal() -> Principal:
     canonical = json.dumps([client_id, issuer or "-", subject or "-"], separators=(",", ":"))
     principal_id = "PR-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return Principal(principal_id, canonical, frozenset(access.scopes))
+
+
+def strip_response_recipient_identities(value: Any) -> Any:
+    """Remove routing-only recipient lists from a model-facing value."""
+    if isinstance(value, Mapping):
+        return {
+            key: strip_response_recipient_identities(item)
+            for key, item in value.items()
+            if key != "recipient_identities"
+        }
+    if isinstance(value, list):
+        return [strip_response_recipient_identities(item) for item in value]
+    if isinstance(value, tuple):
+        return [strip_response_recipient_identities(item) for item in value]
+    return value
+
+
+def _compact_dispatch_state(
+    document: Mapping[str, Any], ticket: Mapping[str, Any]
+) -> dict[str, Any]:
+    state = ticket.get("dispatch_state")
+    source = state if isinstance(state, Mapping) else {}
+    state_name = source.get("state")
+    if state_name is None:
+        if ticket.get("parked") is True:
+            state_name = "parked"
+        elif ticket.get("status") in {"claimed", "in_progress"}:
+            state_name = "claimed"
+        else:
+            state_name = ticket.get("status")
+    agent_name = source.get("agent_name")
+    expires_at = source.get("expires_at")
+    if state_name == "claimed":
+        agent_name = ticket.get("claimed_by") or agent_name
+        expires_at = ticket.get("lease_expires_at") or expires_at
+    elif state_name in {"review_claimed", "reviewing"}:
+        review_lease = ticket.get("review_lease")
+        if isinstance(review_lease, Mapping):
+            agent_name = review_lease.get("reviewer_agent_name") or agent_name
+            expires_at = review_lease.get("expires_at") or expires_at
+    if agent_name is None:
+        state_agent_id = source.get("agent_id")
+        member = document.get("members", {}).get(state_agent_id, {})
+        if isinstance(member, Mapping):
+            agent_name = member.get("agent_name")
+    return {
+        "state": state_name,
+        "agent_name": agent_name,
+        "expires_at": expires_at,
+    }
+
+
+def compact_write_response(
+    tool_name: str,
+    result: Mapping[str, Any],
+    document: Mapping[str, Any],
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project a successful write to its small model-facing mutation receipt."""
+    ticket_id_value = arguments.get("ticket_id") or result.get("ticket_id")
+    tickets = document.get("tickets", {})
+    ticket = (
+        tickets.get(ticket_id_value, {})
+        if isinstance(tickets, Mapping) and isinstance(ticket_id_value, str)
+        else {}
+    )
+    if not isinstance(ticket, Mapping):
+        ticket = {}
+    memory = result.get("memory")
+    if not isinstance(memory, Mapping):
+        memory = {}
+    annotation = result.get("annotation")
+    if not isinstance(annotation, Mapping):
+        annotation = {}
+
+    revoked_offer = None
+    for collection_name in ("dispatch_events", "release_events"):
+        collection = result.get(collection_name)
+        if not isinstance(collection, list):
+            continue
+        for event in collection:
+            if isinstance(event, Mapping) and event.get("kind") == OFFER_REVOKED:
+                revoked_offer = {
+                    "agent_name": event.get("offered_agent_name"),
+                    "reason": event.get("dispatch_reason"),
+                }
+
+    at = (
+        annotation.get("at")
+        or memory.get("created_at")
+        or ticket.get("lease_renewed_at")
+        or ticket.get("updated_at")
+    )
+    if tool_name in {"memory_write", "memory_checkpoint"}:
+        return {
+            "ok": bool(result.get("ok", True)),
+            "memory_id": memory.get("memory_id"),
+            "scope": memory.get("scope"),
+            "generation": int(document.get("generation_revision", 0)),
+            "at": at,
+        }
+    if tool_name == "lease_renew":
+        return {
+            "ok": bool(result.get("ok", True)),
+            "ticket_id": ticket_id_value,
+            "lease_expires_at": result.get("lease_expires_at"),
+            "at": at,
+        }
+
+    projected: dict[str, Any] = {
+        "ok": bool(result.get("ok", True)),
+        "ticket_id": ticket_id_value,
+        "status": ticket.get("status"),
+        "parked": ticket.get("parked") if ticket else None,
+        "generation": int(document.get("generation_revision", 0)),
+        "dispatch_state": _compact_dispatch_state(document, ticket) if ticket else None,
+        "revoked_offer": revoked_offer,
+        "at": at,
+    }
+    if tool_name == "ticket_annotate":
+        projected["annotation_id"] = annotation.get("annotation_id")
+    return projected
+
+
+def project_model_tool_result(
+    result: HandlerResult,
+    *,
+    service: "CentralBoard",
+    tool_name: str | None,
+    arguments: Mapping[str, Any],
+) -> HandlerResult:
+    """Apply board response policy at the protocol boundary, not domain calls."""
+    if hasattr(result, "structured_content"):
+        structured = getattr(result, "structured_content", None)
+        is_error = bool(getattr(result, "is_error", False))
+    elif isinstance(result, Mapping):
+        structured = result.get("structuredContent", result.get("structured_content"))
+        is_error = bool(result.get("isError", result.get("is_error", False)))
+    else:
+        return result
+    if not isinstance(structured, Mapping):
+        return result
+
+    projected: Any = strip_response_recipient_identities(structured)
+    board_id = arguments.get("board_id")
+    if (
+        not is_error
+        and structured.get("ok") is not False
+        and tool_name in COMPACT_WRITE_TOOLS
+        and isinstance(board_id, str)
+        and ID_RE.fullmatch(board_id)
+    ):
+        document = service.load(board_id)
+        response_view = document.get("config", {}).get(
+            "response_view", DEFAULT_RESPONSE_VIEW
+        )
+        if response_view == "compact":
+            projected = compact_write_response(
+                str(tool_name), structured, document, arguments
+            )
+    projected = strip_response_recipient_identities(projected)
+    rendered = json.dumps(projected, ensure_ascii=False, indent=2)
+    if hasattr(result, "model_copy"):
+        return result.model_copy(
+            update={
+                "structured_content": projected,
+                "content": [types.TextContent(type="text", text=rendered)],
+            }
+        )
+    copied = dict(result)
+    structured_key = (
+        "structuredContent" if "structuredContent" in copied else "structured_content"
+    )
+    copied[structured_key] = projected
+    copied["content"] = [{"type": "text", "text": rendered}]
+    return copied
 
 
 def current_host_binding(agent_id_value: str) -> str:
@@ -1026,6 +1215,7 @@ class CentralBoard:
                 "invite_prune_after_days": DEFAULT_INVITE_PRUNE_AFTER_DAYS,
                 "scrub_profile": "strict",
                 "review_policy": "strict",
+                "response_view": DEFAULT_RESPONSE_VIEW,
                 "dispatch_policy": {
                     "offer_ttl_s": DEFAULT_OFFER_TTL_S,
                     "broadcast_reoffer_s": DEFAULT_BROADCAST_REOFFER_S,
@@ -1109,6 +1299,9 @@ class CentralBoard:
         review_policy = config.setdefault("review_policy", "strict")
         if review_policy not in REVIEW_POLICIES:
             raise ValueError("board review policy is invalid")
+        response_view = config.setdefault("response_view", DEFAULT_RESPONSE_VIEW)
+        if response_view not in RESPONSE_VIEWS:
+            raise ValueError("board response view is invalid")
         dispatch_policy = config.setdefault(
             "dispatch_policy",
             {
@@ -2337,6 +2530,14 @@ class SubscriptionAuthorization:
                                         "resultType": "complete",
                                     }
                             result = await call_next(ctx)
+                            result = project_model_tool_result(
+                                result,
+                                service=self.service,
+                                tool_name=(str(tool_name) if tool_name else None),
+                                arguments=(
+                                    arguments if isinstance(arguments, Mapping) else {}
+                                ),
+                            )
                     for notification_context, uri in pending:
                         await notification_context.notify_resource_updated(uri)
                     return result
@@ -4856,6 +5057,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     def project_memory(entry: dict[str, Any]) -> dict[str, Any]:
         projected = copy.deepcopy(entry)
+        if (
+            projected.get("schema_version") == 2
+            and projected.get("memory_type") in {"checkpoint", "handoff"}
+        ):
+            # Schema-v2 structured memories already expose every content field.
+            # The legacy rendered/JSON content remains durable, but returning it
+            # as well makes every memory read emit the same information twice.
+            projected.pop("content", None)
         if not projected.get("memory_id"):
             projected["memory_id"] = memory_identifier(entry)
         if not projected.get("scope"):
@@ -4930,15 +5139,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
         omitted: dict[str, int] = {}
 
-        content = projected.get("content", "")
-        content = content if isinstance(content, str) else str(content)
-        content_truncated = len(content) > BRIEFING_MEMORY_CONTENT_MAX_CHARS
-        if content_truncated:
-            content = (
-                content[: BRIEFING_MEMORY_CONTENT_MAX_CHARS - 1].rstrip() + "…"
-            )
-        result["content"] = content
-        result["content_truncated"] = content_truncated
+        if "content" in projected:
+            content = projected.get("content", "")
+            content = content if isinstance(content, str) else str(content)
+            content_truncated = len(content) > BRIEFING_MEMORY_CONTENT_MAX_CHARS
+            if content_truncated:
+                content = (
+                    content[: BRIEFING_MEMORY_CONTENT_MAX_CHARS - 1].rstrip() + "…"
+                )
+            result["content"] = content
+            result["content_truncated"] = content_truncated
 
         summary = projected.get("summary")
         if isinstance(summary, str):
@@ -5581,6 +5791,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 ),
                 "scrub_profile": board_scrub_profile(document),
                 "review_policy": board_review_policy(document),
+                "response_view": str(
+                    document["config"].get("response_view", DEFAULT_RESPONSE_VIEW)
+                ),
                 "dispatch_enabled": dispatch_enabled(document),
                 "dispatch_policy": dispatch_policy(document),
                 "scrub_allow_counts": copy.deepcopy(
@@ -6310,6 +6523,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "membership_role": board_membership["role"],
                     "scrub_profile": board_scrub_profile(document),
                     "review_policy": board_review_policy(document),
+                    "response_view": str(
+                        document["config"].get(
+                            "response_view", DEFAULT_RESPONSE_VIEW
+                        )
+                    ),
                     "member_count": len(document["members"]),
                     "principal_member_count": len(document["principal_memberships"]),
                     "ticket_count": len(document["tickets"]) + len(
@@ -6385,6 +6603,48 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "changed": result["changed"],
             "scrub_allow_counts": result["allow_counts"],
             "event": event,
+        }
+
+    @tool()
+    async def board_response_view_set(
+        board_id: str,
+        agent_name: str,
+        response_view: str,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Set compact or full model-facing write responses as a board admin."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        if response_view not in RESPONSE_VIEWS:
+            raise ValueError("response_view must be compact or full")
+        principal = current_principal()
+        require_scope(principal, "board:write")
+        now = time.time()
+
+        def set_view(document: dict[str, Any]) -> dict[str, Any]:
+            actor = require_admin_actor(document, principal, agent_name)
+            previous = str(
+                document["config"].get("response_view", DEFAULT_RESPONSE_VIEW)
+            )
+            changed = previous != response_view
+            if changed:
+                document["config"]["response_view"] = response_view
+                document["config"]["response_view_updated_at"] = iso_at(now)
+                document["config"]["response_view_updated_by_agent_id"] = actor[
+                    "agent_id"
+                ]
+            actor["last_activity_at"] = iso_at(now)
+            return {"previous": previous, "changed": changed}
+
+        result = service.mutate(board_id, set_view)
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "response_view": response_view,
+            "previous_response_view": result["previous"],
+            "changed": result["changed"],
+            "at": iso_at(now),
         }
 
     @tool()
@@ -10809,7 +11069,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             }:
                 continue
             title = str(item.get("title", "")).casefold()
-            content = str(item.get("content", "")).casefold()
+            content = str(raw.get("content", "")).casefold()
+            structured_text = " ".join(
+                str(raw.get(field, ""))
+                for field in (
+                    "summary", "remaining_tasks", "files", "next_steps",
+                    "active_branch", "blockers", "warnings",
+                )
+            ).casefold()
             tags_text = " ".join(item.get("tags", [])).casefold()
             files_text = " ".join(item.get("related_files", [])).casefold()
             tickets_text = " ".join(item.get("related_tickets", [])).casefold()
@@ -10817,7 +11084,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 5 * (needle in title)
                 + 3 * (needle in tags_text)
                 + 2 * (needle in files_text or needle in tickets_text)
-                + (needle in content)
+                + (needle in content or needle in structured_text)
             )
             if score:
                 ranked.append(
@@ -11273,6 +11540,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "retired_or_stale_count": hidden_lifecycle_count,
             "scrub_profile": board_scrub_profile(document),
             "review_policy": current_review_policy,
+            "response_view": str(
+                document["config"].get("response_view", DEFAULT_RESPONSE_VIEW)
+            ),
             "dispatch_enabled": dispatch_enabled(document),
             "dispatch_policy": dispatch_policy(document),
             "unassignable_tickets": unassignable,

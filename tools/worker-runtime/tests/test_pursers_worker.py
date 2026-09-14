@@ -1354,7 +1354,9 @@ def test_real_bridge_scans_backlog_once_at_ten_minute_cadence(
                             for event in cued["events"]
                         )
                         claimed = await api.claim("pursers", live_ticket)
-                        assert claimed["ticket"]["status"] == "claimed"
+                        assert claimed["ticket_id"] == live_ticket
+                        assert claimed["status"] == "claimed"
+                        assert claimed["dispatch_state"]["state"] == "claimed"
             finally:
                 central.current_principal = original_principal
 
