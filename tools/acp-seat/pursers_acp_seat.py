@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -178,6 +179,45 @@ def _sandbox_available() -> bool:
     return True
 
 
+def _executable_read_roots(executable: str) -> set[Path]:
+    """Return narrow lexical and real installation trees for an executable."""
+    located = shutil.which(executable) if os.sep not in executable else executable
+    if not located:
+        return set()
+    lexical = Path(os.path.abspath(os.path.expanduser(located)))
+    if not lexical.exists():
+        return set()
+
+    roots: set[Path] = set()
+    for path in (lexical, Path(os.path.realpath(lexical))):
+        roots.add(path)
+        parts = path.parts
+        cellar = max(
+            (index for index, part in enumerate(parts) if part == "Cellar"),
+            default=-1,
+        )
+        if cellar >= 0 and len(parts) > cellar + 2:
+            roots.add(Path(*parts[: cellar + 3]))
+            continue
+        opt = max(
+            (index for index, part in enumerate(parts) if part == "opt"),
+            default=-1,
+        )
+        if opt >= 0 and len(parts) > opt + 1:
+            roots.add(Path(*parts[: opt + 2]))
+            continue
+        bin_dir = max(
+            (
+                index
+                for index, part in enumerate(parts[:-1])
+                if part in {"bin", "sbin"}
+            ),
+            default=-1,
+        )
+        roots.add(Path(*parts[:bin_dir]) if bin_dir > 0 else path.parent)
+    return roots
+
+
 def sandboxed_agent_command(
     command: Sequence[str],
     work_dir: Path,
@@ -196,9 +236,11 @@ def sandboxed_agent_command(
         Path("/dev"),
         Path("/sbin"),
         Path("/Library"),
-        Path("/opt/homebrew"),
         *(path.resolve() for path in readable_roots),
     }
+    for executable in (sys.executable, command[0] if command else ""):
+        if executable:
+            readable.update(_executable_read_roots(executable))
     for part in command:
         candidate = Path(part).expanduser()
         if candidate.exists():

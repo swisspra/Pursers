@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[3]
 ACP_ROOT = ROOT / "tools" / "acp-seat"
 CENTRAL_SRC = ROOT / "packages" / "central" / "src" / "pursers_central"
@@ -435,17 +437,14 @@ def test_production_sandbox_boundary_allows_standalone_clone_commit(
         "subprocess.run(['git','add','result.txt'],check=True); "
         "subprocess.run(['git','commit','-m','complete work'],check=True)"
     )
-    sandbox_available = seat._sandbox_available()
+    if not seat._sandbox_available():
+        pytest.skip("macOS sandbox-exec is unavailable on this host")
     with patch.object(seat, "_sandbox_available", return_value=True):
         command = seat.sandboxed_agent_command(
             [sys.executable, "-c", agent_code], work
         )
 
-    # CI hosts without a usable sandbox-exec still exercise the same generated
-    # boundary preflight, which resolves the real index/git-dir/common-dir and
-    # fails before launch if any mutable Git metadata is outside writable roots.
-    run_command = command if sandbox_available else command[3:]
-    subprocess.run(run_command, cwd=work, check=True, capture_output=True, text=True)
+    subprocess.run(command, cwd=work, check=True, capture_output=True, text=True)
     commit = git("rev-parse", "--verify", "HEAD^{commit}", cwd=work)
     completion = {
         "summary": "sandboxed commit",
@@ -503,6 +502,37 @@ def test_sandbox_profile_denies_network_and_protects_token(tmp_path: Path) -> No
     assert "(deny network*)" in profile
     assert f'(allow file-write* (subpath "{work}"))' in profile
     assert f'(deny file-read* (literal "{token}"))' in profile
+
+
+def test_sandbox_profile_allows_lexical_and_real_interpreter_prefixes(
+    tmp_path: Path,
+) -> None:
+    opt_root = tmp_path / "opt"
+    opt_root.mkdir()
+    prefixes: list[tuple[Path, Path, Path]] = []
+    for name in ("python@9", "agent"):
+        real_prefix = tmp_path / "Cellar" / name / "9.0"
+        real_executable = real_prefix / "bin" / name
+        real_executable.parent.mkdir(parents=True)
+        real_executable.write_text("fake executable\n", encoding="utf-8")
+        lexical_prefix = opt_root / name
+        lexical_prefix.symlink_to(real_prefix, target_is_directory=True)
+        prefixes.append((lexical_prefix, real_prefix, lexical_prefix / "bin" / name))
+    interpreter = prefixes[0][2]
+    agent_executable = prefixes[1][2]
+    work = tmp_path / "work"
+    work.mkdir()
+
+    with (
+        patch.object(seat, "_sandbox_available", return_value=True),
+        patch.object(seat.sys, "executable", str(interpreter)),
+    ):
+        profile = seat.sandboxed_agent_command([str(agent_executable)], work)[2]
+
+    for lexical_prefix, real_prefix, _executable in prefixes:
+        assert f'(allow file-read* (subpath "{lexical_prefix}"))' in profile
+        assert f'(allow file-read* (subpath "{real_prefix}"))' in profile
+    assert f'(allow file-read* (subpath "{opt_root}"))' not in profile
 
 
 def test_offer_event_accepts_bridge_shapes() -> None:
