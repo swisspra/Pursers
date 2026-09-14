@@ -1,5 +1,8 @@
 'use strict';
 
+const MAX_JOIN_ATTEMPTS = 3;
+const RETRY_COUNTDOWN_SECONDS = 3;
+
 function valueOrDash(value) {
   return value === undefined || value === null || value === '' ? '—' : String(value);
 }
@@ -99,9 +102,62 @@ async function readJson(response) {
   }
 }
 
-function initialize(documentRef, fetchImpl) {
+function joinFailure(response, result, transportError) {
+  const code = result && (result.error || result.code);
+  if (transportError) {
+    return {
+      retryable: true,
+      title: 'Pursers helper is unreachable.',
+      action: 'Keep AionUi open or restart it.',
+    };
+  }
+  if (response.status === 401 || response.status === 403 || code === 'auth_rejected') {
+    return {
+      retryable: false,
+      title: 'Authentication was rejected.',
+      action: 'Sign in to AionUi again and reload this page.',
+    };
+  }
+  if (code === 'server_unreachable') {
+    return {
+      retryable: true,
+      title: 'Central is unreachable.',
+      action: 'Check the Central URL and network.',
+    };
+  }
+  if (code === 'bridge_status_failed') {
+    return {
+      retryable: true,
+      title: 'Pursers helper status is unavailable.',
+      action: 'Restart the wait bridge.',
+    };
+  }
+  return {
+    retryable: false,
+    title: (result && result.install_hint) || 'Join failed.',
+    action: 'Ask your coordinator to check the door.',
+  };
+}
+
+function failureMessage(failure, attempts) {
+  return `${failure.title} ${failure.action} Automatic retries stopped after ${attempts} attempts; paste the door again to retry.`;
+}
+
+async function waitForRetry(failure, nextAttempt, message, sleep) {
+  for (let seconds = RETRY_COUNTDOWN_SECONDS; seconds > 0; seconds -= 1) {
+    message.textContent = `${failure.title} ${failure.action} Retrying in ${seconds}s (attempt ${nextAttempt} of ${MAX_JOIN_ATTEMPTS}).`;
+    await sleep(1000);
+  }
+  message.textContent = `Retrying… (attempt ${nextAttempt} of ${MAX_JOIN_ATTEMPTS})`;
+}
+
+function initialize(documentRef, fetchImpl, dependencies = {}) {
+  const sleep = dependencies.sleep || ((milliseconds) => new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  }));
   const form = documentRef.querySelector('#join-form');
   const doorInput = documentRef.querySelector('#door');
+  const submitButton = form.querySelector('button[type="submit"]');
   const message = documentRef.querySelector('#message');
   const ui = {
     card: documentRef.querySelector('#status-card'),
@@ -113,39 +169,92 @@ function initialize(documentRef, fetchImpl) {
   const showResult = (result) => renderStartupView(
     createStartupView(result), ui, documentRef,
   );
+  let joining = false;
+  let viewGeneration = 0;
 
-  form.addEventListener('submit', async (event) => {
+  const setBusy = (busy) => {
+    joining = busy;
+    form.setAttribute('aria-busy', busy ? 'true' : 'false');
+    doorInput.disabled = busy;
+    submitButton.disabled = busy;
+    submitButton.textContent = busy ? 'Joining…' : 'Join';
+  };
+
+  const submitJoin = async (event) => {
     event.preventDefault();
+    if (joining) return;
     const door = doorInput.value.trim();
     doorInput.value = '';
-    message.textContent = 'Joining…';
-    const response = await fetchImpl('/pursers/join', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ door }),
-    });
-    const result = await readJson(response);
-    if (!response.ok || !result.ok) {
-      message.textContent = result.install_hint || 'Join failed. Ask your coordinator to check the door.';
-      if (result.error === 'bridge_not_installed') showResult(result);
-      return;
-    }
-    message.textContent = `Joined and registered ${result.mcp_server}.`;
-    showResult({
-      ok: true,
-      push_mode: result.status && result.status.push_mode,
-      seats: result.status ? [result.status] : [],
-    });
-  });
+    viewGeneration += 1;
+    setBusy(true);
+    message.textContent = `Joining… (attempt 1 of ${MAX_JOIN_ATTEMPTS})`;
+    try {
+      for (let attempt = 1; attempt <= MAX_JOIN_ATTEMPTS; attempt += 1) {
+        let response;
+        let result;
+        let transportError;
+        try {
+          response = await fetchImpl('/pursers/join', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ door }),
+          });
+          result = await readJson(response);
+        } catch (error) {
+          transportError = error;
+        }
 
-  fetchImpl('/pursers/status')
+        if (response && response.ok && result.ok) {
+          message.textContent = `Joined and registered ${result.mcp_server}.`;
+          showResult({
+            ok: true,
+            push_mode: result.status && result.status.push_mode,
+            seats: result.status ? [result.status] : [],
+          });
+          return;
+        }
+
+        const failure = joinFailure(response || { status: 0 }, result, transportError);
+        if (!failure.retryable || attempt === MAX_JOIN_ATTEMPTS) {
+          message.textContent = failure.retryable
+            ? failureMessage(failure, attempt)
+            : `${failure.title} ${failure.action}`;
+          if (result && result.error === 'bridge_not_installed') showResult(result);
+          return;
+        }
+        await waitForRetry(failure, attempt + 1, message, sleep);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  form.addEventListener('submit', submitJoin);
+
+  const startupGeneration = viewGeneration;
+  const statusReady = fetchImpl('/pursers/status')
     .then(readJson)
-    .then(showResult)
-    .catch(() => showResult({ ok: false, error: 'status_unavailable' }));
+    .then((result) => {
+      if (viewGeneration === startupGeneration) showResult(result);
+    })
+    .catch(() => {
+      if (viewGeneration === startupGeneration) {
+        showResult({ ok: false, error: 'status_unavailable' });
+      }
+    });
+  return { statusReady, submitJoin };
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { createStartupView, normalizeSeat, renderStartupView };
+  module.exports = {
+    MAX_JOIN_ATTEMPTS,
+    RETRY_COUNTDOWN_SECONDS,
+    createStartupView,
+    initialize,
+    joinFailure,
+    normalizeSeat,
+    renderStartupView,
+  };
 }
 
 if (typeof document !== 'undefined' && typeof fetch !== 'undefined') {
