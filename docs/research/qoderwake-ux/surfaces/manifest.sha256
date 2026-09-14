@@ -1,0 +1,83 @@
+# Ego Lite capture manifest
+# Browser: Ego Lite task space 18
+# Theme: light (the rendered pages exposed no dark/light/theme/appearance control)
+# file: agent-sdk-1440x900-light.png
+# url: https://qoder.com/agent-sdk
+# viewport: 1440x900
+# captured_at: 2026-09-14T19:05:38.557Z
+03118c45ee3f213b0c68cf355b498c9a518fe8c714d7222910629b260ca80c61  docs/research/qoderwake-ux/surfaces/agent-sdk-1440x900-light.png
+# file: agent-sdk-400x844-light.png
+# url: https://qoder.com/agent-sdk
+# viewport: 400x844
+# captured_at: 2026-09-14T19:05:40.114Z
+a1e8b10e8b6af91995b68e19228cf48fb4d17e6e4a1070e05786b6ba54892820  docs/research/qoderwake-ux/surfaces/agent-sdk-400x844-light.png
+# file: cli-1440x900-light.png
+# url: https://qoder.com/cli
+# viewport: 1440x900
+# captured_at: 2026-09-14T19:05:36.109Z
+8505c46f71acbb4780eb8aa4b2e50ca3a28bd93e238e55ce653c264ba8139657  docs/research/qoderwake-ux/surfaces/cli-1440x900-light.png
+# file: cli-400x844-light.png
+# url: https://qoder.com/cli
+# viewport: 400x844
+# captured_at: 2026-09-14T19:05:37.387Z
+132b7e0fc7f977926a9e116a69a385747d09bd6c77af3debecfec8630313a9b6  docs/research/qoderwake-ux/surfaces/cli-400x844-light.png
+# file: cloud-agents-1440x900-light.png
+# url: https://qoder.com/cloud-agents
+# viewport: 1440x900
+# captured_at: 2026-09-14T19:05:41.080Z
+d8c0e667913165d42e8dd747463d45c5ebd5252b2d6e63b8800b65f11e14f2c8  docs/research/qoderwake-ux/surfaces/cloud-agents-1440x900-light.png
+# file: cloud-agents-400x844-light.png
+# url: https://qoder.com/cloud-agents
+# viewport: 400x844
+# captured_at: 2026-09-14T19:05:42.389Z
+b9174878a12fc1d2617db475c1361b5b5323658ee166a8ff19e1944ec626e72f  docs/research/qoderwake-ux/surfaces/cloud-agents-400x844-light.png
+# file: ide-1440x900-light.png
+# url: https://qoder.com/ide
+# viewport: 1440x900
+# captured_at: 2026-09-14T19:05:32.395Z
+618ba0d2c34ae4f2c15b3aebffe5249419c18947d8566c09fca8c03caae0af58  docs/research/qoderwake-ux/surfaces/ide-1440x900-light.png
+# file: ide-400x844-light.png
+# url: https://qoder.com/ide
+# viewport: 400x844
+# captured_at: 2026-09-14T19:05:33.325Z
+53f21b8652c187508919f56a53a2a5db16eed59e954fe9e475dd01e62ae4f781  docs/research/qoderwake-ux/surfaces/ide-400x844-light.png
+# file: jetbrains-1440x900-light.png
+# url: https://qoder.com/jetbrains
+# viewport: 1440x900
+# captured_at: 2026-09-14T19:05:34.260Z
+c90b238143597f21877c0e359ffb16eac2715105d3afcea10d41a209b4970586  docs/research/qoderwake-ux/surfaces/jetbrains-1440x900-light.png
+# file: jetbrains-400x844-light.png
+# url: https://qoder.com/jetbrains
+# viewport: 400x844
+# captured_at: 2026-09-14T19:05:35.168Z
+e4508cc49c2f5c623ad6897156f5af42330c15d22b67f34c657b64d9a69799f6  docs/research/qoderwake-ux/surfaces/jetbrains-400x844-light.png
+# file: mobile-1440x900-light.png
+# url: https://qoder.com/mobile
+# viewport: 1440x900
+# captured_at: 2026-09-14T19:05:30.381Z
+ee3831d99e53a47836182d8d7f82b3bed6c3a4a5064906fa09ff4189fab7a0a1  docs/research/qoderwake-ux/surfaces/mobile-1440x900-light.png
+# file: mobile-400x844-light.png
+# url: https://qoder.com/mobile
+# viewport: 400x844
+# captured_at: 2026-09-14T19:05:31.669Z
+6c727624ef9a8294f890f075c72d11685712185e22a22451fd461c33a231ae1b  docs/research/qoderwake-ux/surfaces/mobile-400x844-light.png
+# file: qoder-1440x900-light.png
+# url: https://qoder.com/qoder
+# viewport: 1440x900
+# captured_at: 2026-09-14T19:05:27.683Z
+594e6d5c92022b07a90a93281fc0196bbf90d5fc56008085e356fe08dcd95871  docs/research/qoderwake-ux/surfaces/qoder-1440x900-light.png
+# file: qoder-400x844-light.png
+# url: https://qoder.com/qoder
+# viewport: 400x844
+# captured_at: 2026-09-14T19:05:29.062Z
+5bd273f725efcd260db3a0c631aa883bc778971e5654e5eb2ca6b14efcf5303f  docs/research/qoderwake-ux/surfaces/qoder-400x844-light.png
+# file: qoderwake-1440x900-light.png
+# url: https://qoder.com/en/qoderwake
+# viewport: 1440x900
+# captured_at: 2026-09-14T19:05:25.419Z
+96de0f8b05547d9ae9bd3eeb9b5673f076f0023a9fe1b646b8f97441a5bf6536  docs/research/qoderwake-ux/surfaces/qoderwake-1440x900-light.png
+# file: qoderwake-400x844-light.png
+# url: https://qoder.com/en/qoderwake
+# viewport: 400x844
+# captured_at: 2026-09-14T19:05:26.674Z
+04af6cf2b76c35f21ce9b79af87f892bf534b3b95c4ad9178f3b7fa7ede0627f  docs/research/qoderwake-ux/surfaces/qoderwake-400x844-light.png
