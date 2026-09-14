@@ -3,7 +3,7 @@
   "name": "pursers",
   "displayName": "Pursers",
   "version": "0.1.0",
-  "description": "Worker and reviewer presets with a local door join screen.",
+  "description": "Guided Pursers project setup, Team controls, recovery, and worker/reviewer presets.",
   "author": "Pursers",
   "engine": {
     "aionui": "^2.2.1"
@@ -16,7 +16,7 @@
         "localhost",
         "::1"
       ],
-      "reasoning": "Register the local Pursers wait bridge with the AionUi API."
+      "reasoning": "Connect the settings tab to an authenticated loopback-only Pursers Home helper."
     }
   },
   "risk": {
@@ -70,65 +70,11 @@
         "order": 80
       }
     ],
-    "webui": {
-      "apiRoutes": [
-        {
-          "path": "/pursers/join",
-          "method": "POST",
-          "entryPoint": "webui/routes.js",
-          "description": "Store a door and register the wait bridge.",
-          "auth": true
-        },
-        {
-          "path": "/pursers/status",
-          "method": "GET",
-          "entryPoint": "webui/routes.js",
-          "description": "Read redacted wait-bridge status.",
-          "auth": true
-        },
-        {
-          "path": "/pursers/onboarding/validate",
-          "method": "POST",
-          "entryPoint": "webui/routes.js",
-          "description": "Validate a door without storing it.",
-          "auth": true
-        },
-        {
-          "path": "/pursers/onboarding/connect",
-          "method": "POST",
-          "entryPoint": "webui/routes.js",
-          "description": "Connect or idempotently resume a door-backed seat.",
-          "auth": true
-        },
-        {
-          "path": "/pursers/onboarding/status",
-          "method": "GET",
-          "entryPoint": "webui/routes.js",
-          "description": "Read typed redacted onboarding status.",
-          "auth": true
-        },
-        {
-          "path": "/pursers/onboarding/rotate",
-          "method": "POST",
-          "entryPoint": "webui/routes.js",
-          "description": "Replace an existing stored door and reconnect.",
-          "auth": true
-        },
-        {
-          "path": "/pursers/onboarding/recover",
-          "method": "POST",
-          "entryPoint": "webui/routes.js",
-          "description": "Recover MCP registration from redacted stored state.",
-          "auth": true
-        }
-      ],
-      "staticAssets": [
-        {
-          "urlPrefix": "/pursers/assets",
-          "directory": "webui",
-          "description": "Pursers Join tab assets."
-        }
-      ]
-    }
+    "webui": [
+      {
+        "id": "pursers-home",
+        "directory": "webui"
+      }
+    ]
   }
 }

@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-The packaged `onboard_personal/resources/dashboard.html` is a generated,
+The packaged `pursers_personal/resources/dashboard.html` is a generated,
 single-file browser View. It contains compiled and minified portions of the
 following packages. The View and its surrounding On Board code are not
 upstream source releases of those packages.

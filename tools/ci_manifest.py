@@ -54,9 +54,14 @@ def discovered_test_directories(root: Path) -> set[str]:
         for pattern in ("packages/*/tests", "tools/*/tests")
         for path in root.glob(pattern)
         if path.is_dir()
+        and any(
+            candidate.is_file()
+            for test_pattern in ("test_*.py", "*_test.py")
+            for candidate in path.rglob(test_pattern)
+        )
     }
     tools_tests = root / "tools" / "tests"
-    if tools_tests.is_dir():
+    if tools_tests.is_dir() and any(tools_tests.glob("test_*.py")):
         paths.add(tools_tests.relative_to(root).as_posix())
     return paths
 

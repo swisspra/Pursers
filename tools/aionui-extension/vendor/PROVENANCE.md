@@ -3,7 +3,10 @@
 This vendored JSON Schema is the repository's deterministic validation form of
 the extension contract exercised by AionUi 2.2.1 and AionCore 0.2.1. Those
 upstreams did not publish a standalone JSON Schema file at these tags, so the
-snapshot was transcribed from their public manifest examples and loader types.
+snapshot was transcribed from their public manifest examples and exact loader
+types. In particular, `ExtContributes.webui` is an array of `ExtWebui` records
+with `id`, `directory`, and `routes[{path,method,handler}]`; the host does not
+define `apiRoutes`, `staticAssets`, or per-route `auth` manifest fields.
 
 - [AionUi tag `v2.2.1`](https://github.com/iOfficeAI/AionUi/tree/v2.2.1),
   commit `dc47f4a0173ff506b08f13c97b10944d61e422d5`:
@@ -17,6 +20,13 @@ snapshot was transcribed from their public manifest examples and loader types.
 - [AionHub `main`](https://github.com/iOfficeAI/AionHub), inspected
   2026-09-07: public `aion-extension.json` examples
   under `extensions/`; no standalone schema file was present.
+
+The installed AionUi 2.2.1 bundle was also inspected directly. Its
+`@aionui/web-host` static server describes itself as having no business routes,
+and the AionCore extension router exposes contribution metadata and assets but
+no JavaScript handler executor. The supported Pursers integration therefore
+declares only its static WebUI directory and uses the separately launched,
+authenticated loopback helper documented in `host/HELPER_CONTRACT.md`.
 
 The `risk` metadata block records the calculated permission risk alongside the
 loader-compatible `permissions` declaration. AionCore calculates scoped network

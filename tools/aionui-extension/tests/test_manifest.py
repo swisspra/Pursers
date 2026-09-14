@@ -22,6 +22,8 @@ def test_manifest_contributes_backend_variants_without_mcp_block() -> None:
     manifest = load("aion-extension.json")
     contributes = manifest["contributes"]
     assert "mcpServers" not in contributes
+    assert "apiRoutes" not in json.dumps(contributes)
+    assert "staticAssets" not in json.dumps(contributes)
     variants = {
         (assistant["contextFile"], assistant["presetAgentType"])
         for assistant in contributes["assistants"]
@@ -45,18 +47,7 @@ def test_permissions_are_loopback_only_and_moderate() -> None:
     assert manifest["risk"]["level"] == "moderate"
 
 
-def test_onboarding_routes_are_authenticated() -> None:
-    routes = load("aion-extension.json")["contributes"]["webui"]["apiRoutes"]
-    onboarding = {
-        (route["path"], route["method"]): route
-        for route in routes
-        if route["path"].startswith("/pursers/onboarding/")
-    }
-    assert set(onboarding) == {
-        ("/pursers/onboarding/connect", "POST"),
-        ("/pursers/onboarding/recover", "POST"),
-        ("/pursers/onboarding/rotate", "POST"),
-        ("/pursers/onboarding/status", "GET"),
-        ("/pursers/onboarding/validate", "POST"),
-    }
-    assert all(route["auth"] is True for route in onboarding.values())
+def test_webui_declares_only_the_supported_static_host_shape() -> None:
+    webui = load("aion-extension.json")["contributes"]["webui"]
+    assert webui == [{"id": "pursers-home", "directory": "webui"}]
+    assert "routes" not in webui[0]

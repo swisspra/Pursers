@@ -213,12 +213,14 @@ function createDoorOnboarding(dependencies = {}) {
 
   async function register(operation, joined, metadata, normalized, context, outcome) {
     const serverName = `Pursers ${metadata.role} ${metadata.board}`;
+    const server = {
+      name: serverName,
+      transport: { type: 'stdio', command: 'pursers-wait-bridge', args: [], env: {} },
+    };
+    let importResult;
     try {
-      const imported = await dependencies.importMcp({
-        name: serverName,
-        transport: { type: 'stdio', command: 'pursers-wait-bridge', args: [], env: {} },
-      }, context);
-      if (!imported || imported.success === false) throw new Error('import rejected');
+      importResult = await dependencies.importMcp(server, context);
+      if (!importResult || importResult.success === false) throw new Error('import rejected');
     } catch (_error) {
       return failure(operation, 'mcp_registration_failed', 'The seat connected, but MCP registration failed. Use recover and retry.', {
         outcome: 'partial',
@@ -231,7 +233,8 @@ function createDoorOnboarding(dependencies = {}) {
     return result(operation, outcome, {
       status: joined,
       mcp_server: serverName,
-      imported: true,
+      mcp_definition: importResult.imported === false ? server : undefined,
+      imported: importResult.imported !== false,
       team: teamSeat(normalized, joined, metadata),
     });
   }

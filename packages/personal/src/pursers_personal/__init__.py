@@ -2,7 +2,7 @@
 
 from importlib.metadata import PackageNotFoundError, version
 
-PRODUCT_VERSION = "5.0.0a26"
+PRODUCT_VERSION = "5.0.0b1"
 
 try:
     __version__ = version("pursers-personal")

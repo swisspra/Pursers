@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "registry_warning": null,
+  "projects": [
+    {
+      "name": "fixture-project",
+      "board_id": "sandbox-home-acceptance",
+      "status": "active",
+      "tickets_open": 1,
+      "tickets_claimed": 0,
+      "tickets_submitted": 0
+    }
+  ],
+  "pool": [],
+  "truncation_counts": {
+    "projects": 0,
+    "boards": 0,
+    "agents": 0,
+    "tickets": 0,
+    "pool": 0
+  },
+  "totals": {
+    "agents": 0,
+    "busy": 0,
+    "available": 0,
+    "stale": 0
+  }
+}

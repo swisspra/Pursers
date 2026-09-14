@@ -12,7 +12,7 @@
 [![Release v5.0.0b1](https://img.shields.io/badge/release-v5.0.0b1-orange)](https://github.com/swisspra/Pursers/releases)
 [![Status: beta](https://img.shields.io/badge/status-beta-orange)](#beta-status)
 
-<sub>main: <code>5.0.0a26</code> (pre-release train)</sub>
+<sub>main: <code>5.0.0b1</code> (beta release train)</sub>
 
 </div>
 

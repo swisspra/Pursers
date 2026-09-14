@@ -33,6 +33,7 @@ ROLE_SCOPES = {
 BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 KID_RE = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
 METADATA_KEY = "pursers_door"
+BOARD_CLAIM = "pursers_board"
 
 
 class DoorAdminError(RuntimeError):
@@ -295,6 +296,9 @@ def decode_door(value: str) -> dict[str, Any]:
     expires_at = claims.get("exp")
     if not isinstance(kid, str) or not kid or type(expires_at) is not int:
         raise DoorAdminError("door token must contain kid and integer exp")
+    claimed_board = claims.get(BOARD_CLAIM)
+    if claimed_board is not None and claimed_board != payload["b"]:
+        raise DoorAdminError("door board does not match its token board restriction")
     return {
         "u": payload["u"],
         "b": payload["b"],
@@ -361,6 +365,7 @@ def issue_credential(
         "aud": central_url,
         "resource": central_url,
         "scope": actual_scope,
+        BOARD_CLAIM: board,
         "iat": issued_at,
         "nbf": issued_at - 60,
         "exp": expires_at,

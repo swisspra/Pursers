@@ -75,3 +75,52 @@ git diff -- tools/home_runtime_wheelhouse.lock
 The builder fails before dependency resolution when the lock's Python,
 platform, or source-requirements fingerprint is stale. Commit the refreshed
 lock together with the dependency change; never hand-edit its pins or hashes.
+
+## GitHub prerelease handoff
+
+The release workflow validates that the tag is canonical PEP 440 and exactly
+matches `tools/release_versions.toml`. It also requires the six wheel filenames
+to match the manifest versions before it creates `SHA256SUMS.txt`. Alpha, beta,
+and release-candidate tags use `--prerelease --latest=false` on both the create
+and existing-release paths. Stable tags remain the latest release.
+
+For `v5.0.0b1`, the coordinator and operator must replace
+`APPROVED_FULL_40_HEX_SHA` below with the same exact candidate that passed source
+review, all test suites, browser/201-behavior evidence, CI, and CodeQL. The
+preparation branch is not a tag candidate by itself.
+
+```sh
+set -euo pipefail
+TAG=v5.0.0b1
+CANDIDATE="APPROVED_FULL_40_HEX_SHA"
+test "$(git rev-parse "$CANDIDATE^{commit}")" = "$CANDIDATE"
+git tag -s "$TAG" "$CANDIDATE"
+git push origin "refs/tags/$TAG"
+RUN_ID=""
+for attempt in {1..30}; do
+  RUN_ID="$(gh run list --repo swisspra/Pursers --workflow release.yml \
+    --event push --branch "$TAG" --commit "$CANDIDATE" --limit 1 \
+    --json databaseId --jq '.[0].databaseId')"
+  test -n "$RUN_ID" && test "$RUN_ID" != null && break
+  sleep 2
+done
+test -n "$RUN_ID" && test "$RUN_ID" != null
+gh run watch "$RUN_ID" --repo swisspra/Pursers --exit-status
+gh release view "$TAG" --repo swisspra/Pursers \
+  --json tagName,isPrerelease,assets,targetCommitish
+test "$(gh release view "$TAG" --repo swisspra/Pursers \
+  --json isPrerelease --jq '.isPrerelease')" = true
+LATEST_STABLE="$(gh api repos/swisspra/Pursers/releases/latest \
+  --jq '.tag_name')"
+test "$LATEST_STABLE" != "$TAG"
+gh release download "$TAG" --repo swisspra/Pursers --dir dist-release
+(cd dist-release && shasum -a 256 -c SHA256SUMS.txt)
+```
+
+Expected artifacts are the six manifest-bound wheels plus `SHA256SUMS.txt`.
+This beta train authorizes no PyPI publication or production cutover. If the
+tag, release state, cohort, or checksum is wrong, stop without installing or
+deploying it. Do not move the tag or replace assets under the same version;
+correct the source and advance to a new prerelease version. Because no service
+cutover is authorized here, rollback is limited to continuing to use the prior
+approved release.
