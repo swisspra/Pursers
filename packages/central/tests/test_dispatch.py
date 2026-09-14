@@ -6,6 +6,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -336,6 +337,76 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected["status"], "busy")
         self.assertEqual(selected["current_offer"]["ticket_id"], ticket["ticket_id"])
         self.assertEqual(selected["capabilities"]["tier_max"], 2)
+
+    async def test_dispatch_my_offers_is_pure_and_exact_seat_scoped(self) -> None:
+        worker_a = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2, "can_work": True}
+        )
+        worker_b = await self.add_seat(
+            self.worker_b, "worker-b", {"tier_max": 2, "can_work": True}
+        )
+        self.service.register_listener("pursers", worker_a)
+        self.service.register_listener("pursers", worker_b)
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set",
+            agent_name="admin-agent",
+            offer_ttl_s=60,
+        )
+        first = (
+            await self.create(prefer_agents=[worker_a])
+        ).structured_content["ticket"]
+        second = (
+            await self.create(prefer_agents=[worker_b])
+        ).structured_content["ticket"]
+        self.assertIn("work_offer", first, first)
+        self.assertIn("work_offer", second, second)
+        self.assertEqual(first["work_offer"]["agent_id"], worker_a)
+        self.assertEqual(second["work_offer"]["agent_id"], worker_b)
+
+        before_documents = self.persisted_documents()
+        before_seq = self.service.journal.read_after(
+            "pursers", 0, 1
+        )["latest_cursor"]
+        self.principal = self.worker_a
+        mine = await self.call(
+            "dispatch_my_offers", agent_name="worker-a"
+        )
+        payload = mine.structured_content
+        self.assertEqual(payload["agent_id"], worker_a)
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["total_matching"], 1)
+        self.assertFalse(payload["truncated"])
+        self.assertEqual(
+            [ticket["ticket_id"] for ticket in payload["tickets"]],
+            [first["ticket_id"]],
+        )
+        projected = payload["tickets"][0]
+        self.assertEqual(projected["work_offer"]["agent_id"], worker_a)
+        self.assertNotIn("description", projected)
+        self.assertNotIn("annotations", projected)
+        self.assertEqual(self.persisted_documents(), before_documents)
+        self.assertEqual(
+            self.service.journal.read_after("pursers", 0, 1)[
+                "latest_cursor"
+            ],
+            before_seq,
+        )
+
+        with self.assertRaisesRegex(
+            ToolError, "agent is not a member of this board"
+        ):
+            await self.call(
+                "dispatch_my_offers", agent_name="worker-b"
+            )
+
+        with patch.object(
+            central.time, "time", return_value=time.time() + 61
+        ):
+            expired = await self.call(
+                "dispatch_my_offers", agent_name="worker-a"
+            )
+        self.assertEqual(expired.structured_content["tickets"], [])
 
     async def test_ticket_update_revokes_offer_and_redispatches(self) -> None:
         worker_a = await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})

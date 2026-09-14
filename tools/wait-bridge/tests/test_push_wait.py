@@ -96,6 +96,11 @@ class InProcessBoardClient:
     async def ticket_list(self, **arguments: Any) -> dict[str, Any]:
         return await self._call("ticket_list", **arguments)
 
+    async def dispatch_my_offers(self) -> dict[str, Any]:
+        return await self._call(
+            "dispatch_my_offers", agent_name=self.agent_name
+        )
+
     async def lease_renew(self, ticket_id: str) -> dict[str, Any]:
         return await self._call("lease_renew", ticket_id=ticket_id)
 

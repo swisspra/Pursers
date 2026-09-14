@@ -96,6 +96,32 @@ It has no `ack` option and never reads an implicit stored cursor. The client adv
 
 **PROPOSED — subscribe race closure:** a subscriber performs a pure drain from its committed cursor, opens both applicable subscriptions, then performs a second pure drain before blocking. On reconnect it repeats the pure drain before waiting. Deduplication uses board generation plus journal sequence/event identity. If a response says `resync_required`, the runner obtains the documented full state snapshot, installs `reset_cursor`, and only then resumes incremental reads. This closes the gap between snapshot and subscription without turning the notification stream into state.
 
+### Recovering missed dispatch offers
+
+**IMPLEMENTED:** Pursers uses the narrow `dispatch_my_offers` read instead of
+putting recipient-scoped dispatch events into the board catch-up journal. The
+tool requires board membership and derives the requested seat from the
+authenticated principal plus `agent_name`; it returns only that exact seat's
+current, unexpired, valid work or review offers. Its bounded ticket projection
+contains only the fields needed to construct a wake cue, so it does not expose ticket
+descriptions, annotations, or another seat's offer. The read does not reap,
+acknowledge a cursor, touch activity, renew a lease, mutate the board, or append
+an event.
+
+The wait bridge calls `dispatch_my_offers` during its entry check and, when no
+authoritative offer snapshot is already available, before an otherwise
+offer-free return. This recovers an offer when the
+recipient-scoped push frame was missed without resetting or inventing a journal
+cursor. An absent offer also prevents a stale pushed offer from being treated as
+claimable after expiry. For rolling upgrades, a bridge connected to an older
+Central falls back to its bounded `ticket_list` projection; this compatibility
+path can be removed after the Central capability is universal.
+
+This choice keeps the existing board-wide journal visibility and compaction
+contract unchanged. Persisting dispatch notifications in that journal would
+instead require a second read-time authorization dimension for every catch-up,
+replay, compaction, and resync path, with a larger risk of cross-seat disclosure.
+
 ## Idle seats, leases, and liveness
 
 **PROPOSED:** an idle seat makes zero Central tool calls. It may keep a transport subscription open, but does not call a Central heartbeat, `ticket_list`, `board_catchup`, or lease operation. A seat that holds one or more claimed tickets may call only `lease_renew` while otherwise waiting. Renewal cadence is
