@@ -237,8 +237,9 @@ lease lifecycle. The returned `reason` is `offer`, and the event includes
 `offer: {ticket_id, board_id, expires_at, tier, skills_required}`.
 Offer addressing is confirmed from the authoritative ticket instead of relying
 on routing hints in the wake cue. Each wait also reconciles active offers at
-entry and before a return without an offer. A missed recipient-scoped push is
-then synthesized as `ticket_offered`/`review_offered` with
+entry and before a return without an offer, reusing a `ticket_list` snapshot
+when the same wait cycle already performed its bounded backlog scan. A missed
+recipient-scoped push is then synthesized as `ticket_offered`/`review_offered` with
 `reason="reconciled"` while the offer is still unexpired.
 
 Do not claim an unoffered ticket. If an offer expires or is revoked, re-arm and

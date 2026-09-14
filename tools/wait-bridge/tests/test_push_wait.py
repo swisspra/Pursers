@@ -1725,7 +1725,9 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["events"][0]["ticket_id"], "TK-starved")
         self.assertEqual(second["reason"], "backlog")
         self.assertEqual(second["waited_s"], 0.5)
-        self.assertEqual(client.ticket_list_calls, 4)
+        # First return, second entry scan, and the resurfacing cadence each
+        # perform one list. Offer reconciliation reuses the matching scan.
+        self.assertEqual(client.ticket_list_calls, 3)
 
 
 if __name__ == "__main__":

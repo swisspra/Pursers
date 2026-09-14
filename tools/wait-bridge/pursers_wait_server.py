@@ -4953,6 +4953,7 @@ async def _scan_open_backlog(
     wait_for: str = WAIT_FOR_CLAIMABLE,
     board_id: str = BOARD_ID,
     tickets: list[dict[str, Any]] | None = None,
+    ticket_snapshot: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict]:
     """Best-effort scan for work older than the caller's journal cursor."""
     if tickets is None:
@@ -4968,7 +4969,9 @@ async def _scan_open_backlog(
         except Exception as exc:
             _log(f"backlog scan: ticket_list failed: {exc}")
             return []
-        tickets = listed.get("tickets", [])
+        tickets = list(listed.get("tickets", []))
+    if ticket_snapshot is not None:
+        ticket_snapshot["tickets"] = list(tickets)
     if held is not None:
         for ticket in tickets:
             if (
@@ -5637,7 +5640,12 @@ async def _wait_for_work_many(
             result["warnings"] = warnings
         return result
 
-    async def respond(events: list[dict], timed_out: bool) -> dict[str, Any]:
+    async def respond(
+        events: list[dict],
+        timed_out: bool,
+        *,
+        tickets_by_board: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
         if not any(
             event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}
             for event in events
@@ -5651,6 +5659,7 @@ async def _wait_for_work_many(
                     proj,
                     wait_for_by_board[board_id],
                     board_id,
+                    tickets=(tickets_by_board or {}).get(board_id),
                 )
                 reconciled.extend(
                     {**event, "board_id": board_id} for event in offers
@@ -5728,6 +5737,7 @@ async def _wait_for_work_many(
             meta["event_counts"] = _event_kind_counts(events)
             relevant = compacted
         if backlog and not meta["partial"]:
+            entry_ticket_snapshots[board_id] = list(active_tickets or [])
             reconciled = _reconciled_offer_events(
                 active_tickets or [],
                 agent_ids[board_id],
@@ -5776,6 +5786,7 @@ async def _wait_for_work_many(
         return found
 
     # Entry-only backlog scans are interleaved board-by-board with catchup.
+    entry_ticket_snapshots: dict[str, list[dict[str, Any]]] = {}
     relevant = await poll_selected(active, backlog=True)
     for board_id in active:
         lease_due_by_board[board_id] = {
@@ -5789,9 +5800,13 @@ async def _wait_for_work_many(
             started,
         )
     if relevant:
-        return await respond(relevant, False)
+        return await respond(
+            relevant, False, tickets_by_board=entry_ticket_snapshots
+        )
     if any(meta["partial"] for meta in catchup_meta.values()):
-        return await respond([], False)
+        return await respond(
+            [], False, tickets_by_board=entry_ticket_snapshots
+        )
     if not active:
         return await respond([], True)
 
@@ -5808,11 +5823,15 @@ async def _wait_for_work_many(
             await _run_progress(progress_callback, started, budget)
             next_progress = now + (progress_cadence or PROGRESS_INTERVAL_S)
 
-    async def scan_due_backlog(now: float) -> list[dict[str, Any]]:
+    async def scan_due_backlog(
+        now: float,
+    ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
         found: list[dict[str, Any]] = []
+        ticket_snapshots: dict[str, list[dict[str, Any]]] = {}
         for board_id in active:
             if now < backlog_due_by_board[board_id]:
                 continue
+            snapshot: dict[str, list[dict[str, Any]]] = {}
             queued = await _scan_open_backlog(
                 views[board_id],
                 agent_ids[board_id],
@@ -5821,12 +5840,15 @@ async def _wait_for_work_many(
                 held_by_board[board_id],
                 wait_for_by_board[board_id],
                 board_id,
+                ticket_snapshot=snapshot,
             )
+            if "tickets" in snapshot:
+                ticket_snapshots[board_id] = snapshot["tickets"]
             backlog_due_by_board[board_id] = (
                 now + BACKLOG_RESURFACE_INTERVAL_S
             )
             found.extend({**event, "board_id": board_id} for event in queued)
-        return found
+        return found, ticket_snapshots
 
     def maintenance_wait(now: float, remaining: float) -> float:
         flat_due = {
@@ -5933,9 +5955,17 @@ async def _wait_for_work_many(
 
                 now = time.monotonic()
                 await maintain(now)
-                backlog_found = await scan_due_backlog(now)
+                backlog_found, ticket_snapshots = await scan_due_backlog(now)
                 if backlog_found:
-                    return await respond(backlog_found, False)
+                    return await respond(
+                        backlog_found,
+                        False,
+                        tickets_by_board=ticket_snapshots,
+                    )
+                if ticket_snapshots and now >= deadline:
+                    return await respond(
+                        [], True, tickets_by_board=ticket_snapshots
+                    )
                 if fallback and now >= next_poll:
                     relevant = await poll_selected(
                         [board_id for board_id in active if board_id in fallback]
@@ -5967,9 +5997,17 @@ async def _wait_for_work_many(
             )
             now = time.monotonic()
             await maintain(now)
-            backlog_found = await scan_due_backlog(now)
+            backlog_found, ticket_snapshots = await scan_due_backlog(now)
             if backlog_found:
-                return await respond(backlog_found, False)
+                return await respond(
+                    backlog_found,
+                    False,
+                    tickets_by_board=ticket_snapshots,
+                )
+            if ticket_snapshots and now >= deadline:
+                return await respond(
+                    [], True, tickets_by_board=ticket_snapshots
+                )
             if _GLOBAL_KEEPALIVE is not None:
                 cues = _GLOBAL_KEEPALIVE.drain_cues(set(active))
                 if cues:
@@ -6246,10 +6284,13 @@ async def _wait_for_work(
             await _run_progress(progress_callback, started, budget)
             next_progress = now + (progress_cadence or PROGRESS_INTERVAL_S)
 
-    async def scan_due_backlog(now: float) -> list[dict[str, Any]]:
+    async def scan_due_backlog(
+        now: float,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
         nonlocal backlog_due
         if now < backlog_due:
-            return []
+            return [], None
+        snapshot: dict[str, list[dict[str, Any]]] = {}
         queued = await _scan_open_backlog(
             client,
             my_agent_id,
@@ -6258,9 +6299,10 @@ async def _wait_for_work(
             held,
             selected_wait_for,
             BOARD_ID,
+            ticket_snapshot=snapshot,
         )
         backlog_due = now + BACKLOG_RESURFACE_INTERVAL_S
-        return queued
+        return queued, snapshot.get("tickets")
 
     def maintenance_due_in(now: float, remaining: float) -> float:
         return min(
@@ -6325,7 +6367,10 @@ async def _wait_for_work(
                     if not done:
                         now = time.monotonic()
                         await maintain(now)
-                        backlog_found = await scan_due_backlog(now)
+                        (
+                            backlog_found,
+                            backlog_tickets,
+                        ) = await scan_due_backlog(now)
                         if backlog_found:
                             return await finalize({
                                 "new_seq": cursor,
@@ -6342,7 +6387,17 @@ async def _wait_for_work(
                                     else "backlog"
                                 ),
                                 "resynced": resynced,
-                            })
+                            }, tickets=backlog_tickets)
+                        if backlog_tickets is not None and now >= deadline:
+                            return await finalize({
+                                "new_seq": cursor,
+                                "events": [],
+                                "waited_s": round(now - started, 2),
+                                "timed_out": True,
+                                "mode": actual_mode,
+                                "reason": "timeout",
+                                "resynced": resynced,
+                            }, tickets=backlog_tickets)
                         continue
                     if pending_cue is not None and pending_cue in done:
                         cue = pending_cue.result()
@@ -6422,7 +6477,7 @@ async def _wait_for_work(
 
         now = time.monotonic()
         await maintain(now)
-        backlog_found = await scan_due_backlog(now)
+        backlog_found, backlog_tickets = await scan_due_backlog(now)
         if backlog_found:
             return await finalize({
                 "new_seq": cursor,
@@ -6439,7 +6494,17 @@ async def _wait_for_work(
                     else "backlog"
                 ),
                 "resynced": resynced,
-            })
+            }, tickets=backlog_tickets)
+        if backlog_tickets is not None and now >= deadline:
+            return await finalize({
+                "new_seq": cursor,
+                "events": [],
+                "waited_s": round(now - started, 2),
+                "timed_out": True,
+                "mode": actual_mode,
+                "reason": "timeout",
+                "resynced": resynced,
+            }, tickets=backlog_tickets)
 
         if _GLOBAL_KEEPALIVE is not None:
             cues = _GLOBAL_KEEPALIVE.drain_cues({BOARD_ID})

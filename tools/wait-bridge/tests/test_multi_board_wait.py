@@ -283,7 +283,7 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
             [("alpha", 3), ("beta", 7)],
         )
         lists = [call[1] for call in transport.calls if call[0] == "ticket_list"]
-        self.assertEqual(lists, ["alpha", "beta", "alpha", "beta"])
+        self.assertEqual(lists, ["alpha", "beta"])
 
     async def test_registry_wait_compacts_500_events_with_bounded_calls(self) -> None:
         transport = FakeTransport(["alpha"])
@@ -305,7 +305,7 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(data_calls), 20)
         self.assertEqual(
             [name for name, _board, _arguments in data_calls],
-            ["board_catchup", "ticket_list", "ticket_list"],
+            ["board_catchup", "ticket_list"],
         )
         self.assertEqual(result["new_seq"], {"alpha": 500})
         self.assertEqual(result["compacted"], {"alpha": True})
