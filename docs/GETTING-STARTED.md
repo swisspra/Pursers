@@ -5,10 +5,10 @@ loopback, keeps board data in SQLite, and lets MCP hosts such as Claude Desktop,
 Codex, and AionUi work on the same durable board. It is not a remote or
 multi-user security boundary.
 
-This guide starts from the six wheels attached to the `v5.0.0b1` GitHub release
-and builds the extension ZIP from that exact tag. Do not substitute files from
-another tag. For the product boundary and architecture, see the
-[README](../README.md) and
+This guide starts from the six product wheels and `SHA256SUMS.txt` attached to
+the `v5.0.0b1` GitHub release and builds the extension ZIP from that exact tag.
+Do not substitute files from another tag. For the product boundary and
+architecture, see the [README](../README.md) and
 [architecture overview](ARCHITECTURE.md).
 
 ## Before you begin
@@ -16,14 +16,31 @@ another tag. For the product boundary and architecture, see the
 You need:
 
 - macOS and a trusted local user account;
-- Python 3.11 through 3.14 (`python3 --version`);
+- a compatible Python executable (`python3 --version`; see the boundary below);
 - GitHub CLI (`gh`), `git`, and enough space for a virtual environment and local SQLite data;
 - an MCP host: Claude Desktop, Codex CLI, or both;
 - AionUi 2.2.1 only if you want to inspect the optional extension ZIP.
 
+The archived offline b1 wheelhouse requires CPython 3.12 on Apple silicon; the
+six release product wheels support Python 3.11–3.14 when dependencies are
+resolved from their normal package index.
+
 Keep every JWT, invite, and `prs1.…` door private. Do not paste credentials into
 tickets, commits, logs, screenshots, or shared host configuration. The examples
 use `/PATH/TO/...` placeholders deliberately.
+
+For a reproducible walkthrough, isolate application state and pip's cache
+before creating the virtual environment:
+
+```bash
+export XDG_CONFIG_HOME=/PATH/TO/xdg/config
+export XDG_DATA_HOME=/PATH/TO/xdg/data
+export XDG_CACHE_HOME=/PATH/TO/xdg/cache
+export XDG_STATE_HOME=/PATH/TO/xdg/state
+export PIP_CACHE_DIR="$XDG_CACHE_HOME/pip"
+export PIP_CONFIG_FILE=/dev/null
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
+```
 
 ## 1. Download and install the release
 
@@ -50,6 +67,16 @@ e2314191a354ab2ab0d0020c1ef80cc0049909eaf5219fcdff0c0f24847b677e  pursers_client
 34e7d992dffc7b50560706ecdb4c51a5ce67e50edb5c24ec8de2cd48259ed590  pursers_personal_import-5.0.0a3-py3-none-any.whl
 102d6eb35daae393c8fef589c8b3e60b02ab985d01856f64afb99ba3ba94834f  pursers_wait_bridge-0.1.0a16-py3-none-any.whl
 ```
+
+The release bundle contains exactly these six product wheels plus
+`SHA256SUMS.txt`; if any file is missing or any hash differs, stop because the
+bundle is not the approved b1 release.
+
+Do not substitute the separately archived Home runtime wheelhouse. It contains
+30 wheels and uses `SHA256SUMS` (without `.txt`), but its only Pursers product
+wheels are `pursers_client` and `pursers_wait_bridge`; the other wheels are
+locked dependencies for CPython 3.12 on Apple silicon. That wheelhouse is not
+the install source for this six-product quickstart.
 
 > **Publication note:** Release v5.0.0b1 publication pending; hashes above are the approved build.
 
@@ -356,6 +383,9 @@ ticket normally. Never restart at cursor zero to look for work.
 
 Build `pursers-aionui-0.1.0.zip` from the exact release tag; the wheel checksum
 file does not cover this locally built artifact:
+
+This section is runnable only after the `v5.0.0b1` tag exists on GitHub; a
+publication-pending checkout cannot build or verify the exact-tag ZIP.
 
 ```bash
 git clone --branch v5.0.0b1 --depth 1 https://github.com/swisspra/Pursers.git pursers-source

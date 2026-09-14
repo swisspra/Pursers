@@ -40,24 +40,48 @@ chat session so every seat can resume from the same record.
 
 ## 60-second quickstart
 
-Requires Python 3.11–3.14. These commands install the six approved beta wheels,
-create a private project profile, configure Claude Desktop's MCP connector, and
-start Central on loopback:
+The archived offline b1 wheelhouse requires CPython 3.12 on Apple silicon; the
+six release product wheels support Python 3.11–3.14 when dependencies are
+resolved from their normal package index.
+
+The GitHub Release bundle contains exactly six product wheels plus
+`SHA256SUMS.txt`. The archived Home runtime wheelhouse is a different artifact:
+it has 30 wheels, a checksum file named `SHA256SUMS` (without `.txt`), and only
+the `pursers_client` and `pursers_wait_bridge` product wheels alongside locked
+dependencies. It is not the install source for this quickstart.
+
+These commands download and verify the release bundle, install its six product
+wheels, and create a private project profile:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-release=https://github.com/swisspra/Pursers/releases/download/v5.0.0b1
+mkdir -p pursers-5.0.0b1 && cd pursers-5.0.0b1
+gh release download v5.0.0b1 \
+  --repo swisspra/Pursers \
+  --pattern '*.whl' \
+  --pattern SHA256SUMS.txt \
+  --dir .
+shasum -a 256 -c SHA256SUMS.txt
 python -m pip install \
-  "$release/pursers-5.0.0b1-py3-none-any.whl" \
-  "$release/pursers_central-0.1.0a30-py3-none-any.whl" \
-  "$release/pursers_client-0.1.0a23-py3-none-any.whl" \
-  "$release/pursers_personal-5.0.0b1-py3-none-any.whl" \
-  "$release/pursers_personal_import-5.0.0a3-py3-none-any.whl" \
-  "$release/pursers_wait_bridge-0.1.0a16-py3-none-any.whl"
+  ./pursers-5.0.0b1-py3-none-any.whl \
+  ./pursers_central-0.1.0a30-py3-none-any.whl \
+  ./pursers_client-0.1.0a23-py3-none-any.whl \
+  ./pursers_personal-5.0.0b1-py3-none-any.whl \
+  ./pursers_personal_import-5.0.0a3-py3-none-any.whl \
+  ./pursers_wait_bridge-0.1.0a16-py3-none-any.whl
 pursers-personal setup --project "$PWD" --apply
-pursers-personal central --project "$PWD"
 ```
+
+The release bundle contains exactly these six product wheels plus
+`SHA256SUMS.txt`; if any file is missing or any hash differs, stop because the
+bundle is not the approved b1 release. The approved filenames and hashes are in
+[Getting Started](docs/GETTING-STARTED.md#1-download-and-install-the-release).
+
+Continue with Getting Started sections 2–3 to record the generated profile
+paths and start `pursers_central.pursers_central_runtime`; then verify
+`http://127.0.0.1:8766/healthz`. The beta.1 Personal-embedded service is not
+the Central health endpoint.
 
 Restart Claude Desktop, then use its Pursers tools to join the board described
 by your private profile. Keep the generated credentials out of repositories and
