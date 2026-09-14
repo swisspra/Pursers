@@ -63,10 +63,12 @@ such.
 | `TK-50a3c268c655` | Documents Beta.1 operational traps in getting-started and release notes. |
 | `TK-d5770eaa9dd5` | AionUi now renders startup health and the complete seat set instead of masking partial startup state. |
 | `TK-a4972ef8fab0` | Fleet reports actionable TLS mismatch diagnostics instead of a generic disconnected state. |
+| `TK-22b50041810d` | Fleet reuses one joined board client and event loop per viewer process, preventing repeated request-time joins and identity takeover churn. |
 | `TK-73d77c3e7b18` | Fleet search is exposed as an ARIA combobox with keyboard semantics. |
 | `TK-386af2514173` | Personal separates in-review work from other work states. |
 | `TK-e371f76754a5` | The README links the verified showcase rather than relying on unverified illustrations. |
 | `TK-143f427367aa` | Home runtime wheelhouse resolution is locked and reproducibly verified for the next train. |
+| `TK-912f3657c2bf` | Wheelhouse resolver and verifier environments ignore checkout `PYTHONPATH`, so release verification exercises installed wheels rather than source-tree metadata. |
 | `TK-c801f9c8a3d9` | Wait Bridge reconciles missed actionable offers from a bounded backlog snapshot. |
 | `TK-0b66192a59f6` | AionUi exposes partial connection recovery rather than collapsing it into a terminal failure. |
 | `TK-62a2d109171b` | Central recovers deadline work from stale SQLite transaction contexts. |
@@ -76,6 +78,7 @@ such.
 | `TK-6ef5dcc0190f` | Fleet disconnected diagnostics distinguish configuration and runtime failures more clearly. |
 | `TK-ad842243b0d8` | Central indexes journal sequences and keeps indexed reads consistent with transaction state. |
 | `TK-beead2d80df1` | Test-only: makes the Central archive benchmark deterministic so the release gate is repeatable. |
+| `TK-54645e4c45bf` | Test-only: forces stable no-color argparse help output so release checks do not vary with terminal color support. |
 | `TK-81922613b811` | Corrects Beta.1 rc6 artifact provenance, wheelhouse instructions, and release-body wording. |
 | `TK-6628af007951` (rebase of `TK-8cb76082947d`) | Removes focus from non-actionable Fleet rows, labels keyboard help, and announces live connection changes. |
 | `TK-e94424871e67` | Publishes the exact Browser201 Beta.1 coverage boundary instead of implying a full 201-row pass. |
