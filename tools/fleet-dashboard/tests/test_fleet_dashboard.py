@@ -1219,7 +1219,7 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
 
         async def board_catchup(self, **kwargs: object) -> dict:
             calls.append(("board_catchup", dict(kwargs)))
-            return {"events": []}
+            return {"events": [], "resync_required": True, "truncated": True}
 
     config = dashboard.Config(
         url="http://127.0.0.1:8766/mcp",
@@ -1234,6 +1234,8 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
     result = asyncio.run(fetcher.fetch_board("board-detail"))
 
     assert result["board"]["board_id"] == "board-detail"
+    assert result["event_window_truncated"] is True
+    assert result["event_resync_required"] is True
     assert (
         "board_snapshot",
         {"limit": 1_000, "max_bytes": 300_000, "include_retired": True},
@@ -1287,6 +1289,121 @@ def test_timeline_groups_by_utc_day_and_ticket_newest_first() -> None:
             "tickets": [{"ticket_id": "TK-old", "event_seqs": [8]}],
         },
     ]
+
+
+def test_detail_projection_preserves_activity_window_notices() -> None:
+    detail = dashboard.project_board_detail(
+        {
+            "board_id": "pursers",
+            "snapshot": {"tickets": []},
+            "events": [],
+            "event_window_truncated": True,
+            "event_resync_required": True,
+        }
+    )
+
+    assert detail["event_window_truncated"] is True
+    assert detail["event_resync_required"] is True
+
+
+def test_ticket_activity_renders_newest_three_and_empty_state() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    events = [
+        {
+            "seq": 11,
+            "ticket_id": "TK-one",
+            "kind": "lease_renewed",
+            "actor": None,
+            "occurred_at": None,
+        },
+        {
+            "seq": 13,
+            "ticket_id": "TK-one",
+            "kind": "decision_added",
+            "actor": "coordinator-1",
+            "occurred_at": "2030-01-02T12:03:00Z",
+        },
+        {
+            "seq": 99,
+            "ticket_id": "TK-other",
+            "kind": "ticket_closed",
+            "actor": "reviewer-1",
+            "occurred_at": "2030-01-02T12:04:00Z",
+        },
+        {
+            "seq": 10,
+            "ticket_id": "TK-one",
+            "kind": "ticket_created",
+            "actor": "coordinator-1",
+            "occurred_at": "2030-01-02T12:00:00Z",
+        },
+        {
+            "seq": 12,
+            "ticket_id": "TK-one",
+            "kind": "ticket_status_changed",
+            "status_from": "open",
+            "status_to": "claimed",
+            "actor": "worker-9",
+            "occurred_at": "2030-01-02T12:02:00Z",
+        },
+    ]
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("function detailActivityNotices("),
+            source("function eventTypeSummary("),
+            source("function ticketActivityView("),
+            f"const data={{events:{json.dumps(events)},event_window_truncated:true,event_resync_required:true,board:{{board_id:'pursers'}}}};",
+            "const route={central:'personal'};",
+            "console.log(JSON.stringify({filled:ticketActivityView(data,route,{id:'TK-one'}),empty:ticketActivityView({...data,events:[],event_window_truncated:false,event_resync_required:false},route,{id:'TK-empty'})}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    rendered = json.loads(completed.stdout)
+    filled = rendered["filled"]
+
+    assert '<details class="ticket-activity-disclosure">' in filled
+    assert "<summary>Show newest 3 ticket events</summary>" in filled
+    assert filled.index('data-event-seq="13"') < filled.index('data-event-seq="12"')
+    assert filled.index('data-event-seq="12"') < filled.index('data-event-seq="11"')
+    assert 'data-event-seq="10"' not in filled
+    assert 'data-event-seq="99"' not in filled
+    assert "ticket status changed · open → claimed" in filled
+    assert "coordinator-1" in filled
+    assert "Not observed" in filled
+    assert 'href="#/central/personal/board/pursers/timeline">View all</a>' in filled
+    assert "earlier events were not observed" in filled
+    assert "Older events omitted from this bounded view" in filled
+    assert "Not observed — no ticket-scoped journal events" in rendered["empty"]
+
+
+def test_ticket_activity_has_1440_row_and_400_disclosure_structure() -> None:
+    assert (
+        "grid-template-columns:minmax(5rem,.6fr) minmax(11rem,2fr) "
+        "minmax(8rem,1fr) minmax(10rem,1fr)" in dashboard.HTML
+    )
+    assert (
+        "@media(min-width:801px){.ticket-activity-disclosure>summary{display:none}"
+        in dashboard.HTML
+    )
+    assert (
+        "@media(max-width:800px)" in dashboard.HTML
+        and ".ticket-activity-event{grid-template-columns:1fr;gap:2px}"
+        in dashboard.HTML
+    )
+    assert ".ticket-activity-event>*{min-width:0;overflow-wrap:anywhere}" in dashboard.HTML
+    assert ".ticket-activity-disclosure>summary:focus-visible" in dashboard.HTML
 
 
 def test_changes_math_supports_seq_and_default_time_cutoffs() -> None:
