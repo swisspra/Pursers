@@ -5237,7 +5237,7 @@ async def _a2a_wait_impl(
     Relevant work is returned without waiting, so a re-arm after a long gap
     costs one call.
     Otherwise uses subscription-first delivery, with polling only as an
-    explicit or per-call compatibility fallback. timeout_s is capped by the
+    explicit or per-call compatibility fallback. timeout_s must fit within the
     configured host deadline minus its safety margin.
 
     project: when set (case-insensitive), only tickets whose target_url starts
@@ -5352,6 +5352,89 @@ async def _a2a_wait_impl(
     )
 
 
+def _validate_a2a_wait_arguments(
+    *,
+    since_seq: Any,
+    timeout_s: Any,
+    boards: Any,
+    wait_for: Any,
+) -> None:
+    """Reject invalid public-tool arguments before client setup can mask them."""
+    if isinstance(boards, str):
+        if boards != "registry":
+            raise ToolError(
+                'boards must be a list of board IDs or "registry"; '
+                f"received {boards!r}"
+            )
+    elif boards is not None:
+        if not isinstance(boards, list):
+            raise ToolError(
+                'boards must be a list of board IDs or "registry"; '
+                f"received {boards!r}"
+            )
+        if not boards:
+            raise ToolError(
+                "boards must contain at least one non-empty board ID; "
+                f"received {boards!r}"
+            )
+        if any(
+            not isinstance(board_id, str) or not board_id.strip()
+            for board_id in boards
+        ):
+            raise ToolError(
+                "boards must contain only non-empty board ID strings; "
+                f"received {boards!r}"
+            )
+
+    if (
+        not isinstance(wait_for, str)
+        or wait_for.strip().lower() not in WAIT_FOR_VALUES
+    ):
+        raise ToolError(
+            "wait_for must be one of 'auto', 'claimable', or 'submitted'; "
+            f"received {wait_for!r}"
+        )
+
+    if since_seq is not None:
+        if type(since_seq) is int:
+            if since_seq < 0:
+                raise ToolError(
+                    "since_seq integer cursors must be non-negative; "
+                    f"received {since_seq!r}"
+                )
+        elif isinstance(since_seq, dict):
+            if boards is None:
+                raise ToolError(
+                    "since_seq must be a non-negative integer when boards is "
+                    "omitted; "
+                    f"received {since_seq!r}"
+                )
+            if any(
+                not isinstance(board_id, str)
+                or not board_id.strip()
+                or type(cursor) is not int
+                or cursor < 0
+                for board_id, cursor in since_seq.items()
+            ):
+                raise ToolError(
+                    "since_seq maps must use non-empty board ID strings and "
+                    "non-negative integer cursors; "
+                    f"received {since_seq!r}"
+                )
+        else:
+            raise ToolError(
+                "since_seq must be a non-negative integer or a board-to-cursor map; "
+                f"received {since_seq!r}"
+            )
+
+    timeout_limit = host_block_limit_s()
+    if type(timeout_s) is not int or not 1 <= timeout_s <= timeout_limit:
+        raise ToolError(
+            f"timeout_s must be an integer from 1 to {timeout_limit}; "
+            f"received {timeout_s!r}"
+        )
+
+
 @mcp.tool()
 async def a2a_wait(
     ctx: Context,
@@ -5364,6 +5447,12 @@ async def a2a_wait(
     wait_for: str = WAIT_FOR_AUTO,
 ) -> dict[str, Any]:
     """Wait for work and record one model-visible return."""
+    _validate_a2a_wait_arguments(
+        since_seq=since_seq,
+        timeout_s=timeout_s,
+        boards=boards,
+        wait_for=wait_for,
+    )
     client = await _client_for_tool(ctx)
     meter = getattr(client, "meter", None)
 
