@@ -78,8 +78,8 @@ jobs:
           python - <<'PY'
           import importlib.metadata as metadata
 
-          assert metadata.version("mcp") == "2.1.1"
-          print("mcp=2.1.1")
+          assert metadata.version("mcp") == "2.2.0"
+          print("mcp=2.2.0")
           PY
 
       - name: Scan repository for secrets and identifying paths
