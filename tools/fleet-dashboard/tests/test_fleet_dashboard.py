@@ -1205,6 +1205,232 @@ def test_detail_projection_and_html_show_bounded_attributed_annotations() -> Non
     assert "By ${esc(author)}" in dashboard.HTML
 
 
+def test_detail_projection_uses_observed_lifecycle_and_coordination_fields() -> None:
+    ticket = {
+        "ticket_id": "TK-lifecycle",
+        "title": "Lifecycle evidence",
+        "status": "claimed",
+        "created_at": "2030-01-01T10:00:00+00:00",
+        "created_by_agent_id": "AI-coordinator",
+        "claimed_at": "2030-01-01T10:02:00+00:00",
+        "claimed_by": "worker-7",
+        "claimed_by_agent_id": "AI-worker",
+        "lease_expires_at": "2030-01-01T10:12:00+00:00",
+        "dispatch_history": [
+            {
+                "state": "offered",
+                "kind": "work",
+                "agent_name": "worker-7",
+                "at": "2030-01-01T10:01:00+00:00",
+            }
+        ],
+        "annotations": [
+            {
+                "annotation_id": "AN-decision",
+                "kind": "decision",
+                "text": "Wait for the host capture.",
+                "at": "2030-01-01T10:03:00+00:00",
+            }
+        ],
+    }
+    projected = dashboard._detail_ticket(
+        ticket,
+        [
+            {
+                "seq": 1,
+                "kind": "ticket_created",
+                "ticket_id": "TK-lifecycle",
+                "actor": "AI-coordinator",
+                "occurred_at": "2030-01-01T10:00:00+00:00",
+            },
+            {
+                "seq": 2,
+                "kind": "ticket_status_changed",
+                "ticket_id": "TK-lifecycle",
+                "actor": "AI-worker",
+                "status_to": "claimed",
+                "occurred_at": "2030-01-01T10:02:00+00:00",
+            },
+        ],
+        agents_by_id={
+            "AI-coordinator": {"agent_name": "coordinator"},
+            "AI-worker": {"agent_name": "worker-7"},
+        },
+    )
+
+    stages = {stage["key"]: stage for stage in projected["lifecycle"]}
+    assert [stage["key"] for stage in projected["lifecycle"]] == [
+        "created",
+        "offered",
+        "claimed",
+        "submitted",
+        "reviewed",
+    ]
+    assert stages["created"]["actor"] == "coordinator"
+    assert stages["offered"]["actor"] == "worker-7"
+    assert stages["claimed"]["state"] == "current"
+    assert stages["submitted"]["observed"] is False
+    assert stages["reviewed"]["observed"] is False
+    assert projected["coordination"] == {
+        "now": {
+            "text": "worker-7 is working",
+            "lease_expires_at": "2030-01-01T10:12:00+00:00",
+            "lease_expected": True,
+        },
+        "next": "Submit for independent review",
+        "blocked": {
+            "kind": "Decision",
+            "text": "Wait for the host capture.",
+            "at": "2030-01-01T10:03:00+00:00",
+        },
+    }
+
+
+def test_ticket_lifecycle_keeps_work_offer_and_real_submission_evidence() -> None:
+    projected = dashboard._detail_ticket(
+        {
+            "ticket_id": "TK-reviewed-lifecycle",
+            "title": "Reviewed lifecycle",
+            "status": "submitted",
+            "dispatch_history": [
+                {
+                    "state": "offered",
+                    "kind": "work",
+                    "agent_name": "worker-7",
+                    "offered_at": "2030-01-01T10:01:00+00:00",
+                },
+                {
+                    "state": "offered",
+                    "kind": "review",
+                    "agent_name": "reviewer-1",
+                    "offered_at": "2030-01-01T10:04:00+00:00",
+                },
+            ],
+        },
+        [
+            {
+                "seq": 1,
+                "kind": "ticket_status_changed",
+                "ticket_id": "TK-reviewed-lifecycle",
+                "actor": "AI-worker",
+                "status_from": "open",
+                "status_to": "claimed",
+                "occurred_at": "2030-01-01T10:02:00+00:00",
+            },
+            {
+                "seq": 2,
+                "kind": "ticket_status_changed",
+                "ticket_id": "TK-reviewed-lifecycle",
+                "actor": "AI-worker",
+                "status_from": "claimed",
+                "status_to": "submitted",
+                "occurred_at": "2030-01-01T10:03:00+00:00",
+            },
+            {
+                "seq": 3,
+                "kind": "review_offered",
+                "ticket_id": "TK-reviewed-lifecycle",
+                "offered_agent_id": "AI-reviewer",
+                "offered_agent_name": "reviewer-1",
+                "offer_kind": "review",
+                "occurred_at": "2030-01-01T10:04:00+00:00",
+            },
+            {
+                "seq": 4,
+                "kind": "ticket_review_claimed",
+                "ticket_id": "TK-reviewed-lifecycle",
+                "actor": "AI-reviewer",
+                "status_from": "submitted",
+                "status_to": "submitted",
+                "occurred_at": "2030-01-01T10:05:00+00:00",
+            },
+        ],
+        agents_by_id={
+            "AI-worker": {"agent_name": "worker-7"},
+            "AI-reviewer": {"agent_name": "reviewer-1"},
+        },
+    )
+
+    stages = {stage["key"]: stage for stage in projected["lifecycle"]}
+    assert stages["offered"]["actor"] == "worker-7"
+    assert stages["offered"]["at"] == "2030-01-01T10:01:00+00:00"
+    assert stages["submitted"]["actor"] == "worker-7"
+    assert stages["submitted"]["at"] == "2030-01-01T10:03:00+00:00"
+
+
+def test_ticket_lifecycle_render_is_responsive_noninteractive_and_truthful() -> None:
+    html = dashboard.HTML
+    assert (
+        ".ticket-coordination{display:grid;grid-template-columns:repeat(3,minmax(0,1fr))"
+        in html
+    )
+    assert (
+        ".ticket-lifecycle{display:grid;grid-template-columns:repeat(5,minmax(0,1fr))"
+        in html
+    )
+    assert (
+        "@media(max-width:600px){.ticket-coordination,.ticket-lifecycle{grid-template-columns:1fr}"
+        in html
+    )
+
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    empty = dashboard._detail_ticket(
+        {"ticket_id": "TK-empty", "title": "Empty", "status": "unknown"}
+    )
+    observed = dashboard._detail_ticket(
+        {
+            "ticket_id": "TK-observed",
+            "title": "Observed",
+            "status": "claimed",
+            "claimed_by": '<img src=x onerror="alert(1)">',
+            "lease_expires_at": "2000-01-01T00:00:00+00:00",
+        }
+    )
+    missing_lease = dashboard._detail_ticket(
+        {
+            "ticket_id": "TK-missing-lease",
+            "title": "Missing lease",
+            "status": "claimed",
+            "claimed_by": "worker-7",
+        }
+    )
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("function ticketLease("),
+            source("function ticketCoordination("),
+            source("function ticketLifecycle("),
+            f"const empty={json.dumps(empty)};",
+            f"const observed={json.dumps(observed)};",
+            f"const missingLease={json.dumps(missing_lease)};",
+            "console.log(JSON.stringify({empty:ticketCoordination(empty)+ticketLifecycle(empty),observed:ticketCoordination(observed)+ticketLifecycle(observed),missingLease:ticketCoordination(missingLease)}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    )
+    rendered = json.loads(completed.stdout)
+
+    assert "None recorded" in rendered["empty"]
+    assert "Not supplied" in rendered["empty"]
+    assert rendered["empty"].count("Not observed") == 5
+    assert "↑ Current" in rendered["empty"]
+    assert 'aria-label="Ticket lifecycle"' in rendered["empty"]
+    assert "tabindex" not in rendered["empty"].lower()
+    assert '<img src=x onerror="alert(1)">' not in rendered["observed"]
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt; is working" in rendered[
+        "observed"
+    ]
+    assert 'class="warning">lease expired' in rendered["observed"]
+    assert "Not supplied" in rendered["missingLease"]
+
+
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
