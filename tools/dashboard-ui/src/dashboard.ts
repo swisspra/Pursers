@@ -44,6 +44,10 @@ type Ticket = {
   rejected: boolean;
   abandoned_count: number;
   rejection_count: number;
+  created_at: string | null;
+  updated_at: string | null;
+  submitted_at: string | null;
+  closed_at: string | null;
 };
 type BoardEvent = {
   id: string;
@@ -169,8 +173,8 @@ const fallback: Snapshot = {
     { id: "AI-DEMO-2", name: "reviewer-β", status: "idle", role: "reviewer", focus: "Accessibility & special characters", platform: "synthetic", idle_minutes: 18, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null, stale: false },
   ],
   tickets: [
-    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0 },
-    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "reviewer-β", assigned_agent_id: "AI-DEMO-2", claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0 },
+    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:01:00Z", submitted_at: null, closed_at: null },
+    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "reviewer-β", assigned_agent_id: "AI-DEMO-2", claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:02:00Z", submitted_at: "2099-01-01T00:02:00Z", closed_at: null },
   ],
   highlights: {
     latest_handoff: { id: "MEM-DEMO-HANDOFF", type: "handoff", title: "UI shell ready for review", summary: "Synthetic handoff with the next checks for the Personal Preview.", author: "agent-alpha", created_at: "2099-01-01T00:03:00Z", next_steps: ["Check narrow layout", "Verify keyboard navigation"], warnings: [] },
@@ -319,6 +323,10 @@ function decodeTicket(value: unknown): Ticket | null {
     rejected: boolean(value.rejected),
     abandoned_count: nonNegative(value.abandoned_count),
     rejection_count: nonNegative(value.rejection_count),
+    created_at: optionalText(value.created_at),
+    updated_at: optionalText(value.updated_at),
+    submitted_at: optionalText(value.submitted_at),
+    closed_at: optionalText(value.closed_at),
   };
 }
 
@@ -736,7 +744,161 @@ function renderHealth(data: Snapshot): void {
   }
 }
 
-function ticketRow(ticket: Ticket): HTMLElement {
+type LifecycleStage = {
+  id: "open" | "offered" | "working" | "submitted" | "review" | "resolved";
+  label: string;
+  statuses: string[];
+  eventKinds: string[];
+};
+
+const LIFECYCLE_STAGES: LifecycleStage[] = [
+  { id: "open", label: "Open", statuses: ["open", "assigned"], eventKinds: [] },
+  { id: "offered", label: "Offered", statuses: [], eventKinds: ["ticket_offered"] },
+  { id: "working", label: "Working", statuses: ["claimed", "in_progress", "creating_report"], eventKinds: [] },
+  { id: "submitted", label: "Submitted", statuses: ["submitted"], eventKinds: [] },
+  { id: "review", label: "Review", statuses: ["reviewing", "in_review"], eventKinds: [] },
+  { id: "resolved", label: "Resolved", statuses: ["closed", "canceled", "terminated"], eventKinds: [] },
+];
+
+const NEXT_BY_STATUS: Record<string, string> = {
+  open: "Claim work",
+  assigned: "Claim work",
+  claimed: "Submit for independent review",
+  in_progress: "Submit for independent review",
+  creating_report: "Submit for independent review",
+  submitted: "Begin independent review",
+  reviewing: "Complete independent review",
+  in_review: "Complete independent review",
+  rejected: "Address review findings",
+  closed: "None recorded",
+  canceled: "None recorded",
+  terminated: "None recorded",
+};
+
+function ticketEvents(data: Snapshot, ticketId: string): BoardEvent[] {
+  return newestEvents(data.events.filter((event) => event.ticket_id === ticketId));
+}
+
+function lifecycleStageFor(ticket: Ticket): LifecycleStage["id"] | null {
+  if (ticket.review_lease || ticket.review_offer) return "review";
+  const status = ticket.status.toLowerCase();
+  return LIFECYCLE_STAGES.find((stage) => stage.statuses.includes(status))?.id ?? null;
+}
+
+function lifecycleObservedAt(stage: LifecycleStage, ticket: Ticket, events: BoardEvent[]): string | null {
+  const event = events.find((item) => (
+    (item.status_to !== null && stage.statuses.includes(item.status_to.toLowerCase()))
+    || stage.eventKinds.includes(item.kind.toLowerCase())
+  ));
+  if (event?.occurred_at) return event.occurred_at;
+  if (stage.id === "open") return ticket.created_at;
+  if (stage.id === "submitted") return ticket.submitted_at;
+  if (stage.id === "resolved") return ticket.closed_at;
+  return null;
+}
+
+function renderLifecycleRail(ticket: Ticket, data: Snapshot): HTMLElement {
+  const rail = element("ol", "lifecycle-rail");
+  rail.setAttribute("aria-label", `Lifecycle for ${ticket.id}`);
+  const current = lifecycleStageFor(ticket);
+  const events = ticketEvents(data, ticket.id);
+  LIFECYCLE_STAGES.forEach((stage) => {
+    const observedAt = lifecycleObservedAt(stage, ticket, events);
+    const item = element("li", "lifecycle-step");
+    const isCurrent = stage.id === current;
+    item.dataset.observed = String(observedAt !== null);
+    item.dataset.current = String(isCurrent);
+    const marker = element("span", "lifecycle-marker", observedAt ? "✓" : isCurrent ? "●" : "—");
+    marker.setAttribute("aria-hidden", "true");
+    const copy = element("span", "lifecycle-copy");
+    copy.append(
+      element("strong", undefined, `${stage.label}${isCurrent ? " · current" : ""}`),
+      element("span", "lifecycle-time", observedAt ? formatTime(observedAt) : "Not observed"),
+    );
+    item.append(marker, copy);
+    rail.append(item);
+  });
+  return rail;
+}
+
+function ticketActor(ticket: Ticket): string {
+  return ticket.assigned_to ?? ticket.claimed_agent_id ?? ticket.assigned_agent_id ?? "Not supplied";
+}
+
+function ticketNow(ticket: Ticket): string {
+  const status = ticket.status.toLowerCase();
+  const actor = ticketActor(ticket);
+  if (["claimed", "in_progress", "creating_report"].includes(status)) {
+    return `${actor} is working · ${ticket.lease_expires_at ? leaseText(ticket.lease_expires_at) : "lease Not observed"}`;
+  }
+  if (ticket.review_lease) return `${actor} is reviewing`;
+  if (ticket.review_offer) return `Review offered · ${actor}`;
+  if (status === "submitted") return "Submitted · reviewer Not supplied";
+  if (status === "rejected") return `Rejected · ${actor}`;
+  if (["closed", "canceled", "terminated"].includes(status)) return status;
+  if (["open", "assigned"].includes(status)) return `Open · worker ${actor}`;
+  return `${ticket.status || "Not observed"} · owner ${actor}`;
+}
+
+function ticketBlocker(ticket: Ticket, data: Snapshot): string {
+  const blocker = ticketEvents(data, ticket.id).find((event) => {
+    const kind = event.kind.toLowerCase();
+    return kind.includes("blocker") || kind.includes("blocked");
+  });
+  if (blocker) return blocker.text;
+  if (ticket.status.toLowerCase() === "rejected" || ticket.rejected) return "Rejected by independent review";
+  return "None recorded";
+}
+
+function renderTicketSummary(ticket: Ticket, data: Snapshot): HTMLElement {
+  const wrapper = element("section", "ticket-coordination");
+  wrapper.setAttribute("aria-label", `Current coordination for ${ticket.id}`);
+  if (data.stale || data.data_mode === "stale") wrapper.append(element("p", "ticket-data-state", "Last-known data"));
+  const summary = element("dl", "ticket-summary");
+  const cells = [
+    ["Now", ticketNow(ticket)],
+    ["Next", NEXT_BY_STATUS[ticket.status.toLowerCase()] ?? "Not supplied"],
+    ["Blocked", ticketBlocker(ticket, data)],
+  ];
+  cells.forEach(([label, value]) => {
+    const cell = element("div", "ticket-summary-cell");
+    cell.append(element("dt", undefined, label), element("dd", undefined, value));
+    summary.append(cell);
+  });
+  wrapper.append(summary);
+  return wrapper;
+}
+
+function renderTicketActivity(ticket: Ticket, data: Snapshot): HTMLElement {
+  const events = ticketEvents(data, ticket.id);
+  const visible = events.slice(0, 3);
+  const drawer = element("details", "ticket-activity");
+  drawer.open = !window.matchMedia("(max-width: 620px)").matches;
+  const heading = element("summary", "ticket-activity-summary");
+  heading.append(element("strong", undefined, "Recent activity"), pill(`${visible.length} shown`));
+  drawer.append(heading);
+  const body = element("div", "ticket-activity-body");
+  const list = element("div", "timeline compact ticket-activity-list");
+  renderTimeline(list, visible, "No ticket activity observed", "None recorded for this ticket in the bounded local activity projection.");
+  body.append(list);
+  if (events.length > visible.length) {
+    body.append(element("p", "ticket-activity-note", `${events.length - visible.length} older ticket event${events.length - visible.length === 1 ? " was" : "s were"} omitted from this bounded view.`));
+  }
+  if (data.dropped_events > 0) {
+    body.append(element("p", "ticket-activity-note", `${data.dropped_events} older board event${data.dropped_events === 1 ? " was" : "s were"} dropped before ticket filtering.`));
+  }
+  if (data.resync_notice) body.append(element("p", "ticket-activity-note", data.resync_notice));
+  drawer.append(body);
+  return drawer;
+}
+
+function appendTicketCoordination(container: HTMLElement, ticket: Ticket, data: Snapshot): void {
+  container.classList.add("ticket-card");
+  container.dataset.stale = String(data.stale || data.data_mode === "stale");
+  container.append(renderLifecycleRail(ticket, data), renderTicketSummary(ticket, data), renderTicketActivity(ticket, data));
+}
+
+function ticketRow(ticket: Ticket, data: Snapshot): HTMLElement {
   const row = element("article", "list-row");
   const copy = element("div");
   copy.append(element("h3", undefined, ticket.title), element("p", "muted", ticket.id));
@@ -748,6 +910,7 @@ function ticketRow(ticket: Ticket): HTMLElement {
   if (lease) meta.append(lease);
   copy.append(meta);
   row.append(copy);
+  appendTicketCoordination(row, ticket, data);
   return row;
 }
 
@@ -761,7 +924,7 @@ function renderToday(data: Snapshot): void {
   renderHealth(data);
 
   const work = data.tickets.filter((ticket) => !["closed", "canceled", "terminated"].includes(ticket.status)).slice(0, 4);
-  byId("today-work").replaceChildren(...(work.length ? work.map(ticketRow) : [emptyState("No current work", "Open or claimed tickets will appear here.")]));
+  byId("today-work").replaceChildren(...(work.length ? work.map((ticket) => ticketRow(ticket, data)) : [emptyState("No current work", "Open or claimed tickets will appear here.")]));
 
   const agents = data.agents.filter((agent) => !agent.stale).slice(0, 4).map((agent) => {
     const row = element("div", "list-row");
@@ -842,6 +1005,7 @@ function renderWork(data: Snapshot): void {
       if (ticket.abandoned_count) meta.append(pill(`abandoned ×${ticket.abandoned_count}`, "attention"));
       copy.append(meta);
       card.append(copy);
+      appendTicketCoordination(card, ticket, data);
       items.append(card);
     });
     section.append(heading);
@@ -1145,6 +1309,7 @@ function newestEvents(events: BoardEvent[]): BoardEvent[] {
 function renderTimeline(container: HTMLElement, events: BoardEvent[], emptyTitle: string, emptyDetail: string): void {
   const rows = events.map((event) => {
     const row = element("article", "timeline-item");
+    row.setAttribute("role", "listitem");
     row.append(element("span", "timeline-seq", event.seq === null ? "—" : `#${event.seq}`));
     const copy = element("div");
     copy.append(element("h3", undefined, event.kind.replaceAll("_", " ")), element("p", undefined, event.text));
@@ -1155,6 +1320,8 @@ function renderTimeline(container: HTMLElement, events: BoardEvent[], emptyTitle
     row.append(copy);
     return row;
   });
+  if (rows.length) container.setAttribute("role", "list");
+  else container.removeAttribute("role");
   container.replaceChildren(...(rows.length ? rows : [emptyState(emptyTitle, emptyDetail)]));
 }
 

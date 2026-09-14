@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "bb48dc037ef73496da35326a69088d4d1e067607dfbe136c3550da9db8e0bd52"
-    assert len(payload) == 405739
+    expected = "f531c62aa98cfdffc49f9247f12429fdbb38e33366bd8fd0dc7598f364fed1d4"
+    assert len(payload) == 413138
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a26"
     assert lock["view"] == {
@@ -112,7 +112,7 @@ def test_dashboard_work_state_synthetic_ticket_harness() -> None:
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "pass 2" in completed.stdout
+    assert "pass 6" in completed.stdout
 
 
 def test_ticket_projection_preserves_distinct_review_activity() -> None:
