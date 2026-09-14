@@ -4793,25 +4793,43 @@ class SeatConfigManager:
             r"C:\\Users\\[REDACTED:WINDOWS_HOME]",
             value,
         )
-        # Linear-time key/separator/value split. The keyword test runs in
-        # Python instead of nested stars around the alternation, which
-        # backtracked polynomially on repeated whitespace
-        # (CodeQL py/polynomial-redos).
-        sensitive = re.compile(r"(?im)^([^:=\n]*)([:=]\s*)(.*)$")
+        # The previous rewrite still left overlapping unbounded whitespace and
+        # value matches in a regex, so CodeQL continued to report
+        # py/polynomial-redos. Partition each line instead: the split and the
+        # following whitespace scan are linear by construction.
         keyword = re.compile(
             r"(?i)token|authorization|secret|password|api[_-]?key|bearer"
         )
 
-        def redact(match: re.Match[str]) -> str:
-            if keyword.search(match.group(1)) is None:
-                return match.group(0)
-            key = match.group(1).lower()
-            if "file" in key or "path" in key or "env_var" in key:
-                return match.group(0)
-            return f"{match.group(1)}{match.group(2)}[REDACTED]"
+        def redact_line(line: str) -> str:
+            ending = ""
+            if line.endswith("\r\n"):
+                line, ending = line[:-2], "\r\n"
+            elif line.endswith(("\n", "\r")):
+                line, ending = line[:-1], line[-1]
 
-        value = sensitive.sub(redact, value)
-        return value
+            colon_parts = line.partition(":")
+            equals_parts = line.partition("=")
+            candidates = (parts for parts in (colon_parts, equals_parts) if parts[1])
+            try:
+                key, separator, remainder = min(
+                    candidates, key=lambda parts: len(parts[0])
+                )
+            except ValueError:
+                return line + ending
+
+            lowered_key = key.lower()
+            if keyword.search(key) is None or any(
+                exemption in lowered_key for exemption in ("file", "path", "env_var")
+            ):
+                return line + ending
+
+            value_at = 0
+            while value_at < len(remainder) and remainder[value_at].isspace():
+                value_at += 1
+            return f"{key}{separator}{remainder[:value_at]}[REDACTED]{ending}"
+
+        return "".join(redact_line(line) for line in value.splitlines(keepends=True))
 
     @classmethod
     def _diff(cls, change: Any) -> str:

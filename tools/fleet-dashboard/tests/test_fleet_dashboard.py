@@ -7462,41 +7462,31 @@ def test_doors_ui_rendering() -> None:
     assert 'name="integration_ref"' in html
 
 
-def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
-    """CodeQL py/polynomial-redos regression: the key/value redaction pass.
-
-    The previous pattern nested stars around the keyword alternation and
-    backtracked polynomially on repeated whitespace (seconds for ~30k
-    spaces). The remediated split must stay linear and produce identical
-    redaction output.
-    """
+def test_clean_text_redaction_behavior_is_preserved() -> None:
     clean = dashboard.SeatConfigManager._clean_text
 
-    adversarial = "token" + " " * 40_000
+    assert clean("XTOKEN=abc") == "XTOKEN=[REDACTED]"
+    assert clean("XTOKEN_FILE=abc") == "XTOKEN_FILE=abc"
+    assert clean("secret_path=/srv/x") == "secret_path=/srv/x"
+    assert clean("authorization_env_var=AUTH_TOKEN") == (
+        "authorization_env_var=AUTH_TOKEN"
+    )
+    assert clean("token with no delimiter") == "token with no delimiter"
+    assert clean("  MY SECRET :   first:second") == (
+        "  MY SECRET :   [REDACTED]"
+    )
+    assert clean("plain=value\r\nmy bearer: x\r\nbeta=2\r\n") == (
+        "plain=value\r\nmy bearer: [REDACTED]\r\nbeta=2\r\n"
+    )
+
+
+def test_clean_text_redaction_pathological_whitespace_is_fast() -> None:
+    clean = dashboard.SeatConfigManager._clean_text
+    adversarial = "token:" + " " * 100_000
+
     started = time.monotonic()
     output = clean(adversarial)
     elapsed = time.monotonic() - started
-    assert output == adversarial  # no separator on the line: nothing redacted
-    assert elapsed < 5.0  # pre-fix pattern took ~9s at this size
 
-    bigger = "token" + " " * 80_000
-    started = time.monotonic()
-    assert clean(bigger) == bigger
-    elapsed_bigger = time.monotonic() - started
-    assert elapsed_bigger < 5.0  # doubling input stays linear, not quadratic
-
-    # Keyword fused into a longer key (no word boundary) is still redacted.
-    assert clean("XTOKEN=abc") == "XTOKEN=[REDACTED]"
-    # file/path/env_var keys remain visible.
-    assert clean("XTOKEN_FILE=abc") == "XTOKEN_FILE=abc"
-    assert clean("secret_path=/srv/x") == "secret_path=/srv/x"
-    # Separator spacing preserved, value replaced.
-    assert clean("  MY SECRET = s3kr1t") == "  MY SECRET = [REDACTED]"
-    # Only the first separator splits key/value; the rest stays in the value.
-    assert clean("mytoken=a=b") == "mytoken=[REDACTED]"
-    # Lines without a sensitive keyword are untouched.
-    assert clean("plain = value") == "plain = value"
-    # Multi-line input redacts per line.
-    assert clean("alpha=1\nmy bearer: x\nbeta=2") == (
-        "alpha=1\nmy bearer: [REDACTED]\nbeta=2"
-    )
+    assert output == adversarial + "[REDACTED]"
+    assert elapsed < 1.0
