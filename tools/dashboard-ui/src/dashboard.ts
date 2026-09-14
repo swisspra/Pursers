@@ -7,6 +7,7 @@ import {
   type McpUiHostContext,
 } from "@modelcontextprotocol/ext-apps";
 import "./dashboard.css";
+import { ticketReviewLabel, ticketWorkStage, workCounts, type WorkStage } from "./work-state.js";
 
 type DataMode = "live" | "stale" | "demo" | "demo-error";
 type ViewName = "today" | "work" | "agents" | "fleet" | "links" | "activity";
@@ -38,6 +39,8 @@ type Ticket = {
   assigned_agent_id: string | null;
   claimed_agent_id: string | null;
   lease_expires_at: string | null;
+  review_offer: boolean;
+  review_lease: boolean;
   rejected: boolean;
   abandoned_count: number;
   rejection_count: number;
@@ -166,8 +169,8 @@ const fallback: Snapshot = {
     { id: "AI-DEMO-2", name: "reviewer-β", status: "idle", role: "reviewer", focus: "Accessibility & special characters", platform: "synthetic", idle_minutes: 18, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null, stale: false },
   ],
   tickets: [
-    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, rejected: false, abandoned_count: 0, rejection_count: 0 },
-    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "reviewer-β", assigned_agent_id: "AI-DEMO-2", claimed_agent_id: null, lease_expires_at: null, rejected: false, abandoned_count: 0, rejection_count: 0 },
+    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0 },
+    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "reviewer-β", assigned_agent_id: "AI-DEMO-2", claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0 },
   ],
   highlights: {
     latest_handoff: { id: "MEM-DEMO-HANDOFF", type: "handoff", title: "UI shell ready for review", summary: "Synthetic handoff with the next checks for the Personal Preview.", author: "agent-alpha", created_at: "2099-01-01T00:03:00Z", next_steps: ["Check narrow layout", "Verify keyboard navigation"], warnings: [] },
@@ -311,6 +314,8 @@ function decodeTicket(value: unknown): Ticket | null {
     assigned_agent_id: optionalText(value.assigned_agent_id),
     claimed_agent_id: optionalText(value.claimed_agent_id),
     lease_expires_at: optionalText(value.lease_expires_at),
+    review_offer: boolean(value.review_offer),
+    review_lease: boolean(value.review_lease),
     rejected: boolean(value.rejected),
     abandoned_count: nonNegative(value.abandoned_count),
     rejection_count: nonNegative(value.rejection_count),
@@ -599,15 +604,8 @@ function toneForStatus(status: string): string {
   return "neutral";
 }
 
-function ticketCounts(data: Snapshot): { open: number; working: number; submitted: number; attention: number } {
-  const counts = data.status.ticket_status_counts;
-  const count = (statuses: string[]) => statuses.reduce((sum, status) => sum + (counts[status] ?? data.tickets.filter((ticket) => ticket.status === status).length), 0);
-  return {
-    open: count(["open", "assigned"]),
-    working: count(["claimed", "in_progress", "creating_report"]),
-    submitted: count(["submitted", "reviewing", "in_review"]),
-    attention: count(["rejected"]),
-  };
+function ticketCounts(data: Snapshot): { open: number; working: number; submitted: number; inReview: number; attention: number } {
+  return workCounts(data.tickets, data.status.ticket_status_counts);
 }
 
 function formatTime(value: string | null): string {
@@ -715,6 +713,10 @@ function renderHealth(data: Snapshot): void {
     card.dataset.tone = "error";
     title.textContent = "Needs attention";
     detail.textContent = `${counts.attention} rejected item${counts.attention === 1 ? "" : "s"} need another pass.`;
+  } else if (counts.inReview > 0) {
+    card.dataset.tone = "live";
+    title.textContent = "Review in progress";
+    detail.textContent = `${counts.inReview} item${counts.inReview === 1 ? " is" : "s are"} with a reviewer.`;
   } else if (counts.submitted > 0) {
     card.dataset.tone = "live";
     title.textContent = "Ready for review";
@@ -730,7 +732,7 @@ function renderHealth(data: Snapshot): void {
   } else {
     card.dataset.tone = "live";
     title.textContent = "Board is clear";
-    detail.textContent = "No claimed or submitted work needs attention right now.";
+    detail.textContent = "No claimed, submitted, or in-review work needs attention right now.";
   }
 }
 
@@ -740,6 +742,8 @@ function ticketRow(ticket: Ticket): HTMLElement {
   copy.append(element("h3", undefined, ticket.title), element("p", "muted", ticket.id));
   const meta = element("div", "meta-row");
   meta.append(pill(ticket.status, toneForStatus(ticket.status)), pill(ticket.priority));
+  const review = ticketReviewLabel(ticket);
+  if (review) meta.append(pill(review, "working"));
   const lease = leaseBadge(ticket.lease_expires_at);
   if (lease) meta.append(lease);
   copy.append(meta);
@@ -752,6 +756,7 @@ function renderToday(data: Snapshot): void {
   byId("metric-open").textContent = String(counts.open);
   byId("metric-working").textContent = String(counts.working);
   byId("metric-submitted").textContent = String(counts.submitted);
+  byId("metric-in-review").textContent = String(counts.inReview);
   byId("metric-agents").textContent = String(data.agents_live);
   renderHealth(data);
 
@@ -793,13 +798,14 @@ function renderHighlight(container: HTMLElement, value: Highlight | null, emptyT
   container.replaceChildren(item);
 }
 
-const WORK_GROUPS: Array<{ title: string; statuses: string[] }> = [
-  { title: "Open", statuses: ["open", "assigned"] },
-  { title: "Working", statuses: ["claimed", "in_progress", "creating_report"] },
-  { title: "Submitted", statuses: ["submitted", "reviewing", "in_review"] },
-  { title: "Needs attention", statuses: ["rejected"] },
-  { title: "Done", statuses: ["closed"] },
-  { title: "Ended", statuses: ["canceled", "terminated"] },
+const WORK_GROUPS: Array<{ title: string; stage: WorkStage; detail?: string }> = [
+  { title: "Open", stage: "open" },
+  { title: "Working", stage: "working" },
+  { title: "Submitted", stage: "submitted", detail: "Waiting for a reviewer to pick up these submissions." },
+  { title: "In review", stage: "in_review", detail: "A reviewer has been offered or accepted these submissions." },
+  { title: "Needs attention", stage: "attention" },
+  { title: "Done", stage: "done" },
+  { title: "Ended", stage: "ended" },
 ];
 
 function renderWork(data: Snapshot): void {
@@ -812,14 +818,14 @@ function renderWork(data: Snapshot): void {
     item.append(element("p", undefined, "This view is showing the first 500 authorized tickets. Counts still reflect the full board."));
     notice.append(item);
   }
-  const known = new Set(WORK_GROUPS.flatMap((group) => group.statuses));
-  const groups = [...WORK_GROUPS, { title: "Other", statuses: [...new Set(data.tickets.filter((ticket) => !known.has(ticket.status)).map((ticket) => ticket.status))] }];
+  const groups = [...WORK_GROUPS, { title: "Other", stage: "other" as WorkStage }];
   const rendered = groups.map((group) => {
-    const tickets = data.tickets.filter((ticket) => group.statuses.includes(ticket.status));
+    const tickets = data.tickets.filter((ticket) => ticketWorkStage(ticket) === group.stage);
     if (!tickets.length) return null;
     const section = element("section", "work-group");
     const heading = element("h3");
     heading.append(document.createTextNode(group.title), pill(String(tickets.length)));
+    const detail = group.detail ? element("p", "muted work-group-copy", group.detail) : null;
     const items = element("div", "work-group-list");
     tickets.forEach((ticket) => {
       const card = element("article", "work-card");
@@ -828,6 +834,8 @@ function renderWork(data: Snapshot): void {
       if (ticket.description) copy.append(element("p", "muted", ticket.description));
       const meta = element("div", "meta-row");
       meta.append(pill(ticket.priority), pill(ticket.status, toneForStatus(ticket.status)));
+      const review = ticketReviewLabel(ticket);
+      if (review) meta.append(pill(review, "working"));
       if (ticket.assigned_to) meta.append(pill(ticket.assigned_to));
       const lease = leaseBadge(ticket.lease_expires_at);
       if (lease) meta.append(lease);
@@ -836,7 +844,9 @@ function renderWork(data: Snapshot): void {
       card.append(copy);
       items.append(card);
     });
-    section.append(heading, items);
+    section.append(heading);
+    if (detail) section.append(detail);
+    section.append(items);
     return section;
   }).filter((item): item is HTMLElement => item !== null);
   byId("work-groups").replaceChildren(...(rendered.length ? rendered : [emptyState("No tickets yet", "Tickets created through agent chat will appear here.")]));

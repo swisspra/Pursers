@@ -259,6 +259,7 @@ main[aria-busy="true"] { opacity: 0.72; }
 .today-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .span-two { grid-column: span 2; }
 .metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.today-metrics { grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); }
 .fleet-metrics { margin-bottom: 12px; }
 .fleet-grid { display: grid; gap: 12px; }
 
@@ -357,6 +358,7 @@ main[aria-busy="true"] { opacity: 0.72; }
 .work-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .work-group { min-width: 0; }
 .work-group > h3 { display: flex; justify-content: space-between; gap: 8px; margin: 0 0 9px; color: var(--text-soft); }
+.work-group-copy { margin: -4px 0 9px; font-size: 12px; }
 .work-group-list { display: grid; gap: 9px; }
 .work-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
 .work-card .ticket-id { color: var(--text-muted); font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; overflow-wrap: anywhere; }

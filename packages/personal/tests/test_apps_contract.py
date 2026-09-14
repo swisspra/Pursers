@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "33eee21b40c3cf8fab8588b6af5b7b411967497bdd18d9c68310e70f40461122"
-    assert len(payload) == 404280
+    expected = "ea6035612df04503b4246b6422f96e2df93dc2e1c36e195bf79c855cae6a7b5a"
+    assert len(payload) == 405727
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a26"
     assert lock["view"] == {
@@ -98,6 +98,48 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     assert "The candidate remains" not in readme
     for forbidden in ("uv tool install", "--apply", "--activate"):
         assert forbidden not in readme
+
+
+def test_dashboard_work_state_synthetic_ticket_harness() -> None:
+    test_file = (
+        Path(__file__).resolve().parents[3]
+        / "tools/dashboard-ui/src/work-state.test.mjs"
+    )
+    completed = subprocess.run(
+        ["node", "--test", str(test_file)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "pass 2" in completed.stdout
+
+
+def test_ticket_projection_preserves_distinct_review_activity() -> None:
+    tickets = [
+        {"ticket_id": "TK-SUBMITTED", "status": "submitted"},
+        {
+            "ticket_id": "TK-OFFERED",
+            "status": "submitted",
+            "review_offer": {"agent_id": "AI-REVIEWER"},
+        },
+        {
+            "ticket_id": "TK-ACTIVE",
+            "status": "submitted",
+            "review_lease": {"agent_id": "AI-REVIEWER"},
+        },
+    ]
+    projected = [LiveDashboard._ticket_view(ticket) for ticket in tickets]
+
+    states = [
+        (ticket["status"], ticket["review_offer"], ticket["review_lease"])
+        for ticket in projected
+    ]
+    assert states == [
+        ("submitted", False, False),
+        ("submitted", True, False),
+        ("submitted", False, True),
+    ]
 
 
 @pytest.fixture
