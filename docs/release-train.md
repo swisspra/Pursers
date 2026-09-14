@@ -43,3 +43,35 @@ and the Personal component lock are consumers. Do not edit those pins by hand.
 
 PyPI versions are immutable. If verification fails after a version has been
 published, advance the affected version instead of rebuilding that release.
+
+## Home runtime wheelhouse lock
+
+`tools/home_runtime_wheelhouse.lock` pins every third-party wheel by exact
+version and SHA-256 for the supported Python 3.12 platform. Normal wheelhouse
+builds consume that committed lock with pip's `--no-deps --require-hashes`;
+they do not resolve against the current package index. The resulting
+`wheelhouse.json` records the lock path, lock SHA-256, and source-requirements
+SHA-256.
+
+Build from the committed lock with a clean checkout and an explicit Python
+3.12 interpreter:
+
+```sh
+python3 tools/build_home_runtime_wheelhouse.py \
+  --python /PATH/TO/python3.12 \
+  --output /ABSOLUTE/PATH/home-runtime-wheelhouse
+```
+
+Only refresh the lock as a reviewed release-pipeline change. Refreshing is
+platform-specific and overwrites the selected lock atomically:
+
+```sh
+python3 tools/build_home_runtime_wheelhouse.py \
+  --python /PATH/TO/python3.12 \
+  --refresh-lock
+git diff -- tools/home_runtime_wheelhouse.lock
+```
+
+The builder fails before dependency resolution when the lock's Python,
+platform, or source-requirements fingerprint is stale. Commit the refreshed
+lock together with the dependency change; never hand-edit its pins or hashes.

@@ -8,6 +8,7 @@ build/
 dist/
 .DS_Store
 *.lock
+!tools/home_runtime_wheelhouse.lock
 .env
 profile.env
 *.key
