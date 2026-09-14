@@ -2056,6 +2056,43 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         events = self.service.journal.read_after("pursers", 0, 1000)["events"]
         self.assertIn(OFFER_EXPIRED, [event["kind"] for event in events])
 
+    async def test_offer_deadline_reacquires_after_inherited_transaction_closes(
+        self,
+    ) -> None:
+        await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=1
+        )
+
+        # The protocol middleware wraps tool calls in a transaction. A task
+        # created during the call inherits that ContextVar value, but the
+        # middleware closes the connection before the deadline wakes.
+        with patch.object(central, "log_runtime_error") as runtime_error:
+            ticket_ids: list[str] = []
+            for _ in range(2):
+                with self.service.transaction():
+                    created = await self.create()
+                    ticket_id = created.structured_content["ticket"]["ticket_id"]
+                    deadline = self.service.offer_deadline_tasks[
+                        ("pursers", ticket_id, "work")
+                    ]
+                await asyncio.wait_for(asyncio.shield(deadline), timeout=2.0)
+                ticket_ids.append(ticket_id)
+
+        deadline_errors = [
+            call
+            for call in runtime_error.call_args_list
+            if len(call.args) > 1 and call.args[1] == "offer_deadline_error"
+        ]
+        self.assertEqual(deadline_errors, [])
+        tickets = self.service.load("pursers")["tickets"]
+        for ticket_id in ticket_ids:
+            self.assertEqual(
+                tickets[ticket_id]["dispatch_state"]["state"], "broadcast"
+            )
+            self.assertNotIn("work_offer", tickets[ticket_id])
+
     async def test_review_offer_deadline_expires_without_followup_board_call(
         self,
     ) -> None:
