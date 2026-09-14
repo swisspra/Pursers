@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from pursers_client import BoardClient, BoardClientError, JoinedIdentity
+from pursers_client.client import expand_response_id_map
 
 
 def joined(name: str) -> dict[str, Any]:
@@ -284,6 +285,60 @@ async def test_bounded_read_parameters_are_forwarded(monkeypatch) -> None:
             },
         ),
     ]
+
+
+@pytest.mark.anyio
+async def test_ticket_read_projection_parameters_are_forwarded(monkeypatch) -> None:
+    board = client()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return {"ticket": {}, "tickets": []}
+
+    monkeypatch.setattr(board, "_call", call)
+
+    await board.ticket_get(
+        "TK-read", view="full", include_dispatch_history=True
+    )
+    await board.ticket_list(
+        view="summary", include_dispatch_history=True
+    )
+
+    assert calls[0] == (
+        "ticket_get",
+        {
+            "ticket_id": "TK-read",
+            "view": "full",
+            "include_dispatch_history": True,
+        },
+    )
+    assert calls[1][0] == "ticket_list"
+    assert calls[1][1]["view"] == "summary"
+    assert calls[1][1]["include_dispatch_history"] is True
+
+
+def test_id_map_is_expanded_for_existing_client_consumers() -> None:
+    short_agent = "AI-12345678"
+    short_principal = "PR-abcdef01"
+    full_agent = "AI-" + "12345678" + "9" * 56
+    full_principal = "PR-" + "abcdef01" + "2" * 56
+    compact = {
+        "ticket": {
+            "claimed_by_agent_id": short_agent,
+            "description": f"handoff from {short_principal}",
+        },
+        "id_map": {
+            short_agent: full_agent,
+            short_principal: full_principal,
+        },
+    }
+
+    expanded = expand_response_id_map(compact)
+
+    assert expanded["ticket"]["claimed_by_agent_id"] == full_agent
+    assert expanded["ticket"]["description"] == f"handoff from {full_principal}"
+    assert expanded["id_map"] == compact["id_map"]
 
 
 @pytest.mark.anyio

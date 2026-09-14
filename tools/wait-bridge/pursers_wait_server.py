@@ -1281,9 +1281,12 @@ class _BoardView:
         return await self._call("board_catchup", arguments)
 
     async def ticket_get(self, ticket_id: str) -> dict[str, Any]:
-        return await self._call("ticket_get", {"ticket_id": ticket_id})
+        return await self._call(
+            "ticket_get", {"ticket_id": ticket_id, "view": "work"}
+        )
 
     async def ticket_list(self, **arguments: Any) -> dict[str, Any]:
+        arguments.setdefault("view", "work")
         return await self._call("ticket_list", arguments)
 
     async def lease_renew(
