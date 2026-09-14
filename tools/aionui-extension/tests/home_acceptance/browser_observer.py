@@ -778,13 +778,17 @@ def _probe_personal_mcp_runtime(
         argv = shlex.split(command)
     except ValueError:
         raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal MCP runtime command is malformed") from None
-    required_arguments = {
-        "--candidate-source": str(artifact),
-        "--candidate-commit": str(surface["candidate_commit"]),
-        "--board-id": str(surface["target"]["board_id"]),
-        "--acceptance-runtime-receipt": str(receipt_path),
-        "--acceptance-challenge-key": str(challenge_key_path),
-    }
+    # The challenge is the verifier-owned per-install trust anchor. Check it
+    # first so a stale process with several foreign arguments is classified as
+    # belonging to the old installation, independent of which other argument
+    # happens to differ first.
+    required_arguments = (
+        ("--acceptance-challenge-key", str(challenge_key_path)),
+        ("--candidate-source", str(artifact)),
+        ("--candidate-commit", str(surface["candidate_commit"])),
+        ("--board-id", str(surface["target"]["board_id"])),
+        ("--acceptance-runtime-receipt", str(receipt_path)),
+    )
     if not argv or not _PYTHON_EXECUTABLE.match(Path(argv[0]).name):
         raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal process is not a Python interpreter")
     selector, selected, after = _python_execution_selector(argv)
@@ -796,7 +800,7 @@ def _probe_personal_mcp_runtime(
     if argv[after : after + 1] != ["mcp"]:
         raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal process is not the MCP server")
     module_argv = argv[after:]
-    for flag, expected in required_arguments.items():
+    for flag, expected in required_arguments:
         try:
             actual = module_argv[module_argv.index(flag) + 1]
         except (ValueError, IndexError):
