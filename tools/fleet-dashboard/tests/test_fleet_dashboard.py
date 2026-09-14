@@ -2527,6 +2527,54 @@ def test_detail_views_include_filter_routes_mobile_containment_and_escape_calls(
     assert "Agent ${t.claimed_by||'None recorded'}" in dashboard.HTML
 
 
+def test_board_selection_marker_is_stable_and_board_cards_are_addressable() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            source("function syncBoardSelection("),
+            "const attributes={};",
+            "const marker={textContent:'',setAttribute:(key,value)=>attributes[key]=value,removeAttribute:key=>delete attributes[key]};",
+            "const document={querySelector:selector=>selector==='#board-id'?marker:null};",
+            "let location={hash:'',search:''};",
+            "let fleetData={one:{boards:[{board_id:'sandbox-board'}]}};",
+            "let route=()=>null;",
+            "const single=syncBoardSelection();",
+            "fleetData={one:{boards:[{board_id:'board-a'},{board_id:'board-b'}]}};",
+            "location.search='?board_id=board-b';",
+            "const requested=syncBoardSelection();",
+            "location.search='';route=()=>({kind:'board',board:'board-a'});",
+            "const routed=syncBoardSelection();",
+            "route=()=>null;const ambiguous=syncBoardSelection();",
+            "console.log(JSON.stringify({single,requested,routed,ambiguous,text:marker.textContent,attributes}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result == {
+        "single": "sandbox-board",
+        "requested": "board-b",
+        "routed": "board-a",
+        "ambiguous": "",
+        "text": "",
+        "attributes": {"aria-label": "No board selected"},
+    }
+    assert 'id="board-id" data-helper-field="board"' in dashboard.HTML
+    assert 'class="board-card" data-board-id="${esc(b.board_id)}"' in dashboard.HTML
+    assert 'class="board-card" data-board-id="${esc(board.board_id)}"' in dashboard.HTML
+    assert "{home:'overview',projects:'boards',settings:'seats'}" in dashboard.HTML
+
+
 def test_multi_central_routes_and_complete_javascript_are_valid() -> None:
     scripts = re.findall(r"<script>(.*?)</script>", dashboard.HTML, flags=re.DOTALL | re.IGNORECASE)
     completed = subprocess.run(
