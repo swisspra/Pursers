@@ -101,6 +101,12 @@ candidate
 also requires the exact manifest-derived filenames and writes
 `SHA256SUMS.txt`.
 
+Any change under `packages/central` or `packages/client` must regenerate
+`packages/personal/src/pursers_personal/resources/component-lock.json` in the
+same branch by running `tools/regenerate_component_lock.py`. Never edit the
+component lock by hand; review must rebuild it independently and require
+byte-for-byte equality.
+
 The offline Home runtime wheelhouse uses the same two reproducibility variables
 and additionally sets `UV_PYTHON` to its verified Python 3.12 interpreter. It
 removes inherited `PIP_FIND_LINKS` and `UV_FIND_LINKS`, resolves all binary
