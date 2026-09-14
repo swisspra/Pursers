@@ -264,7 +264,7 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
     checksums = (wheelhouse / "SHA256SUMS").read_text()
     assert stat.S_IMODE(wheelhouse.stat().st_mode) == 0o700
     assert stat.S_IMODE((wheelhouse / "wheelhouse.json").stat().st_mode) == 0o600
-    assert "mcp-2.1.1-py3-none-any.whl" in checksums
+    assert "mcp-2.2.0-py3-none-any.whl" in checksums
     assert client_wheel in checksums
     assert bridge_wheel in checksums
     subprocess.run(
