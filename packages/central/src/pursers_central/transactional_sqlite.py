@@ -96,6 +96,7 @@ class TransactionalSQLiteStore(SQLiteStore):
         )
         if row is not None and encoded == stored_blob:
             # No-op mutation: never bump the version or rewrite the blob.
+            self._sync_journal_index(connection, key, updated, version)
             return copy.deepcopy(updated)
         next_version = version + 1
         if row is None:
@@ -110,9 +111,34 @@ class TransactionalSQLiteStore(SQLiteStore):
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("optimistic version conflict inside write transaction")
+        self._sync_journal_index(connection, key, updated, next_version)
         self._record_activity(self._save_activity, key)
         self._cache_put(key, next_version, updated)
         return copy.deepcopy(updated)
+
+    def journal_read_after(
+        self,
+        path: str | Path,
+        board_id: str,
+        cursor: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        connection = self._transaction_connection.get()
+        if connection is None:
+            return super().journal_read_after(path, board_id, cursor, limit)
+        key = self._key(path)
+        row = connection.execute(
+            "SELECT doc, version FROM documents WHERE path = ?", (key,)
+        ).fetchone()
+        if row is not None:
+            state = connection.execute(
+                "SELECT source_version FROM journal_state WHERE path = ?", (key,)
+            ).fetchone()
+            if state is None or int(state[0]) != int(row[1]):
+                self._sync_journal_index(
+                    connection, key, json.loads(row[0]), int(row[1])
+                )
+        return self._journal_read_result(connection, key, board_id, cursor, limit)
 
     def iter_documents(self, prefix: str) -> list[dict[str, Any]]:
         normalized = prefix.strip("/") + "/"
