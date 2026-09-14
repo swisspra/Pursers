@@ -242,6 +242,10 @@ BACKLOG_SUPPRESSION_LIMIT = 500
 _BACKLOG_SEEN: OrderedDict[
     tuple[str, str, str, str], tuple[str, float]
 ] = OrderedDict()
+_IMMEDIATE_SYNTHETIC_CURSORS: OrderedDict[
+    tuple[str, str, str], int
+] = OrderedDict()
+_SYNTHETIC_WAIT_SOURCES = frozenset({"backlog_scan", "offer_reconciliation"})
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
 HUMAN_EVENT_KINDS = frozenset({HUMAN_INPUT_REQUESTED, HUMAN_INPUT_RESOLVED})
@@ -4684,6 +4688,65 @@ def _next_backlog_scan_at(
     return min(due) if due else now + BACKLOG_RESURFACE_INTERVAL_S
 
 
+def _guard_immediate_synthetic_events(
+    events: list[dict[str, Any]],
+    *,
+    board_id: str,
+    wait_for: str,
+    my_agent_id: str,
+    cursor: int,
+) -> list[dict[str, Any]]:
+    """Defer a second sequence-free return at the same journal cursor."""
+    synthetic = [
+        event
+        for event in events
+        if event.get("source") in _SYNTHETIC_WAIT_SOURCES
+        and not isinstance(event.get("seq"), int)
+    ]
+    if not synthetic:
+        return events
+    key = (board_id, wait_for, my_agent_id)
+    prior_cursor = _IMMEDIATE_SYNTHETIC_CURSORS.get(key)
+    if key in _IMMEDIATE_SYNTHETIC_CURSORS:
+        _IMMEDIATE_SYNTHETIC_CURSORS.move_to_end(key)
+    if prior_cursor == cursor:
+        sources = ",".join(sorted({str(event["source"]) for event in synthetic}))
+        _log(
+            "deferred repeated immediate synthetic return "
+            f"board={board_id!r} cursor={cursor} sources={sources}; "
+            "blocking until an authoritative event or the call timeout"
+        )
+        return [
+            event
+            for event in events
+            if not (
+                event.get("source") in _SYNTHETIC_WAIT_SOURCES
+                and not isinstance(event.get("seq"), int)
+            )
+        ]
+    _IMMEDIATE_SYNTHETIC_CURSORS[key] = cursor
+    _IMMEDIATE_SYNTHETIC_CURSORS.move_to_end(key)
+    while len(_IMMEDIATE_SYNTHETIC_CURSORS) > BACKLOG_SUPPRESSION_LIMIT:
+        _IMMEDIATE_SYNTHETIC_CURSORS.popitem(last=False)
+    return events
+
+
+def _log_immediate_wait_return(
+    events: list[dict[str, Any]],
+    *,
+    reason: str,
+    cursors: dict[str, int],
+) -> None:
+    sources = sorted({str(event.get("source") or "journal") for event in events})
+    kinds = sorted({str(event.get("kind") or "unknown") for event in events})
+    _log(
+        "immediate return "
+        f"reason={reason} cursors={json.dumps(cursors, sort_keys=True)} "
+        f"event_count={len(events)} sources={','.join(sources)} "
+        f"kinds={','.join(kinds)}"
+    )
+
+
 async def _is_relevant(
     client: BoardClient,
     event: dict,
@@ -5646,6 +5709,7 @@ async def _wait_for_work_many(
         timed_out: bool,
         *,
         tickets_by_board: dict[str, list[dict[str, Any]]] | None = None,
+        immediate: bool = False,
     ) -> dict[str, Any]:
         if not any(
             event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}
@@ -5668,12 +5732,33 @@ async def _wait_for_work_many(
             if reconciled:
                 events = [*reconciled, *events]
                 timed_out = False
-        return response(events, timed_out)
+        if immediate:
+            guarded: list[dict[str, Any]] = []
+            for board_id in active:
+                board_events = [
+                    event for event in events if event.get("board_id") == board_id
+                ]
+                guarded.extend(_guard_immediate_synthetic_events(
+                    board_events,
+                    board_id=board_id,
+                    wait_for=wait_for_by_board[board_id],
+                    my_agent_id=agent_ids[board_id],
+                    cursor=cursors[board_id],
+                ))
+            events = guarded
+        result = response(events, timed_out)
+        if immediate and events:
+            _log_immediate_wait_return(
+                events,
+                reason=str(result["reason"]),
+                cursors=dict(cursors),
+            )
+        return result
 
     if _GLOBAL_KEEPALIVE is not None:
         keepalive_cues = _GLOBAL_KEEPALIVE.drain_cues(set(active))
         if keepalive_cues:
-            return await respond(keepalive_cues, False)
+            return await respond(keepalive_cues, False, immediate=True)
 
     async def poll_board(board_id: str, *, backlog: bool = False) -> list[dict]:
         meta = catchup_meta[board_id]
@@ -5804,12 +5889,20 @@ async def _wait_for_work_many(
             started,
         )
     if relevant:
-        return await respond(
-            relevant, False, tickets_by_board=entry_ticket_snapshots
+        immediate_result = await respond(
+            relevant,
+            False,
+            tickets_by_board=entry_ticket_snapshots,
+            immediate=True,
         )
+        if immediate_result["events"]:
+            return immediate_result
     if any(meta["partial"] for meta in catchup_meta.values()):
         return await respond(
-            [], False, tickets_by_board=entry_ticket_snapshots
+            [],
+            False,
+            tickets_by_board=entry_ticket_snapshots,
+            immediate=True,
         )
     if not active:
         return await respond([], True)
@@ -6112,6 +6205,7 @@ async def _wait_for_work(
         result: dict[str, Any],
         *,
         tickets: list[dict[str, Any]] | None = None,
+        immediate: bool = False,
     ) -> dict[str, Any]:
         if not any(
             event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}
@@ -6130,6 +6224,21 @@ async def _wait_for_work(
                 result["events"] = [*reconciled, *result["events"]]
                 result["timed_out"] = False
                 result["reason"] = "reconciled"
+        if immediate:
+            result["events"] = _guard_immediate_synthetic_events(
+                result["events"],
+                board_id=BOARD_ID,
+                wait_for=selected_wait_for,
+                my_agent_id=my_agent_id,
+                cursor=cursor,
+            )
+            if result["events"]:
+                result["reason"] = _wait_reason(result["events"])
+                _log_immediate_wait_return(
+                    result["events"],
+                    reason=str(result["reason"]),
+                    cursors={BOARD_ID: cursor},
+                )
         return with_catchup_meta(result)
 
     if _GLOBAL_KEEPALIVE is not None:
@@ -6143,7 +6252,7 @@ async def _wait_for_work(
                 "mode": "push",
                 "reason": "journal",
                 "resynced": resynced,
-            })
+            }, immediate=True)
 
     async def poll_once(*, scan_backlog: bool = False) -> list[dict]:
         nonlocal cursor, resynced, last_active_tickets
@@ -6263,7 +6372,7 @@ async def _wait_for_work(
             if event.get("ticket_id") not in known_ids
         )
     if relevant:
-        return await finalize({
+        immediate_result = await finalize({
             "new_seq": cursor,
             "events": relevant,
             "waited_s": 0.0,
@@ -6271,7 +6380,9 @@ async def _wait_for_work(
             "mode": "poll",
             "reason": _wait_reason(relevant),
             "resynced": resynced,
-        }, tickets=last_active_tickets)
+        }, tickets=last_active_tickets, immediate=True)
+        if immediate_result["events"]:
+            return immediate_result
     if catchup_meta["partial"]:
         return await finalize({
             "new_seq": cursor,
