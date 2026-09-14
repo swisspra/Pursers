@@ -7,7 +7,14 @@ import {
   type McpUiHostContext,
 } from "@modelcontextprotocol/ext-apps";
 import "./dashboard.css";
-import { ticketReviewLabel, ticketWorkStage, workCounts, type WorkStage } from "./work-state.js";
+import {
+  ticketBlocker,
+  ticketNow,
+  ticketReviewLabel,
+  ticketWorkStage,
+  workCounts,
+  type WorkStage,
+} from "./work-state.js";
 
 type DataMode = "live" | "stale" | "demo" | "demo-error";
 type ViewName = "today" | "work" | "agents" | "fleet" | "links" | "activity";
@@ -37,13 +44,35 @@ type Ticket = {
   priority: string;
   assigned_to: string | null;
   assigned_agent_id: string | null;
+  claimed_by: string | null;
   claimed_agent_id: string | null;
   lease_expires_at: string | null;
   review_offer: boolean;
+  review_offer_name: string | null;
+  review_offer_agent_id: string | null;
+  review_offer_expires_at: string | null;
   review_lease: boolean;
+  reviewer_name: string | null;
+  reviewer_agent_id: string | null;
+  review_lease_expires_at: string | null;
+  annotations: TicketAnnotation[];
+  annotation_count: number;
+  annotations_omitted_count: number;
   rejected: boolean;
   abandoned_count: number;
   rejection_count: number;
+  created_at: string | null;
+  updated_at: string | null;
+  submitted_at: string | null;
+  closed_at: string | null;
+};
+type TicketAnnotation = {
+  id: string | null;
+  kind: string;
+  text: string;
+  author: string | null;
+  author_agent_id: string | null;
+  at: string | null;
 };
 type BoardEvent = {
   id: string;
@@ -169,8 +198,8 @@ const fallback: Snapshot = {
     { id: "AI-DEMO-2", name: "reviewer-β", status: "idle", role: "reviewer", focus: "Accessibility & special characters", platform: "synthetic", idle_minutes: 18, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null, stale: false },
   ],
   tickets: [
-    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0 },
-    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "reviewer-β", assigned_agent_id: "AI-DEMO-2", claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0 },
+    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: "agent-alpha", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_offer_name: null, review_offer_agent_id: null, review_offer_expires_at: null, review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], annotation_count: 0, annotations_omitted_count: 0, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:01:00Z", submitted_at: null, closed_at: null },
+    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_by: null, claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_offer_name: "reviewer-β", review_offer_agent_id: "AI-DEMO-2", review_offer_expires_at: "2099-01-01T00:12:00Z", review_lease: false, reviewer_name: null, reviewer_agent_id: null, review_lease_expires_at: null, annotations: [], annotation_count: 0, annotations_omitted_count: 0, rejected: false, abandoned_count: 0, rejection_count: 0, created_at: "2099-01-01T00:00:00Z", updated_at: "2099-01-01T00:02:00Z", submitted_at: "2099-01-01T00:02:00Z", closed_at: null },
   ],
   highlights: {
     latest_handoff: { id: "MEM-DEMO-HANDOFF", type: "handoff", title: "UI shell ready for review", summary: "Synthetic handoff with the next checks for the Personal Preview.", author: "agent-alpha", created_at: "2099-01-01T00:03:00Z", next_steps: ["Check narrow layout", "Verify keyboard navigation"], warnings: [] },
@@ -304,6 +333,11 @@ function decodeAgent(value: unknown): Agent | null {
 
 function decodeTicket(value: unknown): Ticket | null {
   if (!record(value) || typeof value.id !== "string") return null;
+  const annotations = (Array.isArray(value.annotations) ? value.annotations : [])
+    .slice(0, 8)
+    .map(decodeTicketAnnotation)
+    .filter((item): item is TicketAnnotation => item !== null);
+  const annotationsOmitted = nonNegative(value.annotations_omitted_count);
   return {
     id: text(value.id),
     title: text(value.title, "(untitled)"),
@@ -312,13 +346,42 @@ function decodeTicket(value: unknown): Ticket | null {
     priority: text(value.priority, "medium"),
     assigned_to: optionalText(value.assigned_to),
     assigned_agent_id: optionalText(value.assigned_agent_id),
+    claimed_by: optionalText(value.claimed_by),
     claimed_agent_id: optionalText(value.claimed_agent_id),
     lease_expires_at: optionalText(value.lease_expires_at),
     review_offer: boolean(value.review_offer),
+    review_offer_name: optionalText(value.review_offer_name),
+    review_offer_agent_id: optionalText(value.review_offer_agent_id),
+    review_offer_expires_at: optionalText(value.review_offer_expires_at),
     review_lease: boolean(value.review_lease),
+    reviewer_name: optionalText(value.reviewer_name),
+    reviewer_agent_id: optionalText(value.reviewer_agent_id),
+    review_lease_expires_at: optionalText(value.review_lease_expires_at),
+    annotations,
+    annotation_count: Math.max(
+      annotations.length + annotationsOmitted,
+      nonNegative(value.annotation_count),
+    ),
+    annotations_omitted_count: annotationsOmitted,
     rejected: boolean(value.rejected),
     abandoned_count: nonNegative(value.abandoned_count),
     rejection_count: nonNegative(value.rejection_count),
+    created_at: optionalText(value.created_at),
+    updated_at: optionalText(value.updated_at),
+    submitted_at: optionalText(value.submitted_at),
+    closed_at: optionalText(value.closed_at),
+  };
+}
+
+function decodeTicketAnnotation(value: unknown): TicketAnnotation | null {
+  if (!record(value)) return null;
+  return {
+    id: optionalText(value.id),
+    kind: text(value.kind, "note", 32),
+    text: text(value.text, "", MAX_LONG_TEXT_LENGTH),
+    author: optionalText(value.author),
+    author_agent_id: optionalText(value.author_agent_id),
+    at: optionalText(value.at),
   };
 }
 
@@ -736,7 +799,136 @@ function renderHealth(data: Snapshot): void {
   }
 }
 
-function ticketRow(ticket: Ticket): HTMLElement {
+type LifecycleStage = {
+  id: "open" | "offered" | "working" | "submitted" | "review" | "resolved";
+  label: string;
+  statuses: string[];
+  eventKinds: string[];
+};
+
+const LIFECYCLE_STAGES: LifecycleStage[] = [
+  { id: "open", label: "Open", statuses: ["open", "assigned"], eventKinds: [] },
+  { id: "offered", label: "Offered", statuses: [], eventKinds: ["ticket_offered"] },
+  { id: "working", label: "Working", statuses: ["claimed", "in_progress", "creating_report"], eventKinds: [] },
+  { id: "submitted", label: "Submitted", statuses: ["submitted"], eventKinds: [] },
+  { id: "review", label: "Review", statuses: ["reviewing", "in_review"], eventKinds: [] },
+  { id: "resolved", label: "Resolved", statuses: ["closed", "canceled", "terminated"], eventKinds: [] },
+];
+
+const NEXT_BY_STATUS: Record<string, string> = {
+  open: "Claim work",
+  assigned: "Claim work",
+  claimed: "Submit for independent review",
+  in_progress: "Submit for independent review",
+  creating_report: "Submit for independent review",
+  submitted: "Begin independent review",
+  reviewing: "Complete independent review",
+  in_review: "Complete independent review",
+  rejected: "Address review findings",
+  closed: "None recorded",
+  canceled: "None recorded",
+  terminated: "None recorded",
+};
+
+function ticketEvents(data: Snapshot, ticketId: string): BoardEvent[] {
+  return newestEvents(data.events.filter((event) => event.ticket_id === ticketId));
+}
+
+function lifecycleStageFor(ticket: Ticket): LifecycleStage["id"] | null {
+  if (ticket.review_lease || ticket.review_offer) return "review";
+  const status = ticket.status.toLowerCase();
+  return LIFECYCLE_STAGES.find((stage) => stage.statuses.includes(status))?.id ?? null;
+}
+
+function lifecycleObservedAt(stage: LifecycleStage, ticket: Ticket, events: BoardEvent[]): string | null {
+  const event = events.find((item) => (
+    (item.status_to !== null && stage.statuses.includes(item.status_to.toLowerCase()))
+    || stage.eventKinds.includes(item.kind.toLowerCase())
+  ));
+  if (event?.occurred_at) return event.occurred_at;
+  if (stage.id === "open") return ticket.created_at;
+  if (stage.id === "submitted") return ticket.submitted_at;
+  if (stage.id === "resolved") return ticket.closed_at;
+  return null;
+}
+
+function renderLifecycleRail(ticket: Ticket, data: Snapshot): HTMLElement {
+  const rail = element("ol", "lifecycle-rail");
+  rail.setAttribute("aria-label", `Lifecycle for ${ticket.id}`);
+  const current = lifecycleStageFor(ticket);
+  const events = ticketEvents(data, ticket.id);
+  LIFECYCLE_STAGES.forEach((stage) => {
+    const observedAt = lifecycleObservedAt(stage, ticket, events);
+    const item = element("li", "lifecycle-step");
+    const isCurrent = stage.id === current;
+    item.dataset.observed = String(observedAt !== null);
+    item.dataset.current = String(isCurrent);
+    const marker = element("span", "lifecycle-marker", observedAt ? "✓" : isCurrent ? "●" : "—");
+    marker.setAttribute("aria-hidden", "true");
+    const copy = element("span", "lifecycle-copy");
+    copy.append(
+      element("strong", undefined, `${stage.label}${isCurrent ? " · current" : ""}`),
+      element("span", "lifecycle-time", observedAt ? formatTime(observedAt) : "Not observed"),
+    );
+    item.append(marker, copy);
+    rail.append(item);
+  });
+  return rail;
+}
+
+function renderTicketSummary(ticket: Ticket, data: Snapshot): HTMLElement {
+  const wrapper = element("section", "ticket-coordination");
+  wrapper.setAttribute("aria-label", `Current coordination for ${ticket.id}`);
+  if (data.stale || data.data_mode === "stale") wrapper.append(element("p", "ticket-data-state", "Last-known data"));
+  const summary = element("dl", "ticket-summary");
+  const cells = [
+    ["Now", ticketNow(
+      ticket,
+      ticket.lease_expires_at ? leaseText(ticket.lease_expires_at) : "lease Not observed",
+      ticket.review_lease_expires_at ? leaseText(ticket.review_lease_expires_at) : "lease Not observed",
+    )],
+    ["Next", NEXT_BY_STATUS[ticket.status.toLowerCase()] ?? "Not supplied"],
+    ["Blocked", ticketBlocker(ticket, ticketEvents(data, ticket.id))],
+  ];
+  cells.forEach(([label, value]) => {
+    const cell = element("div", "ticket-summary-cell");
+    cell.append(element("dt", undefined, label), element("dd", undefined, value));
+    summary.append(cell);
+  });
+  wrapper.append(summary);
+  return wrapper;
+}
+
+function renderTicketActivity(ticket: Ticket, data: Snapshot): HTMLElement {
+  const events = ticketEvents(data, ticket.id);
+  const visible = events.slice(0, 3);
+  const drawer = element("details", "ticket-activity");
+  drawer.open = !window.matchMedia("(max-width: 620px)").matches;
+  const heading = element("summary", "ticket-activity-summary");
+  heading.append(element("strong", undefined, "Recent activity"), pill(`${visible.length} shown`));
+  drawer.append(heading);
+  const body = element("div", "ticket-activity-body");
+  const list = element("div", "timeline compact ticket-activity-list");
+  renderTimeline(list, visible, "No ticket activity observed", "None recorded for this ticket in the bounded local activity projection.");
+  body.append(list);
+  if (events.length > visible.length) {
+    body.append(element("p", "ticket-activity-note", `${events.length - visible.length} older ticket event${events.length - visible.length === 1 ? " was" : "s were"} omitted from this bounded view.`));
+  }
+  if (data.dropped_events > 0) {
+    body.append(element("p", "ticket-activity-note", `${data.dropped_events} older board event${data.dropped_events === 1 ? " was" : "s were"} dropped before ticket filtering.`));
+  }
+  if (data.resync_notice) body.append(element("p", "ticket-activity-note", data.resync_notice));
+  drawer.append(body);
+  return drawer;
+}
+
+function appendTicketCoordination(container: HTMLElement, ticket: Ticket, data: Snapshot): void {
+  container.classList.add("ticket-card");
+  container.dataset.stale = String(data.stale || data.data_mode === "stale");
+  container.append(renderLifecycleRail(ticket, data), renderTicketSummary(ticket, data), renderTicketActivity(ticket, data));
+}
+
+function ticketRow(ticket: Ticket, data: Snapshot): HTMLElement {
   const row = element("article", "list-row");
   const copy = element("div");
   copy.append(element("h3", undefined, ticket.title), element("p", "muted", ticket.id));
@@ -748,6 +940,7 @@ function ticketRow(ticket: Ticket): HTMLElement {
   if (lease) meta.append(lease);
   copy.append(meta);
   row.append(copy);
+  appendTicketCoordination(row, ticket, data);
   return row;
 }
 
@@ -761,7 +954,7 @@ function renderToday(data: Snapshot): void {
   renderHealth(data);
 
   const work = data.tickets.filter((ticket) => !["closed", "canceled", "terminated"].includes(ticket.status)).slice(0, 4);
-  byId("today-work").replaceChildren(...(work.length ? work.map(ticketRow) : [emptyState("No current work", "Open or claimed tickets will appear here.")]));
+  byId("today-work").replaceChildren(...(work.length ? work.map((ticket) => ticketRow(ticket, data)) : [emptyState("No current work", "Open or claimed tickets will appear here.")]));
 
   const agents = data.agents.filter((agent) => !agent.stale).slice(0, 4).map((agent) => {
     const row = element("div", "list-row");
@@ -842,6 +1035,7 @@ function renderWork(data: Snapshot): void {
       if (ticket.abandoned_count) meta.append(pill(`abandoned ×${ticket.abandoned_count}`, "attention"));
       copy.append(meta);
       card.append(copy);
+      appendTicketCoordination(card, ticket, data);
       items.append(card);
     });
     section.append(heading);
@@ -1145,6 +1339,7 @@ function newestEvents(events: BoardEvent[]): BoardEvent[] {
 function renderTimeline(container: HTMLElement, events: BoardEvent[], emptyTitle: string, emptyDetail: string): void {
   const rows = events.map((event) => {
     const row = element("article", "timeline-item");
+    row.setAttribute("role", "listitem");
     row.append(element("span", "timeline-seq", event.seq === null ? "—" : `#${event.seq}`));
     const copy = element("div");
     copy.append(element("h3", undefined, event.kind.replaceAll("_", " ")), element("p", undefined, event.text));
@@ -1155,6 +1350,8 @@ function renderTimeline(container: HTMLElement, events: BoardEvent[], emptyTitle
     row.append(copy);
     return row;
   });
+  if (rows.length) container.setAttribute("role", "list");
+  else container.removeAttribute("role");
   container.replaceChildren(...(rows.length ? rows : [emptyState(emptyTitle, emptyDetail)]));
 }
 
