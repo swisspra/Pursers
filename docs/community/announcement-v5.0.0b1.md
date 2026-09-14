@@ -44,6 +44,6 @@ and the [roadmap](../ROADMAP.md) for shipped work, Beta.2 candidates, and
 research that is explicitly not committed.
 
 Questions, proposals, and examples are welcome in
-[GitHub Discussions](https://github.com/swisspra/Pursers/discussions). The
-[Discussions guide](DISCUSSIONS.md) explains the categories and the best-effort
+[GitHub Issues](https://github.com/swisspra/Pursers/issues). The
+[community guide](DISCUSSIONS.md) explains the issue types and the best-effort
 response expectations for this beta.
