@@ -1,0 +1,17 @@
+filename	source_url	viewport_css_px	full_page_png_px	captured_at_utc	rendered_theme	sha256
+agent-sdk__1440x900__site-default.png	https://qoder.com/agent-sdk	1440x900	1440x4404	2026-09-14T19:11:33.040Z	site-default light; no theme toggle detected	2bcf0e49938a030408a10621b653c969f76ce528a617d06dba8eba44e2bce774
+agent-sdk__400x844__site-default.png	https://qoder.com/agent-sdk	400x844	400x7947	2026-09-14T19:11:34.470Z	site-default light; no theme toggle detected	be4adaa8a87ab0f5f70ce7601f0282b37b0e29f7e0128a7073f7d0c944fb70d0
+cli__1440x900__site-default.png	https://qoder.com/cli	1440x900	1440x2558	2026-09-14T19:11:30.857Z	site-default light; no theme toggle detected	5e14ff263fd3320c6cab077fa31ba710928cae5557291ab905b049d2fb645f7a
+cli__400x844__site-default.png	https://qoder.com/cli	400x844	400x4382	2026-09-14T19:11:31.914Z	site-default light; no theme toggle detected	b51404096ed7ab66abf023ac2f8834756a96acb70fb55e87fd89a054412df211
+cloud-agents__1440x900__site-default.png	https://qoder.com/cloud-agents	1440x900	1440x3284	2026-09-14T19:11:35.434Z	site-default light; no theme toggle detected	d78bf08fa0fa9afa52953d1714ce43b035dab09ea8e30525a2b4a4b1718c62ca
+cloud-agents__400x844__site-default.png	https://qoder.com/cloud-agents	400x844	400x6519	2026-09-14T19:11:36.730Z	site-default light; no theme toggle detected	69b3c05b8dff0054422e25d0756e5c3fd8ae7e28c54f464bce40e28f47fe8c40
+ide__1440x900__site-default.png	https://qoder.com/ide	1440x900	1440x2112	2026-09-14T19:11:27.280Z	site-default light; no theme toggle detected	0b954ad0053ec14580c1ca2564ff91e14441cbb8ec91977d64915202ac5cf9aa
+ide__400x844__site-default.png	https://qoder.com/ide	400x844	400x3558	2026-09-14T19:11:28.180Z	site-default light; no theme toggle detected	1e7f50105b2369992a60151f4542ae5b1370acb42dfdf802e45fccc54d5a52e5
+jetbrains__1440x900__site-default.png	https://qoder.com/jetbrains	1440x900	1440x2048	2026-09-14T19:11:28.986Z	site-default light; no theme toggle detected	2d6be444a722851ef058ef3ed65172841890ecf63f3298afb8d84f64eb3836f7
+jetbrains__400x844__site-default.png	https://qoder.com/jetbrains	400x844	400x3424	2026-09-14T19:11:29.987Z	site-default light; no theme toggle detected	919737de5a6e589b8eb7ddab7d55658428362a2db3cf8003a61bba737360c525
+mobile__1440x900__site-default.png	https://qoder.com/mobile	1440x900	1440x2698	2026-09-14T19:11:25.535Z	site-default light; no theme toggle detected	449be0f3283baea2c02455e4b3398681dc31648b3619e72a2eb939b3ce7904d5
+mobile__400x844__site-default.png	https://qoder.com/mobile	400x844	400x4658	2026-09-14T19:11:26.532Z	site-default light; no theme toggle detected	6b942b7546cce032e1e10ceddb37fd17cf647a8818e2d06e1ffd95ca19570ecf
+qoder__1440x900__site-default.png	https://qoder.com/qoder	1440x900	1440x3249	2026-09-14T19:11:23.662Z	site-default light; no theme toggle detected	aeefb506d54ada82713b4ee39f252cde4a52cf6146235a64b6064d170bf3ade2
+qoder__400x844__site-default.png	https://qoder.com/qoder	400x844	400x4632	2026-09-14T19:11:24.735Z	site-default light; no theme toggle detected	6b0380e41e7c197e0feb06e14cda1a60683cbbdd63490c9b946ccbc238e387e4
+qoderwake__1440x900__site-default.png	https://qoder.com/en/qoderwake	1440x900	1440x3823	2026-09-14T19:11:21.605Z	site-default light; no theme toggle detected	6125ba5ff796a2040bccbc0cad18d6bff49083ef2e05fa80da4e5a9c1fd6bd71
+qoderwake__400x844__site-default.png	https://qoder.com/en/qoderwake	400x844	400x6026	2026-09-14T19:11:22.794Z	site-default light; no theme toggle detected	30b4cb793b228755bc368da7873550b657bcdbd91ce402f84cbe16f0b0eb6d29
