@@ -688,8 +688,12 @@ async def _event_for_seat(
             return {**event, "reason": "held_ticket_update"}
         if submitted and event.get("status_to") == "submitted":
             return {**event, "reason": "broadcast"}
-        if not submitted and mine in event.get("recipient_identities", []):
-            return {**event, "reason": "broadcast"}
+        if not submitted:
+            recipients = event.get("recipient_identities")
+            if not isinstance(recipients, list) or mine in recipients:
+                # Central has already applied seat visibility when current
+                # model-facing responses omit routing-only recipients.
+                return {**event, "reason": "broadcast"}
         return None
     offer_kind = "review" if submitted else "work"
     offer = ticket.get(f"{offer_kind}_offer")

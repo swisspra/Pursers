@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from mcp import Client
+
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT / "src" / "pursers_central"))
@@ -60,6 +62,40 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
             name,
             {"board_id": "pursers", **arguments},
         )
+
+    async def protocol_call(self, name: str, **arguments: object):
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
+            return await client.call_tool(
+                name,
+                {"board_id": "pursers", **arguments},
+            )
+
+    async def create_fat_ticket(self) -> str:
+        created = await self.call(
+            "ticket_create",
+            agent_name="admin-agent",
+            title="response projection target",
+            description="d" * 5_000,
+            target_url="pursers/packages/central",
+            scope="interactive",
+            required_fields=["test-output"],
+            unassigned=True,
+        )
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+
+        def fatten(document: dict[str, object]) -> None:
+            ticket = document["tickets"][ticket_id]
+            ticket["submission_history"] = [
+                {"summary": f"submission-{index}-" + "s" * 3_000}
+                for index in range(20)
+            ]
+            ticket["review_history"] = [
+                {"review_notes": f"review-{index}-" + "r" * 3_000}
+                for index in range(20)
+            ]
+
+        self.service.mutate("pursers", fatten)
+        return ticket_id
 
     def seed_fat_briefing(self) -> None:
         def mutate(document: dict[str, object]) -> None:
@@ -415,6 +451,180 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
                     ack=False,
                     **bounds,
                 )
+
+    async def test_compact_write_receipts_have_byte_ceilings(self) -> None:
+        ticket_id = await self.create_fat_ticket()
+
+        raw_update = await self.call(
+            "ticket_update",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            parked=True,
+        )
+        compact_update = await self.protocol_call(
+            "ticket_update",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            parked=False,
+        )
+        raw_annotation = await self.call(
+            "ticket_annotate",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            text="raw annotation",
+        )
+        compact_annotation = await self.protocol_call(
+            "ticket_annotate",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            text="compact annotation",
+        )
+        raw_checkpoint = await self.call(
+            "memory_checkpoint",
+            agent_name="admin-agent",
+            summary="raw checkpoint " + "c" * 4_000,
+            remaining_tasks=["t" * 1_000],
+            files=["f" * 1_000],
+            next_steps=["n" * 1_000],
+            blockers=["b" * 1_000],
+        )
+        compact_checkpoint = await self.protocol_call(
+            "memory_checkpoint",
+            agent_name="admin-agent",
+            summary="compact checkpoint",
+        )
+        claimed = await self.protocol_call(
+            "ticket_claim",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+        )
+        renewed = await self.protocol_call(
+            "lease_renew",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+        )
+        unclaimed = await self.protocol_call(
+            "ticket_unclaim",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+        )
+        memory_written = await self.protocol_call(
+            "memory_write",
+            agent_name="admin-agent",
+            title="compact memory",
+            content="one compact receipt",
+            scope="project",
+        )
+
+        pairs = {
+            "ticket_update": (raw_update, compact_update),
+            "ticket_annotate": (raw_annotation, compact_annotation),
+            "memory_checkpoint": (raw_checkpoint, compact_checkpoint),
+        }
+        observed: dict[str, tuple[int, int]] = {}
+        for name, (before, after) in pairs.items():
+            before_bytes = len(
+                json.dumps(
+                    before.structured_content, ensure_ascii=False, sort_keys=True
+                ).encode("utf-8")
+            )
+            after_bytes = len(
+                json.dumps(
+                    after.structured_content, ensure_ascii=False, sort_keys=True
+                ).encode("utf-8")
+            )
+            observed[name] = (before_bytes, after_bytes)
+            self.assertGreater(before_bytes, after_bytes * 10)
+            self.assertLessEqual(after_bytes, 1_024)
+            self.assertNotIn(
+                "recipient_identities",
+                json.dumps(after.structured_content, ensure_ascii=False),
+            )
+        self.assertEqual(
+            set(compact_update.structured_content),
+            {
+                "ok", "ticket_id", "status", "parked", "generation",
+                "dispatch_state", "revoked_offer", "at",
+            },
+        )
+        self.assertEqual(
+            compact_annotation.structured_content["annotation_id"],
+            raw_annotation.structured_content["annotation"]["annotation_id"].replace(
+                "000001", "000002"
+            ),
+        )
+        self.assertEqual(
+            set(compact_checkpoint.structured_content),
+            {
+                "ok", "ticket_id", "status", "parked", "generation",
+                "dispatch_state", "revoked_offer", "at",
+            },
+        )
+        self.assertIsNone(compact_checkpoint.structured_content["ticket_id"])
+        for compact_only in (claimed, renewed, unclaimed, memory_written):
+            self.assertLessEqual(
+                len(
+                    json.dumps(
+                        compact_only.structured_content,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ).encode("utf-8")
+                ),
+                1_024,
+            )
+        print(
+            "compact-write bytes: "
+            + " ".join(
+                f"{name}={before}/{after}"
+                for name, (before, after) in observed.items()
+            )
+        )
+
+    async def test_full_response_view_restores_shape_but_not_routing_lists(self) -> None:
+        ticket_id = await self.create_fat_ticket()
+        configured = await self.protocol_call(
+            "board_response_view_set",
+            agent_name="admin-agent",
+            response_view="full",
+        )
+        self.assertEqual(configured.structured_content["response_view"], "full")
+
+        annotated = await self.protocol_call(
+            "ticket_annotate",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            text="full response",
+        )
+        self.assertIn("ticket", annotated.structured_content)
+        self.assertIn("annotation", annotated.structured_content)
+        self.assertNotIn(
+            "recipient_identities",
+            json.dumps(annotated.structured_content, ensure_ascii=False),
+        )
+
+    async def test_structured_memories_do_not_repeat_rendered_content(self) -> None:
+        written = await self.call(
+            "memory_checkpoint",
+            agent_name="admin-agent",
+            summary="one representation",
+            remaining_tasks=["ship"],
+            next_steps=["verify"],
+        )
+        memory_id = written.structured_content["memory"]["memory_id"]
+        read = await self.call(
+            "memory_read",
+            agent_name="admin-agent",
+            memory_type="checkpoint",
+        )
+        memory = next(
+            item
+            for item in read.structured_content["memories"]
+            if item["memory_id"] == memory_id
+        )
+        self.assertEqual(memory["summary"], "one representation")
+        self.assertEqual(memory["remaining_tasks"], ["ship"])
+        self.assertEqual(memory["next_steps"], ["verify"])
+        self.assertNotIn("content", memory)
 
 
 if __name__ == "__main__":

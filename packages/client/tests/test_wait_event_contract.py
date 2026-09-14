@@ -62,3 +62,41 @@ def test_only_mine_retains_rejection_for_the_submitting_holder() -> None:
         )
 
     asyncio.run(exercise())
+
+
+def test_only_mine_accepts_server_filtered_non_ticket_event_without_recipients() -> None:
+    async def exercise() -> None:
+        board = BoardClient("http://central.invalid/mcp", "TOKEN_PLACEHOLDER", "pursers")
+        board.identity = JoinedIdentity(
+            "pursers", "AI-worker", "PR-worker", "worker-a", "worker"
+        )
+        event = {"kind": "memory_written", "memory_id": "MEM-1"}
+        assert await board._event_matches(
+            object(), event, kinds=frozenset({"memory_written"}), only_mine=True
+        )
+
+    asyncio.run(exercise())
+
+
+def test_only_mine_accepts_server_filtered_ticket_event_without_refetch() -> None:
+    async def exercise() -> None:
+        board = BoardClient("http://central.invalid/mcp", "TOKEN_PLACEHOLDER", "pursers")
+        board.identity = JoinedIdentity(
+            "pursers", "AI-worker", "PR-worker", "worker-a", "worker"
+        )
+
+        async def unexpected_refetch(*_args, **_kwargs):
+            raise AssertionError("Central-filtered events must not need recipient refetch")
+
+        board._call_with = unexpected_refetch  # type: ignore[method-assign]
+        event = {
+            "kind": "ticket_status_changed",
+            "ticket_id": "TK-visible",
+            "status_from": "open",
+            "status_to": "claimed",
+        }
+        assert await board._event_matches(
+            object(), event, kinds=WORKER_WAIT_KINDS, only_mine=True
+        )
+
+    asyncio.run(exercise())

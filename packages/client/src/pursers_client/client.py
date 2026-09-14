@@ -1260,9 +1260,14 @@ class BoardClient:
             return False
         if not only_mine:
             return True
+        recipients = event.get("recipient_identities")
+        if not isinstance(recipients, list):
+            # Current Central applies seat visibility before projecting the
+            # routing-only recipient list out of model-facing responses.
+            return True
         ticket_id = event.get("ticket_id")
         if not ticket_id:
-            return self.identity.agent_id in event.get("recipient_identities", [])
+            return self.identity.agent_id in recipients
         try:
             result = await self._call_with(client, "ticket_get", {"ticket_id": ticket_id})
         except BoardClientError:

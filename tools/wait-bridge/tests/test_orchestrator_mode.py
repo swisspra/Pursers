@@ -398,7 +398,7 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
                     )
                 finally:
                     central.current_principal = lambda: self.principal
-                annotation_id = annotated["annotation"]["annotation_id"]
+                annotation_id = annotated["annotation_id"]
 
                 deadline = time.monotonic() + 3.0
                 while time.monotonic() < deadline:
