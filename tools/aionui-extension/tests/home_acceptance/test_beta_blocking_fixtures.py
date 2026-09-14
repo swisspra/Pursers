@@ -10,7 +10,7 @@ from .beta_blocking_fixtures import BOARD_ID, FIXTURE_DIR, load_fixture, materia
 
 REPO = Path(__file__).resolve().parents[4]
 PLAN_COMMIT = "d5e98bc09f2fb86b640402d44824ef1795ecd0a8"
-PLAN_SHA256 = "8e80ea4e51bcd55d61e0659c6c5c900856ce63475743b8db4de58bcf15c82908"
+PLAN_SHA256 = "8a5b418d340d1bb30df4d39ddc9cf2b10022f1e2c8e323a2b36c9215e3b8b365"
 RECIPE_ROWS = {
     14: "browser-extension-join-state-joined",
     18: "browser-extension-join-form",

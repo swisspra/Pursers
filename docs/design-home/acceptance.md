@@ -115,8 +115,10 @@ same exact step IDs in the evidence report.
    resolved state without approving production work.
 7. `result_visible`: verify the closed result, independent review label, actor,
    status transition, and current cursor appear in the Home and dashboard views.
-8. `pause_resume_stop`: pause, resume, then stop the disposable Team/seats using
-   the shipped lifecycle adapter; verify state and disabled-action transitions.
+8. `pause_resume_stop`: amended 2026-09-15 to product semantics. Pause, then
+   request cooperative stop for the same disposable running seat using the
+   shipped lifecycle adapter; verify both successful request outcomes and that
+   no unsupported Team Resume control is exposed.
 9. `clean_reconnect_after_rotation`: rotate only the disposable door, prove the
    old credential is rejected, reconnect with the new door, and prove no stale
    offer, duplicate identity, or orphaned MCP registration survives.

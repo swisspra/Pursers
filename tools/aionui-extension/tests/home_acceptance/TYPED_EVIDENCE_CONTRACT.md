@@ -5,6 +5,8 @@ bounded by AN366. It does not replace the screenshot and normalized
 accessibility-tree evidence required for every acceptance observation. It also
 does not decide report-level `prior_state` graph validity; the returned
 correlation block exposes the fields the parent integrator needs for that check.
+The complete AionUi phase-B producer inventory and verifier procedure are in
+[`AIONUI_TYPED_PIPELINE.md`](AIONUI_TYPED_PIPELINE.md).
 
 ## Trust boundary
 
@@ -76,7 +78,8 @@ the active AionUi/Personal transport and does not prove an unobserved UI action.
 `trusted_browser_state_v1` is a `state_transition` adapter. Its external private
 trust pins the installed `browser_observer.py` plus `observer.json`, surface,
 origin, page, candidate, board, and a closed recipe. Recipes allow only bounded
-DOM reads (`text`, `value`, `checked`, `disabled`, `count`, `class`, `hidden`)
+DOM reads (`text`, `value`, `checked`, `disabled`, `count`, `class`, `hidden`,
+`integer`, and bounded `attribute:data-*` or `attribute:aria-*` properties)
 and the explicit actions `observe`, `click`, `set_value`, `select`, `submit`,
 the closed navigation-key action `press_key`, `wait`, bounded same-origin
 `resource_delta`, same-origin `fetch`, and
