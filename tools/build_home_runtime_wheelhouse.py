@@ -170,6 +170,7 @@ def _build_environment(python: Path) -> dict[str, str]:
 
 def _pip_environment() -> dict[str, str]:
     environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
     environment.pop("PIP_FIND_LINKS", None)
     environment.pop("UV_FIND_LINKS", None)
     return environment
@@ -307,7 +308,7 @@ def _populate_locked_wheels(
     source_wheels: tuple[Path, Path],
     environment: dict[str, str],
 ) -> None:
-    _run([str(python), "-m", "venv", str(resolver)])
+    _run([str(python), "-m", "venv", str(resolver)], env=environment)
     resolver_python = resolver / "bin" / "python"
     _run(
         [
@@ -344,7 +345,7 @@ def _verify_install(
     environment: dict[str, str],
 ) -> dict[str, object]:
     verifier = temp / "verifier"
-    _run([str(python), "-m", "venv", str(verifier)])
+    _run([str(python), "-m", "venv", str(verifier)], env=environment)
     verifier_python = verifier / "bin" / "python"
     _run(
         [
@@ -512,7 +513,8 @@ def refresh_lock(lock: Path, python: Path) -> dict[str, object]:
         resolved = temp / "resolved"
         resolver = temp / "resolver"
         resolved.mkdir()
-        _run([str(python), "-m", "venv", str(resolver)])
+        environment = _pip_environment()
+        _run([str(python), "-m", "venv", str(resolver)], env=environment)
         resolver_python = resolver / "bin" / "python"
         _run(
             [
@@ -531,7 +533,7 @@ def refresh_lock(lock: Path, python: Path) -> dict[str, object]:
                 "--only-binary=:all:",
                 *(str(wheel) for wheel in source_wheels),
             ],
-            env=_pip_environment(),
+            env=environment,
         )
         source_names = {wheel.name for wheel in source_wheels}
         for source_wheel in source_wheels:
