@@ -99,10 +99,57 @@ async function readJson(response) {
   }
 }
 
+function createDoorPreview(result) {
+  const metadata = result && result.metadata ? result.metadata : {};
+  const normalized = result && result.normalized ? result.normalized : {};
+  return [
+    ['Door ID', valueOrDash(metadata.kid)],
+    ['Central host', valueOrDash(metadata.central_host)],
+    ['Board', valueOrDash(metadata.board)],
+    ['Role', valueOrDash(metadata.role)],
+    ['Seat name', valueOrDash(normalized.seat_name || 'Reserved on first session')],
+    ['Tier', valueOrDash(normalized.tier_max)],
+    ['Expires', metadata.exp ? new Date(Number(metadata.exp) * 1000).toLocaleString() : '—'],
+    ['Transport', valueOrDash(metadata.transport)],
+  ];
+}
+
+function renderDoorPreview(result, list, documentRef) {
+  const fields = createDoorPreview(result);
+  const children = [];
+  for (const [label, value] of fields) {
+    const term = documentRef.createElement('dt');
+    term.textContent = label;
+    const detail = documentRef.createElement('dd');
+    detail.textContent = value;
+    children.push(term, detail);
+  }
+  list.replaceChildren(...children);
+}
+
+function onboardingErrorMessage(result, stage) {
+  if (result && result.code === 'expired_door') {
+    return 'This door has expired. Ask your coordinator for a replacement door.';
+  }
+  if (result && result.code === 'invalid_door') {
+    return 'This door is malformed. Ask your coordinator for a valid Pursers door.';
+  }
+  if (result && result.message) return result.message;
+  return stage === 'validate'
+    ? 'Door validation failed. Check the door and try again.'
+    : 'Connect failed. Ask your coordinator to check the door.';
+}
+
 function initialize(documentRef, fetchImpl) {
   const form = documentRef.querySelector('#join-form');
   const doorInput = documentRef.querySelector('#door');
   const message = documentRef.querySelector('#message');
+  const validateButton = documentRef.querySelector('#validate-door');
+  const confirmation = documentRef.querySelector('#door-confirmation');
+  const preview = documentRef.querySelector('#door-preview');
+  const connectButton = documentRef.querySelector('#connect-door');
+  const cancelButton = documentRef.querySelector('#cancel-door');
+  let pendingDoor = null;
   const ui = {
     card: documentRef.querySelector('#status-card'),
     icon: documentRef.querySelector('#status-icon'),
@@ -113,29 +160,80 @@ function initialize(documentRef, fetchImpl) {
   const showResult = (result) => renderStartupView(
     createStartupView(result), ui, documentRef,
   );
+  const setBusy = (busy) => {
+    form.setAttribute('aria-busy', String(busy));
+    validateButton.disabled = busy;
+    connectButton.disabled = busy;
+  };
+  const clearPending = () => {
+    pendingDoor = null;
+    confirmation.hidden = true;
+    preview.replaceChildren();
+  };
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const door = doorInput.value.trim();
     doorInput.value = '';
-    message.textContent = 'Joining…';
-    const response = await fetchImpl('/pursers/join', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ door }),
-    });
-    const result = await readJson(response);
-    if (!response.ok || !result.ok) {
-      message.textContent = result.install_hint || 'Join failed. Ask your coordinator to check the door.';
-      if (result.error === 'bridge_not_installed') showResult(result);
-      return;
+    clearPending();
+    message.textContent = 'Validating door…';
+    setBusy(true);
+    try {
+      const response = await fetchImpl('/pursers/onboarding/validate', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ door }),
+      });
+      const result = await readJson(response);
+      if (!response.ok || !result.ok) {
+        message.textContent = onboardingErrorMessage(result, 'validate');
+        return;
+      }
+      pendingDoor = door;
+      renderDoorPreview(result, preview, documentRef);
+      confirmation.hidden = false;
+      message.textContent = 'Door validated. Review the redacted details, then select Connect.';
+    } catch (_error) {
+      message.textContent = 'Door validation could not reach the local extension. Try again.';
+    } finally {
+      setBusy(false);
     }
-    message.textContent = `Joined and registered ${result.mcp_server}.`;
-    showResult({
-      ok: true,
-      push_mode: result.status && result.status.push_mode,
-      seats: result.status ? [result.status] : [],
-    });
+  });
+
+  connectButton.addEventListener('click', async () => {
+    if (!pendingDoor) return;
+    const door = pendingDoor;
+    clearPending();
+    message.textContent = 'Connecting…';
+    setBusy(true);
+    try {
+      const response = await fetchImpl('/pursers/onboarding/connect', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ door }),
+      });
+      const result = await readJson(response);
+      if (!response.ok || !result.ok) {
+        message.textContent = onboardingErrorMessage(result, 'connect');
+        return;
+      }
+      message.textContent = `Joined and registered ${result.mcp_server}.`;
+      showResult({
+        ok: true,
+        push_mode: result.status && result.status.push_mode,
+        seats: result.status ? [result.status] : [],
+      });
+    } catch (_error) {
+      message.textContent = 'Connect could not reach the local extension. Validate the door again.';
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  cancelButton.addEventListener('click', () => {
+    clearPending();
+    message.textContent = 'Connection cancelled. Paste a door to start again.';
+    doorInput.focus();
   });
 
   fetchImpl('/pursers/status')
@@ -145,7 +243,15 @@ function initialize(documentRef, fetchImpl) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { createStartupView, normalizeSeat, renderStartupView };
+  module.exports = {
+    createDoorPreview,
+    createStartupView,
+    initialize,
+    normalizeSeat,
+    onboardingErrorMessage,
+    renderDoorPreview,
+    renderStartupView,
+  };
 }
 
 if (typeof document !== 'undefined' && typeof fetch !== 'undefined') {

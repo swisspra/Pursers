@@ -21,7 +21,7 @@ function adapter(dependencies = {}) {
   });
 }
 
-test('parse and validate expose metadata without door or Central URL', () => {
+test('parse and validate expose redacted metadata without door or full Central URL', () => {
   const secretDoor = door();
   const onboarding = adapter({ runBridge: async () => '' });
   const parsed = onboarding.parse(secretDoor);
@@ -38,6 +38,7 @@ test('parse and validate expose metadata without door or Central URL', () => {
     role: 'worker',
     kid: 'door-test-v1',
     exp: 2000000000,
+    central_host: '127.0.0.1:8766',
     transport: 'http-loopback',
     remote: false,
   });
@@ -45,7 +46,7 @@ test('parse and validate expose metadata without door or Central URL', () => {
   assert.equal(validated.normalized.tier_max, 2);
   const rendered = JSON.stringify({ parsed, validated });
   assert.equal(rendered.includes(secretDoor), false);
-  assert.equal(rendered.includes('127.0.0.1:8766'), false);
+  assert.equal(rendered.includes('http://127.0.0.1:8766/mcp'), false);
 });
 
 test('validate rejects expired, mismatched and insecure remote doors', () => {

@@ -81,6 +81,7 @@ function parseDoor(door, nowEpoch = Math.floor(Date.now() / 1000)) {
         role: envelope.r,
         kid: header.kid,
         exp: claims.exp,
+        central_host: endpoint.host,
         transport: endpoint.protocol === 'https:' ? 'https' : 'http-loopback',
         remote: !loopback,
       },
