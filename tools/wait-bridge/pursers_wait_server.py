@@ -5574,10 +5574,11 @@ async def _wait_for_work_many(
         lease_due_by_board[board_id] = {}
 
     active = [board_id for board_id in board_order if board_id in views]
-    # Entry catchup/backlog checks are direct reads. A board becomes push only
-    # after its subscription stream proves ready by advancing a cursor or
-    # yielding an event.
-    mode_by_board = {board_id: "poll" for board_id in active}
+    # Entry catchup/backlog checks happen before a delivery strategy is used.
+    # A board becomes push only after its subscription stream proves ready,
+    # and becomes poll only when the configured poll path or a push fallback
+    # actually runs.
+    mode_by_board = {board_id: "immediate" for board_id in active}
     catchup_meta: dict[str, dict[str, Any]] = {
         board_id: {
             "compacted": False,
@@ -5600,7 +5601,7 @@ async def _wait_for_work_many(
                 else round(time.monotonic() - started, 2)
             ),
             "timed_out": timed_out,
-            "mode": actual_mode if modes else "poll",
+            "mode": actual_mode if modes else "immediate",
             "mode_by_board": dict(mode_by_board),
             "reason": (
                 "partial"
@@ -5738,14 +5739,17 @@ async def _wait_for_work_many(
             relevant = compacted
         if backlog and not meta["partial"]:
             entry_ticket_snapshots[board_id] = list(active_tickets or [])
-            reconciled = _reconciled_offer_events(
-                active_tickets or [],
-                agent_ids[board_id],
-                only_mine,
-                proj,
-                wait_for_by_board[board_id],
-                board_id,
-            )
+            reconciled = [
+                {**event, "reason": "offer"}
+                for event in _reconciled_offer_events(
+                    active_tickets or [],
+                    agent_ids[board_id],
+                    only_mine,
+                    proj,
+                    wait_for_by_board[board_id],
+                    board_id,
+                )
+            ]
             queued = await _scan_open_backlog(
                 views[board_id],
                 agent_ids[board_id],
@@ -5984,6 +5988,8 @@ async def _wait_for_work_many(
         # uncued healthy board here would break selective push semantics.
         final_poll = [board_id for board_id in active if board_id in fallback]
     else:
+        for board_id in active:
+            mode_by_board[board_id] = "poll"
         cycle = 0
         while True:
             remaining = deadline - time.monotonic()

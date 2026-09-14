@@ -50,6 +50,7 @@ class FakeListenContext(AbstractAsyncContextManager[FakeSubscription]):
         self.uris = uris
 
     async def __aenter__(self) -> FakeSubscription:
+        self.transport.listen_attempted[self.board_id].set()
         if self.board_id in self.transport.listen_failures:
             raise RuntimeError("synthetic per-board listen failure")
         self.transport.ready[self.board_id].set()
@@ -75,6 +76,9 @@ class FakeTransport:
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         self.renewed: list[tuple[str, str]] = []
         self.ready = {board_id: asyncio.Event() for board_id in boards}
+        self.listen_attempted = {
+            board_id: asyncio.Event() for board_id in boards
+        }
         self.cues = {
             board_id: asyncio.Queue() for board_id in boards
         }
@@ -396,6 +400,41 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["reason"], "broadcast")
         self.assertEqual(result["events"][0]["ticket_id"], "TK-submitted")
+        self.assertEqual(result["mode"], "immediate")
+        self.assertEqual(result["mode_by_board"], {"alpha": "immediate"})
+
+    async def test_entry_offer_reports_immediate_mode(self) -> None:
+        transport = FakeTransport(["alpha"])
+        agent_id = wait_server._derived_agent_id(
+            transport.principal_id, wait_server.AGENT_NAME, "alpha"
+        )
+        transport.tickets["alpha"]["TK-offered"] = {
+            "ticket_id": "TK-offered",
+            "status": "open",
+            "target_url": "alpha/work",
+            "dispatch_state": {"state": "offered"},
+            "work_offer": {
+                "agent_id": agent_id,
+                "expires_at": "2099-01-01T00:00:00Z",
+            },
+        }
+
+        with patch.object(wait_server, "WAIT_MODE", "push"):
+            result = await wait_server._wait_for_work_many(
+                FakeRootClient(transport),
+                boards=["alpha"],
+                timeout_s=1,
+                only_mine=True,
+            )
+
+        self.assertEqual(result["reason"], "offer")
+        self.assertEqual(result["events"][0]["kind"], "ticket_offered")
+        self.assertEqual(result["mode"], "immediate")
+        self.assertEqual(result["mode_by_board"], {"alpha": "immediate"})
+        self.assertEqual(
+            [call[0] for call in transport.calls if call[0] == "ticket_list"],
+            ["ticket_list"],
+        )
 
     async def test_push_cue_refetches_only_the_cued_board(self) -> None:
         transport = FakeTransport(["alpha", "beta"])
@@ -445,6 +484,35 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after["alpha"], before["alpha"])
         self.assertEqual(after["beta"], before["beta"] + 1)
         self.assertEqual(result["events"][0]["board_id"], "beta")
+        self.assertEqual(result["mode"], "push")
+        self.assertEqual(
+            result["mode_by_board"], {"alpha": "push", "beta": "push"}
+        )
+
+    async def test_single_board_push_failure_reports_poll_fallback(self) -> None:
+        transport = FakeTransport(["alpha"])
+        transport.listen_failures.add("alpha")
+        with (
+            patch.object(wait_server, "WAIT_MODE", "push"),
+            patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.02),
+        ):
+            waiting = asyncio.create_task(
+                wait_server._wait_for_work_many(
+                    FakeRootClient(transport),
+                    boards=["alpha"],
+                    timeout_s=2,
+                    only_mine=False,
+                )
+            )
+            await asyncio.wait_for(
+                transport.listen_attempted["alpha"].wait(), timeout=1
+            )
+            transport.add_event("alpha", "TK-alpha-fallback", 1)
+            result = await asyncio.wait_for(waiting, timeout=1)
+
+        self.assertEqual(result["events"][0]["ticket_id"], "TK-alpha-fallback")
+        self.assertEqual(result["mode"], "poll")
+        self.assertEqual(result["mode_by_board"], {"alpha": "poll"})
 
     async def test_push_failure_degrades_only_that_board_to_polling(self) -> None:
         transport = FakeTransport(["alpha", "beta"])
