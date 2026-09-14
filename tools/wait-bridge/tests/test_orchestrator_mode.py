@@ -909,7 +909,11 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any(t["ticket_id"] == tid2 for t in d["tickets"]))
                 self.assertEqual(engine.subscription_health["reconnects"], 0)
 
-                # Restart offline coverage: loaded from disk while offline, boards="registry" includes secondary board
+                # Model a graceful restart: stop_subscriber waits for the task
+                # and persists the final ring/cache state before the offline
+                # engine reads it. Seeing an in-memory event does not itself
+                # prove the subscriber's asynchronous save has completed.
+                await engine.stop_subscriber()
                 offline_engine = wait_server.OrchestratorEngine(None, engine.meter, engine.state_path)
                 offline_engine.load_state()
                 self.assertIn(second_board, offline_engine.active_boards)
