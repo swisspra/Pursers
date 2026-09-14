@@ -14,10 +14,12 @@ from unittest.mock import AsyncMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = ROOT.parents[1]
 sys.path.insert(0, str(REPOSITORY / "packages" / "client" / "src"))
+sys.path.insert(0, str(REPOSITORY / "packages" / "central" / "src"))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
 import pursers_wait_server as wait_server  # noqa: E402
+from pursers_central import central  # noqa: E402
 
 
 class RawClient:
@@ -118,6 +120,73 @@ class ClaimOnDiscoveryKeepalive(NoDiscoveryKeepalive):
 
 
 class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_work_projection_preserves_holder_for_renewal_failure(self) -> None:
+        full_agent_id = "AI-" + "a" * 64
+        full_principal_id = "PR-" + "b" * 64
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        class ProjectingRawClient:
+            agent_name = "keepalive-seat"
+            role = "worker"
+
+            async def call_tool(
+                self, name: str, arguments: dict[str, Any], **_kwargs: Any
+            ) -> SimpleNamespace:
+                calls.append((name, arguments))
+                if name == "lease_renew":
+                    raise RuntimeError("transient renewal failure")
+                self.assert_ticket_get(name, arguments)
+                ticket = central.project_ticket_read(
+                    {
+                        "ticket_id": "TK-held",
+                        "title": "held ticket",
+                        "status": "claimed",
+                        "claimed_by": self.agent_name,
+                        "claimed_by_agent_id": full_agent_id,
+                        "claimed_by_principal_id": full_principal_id,
+                        "ttl_s": 30,
+                    },
+                    view="work",
+                    dispatch_history=[],
+                    include_dispatch_history=False,
+                )
+                payload = central.abbreviate_response_ids(
+                    {"ok": True, "ticket": ticket, "view": "work"}
+                )
+                return SimpleNamespace(
+                    is_error=False, structured_content=payload, content=[]
+                )
+
+            @staticmethod
+            def assert_ticket_get(name: str, arguments: dict[str, Any]) -> None:
+                if name != "ticket_get" or arguments.get("view") != "work":
+                    raise AssertionError((name, arguments))
+
+        client = ProjectingRawClient()
+        keepalive = NoDiscoveryKeepalive(Connection(client))
+        keepalive.observe_lease(
+            "pursers",
+            "TK-held",
+            {
+                "lease_kind": "work",
+                "ttl_s": 30,
+                "agent_name": client.agent_name,
+                "agent_id": full_agent_id,
+                "principal_id": full_principal_id,
+            },
+        )
+
+        await keepalive._renew("pursers", "TK-held")
+
+        tracked = keepalive.leases[("pursers", "TK-held")]
+        self.assertEqual(tracked["agent_id"], full_agent_id)
+        self.assertEqual(tracked["principal_id"], full_principal_id)
+        self.assertEqual([name for name, _ in calls], ["lease_renew", "ticket_get"])
+        self.assertEqual(calls[1][1]["view"], "work")
+        cues = keepalive.drain_cues({"pursers"})
+        self.assertEqual(len(cues), 1)
+        self.assertEqual(cues[0]["kind"], "lease_keepalive_failed")
+
     async def test_run_downgrades_idle_codex_seat_once(self) -> None:
         """The scheduler must reach the downgrade path for a truly idle seat.
 

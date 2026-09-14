@@ -643,6 +643,7 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
             ticket = document["tickets"][ticket_id]
             ticket["claimed_by"] = "worker-a"
             ticket["claimed_by_agent_id"] = full_agent_id
+            ticket["claimed_by_principal_id"] = full_principal_id
             ticket["last_claimed_by_principal_id"] = full_principal_id
             ticket["annotations"] = [
                 {
@@ -752,6 +753,9 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
         abbreviated_agent_id = "AI-aaaaaaaa"
         abbreviated_principal_id = "PR-bbbbbbbb"
         self.assertEqual(work_ticket["claimed_by_agent_id"], abbreviated_agent_id)
+        self.assertEqual(
+            work_ticket["claimed_by_principal_id"], abbreviated_principal_id
+        )
         self.assertEqual(
             list(work_payload)[-1], "id_map", "id_map must be the trailing block"
         )
