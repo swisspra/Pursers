@@ -31,6 +31,34 @@ This matrix prevents the approachable Home redesign from silently removing capab
 | Extension Join | Home first-run + Settings | Paste-door join, progress, failure hint, and redacted status remain supported without exposing the secret after submission. |
 | Personal MCP App | Shared shell | Host theme/font/safe-area integration, read-only truth, and authorized bounded projections remain intact. |
 
+## Personal MCP App acceptance boundary
+
+Coordinator decision `AN-000000000908` classifies the 79 `dashboard-ui.*`,
+`personal-mcp.*`, and `personal.*` catalogue rows as the `mcp-app` evidence
+surface. Personal is an MCP Apps resource (`ui://pursers/dashboard`), not a
+top-level AionUi route; a static `/personal/` page would exercise its synthetic
+fallback and cannot establish acceptance.
+
+For final evidence, the observer opens a real AionUi conversation page with the
+Personal App already present and selects exactly one matching child frame. The
+main-frame isolated context supplies signed host status and the installed
+candidate manifest from the verifier-pinned same-origin manifest URL. The App-frame isolated context supplies dashboard bytes,
+sandbox-board selectors, accessibility nodes, and transition actions over the
+real postMessage-connected resource. The live Personal stdio process and HMAC
+challenge remain mandatory. Missing or ambiguous frames fail closed.
+
+If a catalogue predicate cannot be observed on that real surface, its fact may
+carry only this explicit boundary shape:
+
+```json
+{"catalogue_boundary":{"kind":"unobservable_on_real_surface","reason":"specific reason"}}
+```
+
+The capture planner blocks such a row before navigation, and the validator
+rejects any report that labels it passed. Source checks, fixtures, and expected
+predicate values remain preflight only and never replace product-produced
+browser state.
+
 ## State Coverage
 
 | State | Required behavior |

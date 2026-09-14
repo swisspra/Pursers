@@ -75,7 +75,7 @@ CAPTURE_KEYS = {
 SURFACE_PRODUCTS = {
     "aionui": "AionUi",
     "fleet": "Pursers Fleet",
-    "personal": "Pursers Personal",
+    "mcp-app": "Pursers Personal",
 }
 TRANSITION_CONTEXT_KEYS = {
     "observation_id", "run_id", "action_id", "entity", "surface",
@@ -880,7 +880,11 @@ def probe_runtime_health(base_url: str, timeout_s: float = 4.0) -> dict[str, str
 
 EGO_SCRIPT = """
 const taskSpace = %s
-const target = %s
+const captureSpec = %s
+const target = typeof captureSpec === 'string' ? captureSpec : captureSpec.page_url
+const surfaceId = typeof captureSpec === 'string' ? 'aionui' : captureSpec.surface_id
+const candidateManifestUrl = typeof captureSpec === 'string'
+  ? new URL('candidate.json', target).href : captureSpec.candidate_manifest_url
 const task = await useOrCreateTaskSpace(taskSpace)
 await openOrReuseTab(target, { wait: true, timeout: 25 })
 await waitForLoad()
@@ -889,22 +893,70 @@ if (!info || !info.url || info.w === 0 || info.h === 0) {
   throw new Error('viewport unavailable')
 }
 const frameTree = await cdp('Page.getFrameTree')
-const frameId = frameTree && frameTree.frameTree && frameTree.frameTree.frame
-  ? frameTree.frameTree.frame.id : null
-if (!frameId) {
+const rootFrame = frameTree && frameTree.frameTree ? frameTree.frameTree : null
+if (!rootFrame || !rootFrame.frame || !rootFrame.frame.id) {
   throw new Error('main frame unavailable')
 }
-const isolated = await cdp('Page.createIsolatedWorld', {
-  frameId: frameId,
-  worldName: 'pursers-verifier-observer',
+const frameEntries = []
+const collectFrames = entry => {
+  frameEntries.push(entry)
+  for (const child of entry.childFrames || []) collectFrames(child)
+}
+collectFrames(rootFrame)
+let frameId = rootFrame.frame.id
+const hostWorld = await cdp('Page.createIsolatedWorld', {
+  frameId: rootFrame.frame.id,
+  worldName: 'pursers-verifier-host',
   grantUniveralAccess: false
 })
-const contextId = isolated ? isolated.executionContextId : null
+const hostContextId = hostWorld ? hostWorld.executionContextId : null
+if (!hostContextId) {
+  throw new Error('isolated host verifier world unavailable')
+}
+let contextId = hostContextId
+let appTitle = null
+if (surfaceId === 'mcp-app') {
+  const matches = []
+  for (const entry of frameEntries.slice(1)) {
+    const probeWorld = await cdp('Page.createIsolatedWorld', {
+      frameId: entry.frame.id,
+      worldName: 'pursers-verifier-mcp-app-probe',
+      grantUniveralAccess: false
+    })
+    const probeContext = probeWorld ? probeWorld.executionContextId : null
+    if (!probeContext) continue
+    const probe = await cdp('Runtime.evaluate', {
+      expression: `(() => ({
+        embedded: window.parent !== window,
+        title: document.title,
+        hasBoard: Boolean(document.querySelector('#board-id')),
+        hasNavigation: Boolean(document.querySelector('#tab-home, #tab-today'))
+      }))()`,
+      contextId: probeContext,
+      returnByValue: true
+    })
+    const value = probe && probe.result ? probe.result.value : null
+    if (value && value.embedded === true
+        && value.title === 'On Board Personal Preview'
+        && value.hasBoard === true && value.hasNavigation === true) {
+      matches.push({ frameId: entry.frame.id, contextId: probeContext, title: value.title })
+    }
+  }
+  if (matches.length !== 1) {
+    throw new Error(matches.length ? 'Personal MCP App frame is ambiguous'
+      : 'Personal MCP App frame is unavailable')
+  }
+  frameId = matches[0].frameId
+  contextId = matches[0].contextId
+  appTitle = matches[0].title
+}
 if (!contextId) {
   throw new Error('isolated verifier world unavailable')
 }
 const shot = await cdp('Page.captureScreenshot', { format: 'png' })
-const ax = await cdp('Accessibility.getFullAXTree')
+const hostAx = await cdp('Accessibility.getFullAXTree')
+const appAx = surfaceId === 'mcp-app'
+  ? await cdp('Accessibility.getFullAXTree', { frameId: frameId }) : hostAx
 const statusResult = await cdp('Runtime.evaluate', {
   expression: `(async () => {
     try {
@@ -922,14 +974,14 @@ const statusResult = await cdp('Runtime.evaluate', {
       return { http_status: 0, content_type: '', payload: null }
     }
   })()`,
-  contextId: contextId,
+  contextId: hostContextId,
   awaitPromise: true,
   returnByValue: true
 })
 const candidateResult = await cdp('Runtime.evaluate', {
   expression: `(async () => {
     try {
-      const response = await fetch(new URL('candidate.json', window.location.href), {
+      const response = await fetch(${JSON.stringify(candidateManifestUrl)}, {
         credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' }
       })
       let payload = null
@@ -943,7 +995,7 @@ const candidateResult = await cdp('Runtime.evaluate', {
       return { http_status: 0, content_type: '', payload: null }
     }
   })()`,
-  contextId: contextId,
+  contextId: hostContextId,
   awaitPromise: true,
   returnByValue: true
 })
@@ -969,7 +1021,7 @@ const pageDigestResult = await cdp('Runtime.evaluate', {
   awaitPromise: true,
   returnByValue: true
 })
-const nodes = (ax && ax.nodes ? ax.nodes : []).slice(0, 400).map(function (node) {
+const simplifyNodes = ax => (ax && ax.nodes ? ax.nodes : []).slice(0, 400).map(function (node) {
   return {
     nodeId: node.nodeId,
     role: node.role && node.role.value ? node.role.value : null,
@@ -977,10 +1029,15 @@ const nodes = (ax && ax.nodes ? ax.nodes : []).slice(0, 400).map(function (node)
     ignored: node.ignored === true
   }
 })
+const nodes = simplifyNodes(appAx)
+const hostNodes = simplifyNodes(hostAx)
+const snapshot = surfaceId === 'mcp-app'
+  ? { title: appTitle || '', viewport: { w: info.w, h: info.h }, nodes: nodes, host_nodes: hostNodes }
+  : { title: info.title || '', viewport: { w: info.w, h: info.h }, nodes: nodes }
 cliLog(JSON.stringify({
   page_url: info.url,
   screenshot_base64: shot.data,
-  snapshot: { title: info.title || '', viewport: { w: info.w, h: info.h }, nodes: nodes },
+  snapshot: snapshot,
   host_status: statusResult && statusResult.result ? statusResult.result.value : null,
   candidate_status: candidateResult && candidateResult.result ? candidateResult.result.value : null,
   selected_board: boardResult && boardResult.result ? boardResult.result.value : null,
@@ -991,7 +1048,11 @@ cliLog(JSON.stringify({
 
 EGO_TRANSITION_SCRIPT = """
 const taskSpace = %s
-const target = %s
+const captureSpec = %s
+const target = typeof captureSpec === 'string' ? captureSpec : captureSpec.page_url
+const surfaceId = typeof captureSpec === 'string' ? 'aionui' : captureSpec.surface_id
+const candidateManifestUrl = typeof captureSpec === 'string'
+  ? new URL('candidate.json', target).href : captureSpec.candidate_manifest_url
 const recipe = %s
 const task = await useOrCreateTaskSpace(taskSpace)
 await openOrReuseTab(target, { wait: true, timeout: 25 })
@@ -999,15 +1060,57 @@ await waitForLoad()
 const info = await pageInfo()
 if (!info || !info.url || info.w === 0 || info.h === 0) throw new Error('viewport unavailable')
 const frameTree = await cdp('Page.getFrameTree')
-const frameId = frameTree && frameTree.frameTree && frameTree.frameTree.frame
-  ? frameTree.frameTree.frame.id : null
-if (!frameId) throw new Error('main frame unavailable')
-const isolated = await cdp('Page.createIsolatedWorld', {
-  frameId: frameId,
-  worldName: 'pursers-verifier-transition',
+const rootFrame = frameTree && frameTree.frameTree ? frameTree.frameTree : null
+if (!rootFrame || !rootFrame.frame || !rootFrame.frame.id) throw new Error('main frame unavailable')
+const frameEntries = []
+const collectFrames = entry => {
+  frameEntries.push(entry)
+  for (const child of entry.childFrames || []) collectFrames(child)
+}
+collectFrames(rootFrame)
+let frameId = rootFrame.frame.id
+const hostWorld = await cdp('Page.createIsolatedWorld', {
+  frameId: rootFrame.frame.id,
+  worldName: 'pursers-verifier-transition-host',
   grantUniveralAccess: false
 })
-const contextId = isolated ? isolated.executionContextId : null
+const hostContextId = hostWorld ? hostWorld.executionContextId : null
+if (!hostContextId) throw new Error('isolated host verifier world unavailable')
+let contextId = hostContextId
+if (surfaceId === 'mcp-app') {
+  const matches = []
+  for (const entry of frameEntries.slice(1)) {
+    const probeWorld = await cdp('Page.createIsolatedWorld', {
+      frameId: entry.frame.id,
+      worldName: 'pursers-verifier-mcp-app-transition-probe',
+      grantUniveralAccess: false
+    })
+    const probeContext = probeWorld ? probeWorld.executionContextId : null
+    if (!probeContext) continue
+    const probe = await cdp('Runtime.evaluate', {
+      expression: `(() => ({
+        embedded: window.parent !== window,
+        title: document.title,
+        hasBoard: Boolean(document.querySelector('#board-id')),
+        hasNavigation: Boolean(document.querySelector('#tab-home, #tab-today'))
+      }))()`,
+      contextId: probeContext,
+      returnByValue: true
+    })
+    const value = probe && probe.result ? probe.result.value : null
+    if (value && value.embedded === true
+        && value.title === 'On Board Personal Preview'
+        && value.hasBoard === true && value.hasNavigation === true) {
+      matches.push({ frameId: entry.frame.id, contextId: probeContext })
+    }
+  }
+  if (matches.length !== 1) {
+    throw new Error(matches.length ? 'Personal MCP App frame is ambiguous'
+      : 'Personal MCP App frame is unavailable')
+  }
+  frameId = matches[0].frameId
+  contextId = matches[0].contextId
+}
 if (!contextId) throw new Error('isolated verifier world unavailable')
 const responseActions = recipe.actions.filter(spec => spec.kind === 'click_response_json')
 if (responseActions.length > 1) throw new Error('multiple response captures are unavailable')
@@ -1514,7 +1617,7 @@ if (jobAction) {
   }
   transitionResult.result.value.action[jobAction.path] = value
 }
-const bindingResult = await cdp('Runtime.evaluate', {
+const hostBindingResult = await cdp('Runtime.evaluate', {
   expression: `(async () => {
     const readJson = async (url) => {
       try {
@@ -1525,7 +1628,15 @@ const bindingResult = await cdp('Runtime.evaluate', {
       } catch (_error) { return { http_status: 0, content_type: '', payload: null } }
     }
     const host = await readJson('/pursers/status')
-    const candidate = await readJson(new URL('candidate.json', window.location.href))
+    const candidate = await readJson(${JSON.stringify(candidateManifestUrl)})
+    return { host_status: host, candidate_status: candidate }
+  })()`,
+  contextId: hostContextId,
+  awaitPromise: true,
+  returnByValue: true
+})
+const appBindingResult = await cdp('Runtime.evaluate', {
+  expression: `(async () => {
     const boardNode = document.querySelector('[data-helper-field="board"], [data-board-id], #board-id')
     const selectedBoard = boardNode ? (boardNode.getAttribute('data-board-id') || boardNode.textContent || '').trim() : ''
     let pageSha = ''
@@ -1536,15 +1647,16 @@ const bindingResult = await cdp('Runtime.evaluate', {
         pageSha = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
       }
     } catch (_error) {}
-    return { host_status: host, candidate_status: candidate, selected_board: selectedBoard, page_sha256: pageSha }
+    return { selected_board: selectedBoard, page_sha256: pageSha }
   })()`,
   contextId: contextId,
   awaitPromise: true,
   returnByValue: true
 })
 const transition = transitionResult && transitionResult.result ? transitionResult.result.value : null
-const binding = bindingResult && bindingResult.result ? bindingResult.result.value : null
-if (!transition || !binding) throw new Error('transition result unavailable')
+const hostBinding = hostBindingResult && hostBindingResult.result ? hostBindingResult.result.value : null
+const appBinding = appBindingResult && appBindingResult.result ? appBindingResult.result.value : null
+if (!transition || !hostBinding || !appBinding) throw new Error('transition result unavailable')
 if (responseAction) {
   const captured = await cdp('Runtime.evaluate', {
     expression: `(async () => {
@@ -1579,10 +1691,10 @@ cliLog(JSON.stringify({
   action: transition.action,
   after: transition.after,
   order: transition.order,
-  host_status: binding.host_status,
-  candidate_status: binding.candidate_status,
-  selected_board: binding.selected_board,
-  page_sha256: binding.page_sha256
+  host_status: hostBinding.host_status,
+  candidate_status: hostBinding.candidate_status,
+  selected_board: appBinding.selected_board,
+  page_sha256: appBinding.page_sha256
 }))
 """
 
@@ -1609,7 +1721,26 @@ def _validate_backend_command(config: dict[str, Any], command: list[str]) -> lis
     return [str(resolved), *command[1:]]
 
 
-def _run_backend(config: dict[str, Any], page_url: str) -> dict[str, Any]:
+def _candidate_manifest_url(
+    config: dict[str, Any], page_url: str, surface_id: str
+) -> str:
+    if surface_id != "mcp-app":
+        return urljoin(page_url, "candidate.json")
+    surface = _surface_config(config, surface_id)
+    candidate_url = surface.get("candidate_manifest_url")
+    target = surface.get("target")
+    base_url = target.get("base_url") if isinstance(target, dict) else None
+    if not isinstance(base_url, str):
+        raise _fail(EXIT_CONFIG, "Personal target origin is unavailable")
+    candidate_url = _same_origin(candidate_url, base_url)
+    if not urlsplit(candidate_url).path.endswith("/candidate.json"):
+        raise _fail(EXIT_CONFIG, "Personal candidate_manifest_url is invalid")
+    return candidate_url
+
+
+def _run_backend(
+    config: dict[str, Any], page_url: str, surface_id: str = "aionui"
+) -> dict[str, Any]:
     backend = config.get("backend")
     if not isinstance(backend, dict) or backend.get("kind") not in {"ego-browser", "command"}:
         raise _fail(EXIT_CONFIG, "observer.json needs an ego-browser or command backend")
@@ -1627,11 +1758,29 @@ def _run_backend(config: dict[str, Any], page_url: str) -> dict[str, Any]:
             raise _fail(EXIT_CONFIG, "ego-browser task_space must be 1-128 characters")
         if isinstance(task_space, int) and task_space < 1:
             raise _fail(EXIT_CONFIG, "ego-browser task_space must be positive")
-        payload = EGO_SCRIPT % (json.dumps(task_space), json.dumps(page_url))
+        payload = EGO_SCRIPT % (
+            json.dumps(task_space),
+            json.dumps({
+                "page_url": page_url,
+                "surface_id": surface_id,
+                "candidate_manifest_url": _candidate_manifest_url(
+                    config, page_url, surface_id
+                ),
+            }),
+        )
         extra_path = str(Path(command[0]).parent)
     else:
         argv = command
-        payload = json.dumps({"page_url": page_url}, sort_keys=True)
+        payload = json.dumps(
+            {
+                "page_url": page_url,
+                "surface_id": surface_id,
+                "candidate_manifest_url": _candidate_manifest_url(
+                    config, page_url, surface_id
+                ),
+            },
+            sort_keys=True,
+        )
         extra_path = str(Path(command[0]).parent)
     env = {
         "PATH": os.pathsep.join([extra_path, os.defpath]),
@@ -1881,7 +2030,8 @@ def _validate_transition_recipe(value: Any) -> dict[str, Any]:
 
 
 def _run_transition_backend(
-    config: dict[str, Any], page_url: str, recipe: dict[str, Any]
+    config: dict[str, Any], page_url: str, recipe: dict[str, Any],
+    surface_id: str = "aionui",
 ) -> dict[str, Any]:
     backend = config.get("backend")
     if not isinstance(backend, dict) or backend.get("kind") not in {"ego-browser", "command"}:
@@ -1897,12 +2047,28 @@ def _run_transition_backend(
         if not isinstance(task_space, (str, int)) or isinstance(task_space, bool):
             raise _fail(EXIT_CONFIG, "ego-browser task_space must be a string or integer")
         payload = EGO_TRANSITION_SCRIPT % (
-            json.dumps(task_space), json.dumps(page_url), json.dumps(recipe)
+            json.dumps(task_space),
+            json.dumps({
+                "page_url": page_url,
+                "surface_id": surface_id,
+                "candidate_manifest_url": _candidate_manifest_url(
+                    config, page_url, surface_id
+                ),
+            }),
+            json.dumps(recipe),
         )
     else:
         argv = command
         payload = json.dumps(
-            {"page_url": page_url, "recipe": recipe}, sort_keys=True
+            {
+                "page_url": page_url,
+                "recipe": recipe,
+                "surface_id": surface_id,
+                "candidate_manifest_url": _candidate_manifest_url(
+                    config, page_url, surface_id
+                ),
+            },
+            sort_keys=True,
         )
     environment = {
         "PATH": os.pathsep.join([str(Path(command[0]).parent), os.defpath]),
@@ -2108,7 +2274,7 @@ def _read_spec(spec_path: Path) -> dict[str, Any]:
 def capture(spec_path: Path, out: Any) -> int:
     config = _load_config()
     spec = _read_spec(spec_path)
-    observation = _run_backend(config, spec["page_url"])
+    observation = _run_backend(config, spec["page_url"], spec["surface_id"])
     binding = _observed_surface_binding(
         config, observation, spec["surface_id"], spec["target"]["base_url"]
     )
@@ -2323,7 +2489,7 @@ def transition(stream: Any, out: Any) -> int:
     spec = _read_transition_spec(stream)
     config = _load_config()
     observation = _run_transition_backend(
-        config, spec["page_url"], spec["recipe"]
+        config, spec["page_url"], spec["recipe"], spec["surface_id"]
     )
     observed_page = _same_origin(
         observation["page_url"], spec["target"]["base_url"]

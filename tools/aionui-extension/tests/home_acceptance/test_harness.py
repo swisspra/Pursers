@@ -163,7 +163,7 @@ def _complete_report() -> dict[str, object]:
             },
             "candidate_commit": CANDIDATE_SHA,
         },
-        "personal": {
+        "mcp-app": {
             "target": dict(TARGET),
             "runtime": {
                 "product": "Pursers Personal",
@@ -190,7 +190,7 @@ def _retarget(
     report["target"] = dict(target)
     surfaces = report.get("surfaces")
     if isinstance(surfaces, dict):
-        for surface_id in ("aionui", "personal"):
+        for surface_id in ("aionui", "mcp-app"):
             surfaces[surface_id]["target"] = dict(target)
         surfaces["fleet"]["target"] = {
             **surfaces["fleet"]["target"],
@@ -217,16 +217,50 @@ def test_report_with_surfaces_but_no_operator_topology_is_rejected(
         _validate(tmp_path, report)
 
 
-def test_dashboard_ui_identifiers_bind_to_the_personal_surface() -> None:
+def test_dashboard_ui_identifiers_bind_to_the_mcp_app_surface() -> None:
     for identifier in (
         "dashboard-ui.logic",
         "dashboard-ui.styles",
         "dashboard-ui.shell",
         "personal-mcp.surface",
     ):
-        assert _surface_for_identifier(identifier) == "personal"
+        assert _surface_for_identifier(identifier) == "mcp-app"
     assert _surface_for_identifier("fleet-dashboard.surface") == "fleet"
     assert _surface_for_identifier("extension-join.surface") == "aionui"
+
+
+def test_catalogue_boundary_cannot_be_reported_as_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identifier = "dashboard-ui.logic"
+    fact = dict(harness_module.REQUIRED_FACTS[identifier])
+    fact["catalogue_boundary"] = {
+        "kind": "unobservable_on_real_surface",
+        "reason": "host does not expose this state in the real App frame",
+    }
+    monkeypatch.setitem(harness_module.REQUIRED_FACTS, identifier, fact)
+
+    with pytest.raises(AcceptanceError, match="catalogue boundary and cannot pass"):
+        harness_module._passed_evidence_items(
+            [{
+                "id": identifier,
+                "status": "passed",
+                "evidence": "observations/dashboard-ui-logic.json",
+            }],
+            "dashboard inventory item",
+        )
+
+
+def test_catalogue_boundary_uses_a_closed_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identifier = "dashboard-ui.logic"
+    fact = dict(harness_module.REQUIRED_FACTS[identifier])
+    fact["catalogue_boundary"] = {"reason": "missing kind"}
+    monkeypatch.setitem(harness_module.REQUIRED_FACTS, identifier, fact)
+
+    with pytest.raises(AcceptanceError, match="closed schema"):
+        harness_module._catalogue_boundary_reason(identifier)
 
 
 def test_dashboard_ui_observation_bound_to_aionui_runtime_is_rejected(
@@ -234,7 +268,7 @@ def test_dashboard_ui_observation_bound_to_aionui_runtime_is_rejected(
 ) -> None:
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
     report = _complete_report()
-    report["surfaces"]["personal"]["runtime"] = {  # type: ignore[index]
+    report["surfaces"]["mcp-app"]["runtime"] = {  # type: ignore[index]
         **HOST,
         "identity_source": "signed-aionui-webui-listener",
     }
@@ -371,7 +405,7 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
                     observation_target["board_id"],
                     _fixture_nonce(identifier),
                 )
-                if surface_id == "personal"
+                if surface_id == "mcp-app"
                 else None
             )
         else:
@@ -635,7 +669,7 @@ snapshot = {
 }
 attestation = None
 nonce = hashlib.sha256(("nonce:" + identifier).encode()).hexdigest()
-if request["surface_id"] == "personal":
+if request["surface_id"] == "mcp-app":
     claim = {
         "schema_version": 1,
         "server_name": "On Board Personal",
@@ -683,7 +717,7 @@ json.dump({
             "observer_id": "verifier-session-1",
             "repository_root": str(Path(PERSONAL_SOURCE).parent),
             "surfaces": {
-                "personal": {
+                "mcp-app": {
                     "runtime": {
                         "artifact": Path(PERSONAL_SOURCE).name,
                         "challenge_key": str(key_path),
@@ -1858,7 +1892,7 @@ def _personal_observations(report: dict[str, object]) -> list[dict[str, object]]
     return [
         row
         for row in rows
-        if harness_module._surface_for_identifier(row["id"]) == "personal"
+        if harness_module._surface_for_identifier(row["id"]) == "mcp-app"
     ]
 
 
