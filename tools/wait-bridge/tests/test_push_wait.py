@@ -847,7 +847,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 ticket_id=legacy["ticket"]["ticket_id"], reason="fixture complete",
             )
             await admin_client._call(
-                "board_dispatch_policy_set", agent_name="live-admin", offer_ttl_s=1
+                "board_dispatch_policy_set", agent_name="live-admin", offer_ttl_s=60
             )
 
             cursor = int(
@@ -866,19 +866,30 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 first["ticket"]["work_offer"]["agent_id"], a.identity.agent_id
             )
+            # Keep the isolation checks independent from wall-clock expiry;
+            # the final block below exercises expiry and rotation explicitly.
+            work_deadline = self.service.offer_deadline_tasks[
+                (wait_server.BOARD_ID, first_id, "work")
+            ]
+            work_deadline.cancel()
+            await asyncio.gather(work_deadline, return_exceptions=True)
 
             self.principal = worker_b
             with (
                 patch.object(wait_server, "WAIT_MODE", "poll"),
-                patch.object(wait_server, "clamp_timeout", return_value=0.03),
+                patch.object(wait_server, "clamp_timeout", return_value=1.0),
                 patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.01),
             ):
                 b_wait = await wait_server._wait_for_work(
                     b, since_seq=cursor, timeout_s=1,
                     only_mine=False, wait_for="claimable",
                 )
-            self.assertTrue(b_wait["timed_out"], b_wait)
-            self.assertEqual(b_wait["events"], [])
+            self.assertEqual(b_wait["events"], [], b_wait)
+            current_first = await b.ticket_get(first_id)
+            self.assertEqual(
+                current_first["ticket"]["work_offer"]["agent_id"],
+                a.identity.agent_id,
+            )
             with self.assertRaisesRegex(
                 BoardClientError,
                 r"^ticket is not offered to this seat; wait for your offer$",
@@ -909,6 +920,11 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 files_changed=["tools/wait-bridge/pursers_wait_server.py"],
             )
             offered_reviewer = submitted["ticket"]["review_offer"]["agent_id"]
+            review_deadline = self.service.offer_deadline_tasks[
+                (wait_server.BOARD_ID, first_id, "review")
+            ]
+            review_deadline.cancel()
+            await asyncio.gather(review_deadline, return_exceptions=True)
             offered_client, offered_principal = (
                 (ra, reviewer_a) if offered_reviewer == ra.identity.agent_id
                 else (rb, reviewer_b)
@@ -919,15 +935,19 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             self.principal = other_principal
             with (
                 patch.object(wait_server, "WAIT_MODE", "poll"),
-                patch.object(wait_server, "clamp_timeout", return_value=0.03),
+                patch.object(wait_server, "clamp_timeout", return_value=1.0),
                 patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.01),
             ):
                 other_review = await wait_server._wait_for_work(
                     other_client, since_seq=review_cursor, timeout_s=1,
                     only_mine=False, wait_for="submitted",
                 )
-            self.assertTrue(other_review["timed_out"])
-            self.assertEqual(other_review["events"], [])
+            self.assertEqual(other_review["events"], [], other_review)
+            current_submitted = await other_client.ticket_get(first_id)
+            self.assertEqual(
+                current_submitted["ticket"]["review_offer"]["agent_id"],
+                offered_client.identity.agent_id,
+            )
             self.principal = offered_principal
             offered_review = await wait_server._wait_for_work(
                 offered_client, since_seq=review_cursor, timeout_s=1,
@@ -958,7 +978,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
             with patch.object(
-                central.time, "time", return_value=expiry_start + 2.0
+                central.time, "time", return_value=expiry_start + 61.0
             ):
                 await admin_client._call("board_reap")
             self.principal = worker_b
@@ -966,10 +986,15 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 b, since_seq=expiry_cursor, timeout_s=1,
                 only_mine=False, wait_for="claimable",
             )
-            self.assertEqual(b_rotated["reason"], "offer")
+            self.assertEqual(b_rotated["reason"], "offer", b_rotated)
             self.assertEqual(
                 b_rotated["events"][0]["offer"]["ticket_id"], expiring_id
             )
+            rotated_deadline = self.service.offer_deadline_tasks[
+                (wait_server.BOARD_ID, expiring_id, "work")
+            ]
+            rotated_deadline.cancel()
+            await asyncio.gather(rotated_deadline, return_exceptions=True)
     async def test_auto_wait_uses_declared_worker_with_review_scoped_token(self) -> None:
         async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
             client = await self._joined_client(raw, role="worker")
