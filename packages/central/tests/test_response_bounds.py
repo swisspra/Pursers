@@ -602,6 +602,50 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
             json.dumps(annotated.structured_content, ensure_ascii=False),
         )
 
+    def test_compact_review_lease_receipt_preserves_expiry(self) -> None:
+        document = {
+            "generation_revision": 7,
+            "members": {
+                "AI-reviewer": {"agent_name": "reviewer-one"},
+            },
+            "tickets": {
+                "TK-review": {
+                    "ticket_id": "TK-review",
+                    "status": "submitted",
+                    "parked": False,
+                    "dispatch_state": {
+                        "state": "review_claimed",
+                        "kind": "review",
+                        "agent_id": "AI-reviewer",
+                    },
+                    "review_lease": {
+                        "reviewer_agent_name": "reviewer-one",
+                        "expires_at": "2026-09-14T17:00:00+00:00",
+                    },
+                },
+            },
+        }
+
+        receipt = central.compact_write_response(
+            "lease_renew",
+            {"ok": True},
+            document,
+            {"board_id": "pursers", "ticket_id": "TK-review"},
+        )
+
+        self.assertEqual(
+            receipt["dispatch_state"],
+            {
+                "state": "review_claimed",
+                "agent_name": "reviewer-one",
+                "expires_at": "2026-09-14T17:00:00+00:00",
+            },
+        )
+        self.assertLessEqual(
+            len(json.dumps(receipt, sort_keys=True).encode("utf-8")),
+            1_024,
+        )
+
     async def test_structured_memories_do_not_repeat_rendered_content(self) -> None:
         written = await self.call(
             "memory_checkpoint",

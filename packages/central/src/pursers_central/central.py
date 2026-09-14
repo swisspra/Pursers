@@ -476,7 +476,7 @@ def _compact_dispatch_state(
     if state_name == "claimed":
         agent_name = ticket.get("claimed_by") or agent_name
         expires_at = ticket.get("lease_expires_at") or expires_at
-    elif state_name == "reviewing":
+    elif state_name in {"review_claimed", "reviewing"}:
         review_lease = ticket.get("review_lease")
         if isinstance(review_lease, Mapping):
             agent_name = review_lease.get("reviewer_agent_name") or agent_name
