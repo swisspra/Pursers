@@ -37,9 +37,18 @@ and the Personal component lock are consumers. Do not edit those pins by hand.
 3. Tag the exact verified commit:
 
    ```sh
-   git tag -s <release_tag> <verified_commit>
-   git push origin <release_tag>
+   git config --get user.signingkey || echo "no signing key: use -a"
+   git tag -a <release_tag> <verified_commit> -m "Pursers <version>" &&
+     test "$(git rev-parse --verify <release_tag>^{commit})" = <verified_commit> &&
+     git push origin <release_tag>
    ```
+
+   If a pre-push command fails, delete the unpushed local tag with
+   `git tag -d <release_tag>` before retrying. Signing is optional: use `-s`
+   only with GPG or `gpg.format=ssh` plus `user.signingkey` configured to a
+   project-owned key, and insert `git tag -v <release_tag> &&` before the SHA
+   check. The release workflow verifies that the tag exists; it does not
+   verify tag signatures.
 
 PyPI versions are immutable. If verification fails after a version has been
 published, advance the affected version instead of rebuilding that release.

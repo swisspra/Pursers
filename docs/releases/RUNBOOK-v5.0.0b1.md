@@ -178,7 +178,7 @@ requires `refs/tags/v5.0.0b1`:
 ```
 
 Do not create a temporary tag just to make the rehearsal pass. Run the same
-command again after the operator creates the real signed tag in step 7; its
+command again after the operator creates the real annotated tag in step 7; its
 only expected output then is the full candidate SHA.
 
 ## 4. Generate and verify `SHA256SUMS.txt`
@@ -282,12 +282,26 @@ green and the exact candidate has passed the required CI and review:
 
 ```sh
 cd "$STAGING/repository"
-git tag -s "$TAG" "$CANDIDATE" -m "Pursers $VERSION"
-test "$(git rev-parse --verify "$TAG^{commit}")" = "$CANDIDATE"
-"$STAGING/build-venv/bin/python" tools/release_publish.py \
-  "$TAG" verify-checkout
-git push origin "refs/tags/$TAG"
+git config --get user.signingkey || echo "no signing key: use -a"
+git tag -a "$TAG" "$CANDIDATE" -m "Pursers $VERSION" &&
+  test "$(git rev-parse --verify "$TAG^{commit}")" = "$CANDIDATE" &&
+  "$STAGING/build-venv/bin/python" tools/release_publish.py \
+    "$TAG" verify-checkout &&
+  git push origin "refs/tags/$TAG"
 ```
+
+If any command fails before the push, stop. Remove an unpushed local tag with
+`git tag -d "$TAG"`, correct the cause, and rerun this step from the tag command.
+
+### Optional signed-tag variant
+
+Signing is optional because the release workflow's `gh release create
+--verify-tag` checks that the tag exists, not that it has a valid signature.
+Use a signed tag only when the release host has either GPG configured or
+`gpg.format=ssh` plus `user.signingkey`, and the configured signing key is
+project-owned. Verify those prerequisites before creating the tag, replace
+`git tag -a` above with `git tag -s`, and insert `git tag -v "$TAG" &&` before
+the candidate-SHA check. Do not push unless `git tag -v` succeeds.
 
 Expected `verify-checkout` output:
 
@@ -405,13 +419,13 @@ than claiming the seven GitHub assets are sufficient.
   rebuild from a fresh exact-candidate checkout. Nothing external needs
   rollback.
 - After tag push but before release publication: do not move or recreate the
-  signed tag. Stop the release job, record the mismatch, fix the source, and
+  tag. Stop the release job, record the mismatch, fix the source, and
   advance to a new prerelease candidate and tag.
 - After publication: do not replace assets, reuse a version, move the tag, or
   delete evidence. Mark the release unavailable only under an explicit
   operator/coordinator incident decision, keep the previous approved release
   as the recovery target, correct the source, advance the prerelease version,
-  and publish a new signed tag.
+  and publish a new tag.
 - At every stage, an unexpected asset, same-name asset hash mismatch, wrong
   candidate, non-prerelease release, beta marked latest, empty body, or body
   provenance mismatch is a hard stop.
@@ -435,7 +449,7 @@ than claiming the seven GitHub assets are sufficient.
   earlier six-wheel-only `--no-index` command was invalid because the release
   cohort is not a complete dependency wheelhouse.
 - `verify-checkout` correctly failed before the tag existed. It becomes an
-  effective exact-SHA gate only after the signed tag is created.
+  effective exact-SHA gate only after the annotated tag is created.
 - The curated release body is absent from rc6. Its reviewed docs correction
   must name the exact candidate, and it differs from the CHANGELOG-derived body
   used by the workflow. Body provenance remains a release-day gate, not a
