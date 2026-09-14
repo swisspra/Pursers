@@ -58,9 +58,11 @@ creates a checkpoint and safely unclaims the ticket.
 
 The production runtime is macOS-only because it fails closed unless
 `sandbox-exec` is available. Its OS profile denies network access and writes
-outside the ticket clone and temporary directory. Mutable Git metadata stays
-inside that clone, so the sandboxed agent can stage and commit without access
-to the source repository. The ACP permission broker
+outside the ticket clone and temporary directory. Every run receives a scratch
+`HOME`, `XDG_CONFIG_HOME`, and global Git config containing only the seat's
+configured commit identity; operator Git configuration is explicitly denied.
+Mutable Git metadata stays inside that clone, so the sandboxed agent can stage
+and commit without access to the source repository. The ACP permission broker
 also canonicalizes requested paths, rejects protected Git/credential paths,
 never selects `allow_always`, and permits terminal requests only with an argv
 and cwd inside the clone.
@@ -78,9 +80,9 @@ for the private config and `gemini --acp` command.
 
 Follow the private config recipe in Getting started, choose a throwaway board,
 and create a ticket that permits one harmless documentation edit. If Gemini CLI
-uses its normal login directory, add that directory to the policy's `fs_roots`;
-the macOS sandbox grants it read access but still denies writes there. Start the
-seat with:
+needs existing login material, copy only that material to a dedicated narrow
+path and add it to the policy's `fs_roots`; never add the operator home. Start
+the seat with:
 
 ```sh
 gemini --version

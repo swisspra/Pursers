@@ -62,6 +62,8 @@ class SeatConfig:
     agent_name: str
     expected_agent_id: str
     expected_principal_id: str
+    git_user_name: str
+    git_user_email: str
     token_file: Path
     command: tuple[str, ...]
     repository: Path
@@ -95,9 +97,17 @@ def load_config(path: str | os.PathLike[str]) -> SeatConfig:
         isinstance(part, str) and part for part in command
     ):
         raise ValueError("acp.command must be a non-empty string list")
-    for key in ("agent_name", "expected_agent_id", "expected_principal_id"):
+    for key in (
+        "agent_name",
+        "expected_agent_id",
+        "expected_principal_id",
+        "git_user_name",
+        "git_user_email",
+    ):
         if not isinstance(seat.get(key), str) or not seat[key].strip():
             raise ValueError(f"seat.{key} must be a non-empty string")
+        if any(char in seat[key] for char in ("\x00", "\r", "\n")):
+            raise ValueError(f"seat.{key} contains an unsafe character")
     repository = Path(str(acp["repository"])).expanduser().resolve()
     if not repository.is_dir():
         raise ValueError("acp.repository must be an existing directory")
@@ -124,6 +134,8 @@ def load_config(path: str | os.PathLike[str]) -> SeatConfig:
         agent_name=str(seat["agent_name"]),
         expected_agent_id=str(seat["expected_agent_id"]),
         expected_principal_id=str(seat["expected_principal_id"]),
+        git_user_name=str(seat["git_user_name"]),
+        git_user_email=str(seat["git_user_email"]),
         token_file=token_file,
         command=tuple(command),
         repository=repository,
@@ -135,25 +147,81 @@ def load_config(path: str | os.PathLike[str]) -> SeatConfig:
     )
 
 
-def sanitized_agent_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Return a small subprocess environment with board credentials removed."""
-    incoming = os.environ if source is None else source
-    allowed = {
-        "HOME",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
+AGENT_ENV_ALLOWLIST = frozenset(
+    {
         "PATH",
-        "SHELL",
-        "TERM",
+        "LANG",
         "TMPDIR",
-        "XDG_CONFIG_HOME",
+        "TERM",
+        "ONBOARD_AGENT_NAME",
+        "ONBOARD_BOARD_ID",
+        "PURSERS_ROLE",
+        "PURSERS_TIER_MAX",
+        "PURSERS_SKILLS",
+        "PURSERS_CAN_WORK",
+        "PURSERS_CAN_REVIEW",
+        "PURSERS_MODEL",
+        "PURSERS_PROVIDER",
     }
-    return {
+)
+
+
+def _git_config_value(value: str) -> str:
+    if not value or any(char in value for char in ("\x00", "\r", "\n")):
+        raise ValueError("Git identity values must be non-empty single lines")
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def isolated_agent_env(
+    git_user_name: str,
+    git_user_email: str,
+    source: Mapping[str, str] | None = None,
+) -> tuple[dict[str, str], Path]:
+    """Create a scratch HOME and a credential-free ACP subprocess environment."""
+    incoming = os.environ if source is None else source
+    safe_name = _git_config_value(git_user_name)
+    safe_email = _git_config_value(git_user_email)
+    scratch_root = Path(tempfile.gettempdir()).resolve()
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    agent_home = Path(
+        tempfile.mkdtemp(prefix="pursers-acp-home-", dir=scratch_root)
+    ).resolve()
+    agent_home.chmod(0o700)
+    git_config = agent_home / "gitconfig"
+    git_config.write_text(
+        "[user]\n"
+        f'\tname = "{safe_name}"\n'
+        f'\temail = "{safe_email}"\n',
+        encoding="utf-8",
+    )
+    git_config.chmod(0o600)
+    environment = {
         key: value
         for key, value in incoming.items()
-        if key in allowed and not key.startswith(("ONBOARD_", "PURSERS_"))
+        if key in AGENT_ENV_ALLOWLIST
     }
+    environment.setdefault("PATH", os.defpath)
+    environment["HOME"] = str(agent_home)
+    environment["XDG_CONFIG_HOME"] = str(agent_home)
+    environment["TMPDIR"] = str(scratch_root)
+    environment["GIT_CONFIG_NOSYSTEM"] = "1"
+    environment["GIT_CONFIG_GLOBAL"] = str(git_config)
+    return environment, agent_home
+
+
+def _operator_git_configs(source: Mapping[str, str] | None = None) -> tuple[Path, ...]:
+    """Return operator global Git config paths for explicit sandbox denial."""
+    incoming = os.environ if source is None else source
+    raw_home = incoming.get("HOME", "").strip()
+    if not raw_home:
+        return ()
+    operator_home = Path(raw_home).expanduser().resolve()
+    candidates = {operator_home / ".gitconfig"}
+    try:
+        candidates.update(operator_home.glob(".gitconfig*"))
+    except OSError:
+        pass
+    return tuple(sorted(candidates, key=str))
 
 
 def _component(value: str) -> str:
@@ -267,6 +335,10 @@ def sandboxed_agent_command(
     readable.add(scratch)
     read_rules = [
         '(allow file-read* (literal "/"))',
+        '(allow file-read* (subpath "/private/var/select"))',
+        '(allow file-read* (literal "/var/select"))',
+        '(allow file-read* file-write* (literal "/dev/null"))',
+        '(allow file-read* (literal "/etc"))',
         *(
             f"(allow file-read* (subpath {json.dumps(str(path))}))"
             for path in sorted(readable, key=str)
@@ -279,6 +351,14 @@ def sandboxed_agent_command(
                 (work_dir, scratch, *readable_roots, *readable)
             ),
             key=str,
+        )
+    )
+    metadata_rules = "\n".join(
+        (
+            '(allow file-read-metadata (literal "/var"))',
+            '(allow file-read-metadata (literal "/private/var"))',
+            '(allow file-read-metadata (literal "/private"))',
+            metadata_rules,
         )
     )
     reads = "\n".join(read_rules)
@@ -665,6 +745,8 @@ class ACPSeatRuntime:
         repository: Path | None = None,
         base_ref: str = "origin/main",
         seat_name: str = "acp-seat",
+        git_user_name: str = "ACP Seat",
+        git_user_email: str = "acp-seat@pursers.invalid",
         policy_file: Path | None = None,
         protected_files: Sequence[Path] = (),
         enforce_os_sandbox: bool = False,
@@ -677,6 +759,8 @@ class ACPSeatRuntime:
         self.repository = repository.resolve() if repository is not None else None
         self.base_ref = base_ref
         self.seat_name = seat_name
+        self.git_user_name = git_user_name
+        self.git_user_email = git_user_email
         self.policy_file = policy_file
         self.protected_files = tuple(path.resolve() for path in protected_files)
         self.enforce_os_sandbox = enforce_os_sandbox
@@ -696,6 +780,7 @@ class ACPSeatRuntime:
         updates: asyncio.Task[None] | None = None
         policy: SeatPermissionPolicy | None = None
         permission_log_index = 0
+        agent_home: Path | None = None
 
         async def flush_permission_log() -> None:
             nonlocal permission_log_index
@@ -712,6 +797,9 @@ class ACPSeatRuntime:
             ticket = await self.board.ticket_get(ticket_id)
             work_dir = await asyncio.to_thread(self._prepare_work_dir, ticket_id)
             policy = SeatPermissionPolicy.load(work_dir, self.policy_file)
+            agent_env, agent_home = isolated_agent_env(
+                self.git_user_name, self.git_user_email
+            )
             command = self.command
             if self.enforce_os_sandbox:
                 command = sandboxed_agent_command(
@@ -723,7 +811,7 @@ class ACPSeatRuntime:
             async with ACPClient(
                 command,
                 process_cwd=work_dir,
-                env=sanitized_agent_env(),
+                env=agent_env,
                 permission_policy=policy,
                 request_timeout=self.request_timeout_s,
             ) as client:
@@ -820,6 +908,8 @@ class ACPSeatRuntime:
                 *(task for task in (updates, renewal) if task is not None),
                 return_exceptions=True,
             )
+            if agent_home is not None:
+                await asyncio.to_thread(shutil.rmtree, agent_home, True)
 
     async def _renew(self, ticket_id: str) -> None:
         while True:
@@ -1007,10 +1097,17 @@ async def run(config: SeatConfig) -> None:
             repository=config.repository,
             base_ref=config.base_ref,
             seat_name=config.agent_name,
+            git_user_name=config.git_user_name,
+            git_user_email=config.git_user_email,
             policy_file=config.policy_file,
             protected_files=tuple(
                 path
-                for path in (config.config_file, config.token_file, config.policy_file)
+                for path in (
+                    config.config_file,
+                    config.token_file,
+                    config.policy_file,
+                    *_operator_git_configs(),
+                )
                 if path is not None
             ),
             enforce_os_sandbox=True,
