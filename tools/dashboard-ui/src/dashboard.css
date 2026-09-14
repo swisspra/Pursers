@@ -354,6 +354,33 @@ main[aria-busy="true"] { opacity: 0.72; }
 .highlight h3 { margin-top: 7px; }
 .highlight ul { margin: 10px 0 0; padding-left: 20px; color: var(--text-soft); }
 .highlight li { margin-top: 4px; overflow-wrap: anywhere; }
+.handoff-card { display: grid; gap: 12px; }
+.handoff-route {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
+}
+.handoff-route[data-connected="false"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.handoff-endpoint {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+.handoff-endpoint strong,
+.handoff-memory code { overflow-wrap: anywhere; word-break: break-word; unicode-bidi: plaintext; }
+.handoff-label { color: var(--text-muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
+.handoff-arrow { display: grid; place-items: center; min-width: 28px; color: var(--accent); font-size: 20px; }
+.handoff-summary { margin: 0; padding: 10px 12px; border-left: 3px solid var(--accent); color: var(--text-soft); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.handoff-next ul { margin-top: 5px; }
+.handoff-meta { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text-muted); font-size: 12px; }
+.handoff-meta-item { margin-right: -6px; }
+.handoff-memory { display: flex; min-width: 0; flex: 1 1 240px; align-items: center; justify-content: flex-end; gap: 8px; }
+.handoff-memory code { min-width: 0; font-family: var(--font-mono, ui-monospace, monospace); }
 
 .work-groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .work-group { min-width: 0; }
@@ -594,6 +621,10 @@ main[aria-busy="true"] { opacity: 0.72; }
   .link-memory-heading,
   .link-value { align-items: flex-start; flex-direction: column; }
   .links-summary { justify-content: flex-start; }
+  .handoff-route,
+  .handoff-route[data-connected="false"] { grid-template-columns: 1fr; }
+  .handoff-arrow { min-height: 28px; transform: rotate(90deg); }
+  .handoff-memory { width: 100%; justify-content: space-between; }
   .app-footer { flex-direction: column; gap: 4px; }
 }
 

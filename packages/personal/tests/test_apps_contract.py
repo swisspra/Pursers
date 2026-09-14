@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "ea6035612df04503b4246b6422f96e2df93dc2e1c36e195bf79c855cae6a7b5a"
-    assert len(payload) == 405727
+    expected = "4205b8021c81c0833627ac186c90ba4c88d4c3a17eb399357d82c197cca2ad7a"
+    assert len(payload) == 409060
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a26"
     assert lock["view"] == {
@@ -140,6 +140,100 @@ def test_ticket_projection_preserves_distinct_review_activity() -> None:
         ("submitted", True, False),
         ("submitted", False, True),
     ]
+
+
+@pytest.mark.anyio
+async def test_handoff_projection_uses_explicit_ticket_and_current_reviewer() -> None:
+    handoff = {
+        "memory_id": "MEM-HANDOFF-NEW",
+        "memory_type": "handoff",
+        "title": "Ready for review",
+        "pinned_summary": "Validate the accountable handoff card.",
+        "author_agent_name": "worker-source-with-a-long-name",
+        "created_at": "2030-01-02T03:04:05+00:00",
+        "related_tickets": ["TK-HANDOFF"],
+        "next_steps": ["Check 400px", "Check 1440px"],
+    }
+
+    class ProjectionReader:
+        async def board_status(self) -> dict[str, Any]:
+            return {"agents": [], "latest_seq": 9}
+
+        async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "tickets": [
+                    {
+                        "ticket_id": "TK-HANDOFF",
+                        "status": "submitted",
+                        "review_offer": {
+                            "agent_id": "AI-REVIEWER",
+                            "agent_name": "reviewer-destination-with-a-long-name",
+                        },
+                    }
+                ],
+                "total_matching": 1,
+                "latest_seq": 9,
+            }
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=FakeClientError,
+    )
+    await state._load_projection(
+        ProjectionReader(),
+        snapshot={
+            "board": {"board_id": "board-personal-test"},
+            "state": {
+                "briefing": {
+                    "value": json.dumps({"latest_handoff": handoff})
+                }
+            },
+            "latest_seq": 9,
+        },
+    )
+
+    assert state._projection is not None
+    assert state._projection["highlights"]["latest_handoff"] == {
+        "id": "MEM-HANDOFF-NEW",
+        "type": "handoff",
+        "title": "Ready for review",
+        "summary": "Validate the accountable handoff card.",
+        "author": "worker-source-with-a-long-name",
+        "created_at": "2030-01-02T03:04:05+00:00",
+        "ticket_ids": ["TK-HANDOFF"],
+        "next_steps": ["Check 400px", "Check 1440px"],
+        "warnings": [],
+    }
+    assert state._projection["tickets"][0]["reviewer"] == (
+        "reviewer-destination-with-a-long-name"
+    )
+
+
+def test_handoff_view_has_wide_row_narrow_stack_and_literal_empty_states() -> None:
+    root = Path(__file__).resolve().parents[3]
+    source = (root / "tools/dashboard-ui/src/dashboard.ts").read_text(
+        encoding="utf-8"
+    )
+    styles = (root / "tools/dashboard-ui/src/dashboard.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert "grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)" in styles
+    assert '@media (max-width: 620px)' in styles
+    assert '.handoff-route[data-connected="false"]' in styles
+    assert "grid-template-columns: 1fr" in styles
+    assert "overflow-wrap: anywhere" in styles
+    for literal in (
+        "Not observed",
+        "None recorded",
+        "Not supplied",
+        "reviewer unassigned",
+    ):
+        assert literal in source
+    assert 'role", "img"' in source
+    assert 'if (value.author && ticket?.reviewer)' in source
+    assert 'copyButton("Copy memory ID", value.id)' in source
 
 
 @pytest.fixture

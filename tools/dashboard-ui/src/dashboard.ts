@@ -41,6 +41,7 @@ type Ticket = {
   lease_expires_at: string | null;
   review_offer: boolean;
   review_lease: boolean;
+  reviewer: string | null;
   rejected: boolean;
   abandoned_count: number;
   rejection_count: number;
@@ -64,6 +65,7 @@ type Highlight = {
   summary: string;
   author: string | null;
   created_at: string | null;
+  ticket_ids: string[];
   next_steps: string[];
   warnings: string[];
 };
@@ -169,12 +171,12 @@ const fallback: Snapshot = {
     { id: "AI-DEMO-2", name: "reviewer-β", status: "idle", role: "reviewer", focus: "Accessibility & special characters", platform: "synthetic", idle_minutes: 18, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null, stale: false },
   ],
   tickets: [
-    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0 },
-    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "reviewer-β", assigned_agent_id: "AI-DEMO-2", claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_lease: false, rejected: false, abandoned_count: 0, rejection_count: 0 },
+    { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, review_offer: false, review_lease: false, reviewer: null, rejected: false, abandoned_count: 0, rejection_count: 0 },
+    { id: "TK-DEMO-2", title: "Review <safe> & readable — ทดสอบ", description: "HTML-like text stays inert: <img src=x onerror=alert(1)> · العربية · 中文 · 🧭", status: "submitted", priority: "medium", assigned_to: "reviewer-β", assigned_agent_id: "AI-DEMO-2", claimed_agent_id: null, lease_expires_at: null, review_offer: true, review_lease: false, reviewer: "reviewer-β", rejected: false, abandoned_count: 0, rejection_count: 0 },
   ],
   highlights: {
-    latest_handoff: { id: "MEM-DEMO-HANDOFF", type: "handoff", title: "UI shell ready for review", summary: "Synthetic handoff with the next checks for the Personal Preview.", author: "agent-alpha", created_at: "2099-01-01T00:03:00Z", next_steps: ["Check narrow layout", "Verify keyboard navigation"], warnings: [] },
-    important_pinned: { id: "MEM-DEMO-WARNING", type: "warning", title: "Host proof is still pending", summary: "Synthetic reminder: SDK evidence is not real-host verification.", author: "reviewer-β", created_at: "2099-01-01T00:04:00Z", next_steps: [], warnings: ["Keep the preview label visible."] },
+    latest_handoff: { id: "MEM-DEMO-HANDOFF", type: "handoff", title: "UI shell ready for review", summary: "Synthetic handoff with the next checks for the Personal Preview.", author: "agent-alpha", created_at: "2099-01-01T00:03:00Z", ticket_ids: ["TK-DEMO-2"], next_steps: ["Check narrow layout", "Verify keyboard navigation"], warnings: [] },
+    important_pinned: { id: "MEM-DEMO-WARNING", type: "warning", title: "Host proof is still pending", summary: "Synthetic reminder: SDK evidence is not real-host verification.", author: "reviewer-β", created_at: "2099-01-01T00:04:00Z", ticket_ids: [], next_steps: [], warnings: ["Keep the preview label visible."] },
   },
   status: { ticket_status_counts: { claimed: 1, submitted: 1 }, memory_type_counts: { handoff: 1, warning: 1 }, visible_memory_count: 2, scrub_profile: "synthetic" },
   events: [
@@ -316,6 +318,7 @@ function decodeTicket(value: unknown): Ticket | null {
     lease_expires_at: optionalText(value.lease_expires_at),
     review_offer: boolean(value.review_offer),
     review_lease: boolean(value.review_lease),
+    reviewer: optionalText(value.reviewer),
     rejected: boolean(value.rejected),
     abandoned_count: nonNegative(value.abandoned_count),
     rejection_count: nonNegative(value.rejection_count),
@@ -347,6 +350,7 @@ function decodeHighlight(value: unknown): Highlight | null {
     summary: text(value.summary, "", MAX_LONG_TEXT_LENGTH),
     author: optionalText(value.author),
     created_at: optionalText(value.created_at),
+    ticket_ids: stringList(value.ticket_ids),
     next_steps: stringList(value.next_steps),
     warnings: stringList(value.warnings),
   };
@@ -772,14 +776,29 @@ function renderToday(data: Snapshot): void {
   });
   byId("today-agents").replaceChildren(...(agents.length ? agents : [emptyState("No agents yet", "Agents appear after they join this local board.")]));
 
-  renderHighlight(byId("latest-handoff"), data.highlights.latest_handoff, "No handoff yet", "A project handoff will appear after an agent records one.");
+  renderHighlight(byId("latest-handoff"), data.highlights.latest_handoff, data, "No handoff yet", "A project handoff will appear after an agent records one.");
   renderHighlight(byId("important-pinned"), data.highlights.important_pinned, "No decision or warning in the loaded pinned digest", "The bounded pinned digest has no decision, blocker, or warning to show.");
   renderTimeline(byId("recent-activity"), newestEvents(data.events).slice(0, 5), "No activity observed", activityEmptyDetail(data));
 }
 
-function renderHighlight(container: HTMLElement, value: Highlight | null, emptyTitle: string, emptyDetail: string): void {
+function renderHighlight(container: HTMLElement, value: Highlight | null, emptyTitle: string, emptyDetail: string): void;
+function renderHighlight(container: HTMLElement, value: Highlight | null, data: Snapshot, emptyTitle: string, emptyDetail: string): void;
+function renderHighlight(
+  container: HTMLElement,
+  value: Highlight | null,
+  dataOrTitle: Snapshot | string,
+  titleOrDetail: string,
+  detail = "",
+): void {
+  const data = typeof dataOrTitle === "string" ? null : dataOrTitle;
+  const emptyTitle = typeof dataOrTitle === "string" ? dataOrTitle : titleOrDetail;
+  const emptyDetail = typeof dataOrTitle === "string" ? titleOrDetail : detail;
   if (!value) {
     container.replaceChildren(emptyState(emptyTitle, emptyDetail));
+    return;
+  }
+  if (value.type === "handoff" && data) {
+    renderHandoff(container, value, data);
     return;
   }
   const item = element("article", "highlight");
@@ -795,6 +814,63 @@ function renderHighlight(container: HTMLElement, value: Highlight | null, emptyT
     details.forEach((detail) => items.append(element("li", undefined, detail)));
     item.append(items);
   }
+  container.replaceChildren(item);
+}
+
+function renderHandoff(container: HTMLElement, value: Highlight, data: Snapshot): void {
+  const ticketId = value.ticket_ids[0] ?? null;
+  const ticket = ticketId ? data.tickets.find((item) => item.id === ticketId) ?? null : null;
+  const source = value.author ?? "Not observed";
+  const destination = ticket?.reviewer ?? "reviewer unassigned";
+  const item = element("article", "highlight handoff-card");
+  item.append(element("span", "highlight-type", "Latest explicit handoff"));
+
+  const route = element("div", "handoff-route");
+  route.dataset.connected = value.author && ticket?.reviewer ? "true" : "false";
+  const sourceNode = element("div", "handoff-endpoint");
+  sourceNode.append(element("span", "handoff-label", "Source agent"), element("strong", undefined, source));
+  route.append(sourceNode);
+  if (value.author && ticket?.reviewer) {
+    const arrow = element("span", "handoff-arrow");
+    arrow.setAttribute("role", "img");
+    arrow.setAttribute("aria-label", `Handoff from ${source} to ${destination}`);
+    arrow.append(element("span", undefined, "→"));
+    arrow.firstElementChild?.setAttribute("aria-hidden", "true");
+    route.append(arrow);
+  }
+  const destinationNode = element("div", "handoff-endpoint");
+  destinationNode.append(element("span", "handoff-label", "Destination"), element("strong", undefined, destination));
+  route.append(destinationNode);
+  item.append(route);
+
+  const summary = element("blockquote", "handoff-summary", value.summary || "Not supplied");
+  item.append(summary);
+  const next = element("div", "handoff-next");
+  next.append(element("span", "handoff-label", "Next steps"));
+  if (value.next_steps.length) {
+    const list = element("ul");
+    value.next_steps.forEach((step) => list.append(element("li", undefined, step)));
+    next.append(list);
+  } else {
+    next.append(element("p", "muted", "None recorded"));
+  }
+  item.append(next);
+
+  const meta = element("div", "handoff-meta");
+  const ticketLink = element("button", "text-button", ticketId ?? "Not supplied") as HTMLButtonElement;
+  ticketLink.type = "button";
+  ticketLink.disabled = !ticket;
+  ticketLink.setAttribute("aria-label", ticket ? `Open ticket ${ticket.id}` : "Ticket not supplied");
+  if (ticket) ticketLink.addEventListener("click", () => selectView("work", true));
+  const memory = element("span", "handoff-memory");
+  memory.append(element("code", undefined, value.id), copyButton("Copy memory ID", value.id));
+  meta.append(
+    element("span", "handoff-meta-item", "Ticket "),
+    ticketLink,
+    element("span", "handoff-time", value.created_at ? formatTime(value.created_at) : "Not observed"),
+    memory,
+  );
+  item.append(meta);
   container.replaceChildren(item);
 }
 
@@ -1468,7 +1544,7 @@ byId("search-results-list").addEventListener("click", (event) => {
 });
 searchInput.addEventListener("input", () => renderSearch(searchInput.value));
 refreshButton.addEventListener("click", () => void Promise.all([refreshSnapshot(), refreshFleet(), refreshLinks()]));
-byId("links-groups").addEventListener("click", (event) => {
+document.addEventListener("click", (event) => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-copy-value]");
   if (!button) return;
   const original = button.textContent ?? "Copy";
