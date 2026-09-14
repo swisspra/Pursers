@@ -110,6 +110,35 @@ class JournalIndexTests(unittest.TestCase):
         self.assertEqual([row["seq"] for row in first["events"]], [1, 2])
         self.assertEqual([row["seq"] for row in second["events"]], [3])
 
+    def test_concurrent_append_cannot_outpace_read_snapshot_metadata(self) -> None:
+        self.journal.append("pursers", self.event(1))
+        read_connection = self.store._read_connection()
+        appended = False
+
+        def append_before_row_select(statement: str) -> None:
+            nonlocal appended
+            if appended or "SELECT event FROM journal_rows" not in statement:
+                return
+            appended = True
+            self.journal.append("pursers", self.event(2))
+
+        read_connection.set_trace_callback(append_before_row_select)
+        try:
+            page = self.journal.read_after("pursers", 0, 100)
+        finally:
+            read_connection.set_trace_callback(None)
+
+        self.assertTrue(appended)
+        self.assertEqual([row["seq"] for row in page["events"]], [1])
+        self.assertEqual(page["next_cursor"], 1)
+        self.assertEqual(page["latest_cursor"], 1)
+        self.assertFalse(page["has_more"])
+        self.assertLessEqual(page["next_cursor"], page["latest_cursor"])
+
+        following = self.journal.read_after("pursers", page["next_cursor"], 100)
+        self.assertEqual([row["seq"] for row in following["events"]], [2])
+        self.assertEqual(following["latest_cursor"], 2)
+
     def test_31_mb_journal_tail_read_is_bounded(self) -> None:
         self.seed(23_692, padding="x" * 1_100)
         journal_path = self.journal._path("pursers")

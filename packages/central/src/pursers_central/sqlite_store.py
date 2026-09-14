@@ -394,19 +394,28 @@ class SQLiteStore(Store[Any]):
         """Read a bounded journal page from the durable ``(path, seq)`` index."""
         key = self._key(path)
         read_connection = self._read_connection()
-        versions = read_connection.execute(
-            "SELECT d.version, s.source_version FROM documents d "
-            "LEFT JOIN journal_state s ON s.path = d.path WHERE d.path = ?",
-            (key,),
-        ).fetchone()
-        if versions is None:
-            return self._journal_read_result(
-                read_connection, key, board_id, cursor, limit
-            )
-        if versions[1] is not None and int(versions[0]) == int(versions[1]):
-            return self._journal_read_result(
-                read_connection, key, board_id, cursor, limit
-            )
+        indexed_result: dict[str, Any] | None = None
+        try:
+            # Keep version, journal state, and page rows on one WAL snapshot.
+            read_connection.execute("BEGIN")
+            versions = read_connection.execute(
+                "SELECT d.version, s.source_version FROM documents d "
+                "LEFT JOIN journal_state s ON s.path = d.path WHERE d.path = ?",
+                (key,),
+            ).fetchone()
+            if versions is None or (
+                versions[1] is not None and int(versions[0]) == int(versions[1])
+            ):
+                indexed_result = self._journal_read_result(
+                    read_connection, key, board_id, cursor, limit
+                )
+            read_connection.commit()
+        except BaseException:
+            if read_connection.in_transaction:
+                read_connection.rollback()
+            raise
+        if indexed_result is not None:
+            return indexed_result
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
