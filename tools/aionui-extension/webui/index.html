@@ -16,16 +16,15 @@
         <button type="submit">Join</button>
       </form>
       <p id="message" role="status" aria-live="polite"></p>
-      <section id="status-card" hidden>
-        <h2>Status</h2>
-        <dl>
-          <dt>Board</dt><dd data-field="board">—</dd>
-          <dt>Role</dt><dd data-field="role">—</dd>
-          <dt>Seat name</dt><dd data-field="seat_name">—</dd>
-          <dt>Push mode</dt><dd data-field="push_mode">—</dd>
-          <dt>Key ID</dt><dd data-field="kid">—</dd>
-          <dt>Expires</dt><dd data-field="exp">—</dd>
-        </dl>
+      <section id="status-card" aria-labelledby="status-title" hidden>
+        <div class="status-heading">
+          <span id="status-icon" class="status-icon" aria-hidden="true"></span>
+          <div>
+            <h2 id="status-title">Status</h2>
+            <p id="status-summary"></p>
+          </div>
+        </div>
+        <div id="seat-list" class="seat-list"></div>
       </section>
     </main>
     <script src="/pursers/assets/app.js"></script>
