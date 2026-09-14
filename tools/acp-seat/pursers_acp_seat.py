@@ -13,7 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -218,6 +218,17 @@ def _executable_read_roots(executable: str) -> set[Path]:
     return roots
 
 
+def _ancestor_metadata_roots(paths: Iterable[Path]) -> set[Path]:
+    """Return ancestors needed to traverse lexical and real path chains."""
+    ancestors: set[Path] = set()
+    for path in paths:
+        lexical = Path(os.path.abspath(os.path.expanduser(path)))
+        real = Path(os.path.realpath(lexical))
+        ancestors.update(lexical.parents)
+        ancestors.update(real.parents)
+    return ancestors
+
+
 def sandboxed_agent_command(
     command: Sequence[str],
     work_dir: Path,
@@ -236,23 +247,41 @@ def sandboxed_agent_command(
         Path("/dev"),
         Path("/sbin"),
         Path("/Library"),
-        *(path.resolve() for path in readable_roots),
+        Path("/private/etc"),
+        Path("/private/var/db"),
     }
+    for path in readable_roots:
+        readable.add(Path(os.path.abspath(os.path.expanduser(path))))
+        readable.add(Path(os.path.realpath(path)))
     for executable in (sys.executable, command[0] if command else ""):
         if executable:
             readable.update(_executable_read_roots(executable))
     for part in command:
         candidate = Path(part).expanduser()
         if candidate.exists():
+            readable.add(Path(os.path.abspath(candidate)))
             readable.add(candidate.resolve())
     scratch = Path(tempfile.gettempdir()).resolve()
     if (work_dir / ".git").exists():
         _require_git_metadata_within(work_dir, (work_dir, scratch))
     readable.add(scratch)
-    reads = "\n".join(
-        f"(allow file-read* (subpath {json.dumps(str(path))}))"
-        for path in sorted(readable, key=str)
+    read_rules = [
+        '(allow file-read* (literal "/"))',
+        *(
+            f"(allow file-read* (subpath {json.dumps(str(path))}))"
+            for path in sorted(readable, key=str)
+        ),
+    ]
+    metadata_rules = "\n".join(
+        f"(allow file-read-metadata (literal {json.dumps(str(path))}))"
+        for path in sorted(
+            _ancestor_metadata_roots(
+                (work_dir, scratch, *readable_roots, *readable)
+            ),
+            key=str,
+        )
     )
+    reads = "\n".join(read_rules)
     protects = "\n".join(
         f"(deny file-read* (literal {json.dumps(str(path.resolve()))}))"
         for path in protected_files
@@ -264,6 +293,7 @@ def sandboxed_agent_command(
         "(allow sysctl-read)\n"
         "(allow mach-lookup)\n"
         f"{reads}\n"
+        f"{metadata_rules}\n"
         f"(allow file-write* (subpath {json.dumps(str(work_dir.resolve()))}))\n"
         f"(allow file-write* (subpath {json.dumps(str(scratch))}))\n"
         "(deny network*)\n"

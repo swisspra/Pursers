@@ -533,6 +533,12 @@ def test_sandbox_profile_allows_lexical_and_real_interpreter_prefixes(
         assert f'(allow file-read* (subpath "{lexical_prefix}"))' in profile
         assert f'(allow file-read* (subpath "{real_prefix}"))' in profile
     assert f'(allow file-read* (subpath "{opt_root}"))' not in profile
+    assert '(allow file-read* (literal "/"))' in profile
+    assert '(allow file-read* (subpath "/private/etc"))' in profile
+    assert '(allow file-read* (subpath "/private/var/db"))' in profile
+    for _lexical_prefix, _real_prefix, executable in prefixes:
+        for path in (*executable.parents, *executable.resolve().parents):
+            assert f'(allow file-read-metadata (literal "{path}"))' in profile
 
 
 def test_offer_event_accepts_bridge_shapes() -> None:
