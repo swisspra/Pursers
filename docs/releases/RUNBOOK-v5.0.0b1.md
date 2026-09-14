@@ -284,7 +284,8 @@ green and the exact candidate has passed the required CI and review:
 cd "$STAGING/repository"
 git tag -s "$TAG" "$CANDIDATE" -m "Pursers $VERSION"
 test "$(git rev-parse --verify "$TAG^{commit}")" = "$CANDIDATE"
-python3 tools/release_publish.py "$TAG" verify-checkout
+"$STAGING/build-venv/bin/python" tools/release_publish.py \
+  "$TAG" verify-checkout
 git push origin "refs/tags/$TAG"
 ```
 
@@ -337,7 +338,8 @@ for local_asset in dist/*.whl dist/SHA256SUMS.txt; do
   name=$(basename "$local_asset")
   existing="$STAGING/existing-release-assets/$name"
   if test -e "$existing"; then
-    python3 tools/release_publish.py "$TAG" verify-asset \
+    "$STAGING/build-venv/bin/python" tools/release_publish.py \
+      "$TAG" verify-asset \
       --local "$local_asset" --existing "$existing"
   else
     gh release upload "$TAG" "$local_asset"
