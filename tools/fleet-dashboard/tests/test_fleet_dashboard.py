@@ -1832,6 +1832,21 @@ def test_collapsed_state_survives_rebinding_without_local_storage() -> None:
     assert "filterNeedle=''" in dashboard.HTML
 
 
+def test_non_actionable_table_rows_are_not_added_to_focus_order() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    line = next(
+        item
+        for item in script.splitlines()
+        if item.startswith("function bindInteractive(")
+    )
+
+    assert "querySelectorAll('table')" not in line
+    assert "tbody tr" not in line
+    assert ".tabIndex" not in line
+    assert "row.addEventListener" not in line
+    assert "tabindex=" not in dashboard.HTML.lower()
+
+
 def test_reconnect_banner_keeps_cached_fleet_and_recovers_silently() -> None:
     script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
     lines = script.splitlines()
@@ -1849,7 +1864,7 @@ def test_reconnect_banner_keeps_cached_fleet_and_recovers_silently() -> None:
             source("function markConnectionFailure("),
             source("async function refreshCentral("),
             "const banner={hidden:true,textContent:''},document={querySelector:()=>banner};",
-            "const connectionFailures=new Set(),connectionFailureDetails=new Map();let lastSuccessAt=null;",
+            "const connectionFailures=new Set(),connectionFailureDetails=new Map();let lastSuccessAt=null,connectionWasUnavailable=false;const announceState=()=>{};",
             "let fleetData={personal:{central:'personal',cached:true}},fleetErrors={},rendered=0;",
             "const CENTRAL_REQUEST_TIMEOUT_MS=4000;",
             "const apiCentral=x=>x,route=()=>null,renderFleet=()=>rendered++;",
@@ -1914,13 +1929,116 @@ def test_fetch_json_keeps_only_a_bounded_error_class() -> None:
 
 def test_help_theme_density_and_keyboard_controls_render() -> None:
     assert 'id="help-overlay"' in dashboard.HTML
+    assert 'id="help-overlay" aria-labelledby="help-title"' in dashboard.HTML
+    assert '<h2 id="help-title">Keyboard shortcuts</h2>' in dashboard.HTML
+    assert 'id="connection-banner" class="connection-banner" hidden' in dashboard.HTML
+    banner_markup = dashboard.HTML.split(
+        '<div id="connection-banner"', 1
+    )[1].split("</div>", 1)[0]
+    assert "role=" not in banner_markup
+    assert "aria-live=" not in banner_markup
+    assert (
+        'id="live-state" class="sr-only" role="status" aria-live="polite" '
+        'aria-atomic="true"' in dashboard.HTML
+    )
+    assert 'id="state" class="muted" role="status"' not in dashboard.HTML
+    assert "function announceState(message)" in dashboard.HTML
+    assert "message===lastAnnouncement" in dashboard.HTML
+    render_fleet = next(
+        item
+        for item in dashboard.HTML.splitlines()
+        if item.startswith("function renderFleet(")
+    )
+    assert "announceState(" not in render_fleet
     assert "g then f" in dashboard.HTML
-    assert "Move within tables or search results" in dashboard.HTML
+    assert "Move within search results" in dashboard.HTML
+    assert "Move within tables or search results" not in dashboard.HTML
     assert 'id="theme-toggle"' in dashboard.HTML
     assert 'id="density-toggle"' in dashboard.HTML
     assert ':root[data-theme="light"]' in dashboard.HTML
     assert "@media print" in dashboard.HTML
     assert "e.key==='g'" in dashboard.HTML
+
+
+def test_live_state_announcements_are_deduplicated() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    line = next(
+        item
+        for item in script.splitlines()
+        if item.startswith("function announceState(")
+    )
+    program = "\n".join(
+        [
+            line,
+            "let lastAnnouncement='',writes=0,value='';",
+            "const live={set textContent(next){writes++;value=next}};",
+            "const document={querySelector:()=>live};",
+            "announceState('Dashboard updated');",
+            "announceState('Dashboard updated');",
+            "announceState('Auto-refresh paused while you edit');",
+            "console.log(JSON.stringify({writes,value}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "writes": 2,
+        "value": "Auto-refresh paused while you edit",
+    }
+
+
+def test_partial_outage_announces_only_connection_transitions() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            source("function announceState("),
+            source("const connectionRecoveryHint="),
+            source("const connectionFailureDetail="),
+            source("const connectionBannerText="),
+            source("function updateConnectionState("),
+            source("function markConnectionSuccess("),
+            source("function markConnectionFailure("),
+            "const connectionFailures=new Set(),connectionFailureDetails=new Map();",
+            "let lastSuccessAt=null,connectionWasUnavailable=false,lastAnnouncement='';",
+            "const bannerWrites=[],liveWrites=[];",
+            "const banner={hidden:true,set textContent(value){bannerWrites.push(value)}};",
+            "const live={set textContent(value){liveWrites.push(value)}};",
+            "const document={querySelector:selector=>selector==='#connection-banner'?banner:live};",
+            "markConnectionSuccess('healthy',new Date('2030-01-02T03:04:05Z'));",
+            "markConnectionFailure('broken');",
+            "for(const stamp of ['2030-01-02T03:05:05Z','2030-01-02T03:06:05Z','2030-01-02T03:07:05Z'])markConnectionSuccess('healthy',new Date(stamp));",
+            "const beforeRecovery=[...liveWrites];",
+            "markConnectionSuccess('broken',new Date('2030-01-02T03:08:05Z'));",
+            "console.log(JSON.stringify({beforeRecovery,liveWrites,bannerWrites,bannerHidden:banner.hidden}))",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["beforeRecovery"] == ["Connection interrupted. Reconnecting."]
+    assert result["liveWrites"] == [
+        "Connection interrupted. Reconnecting.",
+        "Connection restored.",
+    ]
+    assert len(
+        [value for value in result["bannerWrites"] if value.startswith("reconnecting")]
+    ) == 4
+    assert result["bannerHidden"] is True
 
 
 def test_two_central_dom_groups_are_rendered_without_pool_merge() -> None:
@@ -1963,6 +2081,7 @@ def test_two_central_dom_groups_are_rendered_without_pool_merge() -> None:
             source("function renderFleet("),
             "const elements={'#central-sections':{innerHTML:''},'#state':{textContent:''}};",
             "const document={querySelector:key=>elements[key]};",
+            "const announceState=()=>{};",
             "let filterNeedle='',centralLabels=['personal','work'],fleetErrors={};",
             f"let fleetData={{personal:{json.dumps(fleet('personal', 'personal-seat'))},work:{json.dumps(fleet('work', 'work-seat'))}}};",
             "renderFleet();",
@@ -2103,6 +2222,7 @@ def test_filter_behavior_removes_unrelated_home_rows_and_change_counts() -> None
             f"const fixture={json.dumps(fixtures)};",
             "const elements=Object.fromEntries(['#central-sections','#state'].map(key=>[key,{innerHTML:'',textContent:''}]));",
             "const document={querySelector:key=>elements[key]};",
+            "const announceState=()=>{};",
             "let filterNeedle='alpha',centralLabels=['personal'],fleetData={personal:fixture.fleet},fleetErrors={};",
             "renderFleet();",
             "const originalChangesFor=changesFor;let changeEvents=[],changeSummary=null;",
