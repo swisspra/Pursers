@@ -106,7 +106,13 @@ function createHandlers(dependencies = {}) {
     if (!connected.ok) {
       const payload = { ok: false, error: connected.code };
       if (connected.code === 'bridge_not_installed') payload.install_hint = INSTALL_HINT;
-      if (connected.connected) payload.joined = true;
+      if (connected.connected) {
+        payload.joined = true;
+        payload.outcome = connected.outcome;
+        payload.retryable = Boolean(connected.retryable);
+        payload.message = connected.message;
+        payload.status = connected.status;
+      }
       const invalidInput = new Set(['invalid_door', 'invalid_board', 'invalid_role', 'invalid_url', 'insecure_remote_url', 'expired_door', 'invalid_seat_name', 'invalid_tier', 'invalid_folder']);
       return jsonResponse(invalidInput.has(connected.code) ? 400 : responseStatus(connected), payload);
     }

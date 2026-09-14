@@ -91,6 +91,72 @@ function renderStartupView(view, ui, documentRef) {
   ui.seatList.replaceChildren(...cards);
 }
 
+function recoveryPayload(status) {
+  if (!status || typeof status !== 'object') return null;
+  const { board, role, seat_name: seatName } = status;
+  if (![board, role, seatName].every((value) => typeof value === 'string' && value)) return null;
+  return { board, role, seat_name: seatName, tier_max: 2 };
+}
+
+function connectionState(result) {
+  const value = result && typeof result === 'object' ? result : {};
+  const code = value.code || value.error;
+  if (value.outcome === 'partial' || value.connected || value.joined) {
+    const recovery = recoveryPayload(value.status);
+    return {
+      title: 'Connected; registration incomplete',
+      central: 'Connected',
+      board: 'Joined',
+      helper: 'Registration incomplete',
+      message: recovery
+        ? 'Your seat is stored. Recover registers the helper without asking for the door again.'
+        : 'Your seat is stored, but its recovery details are unavailable. Check bridge status and retry.',
+      recovery,
+    };
+  }
+  if (value.ok && value.status) {
+    return {
+      title: 'Connected and registered',
+      central: 'Connected',
+      board: 'Joined',
+      helper: 'Registered',
+      message: '',
+      recovery: null,
+    };
+  }
+  if (code === 'bridge_rejected' || code === 'identity_conflict' || code === 'rotation_required') {
+    return {
+      title: 'Board join refused',
+      central: 'Reached',
+      board: 'Join refused',
+      helper: 'Not registered',
+      message: value.message || 'The seat was not stored. Check the board, role, and door with your coordinator.',
+      recovery: null,
+    };
+  }
+  if (code === 'bridge_not_installed' || code === 'bridge_status_failed') {
+    return {
+      title: 'Local helper unavailable',
+      central: 'Not checked',
+      board: 'Not joined',
+      helper: code === 'bridge_not_installed' ? 'Not installed' : 'Unavailable',
+      message: value.install_hint || value.message || 'Restore pursers-wait-bridge, then try again.',
+      recovery: null,
+    };
+  }
+  if (code === 'server_unreachable') {
+    return {
+      title: 'Central unavailable',
+      central: 'Unavailable',
+      board: 'Not joined',
+      helper: 'Not registered',
+      message: value.message || 'Check the Central connection, then try again.',
+      recovery: null,
+    };
+  }
+  return null;
+}
+
 async function readJson(response) {
   try {
     return await response.json();
@@ -110,9 +176,33 @@ function initialize(documentRef, fetchImpl) {
     summary: documentRef.querySelector('#status-summary'),
     seatList: documentRef.querySelector('#seat-list'),
   };
+  const connectionCard = documentRef.querySelector('#connection-card');
+  const connectionTitle = documentRef.querySelector('#connection-title');
+  const recoverButton = documentRef.querySelector('#recover');
+  let recoveryTarget = null;
+
   const showResult = (result) => renderStartupView(
     createStartupView(result), ui, documentRef,
   );
+
+  function showStatus(status, pushMode) {
+    showResult({
+      ok: true,
+      push_mode: status.push_mode || pushMode,
+      seats: [status],
+    });
+  }
+
+  function showConnection(state) {
+    if (!state) return;
+    connectionTitle.textContent = state.title;
+    for (const field of ['central', 'board', 'helper']) {
+      connectionCard.querySelector(`[data-connection="${field}"]`).textContent = state[field];
+    }
+    recoveryTarget = state.recovery;
+    recoverButton.hidden = !recoveryTarget;
+    connectionCard.hidden = false;
+  }
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -125,27 +215,67 @@ function initialize(documentRef, fetchImpl) {
       body: JSON.stringify({ door }),
     });
     const result = await readJson(response);
+    const state = connectionState(result);
     if (!response.ok || !result.ok) {
-      message.textContent = result.install_hint || 'Join failed. Ask your coordinator to check the door.';
-      if (result.error === 'bridge_not_installed') showResult(result);
+      showConnection(state);
+      if (result.status) showStatus(result.status);
+      else if (result.error === 'bridge_not_installed') showResult(result);
+      message.textContent = (state && state.message)
+        || result.install_hint
+        || 'Join failed. Ask your coordinator to check the door.';
       return;
     }
+    showConnection(state);
     message.textContent = `Joined and registered ${result.mcp_server}.`;
-    showResult({
-      ok: true,
-      push_mode: result.status && result.status.push_mode,
-      seats: result.status ? [result.status] : [],
-    });
+    showStatus(result.status, result.push_mode);
+  });
+
+  recoverButton.addEventListener('click', async () => {
+    if (!recoveryTarget) return;
+    recoverButton.disabled = true;
+    message.textContent = 'Recovering…';
+    try {
+      const response = await fetchImpl('/pursers/onboarding/recover', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(recoveryTarget),
+      });
+      const result = await readJson(response);
+      const state = connectionState(result);
+      showConnection(state);
+      if (result.status) showStatus(result.status);
+      message.textContent = response.ok && result.ok
+        ? 'Recovered and registered without re-entering the door.'
+        : (state && state.message) || 'Recovery failed. Check the helper and try again.';
+    } catch (_error) {
+      message.textContent = 'Recovery could not reach the local helper. Try again.';
+    } finally {
+      recoverButton.disabled = false;
+    }
   });
 
   fetchImpl('/pursers/status')
     .then(readJson)
-    .then(showResult)
+    .then((result) => {
+      showResult(result);
+      if (!result.ok) {
+        const state = connectionState(result);
+        showConnection(state);
+        if (state) message.textContent = state.message;
+      }
+    })
     .catch(() => showResult({ ok: false, error: 'status_unavailable' }));
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { createStartupView, normalizeSeat, renderStartupView };
+  module.exports = {
+    connectionState,
+    createStartupView,
+    mount: initialize,
+    normalizeSeat,
+    recoveryPayload,
+    renderStartupView,
+  };
 }
 
 if (typeof document !== 'undefined' && typeof fetch !== 'undefined') {
