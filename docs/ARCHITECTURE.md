@@ -134,11 +134,10 @@ the Git-only verifier in the seat kit. ([`central.py`](../packages/central/src/p
   [`door_state.py`](../tools/wait-bridge/door_state.py))
 - The strict review policy is labelled `independent-principal-review`, and
   review history stores both submitting and reviewing principal IDs. The
-  current enforcement rejects the exact submitting `agent_id` and requires a
-  reviewer membership plus `board:review`; it does not directly compare the
-  two principal IDs. Deployments that require principal independence must
-  therefore provision reviewers under a separate principal and verify the two
-  recorded IDs. ([`central.py`](../packages/central/src/pursers_central/central.py),
+  enforcement rejects both the exact submitting `agent_id` and any reviewer
+  with the submitting `principal_id`, then requires reviewer membership plus
+  `board:review`. Workflow review keeps the seat-level self-review guard but
+  permits cross-seat checks within one principal. ([`central.py`](../packages/central/src/pursers_central/central.py),
   [`test_review_leases.py`](../packages/central/tests/test_review_leases.py))
 - Before approval, the reviewer must fetch and detach the full submitted SHA,
   compare the changed paths and stat with `files_changed`, confirm the remote
