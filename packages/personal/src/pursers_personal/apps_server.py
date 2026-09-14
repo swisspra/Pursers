@@ -206,6 +206,9 @@ FALLBACK_TICKETS = [
         "status": "submitted",
         "priority": "medium",
         "assigned_to": "reviewer-beta",
+        "reviewer": "reviewer-beta",
+        "review_offer": True,
+        "review_lease": False,
         "lease_expires_at": None,
         "rejected": False,
         "abandoned_count": 0,
@@ -275,6 +278,7 @@ FALLBACK_HIGHLIGHTS = {
         "summary": "Synthetic handoff with the next checks for the Personal Preview.",
         "author": "agent-alpha",
         "created_at": "2099-01-01T00:03:00Z",
+        "ticket_ids": ["TK-DEMO-2"],
         "next_steps": ["Check narrow layout", "Verify keyboard navigation"],
         "warnings": [],
     },
@@ -1668,6 +1672,22 @@ class LiveDashboard:
         return project or None
 
     @classmethod
+    def _review_destination(cls, ticket: dict[str, Any]) -> str | None:
+        lease = ticket.get("review_lease")
+        if isinstance(lease, dict):
+            destination = lease.get("reviewer_agent_name") or lease.get(
+                "reviewer_agent_id"
+            )
+            if isinstance(destination, str) and destination:
+                return destination
+        offer = ticket.get("review_offer")
+        if isinstance(offer, dict):
+            destination = offer.get("agent_name") or offer.get("agent_id")
+            if isinstance(destination, str) and destination:
+                return destination
+        return None
+
+    @classmethod
     def _ticket_view(cls, ticket: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": ticket["ticket_id"],
@@ -1682,6 +1702,7 @@ class LiveDashboard:
             "lease_expires_at": ticket.get("lease_expires_at"),
             "review_offer": bool(ticket.get("review_offer")),
             "review_lease": bool(ticket.get("review_lease")),
+            "reviewer": cls._review_destination(ticket),
             "ttl_s": ticket.get("ttl_s"),
             "rejected": ticket.get("status") == "rejected",
             "abandoned_count": int(ticket.get("abandoned_count", 0)),
@@ -1704,10 +1725,13 @@ class LiveDashboard:
         )
         next_steps = memory.get("next_steps", [])
         warnings = memory.get("warnings", [])
+        ticket_ids = memory.get("related_tickets", [])
         if not isinstance(next_steps, list):
             next_steps = []
         if not isinstance(warnings, list):
             warnings = []
+        if not isinstance(ticket_ids, list):
+            ticket_ids = []
         return {
             "id": memory.get("memory_id"),
             "type": memory.get("memory_type", "context"),
@@ -1716,6 +1740,7 @@ class LiveDashboard:
             "author": memory.get("author_agent_name")
             or memory.get("author_agent_id"),
             "created_at": memory.get("created_at"),
+            "ticket_ids": [str(item) for item in ticket_ids[:8]],
             "next_steps": [str(item) for item in next_steps[:8]],
             "warnings": [str(item) for item in warnings[:8]],
         }

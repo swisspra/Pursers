@@ -1493,6 +1493,10 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
             calls.append(("board_catchup", dict(kwargs)))
             return {"events": [], "resync_required": True, "truncated": True}
 
+        async def memory_read(self, **kwargs: object) -> list[dict]:
+            calls.append(("memory_read", dict(kwargs)))
+            return []
+
     config = dashboard.Config(
         url="http://127.0.0.1:8766/mcp",
         token="test-token",
@@ -1522,6 +1526,87 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
             "max_bytes": 100_000,
         },
     ) in calls
+    assert (
+        "memory_read",
+        {"memory_type": "handoff", "limit": dashboard.MAX_HANDOFF_MEMORIES},
+    ) in calls
+
+
+def test_ticket_detail_projects_latest_explicit_handoff_and_current_reviewer() -> None:
+    detail = dashboard.project_board_detail(
+        {
+            "label": "Board",
+            "board_id": "board-detail",
+            "snapshot": {
+                "tickets": [
+                    {
+                        "ticket_id": "TK-HANDOFF",
+                        "title": "Handoff target",
+                        "status": "submitted",
+                        "review_lease": {
+                            "reviewer_agent_name": "reviewer-destination-long-name"
+                        },
+                    },
+                    {"ticket_id": "TK-NONE", "status": "open"},
+                ]
+            },
+            "handoff_memories": [
+                {
+                    "memory_id": "MEM-OLD",
+                    "memory_type": "handoff",
+                    "author_agent_name": "older-worker",
+                    "created_at_epoch": 1,
+                    "related_tickets": ["TK-HANDOFF", "TK-NONE"],
+                },
+                {
+                    "memory_id": "MEM-LATEST",
+                    "memory_type": "handoff",
+                    "author_agent_name": "worker-source-long-name",
+                    "created_at_epoch": 2,
+                    "created_at": "2030-01-02T03:04:05+00:00",
+                    "pinned_summary": "The quoted handoff summary.",
+                    "related_tickets": ["TK-HANDOFF"],
+                    "next_steps": ["Run the bounded acceptance checks"],
+                },
+                {
+                    "memory_id": "MEM-UNLINKED",
+                    "memory_type": "handoff",
+                    "created_at_epoch": 3,
+                    "related_tickets": [],
+                },
+            ],
+            "events": [],
+        }
+    )
+    tickets = {ticket["id"]: ticket for ticket in detail["tickets"]}
+
+    assert tickets["TK-HANDOFF"]["latest_handoff"] == {
+        "memory_id": "MEM-LATEST",
+        "ticket_id": "TK-HANDOFF",
+        "source": "worker-source-long-name",
+        "destination": "reviewer-destination-long-name",
+        "summary": "The quoted handoff summary.",
+        "next_steps": ["Run the bounded acceptance checks"],
+        "created_at": "2030-01-02T03:04:05+00:00",
+    }
+    assert tickets["TK-NONE"]["latest_handoff"]["destination"] is None
+
+
+def test_fleet_handoff_view_has_wide_row_narrow_stack_and_safe_empty_state() -> None:
+    assert "grid-template-columns:minmax(0,1fr) auto minmax(0,1fr)" in dashboard.HTML
+    assert "@media(max-width:800px){.handoff-route" in dashboard.HTML
+    assert ".handoff-route[data-connected=false]" in dashboard.HTML
+    assert "overflow-wrap:anywhere" in dashboard.HTML
+    for literal in (
+        "Not observed",
+        "None recorded",
+        "Not supplied",
+        "reviewer unassigned",
+    ):
+        assert literal in dashboard.HTML
+    assert "Boolean(h.source&&h.destination)" in dashboard.HTML
+    assert 'role="img" aria-label="Handoff from' in dashboard.HTML
+    assert 'data-copy-handoff=' in dashboard.HTML
 
 
 def test_timeline_groups_by_utc_day_and_ticket_newest_first() -> None:

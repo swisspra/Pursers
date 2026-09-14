@@ -102,6 +102,7 @@ MAX_REQUIRED_FIELDS = 20
 MAX_SUBMISSION_CHARS = 500
 MAX_ANNOTATIONS_PER_TICKET = 50
 MAX_ANNOTATION_TEXT_CHARS = 4_000
+MAX_HANDOFF_MEMORIES = 500
 MAX_FINDINGS = 50
 MAX_FINDING_CHARS = 500
 MAX_OVERHEAD_FILE_BYTES = 2_000_000
@@ -358,6 +359,10 @@ class FleetClient(Protocol):
     ) -> dict[str, Any]: ...
     async def board_claim_ttl_set(self, claim_ttl_s: int) -> dict[str, Any]: ...
     async def ticket_get(self, ticket_id: str) -> dict[str, Any]: ...
+
+    async def memory_read(
+        self, *, memory_type: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]: ...
 
 
 def _state_value(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
@@ -2147,6 +2152,89 @@ def _active_review_from_log(lines: list[str]) -> dict[str, str] | None:
     return _review_state_after_log(lines)[1]
 
 
+def _review_destination(ticket: dict[str, Any]) -> str | None:
+    lease = ticket.get("review_lease")
+    if isinstance(lease, dict):
+        destination = lease.get("reviewer_agent_name") or lease.get(
+            "reviewer_agent_id"
+        )
+        if isinstance(destination, str) and destination:
+            return _clip(destination, MAX_LABEL_CHARS)
+    offer = ticket.get("review_offer")
+    if isinstance(offer, dict):
+        destination = offer.get("agent_name") or offer.get("agent_id")
+        if isinstance(destination, str) and destination:
+            return _clip(destination, MAX_LABEL_CHARS)
+    return None
+
+
+def _handoff_recency(memory: dict[str, Any]) -> tuple[float, str, str]:
+    raw_epoch = memory.get("created_at_epoch")
+    epoch = float(raw_epoch) if isinstance(raw_epoch, (int, float)) else 0.0
+    return (
+        epoch,
+        str(memory.get("created_at") or ""),
+        str(memory.get("memory_id") or ""),
+    )
+
+
+def _latest_handoffs_by_ticket(memories: Any) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    if not isinstance(memories, list):
+        return latest
+    for memory in memories[:MAX_HANDOFF_MEMORIES]:
+        if (
+            not isinstance(memory, dict)
+            or memory.get("memory_type") != "handoff"
+            or not isinstance(memory.get("memory_id"), str)
+        ):
+            continue
+        related = memory.get("related_tickets")
+        if not isinstance(related, list):
+            continue
+        for raw_ticket_id in related[:MAX_REQUIRED_FIELDS]:
+            if not isinstance(raw_ticket_id, str) or not raw_ticket_id:
+                continue
+            ticket_id = _clip(raw_ticket_id, MAX_LABEL_CHARS)
+            current = latest.get(ticket_id)
+            if current is None or _handoff_recency(memory) > _handoff_recency(current):
+                latest[ticket_id] = memory
+    return latest
+
+
+def _detail_handoff(
+    memory: dict[str, Any] | None, ticket: dict[str, Any]
+) -> dict[str, Any] | None:
+    if not isinstance(memory, dict):
+        return None
+    next_steps = memory.get("next_steps")
+    if not isinstance(next_steps, list):
+        next_steps = []
+    return {
+        "memory_id": _clip(memory.get("memory_id"), MAX_LABEL_CHARS),
+        "ticket_id": _clip(ticket.get("ticket_id"), MAX_LABEL_CHARS),
+        "source": _clip(
+            memory.get("author_agent_name") or memory.get("author_agent_id"),
+            MAX_LABEL_CHARS,
+        )
+        or None,
+        "destination": _review_destination(ticket),
+        "summary": _clip(
+            memory.get("pinned_summary")
+            or memory.get("summary")
+            or memory.get("title"),
+            MAX_SUBMISSION_CHARS,
+        )
+        or None,
+        "next_steps": [
+            _clip(item, MAX_DESCRIPTION_CHARS)
+            for item in next_steps[:8]
+            if isinstance(item, str) and item
+        ],
+        "created_at": _clip(memory.get("created_at"), 40) or None,
+    }
+
+
 def _ticket_actor_label(
     *,
     name: Any = None,
@@ -2455,6 +2543,7 @@ def _detail_ticket(
     events: list[Any] | None = None,
     *,
     agents_by_id: dict[str, dict[str, Any]] | None = None,
+    handoff: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     required = ticket.get("required_fields")
     if not isinstance(required, list):
@@ -2550,6 +2639,7 @@ def _detail_ticket(
             ticket, events or [], agents_by_id=agents_by_id
         ),
         "coordination": _ticket_coordination_summary(ticket),
+        "latest_handoff": _detail_handoff(handoff, ticket),
     }
 
 
@@ -2993,8 +3083,14 @@ def project_board_detail(
         if isinstance(source_agents, list)
         else {}
     )
+    handoffs_by_ticket = _latest_handoffs_by_ticket(raw.get("handoff_memories"))
     tickets = [
-        _detail_ticket(item, source_events, agents_by_id=agents_by_id)
+        _detail_ticket(
+            item,
+            source_events,
+            agents_by_id=agents_by_id,
+            handoff=handoffs_by_ticket.get(str(item.get("ticket_id") or "")),
+        )
         for item in source_tickets
         if isinstance(item, dict)
     ]
@@ -3869,6 +3965,14 @@ class FleetFetcher:
                             )
                 except Exception:  # noqa: BLE001 - older centrals lack needs_human.
                     human_requests = []
+                try:
+                    handoff_memories = await client.memory_read(
+                        memory_type="handoff", limit=MAX_HANDOFF_MEMORIES
+                    )
+                    if not isinstance(handoff_memories, list):
+                        handoff_memories = []
+                except Exception:  # noqa: BLE001 - older clients may lack memory_read.
+                    handoff_memories = []
             return {
                 "label": label,
                 "board_id": board_id,
@@ -3879,6 +3983,7 @@ class FleetFetcher:
                 ),
                 "event_resync_required": event_feed["resync_required"],
                 "human_requests": human_requests[:10],
+                "handoff_memories": handoff_memories,
             }
         except Exception as exc:  # noqa: BLE001 - isolate one unavailable board.
             return {
@@ -6423,6 +6528,9 @@ function pressureBadge(s){const label=s.pressure==='compact'?'COMPACT':s.pressur
 function renderOverhead(d){const sessions=d.sessions||[],model=d.model_wait||[],cumulative=d.seats||[];document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Session context pressure · ${esc(d.central)}</h2><p class="muted">Model-visible wait cost is separated from bridge-to-Central diagnostics.</p></div></div><section class="card pool"><h3>Model-visible a2a_wait cost</h3>${model.length?`<div class="table-scroll"><table aria-label="Model-visible wait cost"><thead><tr><th>Seat</th><th>Returns this hour</th><th>Context this hour</th><th>24-hour outcomes</th></tr></thead><tbody>${model.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.returns_per_hour)}</td><td>${esc(s.context_bytes_per_hour)} B<div class="meta">≈ ${esc(s.estimated_tokens_per_hour)} tokens</div></td><td>${esc(JSON.stringify(s.outcomes||{}))}<div class="meta">${esc(s.last_24h_returns)} returns · ${esc(s.last_24h_context_bytes)} B</div></td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No model-visible wait returns yet.</p>`}</section><section class="card pool">${sessions.length?`<div class="table-scroll"><table aria-label="Session context pressure"><thead><tr><th>Seat</th><th>Board</th><th>Est. tokens / poll</th><th>Trend vs median</th><th>Pressure</th></tr></thead><tbody>${sessions.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">sampled ${esc(fmt(s.latest_at))}</div></td><td>${esc(s.board_id)}</td><td>${esc(s.latest_estimated_tokens)}</td><td>${esc(s.trend)} ${s.trend_ratio===null?'—':`${esc(s.trend_ratio)}×`}<div class="meta">24-sample median ≈ ${esc(s.median_estimated_tokens)} tokens · ${esc(s.sample_count)} samples</div></td><td>${pressureBadge(s)}<div class="meta">${esc(s.next_action)}</div></td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No session pressure samples yet — context pressure is calm (${esc(d.source_status)}).</p>`}</section><details class="card pool" data-state-key="overhead-details:${esc(d.central)}"><summary>Bridge-to-Central diagnostic details</summary>${cumulative.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${cumulative.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No cumulative debug stats.</p>`}</details>`;bindInteractive(document.querySelector('#detail-view'))}
 function sortedTickets(items){const rank=s=>['claimed','in_progress','creating_report'].includes(s)?0:['submitted','reviewing','in_review'].includes(s)?1:s==='open'?2:3;return [...items].sort((a,b)=>rank(a.status)-rank(b.status)||(detailSort==='oldest'?String(a.updated_at||'').localeCompare(String(b.updated_at||'')):String(b.updated_at||'').localeCompare(String(a.updated_at||''))))}
 function tabs(d,r){return `<nav class="tabs" aria-label="Board views">${[['tickets','Tickets'],['timeline','Timeline'],['changes','Changes'],['flow','Ticket Flow'],['routes','Routes']].map(([v,label])=>`<a class="tab${r.view===v?' active':''}" href="${boardHref(r.central,d.board.board_id,v)}">${esc(label)}</a>`).join('')}</nav>`}
+async function copyHandoffValue(button){const value=button.dataset.copyHandoff||'',original=button.textContent;let copied=false;try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(value);copied=true}}catch(_error){}if(!copied){const input=document.createElement('textarea');input.value=value;input.readOnly=true;input.style.position='fixed';input.style.left='-10000px';document.body.append(input);input.select();try{copied=document.execCommand('copy')}catch(_error){}input.remove()}button.textContent=copied?'Copied':'Copy unavailable';setTimeout(()=>button.textContent=original,1500)}
+document.addEventListener('click',event=>{const button=event.target.closest?.('[data-copy-handoff]');if(button)copyHandoffValue(button)})
+function handoffView(t,r,d){const h=t.latest_handoff;if(!h)return'';const source=h.source||'Not observed',destination=h.destination||'reviewer unassigned',connected=Boolean(h.source&&h.destination),ticket=h.ticket_id||'Not supplied',summary=h.summary||'Not supplied',steps=(h.next_steps||[]).length?`<ul>${h.next_steps.map(step=>`<li>${esc(step)}</li>`).join('')}</ul>`:'<p class="meta">None recorded</p>',arrow=connected?`<span class="handoff-arrow" role="img" aria-label="Handoff from ${esc(source)} to ${esc(destination)}"><span aria-hidden="true">→</span></span>`:'';return`<article class="handoff-card"><span class="handoff-kicker">Latest explicit handoff</span><div class="handoff-route" data-connected="${connected}"><div class="handoff-endpoint"><span>Source agent</span><strong>${esc(source)}</strong></div>${arrow}<div class="handoff-endpoint"><span>Destination</span><strong>${esc(destination)}</strong></div></div><blockquote>${esc(summary)}</blockquote><div class="handoff-next"><b>Next steps</b>${steps}</div><div class="handoff-meta"><a class="id" href="${ticketHref(r.central,d.board.board_id,ticket)}">${esc(ticket)}</a><span>${esc(h.created_at?fmt(h.created_at):'Not observed')}</span><span class="handoff-memory"><code>${esc(h.memory_id||'Not supplied')}</code>${h.memory_id?`<button type="button" data-copy-handoff="${esc(h.memory_id)}" aria-label="Copy memory ID ${esc(h.memory_id)}">Copy memory ID</button>`:''}</span></div></article>`}
 function annotationView(t){const rows=t.annotations||[],omitted=Number(t.annotations_omitted_count||0);if(!rows.length&&!omitted)return'';return`<section class="ticket-annotations"><h3>Annotations · ${esc(t.annotation_count||rows.length)}</h3>${omitted?`<p class="meta">${esc(omitted)} older annotation(s) omitted.</p>`:''}${rows.map(a=>{const by=a.by||{},author=by.agent_name||by.agent_id||by.principal_id||'unknown';return`<article class="finding annotation"><span class="pill annotation-kind">${esc(a.kind||'note')}</span> <span class="id">${esc(a.annotation_id)}</span><p class="ticket-copy">${esc(a.text)}</p><p class="meta">By ${esc(author)} · ${esc(fmt(a.at))}</p></article>`}).join('')}</section>`}
 function detailActivityNotices(d){return`${d.event_resync_required?'<p class="warning ticket-activity-notice">This bounded catchup required a journal resync; earlier events were not observed.</p>':''}${d.event_window_truncated?'<p class="meta ticket-activity-notice">Older events omitted from this bounded view.</p>':''}`}
 function eventTypeSummary(e){const kind=e.kind?String(e.kind).replaceAll('_',' '):'Not observed';return e.status_from||e.status_to?`${kind} · ${e.status_from||'Not observed'} → ${e.status_to||'Not observed'}`:kind}
@@ -6483,7 +6591,29 @@ function ticketView(d,r){""",
         "<summary>${esc(t.title)}</summary><p class=\"ticket-copy\">",
         "<summary>${esc(t.title)}</summary><div class=\"ticket-detail-body\">${ticketCoordination(t)}${ticketLifecycle(t)}<p class=\"ticket-copy\">",
     )
+    .replace(
+        "${ticketActivityView(d,r,t)}${annotationView(t)}",
+        "${ticketActivityView(d,r,t)}${handoffView(t,r,d)}${annotationView(t)}",
+    )
     .replace("${annotationView(t)}</details>", "${annotationView(t)}</div></details>")
+)
+
+HTML = HTML.replace(
+    "</style>",
+    ".handoff-card{display:grid;gap:10px;margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}"
+    ".handoff-kicker,.handoff-endpoint>span{color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}"
+    ".handoff-route{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:10px;align-items:stretch}"
+    ".handoff-route[data-connected=false]{grid-template-columns:repeat(2,minmax(0,1fr))}"
+    ".handoff-endpoint{display:grid;align-content:center;min-width:0;padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}"
+    ".handoff-endpoint strong,.handoff-memory code{overflow-wrap:anywhere;word-break:break-word;unicode-bidi:plaintext}"
+    ".handoff-arrow{display:grid;place-items:center;min-width:28px;color:var(--accent);font-size:20px}"
+    ".handoff-card blockquote{margin:0;padding:8px 10px;border-left:3px solid var(--accent);overflow-wrap:anywhere;unicode-bidi:plaintext}"
+    ".handoff-next ul{margin:5px 0 0;padding-left:20px}.handoff-next li{overflow-wrap:anywhere}"
+    ".handoff-meta{display:flex;min-width:0;flex-wrap:wrap;align-items:center;gap:10px;color:var(--muted);font-size:12px}"
+    ".handoff-memory{display:flex;min-width:0;flex:1 1 220px;align-items:center;justify-content:flex-end;gap:8px}"
+    ".handoff-memory button{min-height:34px;padding:5px 9px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text);cursor:pointer}"
+    "@media(max-width:800px){.handoff-route,.handoff-route[data-connected=false]{grid-template-columns:1fr}.handoff-arrow{min-height:28px;transform:rotate(90deg)}.handoff-memory{width:100%;justify-content:space-between}}"
+    "@media(forced-colors:active){.handoff-card,.handoff-endpoint{border:1px solid CanvasText}}</style>",
 )
 
 # Keep the existing bounded fleet SPA intact; layer the one explicit write surface
