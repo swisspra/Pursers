@@ -1,0 +1,80 @@
+name: Bug report
+description: Report a reproducible problem in Pursers
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. For vulnerabilities, use private vulnerability reporting instead of this public form.
+  - type: dropdown
+    id: version
+    attributes:
+      label: Version
+      description: Select the version or source type where the problem occurs.
+      options:
+        - 5.0.0b1
+        - Source checkout
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Central
+        - Client or MCP connector
+        - Personal
+        - Wait bridge
+        - Fleet Dashboard or seat kit
+        - Importer
+        - AionUi extension
+        - Documentation or release tooling
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, Python version, install method, and MCP host when relevant.
+      placeholder: macOS 15; Python 3.12; release wheels; Codex
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest safe sequence that reproduces the problem.
+      placeholder: |
+        1. Start ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted logs or evidence
+      description: Remove tokens, private paths, board contents, and personal identifiers.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I removed credentials, private data, and identifying paths.
+          required: true
