@@ -51,7 +51,8 @@ e2314191a354ab2ab0d0020c1ef80cc0049909eaf5219fcdff0c0f24847b677e  pursers_client
 102d6eb35daae393c8fef589c8b3e60b02ab985d01856f64afb99ba3ba94834f  pursers_wait_bridge-0.1.0a16-py3-none-any.whl
 ```
 
-> **Publication note:** Release v5.0.0b1 publication pending; hashes above are the approved build.
+The published [`v5.0.0b1` prerelease](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1)
+contains exactly these six wheel assets and `SHA256SUMS.txt`.
 
 Use a dedicated environment. Installing all six wheels together lets the
 installer resolve their exact cross-package versions:

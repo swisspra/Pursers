@@ -32,7 +32,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `_registry_boards` honors `PURSERS_BOARDS` (`registry` | `home` | list) so a
   seat no longer joins every registry board its credential cannot enter.
 
-## [5.0.0b1] - 2026-09-13
+## [5.0.0b1] - 2026-09-14
 
 This release includes `pursers-central==0.1.0a30`,
 `pursers-client==0.1.0a23`, `pursers-personal-import==5.0.0a3`,

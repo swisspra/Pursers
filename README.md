@@ -9,7 +9,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.11–3.14](https://img.shields.io/badge/python-3.11%E2%80%933.14-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)
-[![Release v5.0.0b1](https://img.shields.io/badge/release-v5.0.0b1-orange)](https://github.com/swisspra/Pursers/releases)
+[![Release v5.0.0b1](https://img.shields.io/badge/release-v5.0.0b1-orange)](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1)
 [![Status: beta](https://img.shields.io/badge/status-beta-orange)](#beta-status)
 
 <sub>main: <code>5.0.0a26</code> (pre-release train)</sub>
@@ -64,8 +64,8 @@ by your private profile. Keep the generated credentials out of repositories and
 shared configuration. For identity admission, another host, health checks, and
 rollback, continue with [Getting Started](docs/GETTING-STARTED.md).
 
-> **Publication note:** v5.0.0b1 assets are approved but not yet published; the
-> release team will remove this note when the GitHub prerelease goes live.
+The published [`v5.0.0b1` prerelease](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1)
+contains the six wheel assets above plus `SHA256SUMS.txt`.
 
 ## How the pieces fit
 
