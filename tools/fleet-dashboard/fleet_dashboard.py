@@ -2243,7 +2243,11 @@ def _ticket_lifecycle(
     dispatch_history = ticket.get("dispatch_history")
     if isinstance(dispatch_history, list):
         for item in dispatch_history:
-            if not isinstance(item, dict) or item.get("state") != "offered":
+            if (
+                not isinstance(item, dict)
+                or item.get("state") != "offered"
+                or item.get("kind") != "work"
+            ):
                 continue
             evidence["offered"] = {
                 "at": _clip(item.get("offered_at") or item.get("at"), 40) or None,
@@ -2292,7 +2296,15 @@ def _ticket_lifecycle(
                 "at": occurred_at or evidence["claimed"]["at"],
                 "actor": actor or evidence["claimed"]["actor"],
             }
-        if event.get("status_to") in SUBMITTED_STATES:
+        is_submission_event = event.get("kind") in {
+            "ticket_submitted",
+            "ticket_resubmitted",
+        } or (
+            event.get("kind") == "ticket_status_changed"
+            and event.get("status_to") in SUBMITTED_STATES
+            and event.get("status_from") not in SUBMITTED_STATES
+        )
+        if is_submission_event:
             evidence["submitted"] = {
                 "at": occurred_at or evidence["submitted"]["at"],
                 "actor": (

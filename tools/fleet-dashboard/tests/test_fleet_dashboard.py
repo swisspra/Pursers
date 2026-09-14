@@ -1173,6 +1173,7 @@ def test_detail_projection_uses_observed_lifecycle_and_coordination_fields() -> 
         "dispatch_history": [
             {
                 "state": "offered",
+                "kind": "work",
                 "agent_name": "worker-7",
                 "at": "2030-01-01T10:01:00+00:00",
             }
@@ -1237,6 +1238,78 @@ def test_detail_projection_uses_observed_lifecycle_and_coordination_fields() -> 
             "at": "2030-01-01T10:03:00+00:00",
         },
     }
+
+
+def test_ticket_lifecycle_keeps_work_offer_and_real_submission_evidence() -> None:
+    projected = dashboard._detail_ticket(
+        {
+            "ticket_id": "TK-reviewed-lifecycle",
+            "title": "Reviewed lifecycle",
+            "status": "submitted",
+            "dispatch_history": [
+                {
+                    "state": "offered",
+                    "kind": "work",
+                    "agent_name": "worker-7",
+                    "offered_at": "2030-01-01T10:01:00+00:00",
+                },
+                {
+                    "state": "offered",
+                    "kind": "review",
+                    "agent_name": "reviewer-1",
+                    "offered_at": "2030-01-01T10:04:00+00:00",
+                },
+            ],
+        },
+        [
+            {
+                "seq": 1,
+                "kind": "ticket_status_changed",
+                "ticket_id": "TK-reviewed-lifecycle",
+                "actor": "AI-worker",
+                "status_from": "open",
+                "status_to": "claimed",
+                "occurred_at": "2030-01-01T10:02:00+00:00",
+            },
+            {
+                "seq": 2,
+                "kind": "ticket_status_changed",
+                "ticket_id": "TK-reviewed-lifecycle",
+                "actor": "AI-worker",
+                "status_from": "claimed",
+                "status_to": "submitted",
+                "occurred_at": "2030-01-01T10:03:00+00:00",
+            },
+            {
+                "seq": 3,
+                "kind": "review_offered",
+                "ticket_id": "TK-reviewed-lifecycle",
+                "offered_agent_id": "AI-reviewer",
+                "offered_agent_name": "reviewer-1",
+                "offer_kind": "review",
+                "occurred_at": "2030-01-01T10:04:00+00:00",
+            },
+            {
+                "seq": 4,
+                "kind": "ticket_review_claimed",
+                "ticket_id": "TK-reviewed-lifecycle",
+                "actor": "AI-reviewer",
+                "status_from": "submitted",
+                "status_to": "submitted",
+                "occurred_at": "2030-01-01T10:05:00+00:00",
+            },
+        ],
+        agents_by_id={
+            "AI-worker": {"agent_name": "worker-7"},
+            "AI-reviewer": {"agent_name": "reviewer-1"},
+        },
+    )
+
+    stages = {stage["key"]: stage for stage in projected["lifecycle"]}
+    assert stages["offered"]["actor"] == "worker-7"
+    assert stages["offered"]["at"] == "2030-01-01T10:01:00+00:00"
+    assert stages["submitted"]["actor"] == "worker-7"
+    assert stages["submitted"]["at"] == "2030-01-01T10:03:00+00:00"
 
 
 def test_ticket_lifecycle_render_is_responsive_noninteractive_and_truthful() -> None:
