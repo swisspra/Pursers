@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- Upgraded the Python MCP SDK pins across central, client, and personal from
+  2.1.1 to 2.2.0; CI now verifies the installed SDK version explicitly.
+
 ### Fixed
 
 - Seat kit tests: the synthetic door token used by the door tests now carries
