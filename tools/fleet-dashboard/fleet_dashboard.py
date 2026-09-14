@@ -180,6 +180,20 @@ CENTRAL_LABEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 SUBMITTED_STATES = frozenset({"submitted", "reviewing", "in_review"})
 TERMINAL_STATES = frozenset({"closed", "rejected", "canceled", "terminated"})
+TICKET_NEXT_LABELS = {
+    "open": "Claim when offered",
+    "assigned": "Claim when offered",
+    "claimed": "Submit for independent review",
+    "in_progress": "Submit for independent review",
+    "creating_report": "Submit for independent review",
+    "submitted": "Complete independent review",
+    "reviewing": "Complete independent review",
+    "in_review": "Complete independent review",
+    "rejected": "Address review feedback",
+    "closed": "No next lifecycle action",
+    "canceled": "No next lifecycle action",
+    "terminated": "No next lifecycle action",
+}
 CONFIG_STATE_KEY = "coordinator_config"
 INTAKE_STATE_KEY = "coordinator_intake"
 FINDINGS_STATE_KEY = "coordinator_findings"
@@ -2133,7 +2147,303 @@ def _active_review_from_log(lines: list[str]) -> dict[str, str] | None:
     return _review_state_after_log(lines)[1]
 
 
-def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
+def _ticket_actor_label(
+    *,
+    name: Any = None,
+    agent_id: Any = None,
+    agents_by_id: dict[str, dict[str, Any]] | None = None,
+) -> str | None:
+    """Return one observed actor label without inventing a display identity."""
+    label = _clip(name, MAX_LABEL_CHARS)
+    if label:
+        return label
+    safe_agent_id = _clip(agent_id, MAX_LABEL_CHARS)
+    known = (agents_by_id or {}).get(safe_agent_id, {})
+    return _clip(known.get("agent_name"), MAX_LABEL_CHARS) or safe_agent_id or None
+
+
+def _ticket_lifecycle(
+    ticket: dict[str, Any],
+    events: list[Any],
+    *,
+    agents_by_id: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Project observed lifecycle evidence plus the current protocol stage."""
+    submissions = ticket.get("submission_history")
+    latest_submission = (
+        submissions[-1]
+        if isinstance(submissions, list)
+        and submissions
+        and isinstance(submissions[-1], dict)
+        else {}
+    )
+    reviews = ticket.get("review_history")
+    latest_review = (
+        reviews[-1]
+        if isinstance(reviews, list)
+        and reviews
+        and isinstance(reviews[-1], dict)
+        else {}
+    )
+    evidence: dict[str, dict[str, Any]] = {
+        "created": {
+            "at": _clip(ticket.get("created_at"), 40) or None,
+            "actor": _ticket_actor_label(
+                name=ticket.get("created_by"),
+                agent_id=ticket.get("created_by_agent_id"),
+                agents_by_id=agents_by_id,
+            ),
+        },
+        "offered": {"at": None, "actor": None},
+        "claimed": {
+            "at": _clip(ticket.get("claimed_at"), 40) or None,
+            "actor": _ticket_actor_label(
+                name=ticket.get("claimed_by"),
+                agent_id=ticket.get("claimed_by_agent_id"),
+                agents_by_id=agents_by_id,
+            ),
+        },
+        "submitted": {
+            "at": _clip(
+                latest_submission.get("submitted_at") or ticket.get("submitted_at"),
+                40,
+            )
+            or None,
+            "actor": _ticket_actor_label(
+                name=(
+                    latest_submission.get("submitted_by_agent_name")
+                    or ticket.get("submitted_by_agent_name")
+                ),
+                agent_id=(
+                    latest_submission.get("submitted_by_agent_id")
+                    or ticket.get("submitted_by_agent_id")
+                ),
+                agents_by_id=agents_by_id,
+            ),
+        },
+        "reviewed": {
+            "at": _clip(
+                latest_review.get("reviewed_at") or ticket.get("reviewed_at"), 40
+            )
+            or None,
+            "actor": _ticket_actor_label(
+                name=(
+                    latest_review.get("reviewed_by_agent_name")
+                    or ticket.get("reviewed_by_agent_name")
+                ),
+                agent_id=(
+                    latest_review.get("reviewed_by_agent_id")
+                    or ticket.get("reviewed_by_agent_id")
+                ),
+                agents_by_id=agents_by_id,
+            ),
+        },
+    }
+
+    dispatch_history = ticket.get("dispatch_history")
+    if isinstance(dispatch_history, list):
+        for item in dispatch_history:
+            if not isinstance(item, dict) or item.get("state") != "offered":
+                continue
+            evidence["offered"] = {
+                "at": _clip(item.get("offered_at") or item.get("at"), 40) or None,
+                "actor": _ticket_actor_label(
+                    name=item.get("agent_name"),
+                    agent_id=item.get("agent_id"),
+                    agents_by_id=agents_by_id,
+                ),
+            }
+
+    ticket_id = str(ticket.get("ticket_id") or "")
+    ordered_events = sorted(
+        (
+            item
+            for item in events
+            if isinstance(item, dict) and item.get("ticket_id") == ticket_id
+        ),
+        key=lambda item: item.get("seq") if isinstance(item.get("seq"), int) else -1,
+    )
+    for event in ordered_events:
+        occurred_at = _clip(event.get("occurred_at"), 40) or None
+        actor = _ticket_actor_label(
+            agent_id=event.get("actor"), agents_by_id=agents_by_id
+        )
+        if event.get("kind") == "ticket_created" or (
+            event.get("status_from") == "missing" and event.get("status_to") == "open"
+        ):
+            evidence["created"] = {
+                "at": occurred_at or evidence["created"]["at"],
+                "actor": actor or evidence["created"]["actor"],
+            }
+        if event.get("kind") == "ticket_offered":
+            evidence["offered"] = {
+                "at": occurred_at or evidence["offered"]["at"],
+                "actor": (
+                    _ticket_actor_label(
+                        name=event.get("offered_agent_name"),
+                        agent_id=event.get("offered_agent_id"),
+                        agents_by_id=agents_by_id,
+                    )
+                    or evidence["offered"]["actor"]
+                ),
+            }
+        if event.get("status_to") in ACTIVE_CLAIM_STATES:
+            evidence["claimed"] = {
+                "at": occurred_at or evidence["claimed"]["at"],
+                "actor": actor or evidence["claimed"]["actor"],
+            }
+        if event.get("status_to") in SUBMITTED_STATES:
+            evidence["submitted"] = {
+                "at": occurred_at or evidence["submitted"]["at"],
+                "actor": (
+                    _ticket_actor_label(
+                        name=event.get("submitted_by_agent_name"),
+                        agent_id=(
+                            event.get("submitted_by_agent_id") or event.get("actor")
+                        ),
+                        agents_by_id=agents_by_id,
+                    )
+                    or evidence["submitted"]["actor"]
+                ),
+            }
+        if event.get("review_verdict") or event.get("status_to") == "closed":
+            evidence["reviewed"] = {
+                "at": occurred_at or evidence["reviewed"]["at"],
+                "actor": (
+                    _ticket_actor_label(
+                        name=event.get("reviewed_by_agent_name"),
+                        agent_id=(
+                            event.get("reviewed_by_agent_id") or event.get("actor")
+                        ),
+                        agents_by_id=agents_by_id,
+                    )
+                    or evidence["reviewed"]["actor"]
+                ),
+            }
+
+    status = str(ticket.get("status") or "unknown")
+    dispatch_state = ticket.get("dispatch_state")
+    offered_now = (
+        isinstance(dispatch_state, dict) and dispatch_state.get("state") == "offered"
+    )
+    if status in {"closed", "rejected"}:
+        current_key = "reviewed"
+    elif status in SUBMITTED_STATES:
+        current_key = "submitted"
+    elif status in ACTIVE_CLAIM_STATES:
+        current_key = "claimed"
+    elif offered_now or status == "assigned":
+        current_key = "offered"
+    else:
+        current_key = "created"
+
+    stages = []
+    for key, label in (
+        ("created", "Created"),
+        ("offered", "Offered"),
+        ("claimed", "Claimed"),
+        ("submitted", "Submitted"),
+        ("reviewed", "Reviewed"),
+    ):
+        observed = bool(evidence[key]["at"] or evidence[key]["actor"])
+        stages.append(
+            {
+                "key": key,
+                "label": label,
+                "state": (
+                    "current"
+                    if key == current_key
+                    else "complete"
+                    if observed
+                    else "pending"
+                ),
+                "observed": observed,
+                **evidence[key],
+            }
+        )
+    return stages
+
+
+def _ticket_coordination_summary(ticket: dict[str, Any]) -> dict[str, Any]:
+    """Translate current protocol fields through explicit, bounded labels."""
+    status = str(ticket.get("status") or "unknown")
+    review_lease = ticket.get("review_lease")
+    dispatch_state = ticket.get("dispatch_state")
+    lease_expires_at = None
+    lease_expected = False
+    if isinstance(review_lease, dict) and status in SUBMITTED_STATES:
+        lease_expected = True
+        reviewer = _ticket_actor_label(
+            name=review_lease.get("reviewer_agent_name"),
+            agent_id=review_lease.get("reviewer_agent_id"),
+        )
+        now_text = f"{reviewer} is reviewing" if reviewer else "Independent review active"
+        lease_expires_at = _clip(review_lease.get("expires_at"), 40) or None
+    elif status in ACTIVE_CLAIM_STATES:
+        lease_expected = True
+        worker = _ticket_actor_label(
+            name=ticket.get("claimed_by"), agent_id=ticket.get("claimed_by_agent_id")
+        )
+        now_text = f"{worker} is working" if worker else "Claimed work in progress"
+        lease_expires_at = _clip(ticket.get("lease_expires_at"), 40) or None
+    elif (
+        isinstance(dispatch_state, dict) and dispatch_state.get("state") == "offered"
+    ):
+        offered_to = _ticket_actor_label(
+            name=dispatch_state.get("agent_name"),
+            agent_id=dispatch_state.get("agent_id"),
+        )
+        now_text = f"Offer sent to {offered_to or 'Not supplied'}"
+    else:
+        now_text = {
+            "open": "Awaiting an eligible worker",
+            "assigned": "Awaiting the assigned worker",
+            "submitted": "Awaiting independent review",
+            "reviewing": "Independent review active",
+            "in_review": "Independent review active",
+            "rejected": "Review requested changes",
+            "closed": "Review approved",
+            "canceled": "Ticket canceled",
+            "terminated": "Ticket terminated",
+        }.get(status, "Not supplied")
+
+    raw_annotations = ticket.get("annotations")
+    latest_decision = None
+    if isinstance(raw_annotations, list):
+        latest_decision = next(
+            (
+                item
+                for item in reversed(raw_annotations)
+                if isinstance(item, dict)
+                and item.get("kind") == "decision"
+                and _clip(item.get("text"), MAX_ANNOTATION_TEXT_CHARS)
+            ),
+            None,
+        )
+    decision = None
+    if latest_decision is not None:
+        decision = {
+            "kind": "Decision",
+            "text": _clip(latest_decision.get("text"), MAX_ANNOTATION_TEXT_CHARS),
+            "at": _clip(latest_decision.get("at"), 40) or None,
+        }
+    return {
+        "now": {
+            "text": now_text,
+            "lease_expires_at": lease_expires_at,
+            "lease_expected": lease_expected,
+        },
+        "next": TICKET_NEXT_LABELS.get(status, "Not supplied"),
+        "blocked": decision,
+    }
+
+
+def _detail_ticket(
+    ticket: dict[str, Any],
+    events: list[Any] | None = None,
+    *,
+    agents_by_id: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     required = ticket.get("required_fields")
     if not isinstance(required, list):
         required = []
@@ -2213,6 +2523,10 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
             int(ticket.get("annotation_count", 0) or 0),
         ),
         "annotations_omitted_count": annotations_omitted,
+        "lifecycle": _ticket_lifecycle(
+            ticket, events or [], agents_by_id=agents_by_id
+        ),
+        "coordination": _ticket_coordination_summary(ticket),
     }
 
 
@@ -2645,8 +2959,21 @@ def project_board_detail(
     source_tickets = (
         snapshot.get("tickets") if isinstance(snapshot.get("tickets"), list) else []
     )
+    source_events = raw.get("events") if isinstance(raw.get("events"), list) else []
+    source_agents = snapshot.get("agents")
+    agents_by_id = (
+        {
+            str(agent.get("agent_id")): agent
+            for agent in source_agents
+            if isinstance(agent, dict) and agent.get("agent_id")
+        }
+        if isinstance(source_agents, list)
+        else {}
+    )
     tickets = [
-        _detail_ticket(item) for item in source_tickets if isinstance(item, dict)
+        _detail_ticket(item, source_events, agents_by_id=agents_by_id)
+        for item in source_tickets
+        if isinstance(item, dict)
     ]
     status_rank = {
         **{status: 0 for status in ACTIVE_CLAIM_STATES},
@@ -2656,7 +2983,6 @@ def project_board_detail(
     tickets.sort(key=lambda item: item["updated_at"] or "", reverse=True)
     tickets.sort(key=lambda item: status_rank.get(item["status"], 3))
 
-    source_events = raw.get("events") if isinstance(raw.get("events"), list) else []
     routes = assemble_provenance(
         snapshot,
         source_events,
@@ -6080,7 +6406,12 @@ HTML = (
         "</style>",
         ".route-load{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:12px 0 18px}"
         ".route-seat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px}"
-        ".route-seat .counts{margin:8px 0 0}.route-stage{min-width:150px}.route-stage .meta{display:block;white-space:nowrap}</style>",
+        ".route-seat .counts{margin:8px 0 0}.route-stage{min-width:150px}.route-stage .meta{display:block;white-space:nowrap}"
+        ".ticket-detail-body{min-width:0}.ticket-coordination{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}"
+        ".ticket-coordinate{min-width:0;padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);overflow-wrap:anywhere}.ticket-coordinate>span{display:block;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.06em}.ticket-coordinate .warning{margin-left:4px}"
+        ".ticket-lifecycle{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;margin:12px 0;padding:0;list-style:none}.ticket-stage{position:relative;display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px;min-width:0;padding:8px;border-top:2px solid var(--line);overflow-wrap:anywhere}"
+        ".ticket-stage.complete,.ticket-stage.current{border-color:var(--accent)}.ticket-stage.current{background:var(--panel2)}.ticket-stage-icon{color:var(--muted)}.ticket-stage.complete .ticket-stage-icon,.ticket-stage.current .ticket-stage-icon{color:var(--accent)}.ticket-stage b,.ticket-stage .meta,.ticket-stage-current{display:block}.ticket-stage-current{color:var(--text);font-size:11px;font-weight:700}"
+        "@media(max-width:600px){.ticket-coordination,.ticket-lifecycle{grid-template-columns:1fr}.ticket-stage{border-top:0;border-left:2px solid var(--line)}}</style>",
     )
     .replace(
         "<dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt>",
@@ -6090,6 +6421,18 @@ HTML = (
         "if(e.key==='f')location.hash='#/';if(e.key==='o')",
         "if(e.key==='f')location.hash='#/';if(e.key==='r'){const current=route();if(current?.kind==='board')location.hash=boardHref(current.central,current.board,'routes')}if(e.key==='o')",
     )
+    .replace(
+        "function ticketView(d,r){",
+        r"""function ticketLease(value){if(!value)return{text:'Not supplied',stale:false};const remaining=new Date(value).getTime()-Date.now();if(!Number.isFinite(remaining))return{text:'Not supplied',stale:false};if(remaining<=0)return{text:'lease expired',stale:true};const minutes=Math.max(1,Math.ceil(remaining/60000));return{text:`lease ${minutes}m`,stale:false}}
+function ticketCoordination(t){const c=t.coordination||{now:{text:'Not supplied',lease_expected:false},next:'Not supplied',blocked:null},lease=c.now.lease_expected?ticketLease(c.now.lease_expires_at):null,blocked=c.blocked;return `<section class="ticket-coordination" aria-label="Now, next, and blocked"><div class="ticket-coordinate"><span>NOW</span><b>${esc(c.now.text||'Not supplied')}</b>${lease?` <small class="${lease.stale?'warning':'meta'}">${esc(lease.text)}</small>`:''}</div><div class="ticket-coordinate"><span>NEXT</span><b>${esc(c.next||'Not supplied')}</b></div><div class="ticket-coordinate"><span>BLOCKED</span><b>${blocked?`${esc(blocked.kind)} · ${esc(blocked.text)}`:'None recorded'}</b>${blocked?.at?`<small class="meta">${esc(fmt(blocked.at))}</small>`:''}</div></section>`}
+function ticketLifecycle(t){const stages=t.lifecycle||[];return `<ol class="ticket-lifecycle" aria-label="Ticket lifecycle">${stages.map(stage=>{const current=stage.state==='current',icon=stage.state==='pending'?'○':'●',evidence=stage.observed?[stage.at?fmt(stage.at):null,stage.actor].filter(Boolean).join(' · ')||'Not observed':'Not observed';return `<li class="ticket-stage ${esc(stage.state)}"><span class="ticket-stage-icon" aria-hidden="true">${icon}</span><div><b>${esc(stage.label)}</b>${current?'<span class="ticket-stage-current">↑ Current</span>':''}<span class="meta">${esc(evidence)}</span></div></li>`}).join('')}</ol>`}
+function ticketView(d,r){""",
+    )
+    .replace(
+        "<summary>${esc(t.title)}</summary><p class=\"ticket-copy\">",
+        "<summary>${esc(t.title)}</summary><div class=\"ticket-detail-body\">${ticketCoordination(t)}${ticketLifecycle(t)}<p class=\"ticket-copy\">",
+    )
+    .replace("${annotationView(t)}</details>", "${annotationView(t)}</div></details>")
 )
 
 # Keep the existing bounded fleet SPA intact; layer the one explicit write surface
