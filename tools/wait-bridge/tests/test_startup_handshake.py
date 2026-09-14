@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import io
+import json
 import os
 import socket
 import sys
@@ -23,6 +25,27 @@ from mcp import Client  # noqa: E402
 from mcp.client.stdio import StdioServerParameters  # noqa: E402
 from pursers_client import BoardClientError, JoinedIdentity  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
+
+
+def _segment(value: dict[str, object]) -> str:
+    return base64.urlsafe_b64encode(
+        json.dumps(value, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
+
+
+def _door() -> str:
+    signature = base64.urlsafe_b64encode(b"synthetic-signature").decode().rstrip("=")
+    token = (
+        f"{_segment({'alg': 'RS256', 'kid': 'test-key'})}."
+        f"{_segment({'exp': 2_000_000_000})}.{signature}"
+    )
+    envelope = {
+        "u": "http://127.0.0.1:8766/mcp",
+        "b": "sandbox",
+        "r": "worker",
+        "t": token,
+    }
+    return f"prs1.{_segment(envelope)}"
 
 
 class _UnauthorizedHandler(BaseHTTPRequestHandler):
@@ -62,6 +85,38 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
                 wait_server.main()
             run.assert_not_called()
             self.assertIn("FATAL: split identity", stderr.getvalue())
+
+    async def test_main_refuses_empty_token_file_with_stored_door(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state = Path(raw)
+            wait_server.door_state.store(state / "doors.json", _door())
+            token_file = state / "seat-token"
+            for contents in ("", " \n\t"):
+                with self.subTest(contents=repr(contents)):
+                    token_file.write_text(contents, encoding="utf-8")
+                    stderr = io.StringIO()
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "PURSERS_BRIDGE_STATE_DIR": raw,
+                                "ONBOARD_CENTRAL_TOKEN_FILE": str(token_file),
+                                "ONBOARD_BOARD_ID": "sandbox",
+                                "PURSERS_ROLE": "worker",
+                            },
+                            clear=True,
+                        ),
+                        patch.object(sys, "argv", ["pursers-wait-bridge"]),
+                        patch.object(wait_server, "_RUNTIME_CONFIG_ERROR", None),
+                        patch.object(wait_server.mcp, "run") as run,
+                        redirect_stderr(stderr),
+                    ):
+                        wait_server.main()
+                    run.assert_not_called()
+                    self.assertIn(
+                        "FATAL: ONBOARD_CENTRAL_TOKEN_FILE is empty",
+                        stderr.getvalue(),
+                    )
 
     async def test_runtime_config_split_identity_is_a_configuration_failure(
         self,

@@ -215,7 +215,9 @@ the host after changing either token source.
 
 Any process that sets both explicit token sources also fails closed when their
 values differ, even without a managed-seat launcher. This prevents an inherited
-operator credential from overriding a seat token file. Use
+operator credential from overriding a seat token file. A configured token file
+that is empty or contains only whitespace is a configuration error and never
+falls back to stored door state. Use
 `PURSERS_ALLOW_ENV_TOKEN=1` only when the environment override is deliberate.
 
 An explicit identity is joined when its call starts. Joins are stateless and

@@ -414,6 +414,8 @@ def resolve(env: Mapping[str, str] | None = None) -> dict[str, str]:
             )
         except OSError as exc:
             raise ValueError("ONBOARD_CENTRAL_TOKEN_FILE is not readable") from exc
+        if not file_token:
+            raise ValueError("ONBOARD_CENTRAL_TOKEN_FILE is empty")
         if (
             direct_token
             and not hmac.compare_digest(direct_token, file_token)

@@ -99,6 +99,25 @@ class DoorStateTests(unittest.TestCase):
             )
             self.assertEqual(resolved["token"], "explicit-file-token")
 
+    def test_empty_token_file_fails_closed_with_stored_token(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state = Path(raw)
+            door_state.store(state / "doors.json", door())
+            token_file = state / "explicit.txt"
+            env = {
+                "PURSERS_BRIDGE_STATE_DIR": raw,
+                "ONBOARD_CENTRAL_TOKEN_FILE": str(token_file),
+                "ONBOARD_BOARD_ID": "sandbox",
+                "PURSERS_ROLE": "worker",
+            }
+            for contents in ("", " \n\t"):
+                with self.subTest(contents=repr(contents)):
+                    token_file.write_text(contents, encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        ValueError, "ONBOARD_CENTRAL_TOKEN_FILE is empty"
+                    ):
+                        door_state.resolve(env)
+
     def test_matching_environment_and_file_tokens_are_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             token_file = Path(raw) / "explicit.txt"
