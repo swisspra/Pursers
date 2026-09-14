@@ -34,6 +34,23 @@ button {
   font: inherit;
 }
 
+button.secondary {
+  background: transparent;
+  color: #f8fafc;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.confirmation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
 button {
   cursor: pointer;
   background: #0ea5e9;

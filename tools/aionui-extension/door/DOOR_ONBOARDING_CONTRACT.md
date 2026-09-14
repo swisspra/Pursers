@@ -13,7 +13,7 @@ creates or mutates a Team.
 
 | Operation | Mutation | Result |
 |---|---|---|
-| `parse(door)` | none | Redacted board, role, key ID, expiry, and transport metadata. Parsing is syntax-only; Central verifies the credential during connect. |
+| `parse(door)` | none | Redacted board, role, key ID, Central host, expiry, and transport metadata. Parsing is syntax-only; Central verifies the credential during connect. |
 | `validate(input)` | none | Adds expected board/role, seat-name, tier, HTTPS/loopback, and Team-fragment checks. |
 | `status()` | none | Calls `pursers-wait-bridge status`; returns stored redacted seats and push mode. |
 | `connect(input)` | private local state, Central onboarding, MCP import | Calls the shipped bridge `join`; passes `--name`, secure remote confirmation for HTTPS only, and `PURSERS_TIER_MAX`. |

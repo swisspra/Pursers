@@ -3,7 +3,13 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createHandlers } = require('../webui/routes.js');
-const { createStartupView, renderStartupView } = require('../webui/app.js');
+const {
+  createDoorPreview,
+  createStartupView,
+  initialize,
+  onboardingErrorMessage,
+  renderStartupView,
+} = require('../webui/app.js');
 
 class FakeElement {
   constructor(tagName = 'div') {
@@ -13,6 +19,11 @@ class FakeElement {
     this.hidden = true;
     this.textContent = '';
     this.className = '';
+    this.value = '';
+    this.disabled = false;
+    this.attributes = {};
+    this.listeners = {};
+    this.focused = false;
   }
 
   append(...children) {
@@ -21,6 +32,22 @@ class FakeElement {
 
   replaceChildren(...children) {
     this.children = children;
+  }
+
+  addEventListener(name, listener) {
+    this.listeners[name] = listener;
+  }
+
+  setAttribute(name, value) {
+    this.attributes[name] = value;
+  }
+
+  focus() {
+    this.focused = true;
+  }
+
+  async trigger(name, event = {}) {
+    return this.listeners[name]({ preventDefault() {}, ...event });
   }
 }
 
@@ -125,4 +152,89 @@ test('join status shape normalizes into the same ready view', () => {
   assert.equal(view.state, 'ready');
   assert.equal(view.icon, '✓');
   assert.equal(view.seats[0].seat_name, 'worker-one');
+});
+
+test('door preview contains only redacted confirmation metadata', () => {
+  const fields = Object.fromEntries(createDoorPreview({
+    metadata: {
+      board: 'alpha', role: 'worker', kid: 'door-a', exp: 2000000000,
+      central_host: 'central.example', transport: 'https',
+    },
+    normalized: { seat_name: null, tier_max: 2 },
+  }));
+  assert.equal(fields['Door ID'], 'door-a');
+  assert.equal(fields['Central host'], 'central.example');
+  assert.equal(fields.Board, 'alpha');
+  assert.equal(fields['Seat name'], 'Reserved on first session');
+  assert.equal(fields.Tier, '2');
+  assert.equal(JSON.stringify(fields).includes('prs1.'), false);
+});
+
+test('validation requires a second explicit Connect before connection', async () => {
+  const ids = [
+    'join-form', 'door', 'message', 'validate-door', 'door-confirmation',
+    'door-preview', 'connect-door', 'cancel-door', 'status-card',
+    'status-icon', 'status-title', 'status-summary', 'seat-list',
+    'connection-card', 'connection-title', 'recover',
+  ];
+  const elements = Object.fromEntries(ids.map((id) => [id, new FakeElement()]));
+  const connections = Object.fromEntries(
+    ['central', 'board', 'helper'].map((name) => [name, new FakeElement()]),
+  );
+  elements['connection-card'].querySelector = (selector) => (
+    connections[selector.match(/data-connection="([^"]+)/)[1]]
+  );
+  elements.door.value = 'prs1.secret-door';
+  const fakeDocument = {
+    createElement: documentRef.createElement,
+    querySelector(selector) { return elements[selector.slice(1)]; },
+  };
+  const calls = [];
+  const fetchImpl = async (path, options = {}) => {
+    calls.push({ path, options });
+    if (path === '/pursers/status') {
+      return new Response(JSON.stringify({ ok: true, push_mode: 'push', seats: [] }));
+    }
+    if (path === '/pursers/onboarding/validate') {
+      return new Response(JSON.stringify({
+        ok: true,
+        metadata: {
+          board: 'alpha', role: 'worker', kid: 'door-a', exp: 2000000000,
+          central_host: 'central.example', transport: 'https',
+        },
+        normalized: { seat_name: null, tier_max: 2 },
+      }));
+    }
+    return new Response(JSON.stringify({
+      ok: true,
+      mcp_server: 'pursers-alpha-worker',
+      status: { board: 'alpha', role: 'worker', seat_name: 'worker-one' },
+    }));
+  };
+
+  initialize(fakeDocument, fetchImpl);
+  await elements['join-form'].trigger('submit');
+  const onboardingCalls = calls.filter((call) => call.path.includes('/onboarding/'));
+  assert.deepEqual(onboardingCalls.map((call) => call.path), ['/pursers/onboarding/validate']);
+  assert.equal(elements['door-confirmation'].hidden, false);
+  assert.equal(elements.door.value, '');
+  assert.equal(elements['door-preview'].children.some((child) => child.textContent.includes('secret-door')), false);
+  assert.match(elements.message.textContent, /select Connect/);
+
+  await elements['connect-door'].trigger('click');
+  assert.deepEqual(
+    calls.filter((call) => call.path.includes('/onboarding/')).map((call) => call.path),
+    ['/pursers/onboarding/validate', '/pursers/onboarding/connect'],
+  );
+  assert.equal(JSON.parse(calls.at(-1).options.body).door, 'prs1.secret-door');
+  assert.match(elements.message.textContent, /Joined and registered/);
+});
+
+test('malformed and expired doors have distinct actionable copy', () => {
+  assert.match(onboardingErrorMessage({ code: 'invalid_door' }, 'validate'), /malformed/);
+  assert.match(onboardingErrorMessage({ code: 'expired_door' }, 'validate'), /expired/);
+  assert.notEqual(
+    onboardingErrorMessage({ code: 'invalid_door' }, 'validate'),
+    onboardingErrorMessage({ code: 'expired_door' }, 'validate'),
+  );
 });

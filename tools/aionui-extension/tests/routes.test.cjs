@@ -172,6 +172,9 @@ test('typed validation returns redacted metadata and preserved tier', async () =
   const payload = await response.json();
   assert.equal(response.status, 200);
   assert.equal(payload.operation, 'validate');
+  assert.equal(payload.metadata.central_host, '127.0.0.1:8766');
+  assert.equal(payload.metadata.board, 'demo');
+  assert.equal(payload.metadata.kid, 'door-1');
   assert.equal(payload.normalized.tier_max, 2);
   assert.equal(JSON.stringify(payload).includes(secretDoor), false);
 });

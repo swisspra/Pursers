@@ -13,9 +13,18 @@
       <form id="join-form">
         <label for="door">Paste your door</label>
         <input id="door" name="door" type="password" autocomplete="off" spellcheck="false" required>
-        <button type="submit">Join</button>
+        <button id="validate-door" type="submit">Validate door</button>
       </form>
       <p id="message" role="status" aria-live="polite"></p>
+      <section id="door-confirmation" aria-labelledby="door-confirmation-title" hidden>
+        <h2 id="door-confirmation-title">Confirm connection</h2>
+        <p>Review the redacted door details. Nothing connects until you select Connect.</p>
+        <dl id="door-preview"></dl>
+        <div class="confirmation-actions">
+          <button id="connect-door" type="button">Connect</button>
+          <button id="cancel-door" class="secondary" type="button">Cancel</button>
+        </div>
+      </section>
       <section id="connection-card" aria-labelledby="connection-title" hidden>
         <h2 id="connection-title">Connection state</h2>
         <dl>

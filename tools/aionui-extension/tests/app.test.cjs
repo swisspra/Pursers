@@ -27,9 +27,23 @@ function uiFixture() {
     }
   }
   const elements = {
-    '#join-form': { addEventListener: (name, handler) => listeners.set(`form:${name}`, handler) },
-    '#door': { value: '' },
+    '#join-form': {
+      attributes: {},
+      addEventListener: (name, handler) => listeners.set(`form:${name}`, handler),
+      setAttribute(name, value) { this.attributes[name] = value; },
+    },
+    '#door': { value: '', focus() {} },
     '#message': { textContent: '' },
+    '#validate-door': { disabled: false },
+    '#door-confirmation': { hidden: true },
+    '#door-preview': new FakeElement(),
+    '#connect-door': {
+      disabled: false,
+      addEventListener: (name, handler) => listeners.set(`connect:${name}`, handler),
+    },
+    '#cancel-door': {
+      addEventListener: (name, handler) => listeners.set(`cancel:${name}`, handler),
+    },
     '#status-card': new FakeElement(),
     '#status-icon': new FakeElement(),
     '#status-title': new FakeElement(),
@@ -148,7 +162,14 @@ test('mounted partial result exposes Recover and posts only the redacted target'
   const fetchImpl = async (url, options = {}) => {
     requests.push({ url, options });
     if (url === '/pursers/status') return jsonResponse({ ok: true, seats: [] });
-    if (url === '/pursers/join') {
+    if (url === '/pursers/onboarding/validate') {
+      return jsonResponse({
+        ok: true,
+        metadata: { board: 'demo', role: 'worker', kid: 'door-1' },
+        normalized: { seat_name: 'worker-one', tier_max: 2 },
+      });
+    }
+    if (url === '/pursers/onboarding/connect') {
       return jsonResponse({ ok: false, error: 'mcp_registration_failed', outcome: 'partial', joined: true, status }, false);
     }
     return jsonResponse({ ok: true, outcome: 'recovered', status });
@@ -157,6 +178,7 @@ test('mounted partial result exposes Recover and posts only the redacted target'
   await flushPromises();
   fixture.elements['#door'].value = 'prs1.secret-must-not-survive';
   await fixture.listeners.get('form:submit')({ preventDefault() {} });
+  await fixture.listeners.get('connect:click')();
 
   assert.equal(fixture.elements['#connection-title'].textContent, 'Connected; registration incomplete');
   assert.deepEqual(

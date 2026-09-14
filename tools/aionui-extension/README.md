@@ -21,21 +21,26 @@ it with `uv tool install pursers-wait-bridge` or
 ## Join a seat
 
 1. Open Settings, then Pursers.
-2. Paste the door supplied by your coordinator and select Join.
-3. Confirm the redacted board, role, seat name, push mode, key ID, and expiry.
-4. Start a new conversation and pick the matching Worker or Reviewer preset.
+2. Paste the door supplied by your coordinator and select **Validate door**.
+3. Review the redacted door ID, Central host, board, role, seat name, tier,
+   expiry, and transport. Malformed or expired doors stop here.
+4. Select **Connect** explicitly. Validation alone never stores the door or
+   contacts Central.
+5. Start a new conversation and pick the matching Worker or Reviewer preset.
 
-The Join route passes the door directly to `pursers-wait-bridge join`, which
-owns the private mode-0600 credential store. The extension does not log or
-persist the door. It then registers an environment-free stdio bridge through
-AionUi's local `POST /api/mcp/servers/import` endpoint.
+The validation route parses locally and returns only redacted metadata. After
+confirmation, the Connect route passes the in-memory door to
+`pursers-wait-bridge join`, which owns the private mode-0600 credential store.
+The extension does not log or persist the door. It then registers an
+environment-free stdio bridge through AionUi's local
+`POST /api/mcp/servers/import` endpoint.
 
 ## Backend onboarding contract
 
 `door/adapter.cjs` provides typed `parse`, `validate`, `connect`, `status`,
-`rotate`, and `recover` operations for a future beginner flow. The authenticated
+`rotate`, and `recover` operations for the beginner flow. The authenticated
 routes are under `/pursers/onboarding/`; the existing `/pursers/join` and
-`/pursers/status` response shapes remain compatible with the current UI.
+`/pursers/status` response shapes remain compatible for older callers.
 
 Remote Central doors require HTTPS. HTTP doors are accepted only for loopback.
 The adapter forwards a unique seat name and `PURSERS_TIER_MAX` to the shipped
