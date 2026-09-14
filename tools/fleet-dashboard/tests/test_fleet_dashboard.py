@@ -679,17 +679,21 @@ def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
             "board_id": "board-one",
             "project": "One",
             "role": "member",
-            "current_ticket_id": "TK-current",
-            "current_ticket_title": "Current work",
-            "last_seen": recent,
+                "current_ticket_id": "TK-current",
+                "current_ticket_title": "Current work",
+                "current_ticket_status": "claimed",
+                "lease_expires_at": None,
+                "last_seen": recent,
         },
         {
             "board_id": "board-two",
             "project": "Two",
             "role": None,
-            "current_ticket_id": None,
-            "current_ticket_title": None,
-            "last_seen": recent,
+                "current_ticket_id": None,
+                "current_ticket_title": None,
+                "current_ticket_status": None,
+                "lease_expires_at": None,
+                "last_seen": recent,
         },
     ]
     assert result["agents"][0]["duplicate_name"] is False
@@ -913,6 +917,48 @@ def test_ticket_table_filters_before_bounding_and_includes_submitted() -> None:
         "TK-open",
     ]
     assert rows[1]["status_label"] == "in review by reviewer-a"
+
+
+def test_agent_roster_projects_current_ticket_lease_and_status() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "agent_id": "AI-worker",
+                            "principal_id": "PR-worker",
+                            "agent_name": "worker-one",
+                            "last_activity_at": now.isoformat(),
+                            "lifecycle_status": "active",
+                            "status": "working",
+                        }
+                    ],
+                    "tickets": [
+                        {
+                            "ticket_id": "TK-active",
+                            "title": "Active work",
+                            "status": "claimed",
+                            "claimed_by_agent_id": "AI-worker",
+                            "claimed_at": "2030-01-02T11:50:00Z",
+                            "lease_expires_at": "2030-01-02T12:08:00Z",
+                        }
+                    ],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    seat = result["agents"][0]["seats"][0]
+    assert seat["current_ticket_id"] == "TK-active"
+    assert seat["current_ticket_status"] == "claimed"
+    assert seat["lease_expires_at"] == "2030-01-02T12:08:00Z"
 
 
 def test_keepalive_only_claim_is_projected_and_flagged_for_attention() -> None:
@@ -1375,6 +1421,145 @@ def test_ticket_flow_classifies_bounded_rows_and_closed_today() -> None:
     }
 
 
+def test_detail_ticket_projects_review_attention_without_inventing_values() -> None:
+    projected = dashboard._detail_ticket(
+        {
+            "ticket_id": "TK-review",
+            "title": "Review me",
+            "status": "submitted",
+            "submitted_at": "2030-01-02T11:40:00Z",
+            "rejection_count": 2,
+            "review_lease": {
+                "reviewer_agent_name": "reviewer-one",
+                "expires_at": "2030-01-02T13:00:00Z",
+            },
+        }
+    )
+    missing = dashboard._detail_ticket(
+        {"ticket_id": "TK-missing", "status": "submitted"}
+    )
+
+    assert projected["status"] == "submitted"
+    assert projected["status_label"] == "in review by reviewer-one"
+    assert projected["rejection_count"] == 2
+    assert projected["review_wait_started_at"] == "2030-01-02T11:40:00Z"
+    assert missing["title"] == "Not supplied"
+    assert missing["review_wait_started_at"] is None
+    assert missing["rejection_count"] == 0
+
+
+def test_flow_view_has_four_desktop_lanes_mobile_tabs_attention_and_empty_state() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    fixture = {
+        "board": {"board_id": "pursers"},
+        "ticket_returned": 4,
+        "tickets": [
+            {"id": "TK-open", "title": "Open", "status": "open"},
+            {
+                "id": "TK-work",
+                "title": "Work",
+                "status": "claimed",
+                "claimed_by": "worker-one",
+            },
+            {
+                "id": "TK-review",
+                "title": "Review",
+                "status": "submitted",
+                "status_label": "in review by reviewer-one",
+                "review_wait_started_at": "2030-01-02T11:40:00Z",
+                "rejection_count": 2,
+            },
+            {"id": "TK-done", "title": "Done", "status": "closed"},
+        ],
+        "ticket_flow": {
+            "open": ["TK-open"],
+            "claimed": ["TK-work"],
+            "submitted": ["TK-review"],
+            "closed_today": ["TK-done"],
+        },
+    }
+    empty = {
+        "board": {"board_id": "pursers"},
+        "ticket_returned": 0,
+        "tickets": [],
+        "ticket_flow": {
+            "open": [],
+            "claimed": [],
+            "submitted": [],
+            "closed_today": [],
+        },
+    }
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("function elapsedAge("),
+            source("const flowLabels="),
+            source("function flowCardMeta("),
+            source("function flowView("),
+            "Date.now=()=>new Date('2030-01-02T12:00:00Z').getTime();",
+            "let filterNeedle='';",
+            f"const fixture={json.dumps(fixture)},empty={json.dumps(empty)},r={{central:'personal'}};",
+            "console.log(JSON.stringify({full:flowView(fixture,r),empty:flowView(empty,r)}));",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+
+    assert result["full"].count('role="tabpanel"') == 4
+    assert result["full"].count('role="tab"') == 4
+    assert 'role="tablist"' in result["full"]
+    assert "Working · 1" in result["full"]
+    assert "Review wait 20m" in result["full"]
+    assert "Rejected ×2" in result["full"]
+    assert "TK-work" in result["full"] and "worker-one" in result["full"]
+    assert result["empty"].count("None recorded") == 4
+    assert ".flow{grid-template-columns:repeat(4,minmax(0,1fr))}" in dashboard.HTML
+    assert '.flow-column:not([data-active="true"]){display:none}' in dashboard.HTML
+
+
+def test_flow_mobile_tabs_wrap_and_support_arrow_keys() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            source("const flowLabels="),
+            source("function selectFlowLane("),
+            source("function bindFlowTabs("),
+            "const keys=Object.keys(flowLabels);",
+            "const tabs=keys.map(key=>({dataset:{flowLane:key},attrs:{},tabIndex:0,listeners:{},focused:false,setAttribute(k,v){this.attrs[k]=v},addEventListener(k,v){this.listeners[k]=v},focus(){this.focused=true}}));",
+            "const panels=keys.map(key=>({dataset:{flowPanel:key}}));",
+            "const root={querySelectorAll(selector){return selector.includes('tabpanel')?panels:tabs}};",
+            "bindFlowTabs(root);let prevented=false;tabs[0].listeners.keydown({key:'ArrowLeft',preventDefault(){prevented=true}});",
+            "console.log(JSON.stringify({prevented,selected:tabs.map(x=>x.attrs['aria-selected']),focus:tabs.map(x=>x.focused),active:panels.map(x=>x.dataset.active)}));",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+
+    assert result == {
+        "prevented": True,
+        "selected": ["false", "false", "false", "true"],
+        "focus": [False, False, False, True],
+        "active": ["false", "false", "false", "true"],
+    }
+
+
 def test_routes_assemble_event_provenance_rework_and_principal_collisions() -> None:
     now = datetime(2030, 1, 8, 12, tzinfo=timezone.utc)
     agents = [
@@ -1613,7 +1798,7 @@ def test_detail_views_include_filter_routes_mobile_containment_and_escape_calls(
     assert ".table-scroll" in dashboard.HTML
     assert "Showing last ${esc(d.event_returned)} events" in dashboard.HTML
     assert "${esc(t.title)}" in dashboard.HTML
-    assert "${esc(t.claimed_by||'Unassigned')}" in dashboard.HTML
+    assert "Agent ${t.claimed_by||'None recorded'}" in dashboard.HTML
 
 
 def test_multi_central_routes_and_complete_javascript_are_valid() -> None:
@@ -1844,7 +2029,7 @@ def test_non_actionable_table_rows_are_not_added_to_focus_order() -> None:
     assert "tbody tr" not in line
     assert ".tabIndex" not in line
     assert "row.addEventListener" not in line
-    assert "tabindex=" not in dashboard.HTML.lower()
+    assert "<tr tabindex=" not in dashboard.HTML.lower()
 
 
 def test_reconnect_banner_keeps_cached_fleet_and_recovers_silently() -> None:
@@ -5223,6 +5408,8 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
                     "role": "worker",
                     "current_ticket_id": "TK-live",
                     "current_ticket_title": long_title,
+                    "current_ticket_status": "claimed",
+                    "lease_expires_at": "2030-01-01T12:08:00Z",
                     "last_seen": "2030-01-01T11:58:00Z",
                 }
             ],
@@ -5240,6 +5427,7 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
             source("function clippedAgentTitle("),
             source("function agentLiveWork("),
             source("function agentTicketLink("),
+            source("function agentRosterTiming("),
             source("function agentVisibilityToggle("),
             source("function pageHead("),
             source("function workerByName("),
@@ -5269,8 +5457,11 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
     assert 'aria-pressed="false"' in active
     assert "TK-live" in active
     assert "Ticket title " + "x" * 34 + "…" in active
+    assert "Status claimed" in active
+    assert "Lease until" in active
     assert "2m ago" in active
-    assert "ว่าง/idle" in active
+    assert "None recorded" in active
+    assert "Last seen 2m ago" in active
     assert all_agents.index("z-busy") < all_agents.index("a-available")
     assert all_agents.index("a-available") < all_agents.index("m-stale")
     assert "Show active only" in all_agents
