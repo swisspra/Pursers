@@ -78,8 +78,23 @@ and ticket-lifecycle diagrams.
 
 ## Screenshots
 
-> **Coming soon:** a beta showcase ticket will add verified product screenshots;
-> no mockups or unverified host captures are presented here.
+[![Fleet overview](docs/showcase/01-fleet-overview.png)](docs/showcase/01-fleet-overview.png)
+
+The Fleet overview shows a live disposable Central with a populated board,
+agent availability, ticket totals, and bounded attention findings.
+
+[![Personal Today view](docs/showcase/02-personal-today.png)](docs/showcase/02-personal-today.png)
+
+The Personal **Today** view combines health, active work, agents, continuity,
+pinned context, and recent activity. The bundled dashboard deliberately labels
+this disconnected fixture as synthetic demo data.
+
+[![Pursers Home offer and claim view](docs/showcase/06-aionui-offer-claim.png)](docs/showcase/06-aionui-offer-claim.png)
+
+The board-backed ticket view shows live offers from the disposable Central and
+the result of an exact-identity claim by `aion-showcase-worker`.
+
+[See the full verified product showcase.](docs/showcase/README.md)
 
 ## Documentation
 
