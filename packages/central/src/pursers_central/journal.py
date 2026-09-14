@@ -147,6 +147,9 @@ class Journal:
             raise ValueError("cursor must be a non-negative integer")
         if not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise ValueError("limit must be between 1 and 1000")
+        indexed_reader = getattr(self.store, "journal_read_after", None)
+        if callable(indexed_reader):
+            return indexed_reader(self._path(board_id), board_id, cursor, limit)
         document = self.store.load(self._path(board_id), lambda: self._default(board_id))
         self._check_document(document, board_id)
         compacted_through = int(document.get("compacted_through", 0))
