@@ -269,6 +269,58 @@ PURSERS_OWNER_TOKEN="$(tr -d '\n' < "$TOKEN_FILE")" codex
 Do not put the token value in `config.toml`. In Codex, call `board_onboard` with
 the same board and a distinct stable agent name for this seat.
 
+## Use Pursers from your IDE (ACP)
+
+`pursers-acp` is a board assistant for ACP-capable IDEs. It uses the existing
+human Personal profile created in step 2. It does not create a worker seat,
+claim offers, read or edit the project, or accept a seat token. Its commands are
+`my tickets`, `my offers`, `board status`,
+`create ticket <title> :: <description>`, `annotate TK-… <text>`, and
+`watch <board>`.
+
+For development before the registry package is published, install it from the
+same checkout and validate the selected profile:
+
+```bash
+.venv/bin/python -m pip install ./tools/acp-agent
+ONBOARD_PERSONAL_PROFILE="$PURSERS_PROFILE" .venv/bin/pursers-acp --login
+```
+
+Zed's current custom-agent configuration launches the same executable over
+stdio JSON-RPC. Put the profile path in `env`; never put the token or token-file
+path in IDE settings:
+
+```json
+{
+  "agent_servers": {
+    "pursers": {
+      "type": "custom",
+      "command": "/PATH/TO/.venv/bin/pursers-acp",
+      "args": [],
+      "env": {
+        "ONBOARD_PERSONAL_PROFILE": "/PATH/TO/profile.json"
+      }
+    }
+  }
+}
+```
+
+Open a Zed External Agent thread and choose `pursers`. Zed installs published
+agents from the ACP Registry; extension-provided agent servers are deprecated.
+JetBrains ACP plugins can consume the same registry entry. VS Code requires a
+compatible ACP client extension and the same custom launch command; Pursers
+does not claim built-in VS Code registry support.
+
+Every ticket creation and annotation opens an ACP permission prompt containing
+the exact board operation and payload. Only **Allow once** performs the write.
+Cancelling a `watch` turn closes its live subscription. The agent advertises no
+filesystem, terminal, MCP, image, code-edit, or session-loading capability.
+
+Protocol and host configuration were checked against the official
+[ACP v1 documentation](https://agentclientprotocol.com/protocol/v1/overview)
+and [Zed External Agents documentation](https://zed.dev/docs/ai/external-agents)
+on 2026-09-14.
+
 ## 6. Create an admission invite and the first ticket
 
 The first successful owner `board_onboard` bootstraps the generated board and
