@@ -293,6 +293,8 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                     agent_name = "acp-seat"
                     renewals = 0
                     mutation_names: list[tuple[str, str]] = []
+                    checkpoints: list[str] = []
+                    delay_next_checkpoint = True
 
                     async def _call(
                         self, name: str, arguments: dict[str, object]
@@ -335,6 +337,12 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                         files: list[str] | None = None,
                         remaining_tasks: list[str] | None = None,
                     ) -> dict[str, object]:
+                        self.checkpoints.append(summary)
+                        if self.delay_next_checkpoint:
+                            self.delay_next_checkpoint = False
+                            # This exceeds the old 0.25-second completion guess.
+                            # Completion must wait on protocol ordering, not speed.
+                            await asyncio.sleep(0.35)
                         return await call(
                             worker,
                             "memory_checkpoint",
@@ -395,7 +403,11 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                     work_root,
                     lease_interval_s=0.01,
                 )
-                assert await runtime.run_ticket("TK-acp-e2e") == "submitted"
+                outcome = await runtime.run_ticket("TK-acp-e2e")
+                assert outcome == "submitted", {
+                    "outcome": outcome,
+                    "checkpoints": client.checkpoints,
+                }
                 final = await call(worker, "ticket_get", ticket_id="TK-acp-e2e")
                 ticket = final["ticket"]
                 assert ticket["status"] == "submitted"
@@ -406,6 +418,7 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                 assert ticket["submitted_by_principal_id"] == worker.principal_id
                 assert client.renewals >= 1
                 assert client.mutation_names[0] == ("ticket_claim", "acp-seat")
+                assert ("lease_renew", "acp-seat") in client.mutation_names
                 assert client.mutation_names[-1] == ("ticket_submit", "acp-seat")
                 assert all(
                     agent_name == "acp-seat"

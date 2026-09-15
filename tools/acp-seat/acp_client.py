@@ -261,6 +261,14 @@ class ACPClient:
         except TimeoutError as exc:
             raise ACPTimeoutError("timed out waiting for session/update") from exc
 
+    def acknowledge_update(self) -> None:
+        """Mark one update returned by :meth:`next_update` as processed."""
+        self._updates.task_done()
+
+    async def wait_for_updates(self) -> None:
+        """Wait until every received update has been processed by a consumer."""
+        await self._updates.join()
+
     async def updates(self) -> AsyncIterator[JSON]:
         """Yield session/update params until the consumer stops iteration."""
         while True:

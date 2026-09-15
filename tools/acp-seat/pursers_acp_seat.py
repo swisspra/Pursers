@@ -775,7 +775,6 @@ class ACPSeatRuntime:
         completion: JSON | None = None
         completion_text: list[str] = []
         completion_text_chars = 0
-        completion_ready = asyncio.Event()
         renewal: asyncio.Task[None] | None = None
         updates: asyncio.Task[None] | None = None
         policy: SeatPermissionPolicy | None = None
@@ -828,31 +827,56 @@ class ACPSeatRuntime:
                     nonlocal completion, completion_text_chars
                     while True:
                         params = await client.next_update()
-                        update = params.get("update")
-                        if not isinstance(update, dict):
-                            continue
-                        found = _completion_from(update)
-                        if found is not None:
-                            completion = found
-                            completion_ready.set()
-                        content = update.get("content")
-                        if (
-                            update.get("sessionUpdate") == "agent_message_chunk"
-                            and isinstance(content, dict)
-                            and content.get("type") == "text"
-                            and completion_text_chars < MAX_COMPLETION_TEXT
-                        ):
-                            chunk = str(content.get("text", ""))[
-                                : MAX_COMPLETION_TEXT - completion_text_chars
-                            ]
-                            completion_text.append(chunk)
-                            completion_text_chars += len(chunk)
-                        bounded = _bounded_update(update)
-                        if bounded:
-                            await self.board.checkpoint(
-                                ticket_id,
-                                f"ACP update for {ticket_id}: {bounded}",
-                            )
+                        try:
+                            update = params.get("update")
+                            if not isinstance(update, dict):
+                                continue
+                            found = _completion_from(update)
+                            if found is not None:
+                                completion = found
+                            content = update.get("content")
+                            if (
+                                update.get("sessionUpdate")
+                                == "agent_message_chunk"
+                                and isinstance(content, dict)
+                                and content.get("type") == "text"
+                                and completion_text_chars < MAX_COMPLETION_TEXT
+                            ):
+                                chunk = str(content.get("text", ""))[
+                                    : MAX_COMPLETION_TEXT - completion_text_chars
+                                ]
+                                completion_text.append(chunk)
+                                completion_text_chars += len(chunk)
+                            bounded = _bounded_update(update)
+                            if bounded:
+                                await self.board.checkpoint(
+                                    ticket_id,
+                                    f"ACP update for {ticket_id}: {bounded}",
+                                )
+                        finally:
+                            client.acknowledge_update()
+
+                async def wait_for_update_drain() -> None:
+                    assert updates is not None
+                    drain = asyncio.create_task(client.wait_for_updates())
+                    done, _pending = await asyncio.wait(
+                        {drain, updates},
+                        timeout=self.request_timeout_s,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if updates in done:
+                        if not drain.done():
+                            drain.cancel()
+                            await asyncio.gather(drain, return_exceptions=True)
+                        exception = updates.exception()
+                        if exception is not None:
+                            raise exception
+                        raise RuntimeError("ACP update consumer stopped unexpectedly")
+                    if drain not in done:
+                        drain.cancel()
+                        await asyncio.gather(drain, return_exceptions=True)
+                        raise TimeoutError("ACP updates did not drain before timeout")
+                    await drain
 
                 updates = asyncio.create_task(consume_updates())
                 result = await client.prompt(
@@ -862,11 +886,10 @@ class ACPSeatRuntime:
                 )
                 if result.get("stopReason") != "end_turn":
                     raise RuntimeError(f"ACP turn stopped: {result.get('stopReason')}")
-                if completion is None:
-                    try:
-                        await asyncio.wait_for(completion_ready.wait(), timeout=0.25)
-                    except TimeoutError:
-                        pass
+                # The JSON-RPC reader handles notifications before the following
+                # prompt response. Wait for that protocol-ordered update fence,
+                # rather than guessing how long a checkpoint takes on this host.
+                await wait_for_update_drain()
                 await flush_permission_log()
                 if completion is None:
                     completion = _completion_from_text("".join(completion_text))
