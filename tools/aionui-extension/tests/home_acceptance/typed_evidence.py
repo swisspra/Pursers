@@ -1615,9 +1615,37 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 )
                 observer = _closed(
                     record["observer"],
-                    {"command_sha256", "config_sha256", "page_url", "bridge"},
+                    {
+                        "command_sha256", "config_sha256", "page_url", "bridge",
+                        "binding",
+                    },
                     "browser failure observer",
                 )
+                binding = observer["binding"]
+                if binding is not None:
+                    binding = _closed(
+                        binding, {
+                            "runtime", "candidate_commit", "selected_board",
+                            "screenshot_sha256",
+                        }, "browser failure runtime binding",
+                    )
+                    runtime = _closed(
+                        binding["runtime"],
+                        {"product", "version", "build", "source"},
+                        "browser failure runtime",
+                    )
+                    if (
+                        binding["candidate_commit"] != context["candidate_commit"]
+                        or binding["selected_board"] != context["board_id"]
+                        or not SHA256.fullmatch(str(binding["screenshot_sha256"]))
+                        or any(
+                            not isinstance(value, str) or not value
+                            for value in runtime.values()
+                        )
+                    ):
+                        raise TypedEvidenceError(
+                            "browser failure runtime binding is invalid"
+                        )
                 exit_code = failure["exit_code"]
                 if (
                     failure["stage"] != "browser_transition"
@@ -1636,7 +1664,9 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                         or exit_code <= 0
                     ))
                     or (record["outcome"] == "failure" and exit_code is None)
-                    or observer != {
+                    or {key: observer[key] for key in (
+                        "command_sha256", "config_sha256", "page_url", "bridge"
+                    )} != {
                         "command_sha256": trusted_source["command_sha256"],
                         "config_sha256": trusted_source["config_sha256"],
                         "page_url": trusted_source["page_url"],
@@ -1645,6 +1675,7 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                             Path(str(trust["candidate_checkout_root"])).resolve(),
                         ),
                     }
+                    or (record["outcome"] == "failure" and binding is None)
                 ):
                     raise TypedEvidenceError("browser state failure evidence is invalid")
                 return evidence
@@ -2702,6 +2733,47 @@ def _browser_transition_call(
             Path(str(trust["candidate_checkout_root"])).resolve(),
         ),
     }
+
+    def failure_binding() -> dict[str, Any] | None:
+        probe = subprocess.run(
+            [str(Path(str(source["command"])).resolve()), "probe-browser", "--page", source["page_url"]],
+            text=True, capture_output=True, check=False,
+            timeout=float(source["timeout_seconds"]),
+            cwd=Path(str(source["command"])).resolve().parent,
+            env=environment,
+        )
+        if probe.returncode or len(probe.stdout.encode()) > MAX_CONFIG_BYTES:
+            return None
+        try:
+            value = json.loads(probe.stdout)
+        except json.JSONDecodeError:
+            return None
+        keys = {
+            "observed_page_url", "screenshot_bytes", "screenshot_sha256",
+            "snapshot_nodes", "snapshot_bytes", "host", "candidate_commit",
+            "selected_board", "evidence_written",
+        }
+        if not isinstance(value, dict) or set(value) != keys:
+            return None
+        host = _closed(
+            value["host"], {"product", "version", "build", "source"},
+            "browser failure runtime binding",
+        )
+        if (
+            value["observed_page_url"] != source["page_url"]
+            or value["candidate_commit"] != source["candidate_commit"]
+            or value["selected_board"] != source["board_id"]
+            or value["evidence_written"] is not False
+            or not SHA256.fullmatch(str(value["screenshot_sha256"]))
+            or any(not isinstance(item, str) or not item for item in host.values())
+        ):
+            return None
+        return {
+            "runtime": host,
+            "candidate_commit": value["candidate_commit"],
+            "selected_board": value["selected_board"],
+            "screenshot_sha256": value["screenshot_sha256"],
+        }
     try:
         completed = subprocess.run(
             [str(Path(str(source["command"])).resolve()), "transition"],
@@ -2724,13 +2796,14 @@ def _browser_transition_call(
                 "stdout_sha256": hashlib.sha256(b"").hexdigest(),
                 "stderr_sha256": hashlib.sha256(b"").hexdigest(),
             },
-            "observer": observer,
+            "observer": {**observer, "binding": None},
         }
     stdout_bytes = completed.stdout.encode()
     stderr_bytes = completed.stderr.encode()
     if completed.returncode:
+        binding = failure_binding()
         return {
-            "outcome": "failure",
+            "outcome": "failure" if binding is not None else "blocked",
             "failure": {
                 "stage": "browser_transition",
                 "exit_code": completed.returncode,
@@ -2740,7 +2813,7 @@ def _browser_transition_call(
                 "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
                 "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
             },
-            "observer": observer,
+            "observer": {**observer, "binding": binding},
         }
     if len(stdout_bytes) > MAX_CONFIG_BYTES:
         raise TypedEvidenceError("trusted browser state command returned oversized output")

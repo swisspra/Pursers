@@ -738,7 +738,10 @@ def test_browser_state_nonzero_exit_is_signed_failure_evidence(
     command = Path(source["command"])
     command.write_text(
         "#!/usr/bin/env python3\n"
-        "import sys\n"
+        "import json,sys\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == 'probe-browser':\n"
+        f" print(json.dumps({{'observed_page_url':{source['page_url']!r},'screenshot_bytes':100,'screenshot_sha256':{'a' * 64!r},'snapshot_nodes':10,'snapshot_bytes':100,'host':{{'product':'AionUi','version':'2.2.2','build':'build-1','source':'signed-aionui-webui-listener'}},'candidate_commit':{CANDIDATE!r},'selected_board':{BOARD!r},'evidence_written':False}}))\n"
+        " raise SystemExit(0)\n"
         "sys.stderr.write('observer: required pause selector was absent\\n')\n"
         "raise SystemExit(8)\n",
         encoding="utf-8",
