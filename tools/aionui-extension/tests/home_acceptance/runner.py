@@ -48,6 +48,7 @@ TYPED_PREDICATE_DELTA = (
 )
 SCHEMA_VERSION = 1
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
+SAFE_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,127}")
 SURFACE_PRODUCTS = {
     "aionui": "AionUi",
     "fleet": "Pursers Fleet",
@@ -696,6 +697,40 @@ def _installed_assistant_manifest(value: str) -> Path:
     return installed
 
 
+def _bridge_artifact_provenance(command_value: str, wheel_value: str) -> dict[str, str]:
+    command = Path(command_value).expanduser().resolve()
+    wheel = Path(wheel_value).expanduser().resolve()
+    root = REPOSITORY_ROOT.resolve()
+    if (
+        not command.is_file()
+        or not os.access(command, os.X_OK)
+        or command.is_relative_to(root)
+        or command.stat().st_mode & 0o022
+        or not wheel.is_file()
+        or wheel.is_relative_to(root)
+        or wheel.stat().st_mode & 0o022
+    ):
+        raise RunnerError(
+            EXIT_USAGE,
+            "bridge command and exact candidate wheel must be external verifier-owned files",
+        )
+    completed = subprocess.run(
+        [str(command), "--version"], text=True, capture_output=True,
+        check=False, timeout=10,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    version = completed.stdout.strip()
+    if completed.returncode or not SAFE_VERSION.fullmatch(version):
+        raise RunnerError(EXIT_BLOCKED, "bridge command version is unavailable")
+    return {
+        "version": version,
+        "wheel_path": str(wheel),
+        "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+        "command": str(command),
+        "command_sha256": hashlib.sha256(command.read_bytes()).hexdigest(),
+    }
+
+
 def prepare_aionui_typed(args: argparse.Namespace) -> int:
     """Install and wire verifier-owned recorders for the 21 AionUi typed rows."""
     observer_dir = Path(args.observer).expanduser().resolve()
@@ -715,6 +750,9 @@ def prepare_aionui_typed(args: argparse.Namespace) -> int:
     import harness
 
     installed_manifest = _installed_assistant_manifest(args.installed_manifest)
+    bridge_provenance = _bridge_artifact_provenance(
+        args.bridge_command, args.bridge_wheel
+    )
     typed_dir = Path(args.dir).expanduser().resolve()
     trust_path = typed_dir / "trust.json"
     typed_plan_path = evidence / "aionui-typed-plan.json"
@@ -760,6 +798,7 @@ def prepare_aionui_typed(args: argparse.Namespace) -> int:
             "env": {},
             "timeout_seconds": 180,
             "select_allowlist": adapter["select_allowlist"],
+            "bridge_provenance": bridge_provenance,
         }
         if adapter["adapter"] == "aionui_assistant_binding_v1":
             source.update({
@@ -1458,6 +1497,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--installed-manifest",
         required=True,
         help="external installed aion-extension.json with matching contexts",
+    )
+    typed_plan.add_argument(
+        "--bridge-command", required=True,
+        help="external installed exact-candidate pursers-wait-bridge executable",
+    )
+    typed_plan.add_argument(
+        "--bridge-wheel", required=True,
+        help="external exact-candidate pursers-wait-bridge wheel",
     )
     typed_plan.set_defaults(handler=prepare_aionui_typed)
 

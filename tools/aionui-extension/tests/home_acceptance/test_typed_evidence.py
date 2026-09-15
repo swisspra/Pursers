@@ -652,6 +652,14 @@ def _browser_state_trust(
         encoding="utf-8",
     )
     command.chmod(0o700)
+    bridge_command = verifier / "pursers-wait-bridge"
+    bridge_command.write_text(
+        "#!/usr/bin/env python3\nprint('0.1.0a16')\n", encoding="utf-8"
+    )
+    bridge_command.chmod(0o700)
+    bridge_wheel = verifier / "pursers_wait_bridge-0.1.0a16-py3-none-any.whl"
+    bridge_wheel.write_bytes(b"exact candidate bridge wheel fixture")
+    bridge_wheel.chmod(0o600)
     recipe = {
         "before": [{"path": "/state", "selector": "#status", "property": "text"}],
         "actions": [recipe_action],
@@ -680,6 +688,13 @@ def _browser_state_trust(
         "select_allowlist": [
             "/state", *sorted(typed_evidence._browser_action_result_paths(recipe_action)),
         ],
+        "bridge_provenance": {
+            "version": "0.1.0a16",
+            "wheel_path": str(bridge_wheel),
+            "wheel_sha256": hashlib.sha256(bridge_wheel.read_bytes()).hexdigest(),
+            "command": str(bridge_command),
+            "command_sha256": hashlib.sha256(bridge_command.read_bytes()).hexdigest(),
+        },
     }
     trust["state_sources"]["aionui-start"] = source
     context = _context(
@@ -713,6 +728,69 @@ def test_browser_state_transition_is_recipe_and_source_bound(
     changed["action"][0]["selector"] = "#decoy"
     with pytest.raises(TypedEvidenceError, match="verifier-owned recipe"):
         record_evidence(_request("state_transition", changed, context), trust)
+
+
+def test_browser_state_nonzero_exit_is_signed_failure_evidence(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust, context, recorder = _browser_state_trust(tmp_path, http_server)
+    source = trust["state_sources"]["aionui-start"]
+    command = Path(source["command"])
+    command.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stderr.write('observer: required pause selector was absent\\n')\n"
+        "raise SystemExit(8)\n",
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    source["command_sha256"] = hashlib.sha256(command.read_bytes()).hexdigest()
+
+    evidence = record_evidence(
+        _request("state_transition", recorder, context), trust
+    )
+    assert evidence["record"]["outcome"] == "failure"
+    assert evidence["record"]["failure"]["exit_code"] == 8
+    assert "pause selector was absent" in evidence["record"]["failure"]["stderr"]
+    result = evaluate_evidence(evidence, _expected(evidence, [{
+        "phase": "after", "path": "/state", "op": "eq", "value": "ready",
+    }]), trust)
+    assert result["passed"] is False
+    assert result["outcome"] == "failure"
+    assert result["checks"] == []
+
+
+def test_browser_state_rejects_changed_bridge_wheel(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust, context, recorder = _browser_state_trust(tmp_path, http_server)
+    provenance = trust["state_sources"]["aionui-start"]["bridge_provenance"]
+    Path(provenance["wheel_path"]).write_bytes(b"changed bridge wheel")
+    with pytest.raises(TypedEvidenceError, match="bridge artifact"):
+        record_evidence(_request("state_transition", recorder, context), trust)
+
+
+def test_browser_state_timeout_is_signed_blocked_evidence(
+    tmp_path: Path, http_server: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trust, context, recorder = _browser_state_trust(tmp_path, http_server)
+    real_run = subprocess.run
+
+    def timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[0][0] == trust["state_sources"]["aionui-start"]["command"]:
+            raise subprocess.TimeoutExpired(args[0], timeout=10)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(typed_evidence.subprocess, "run", timeout)
+    evidence = record_evidence(
+        _request("state_transition", recorder, context), trust
+    )
+    assert evidence["record"]["outcome"] == "blocked"
+    assert evidence["record"]["failure"]["exit_code"] is None
+    assert "TimeoutExpired" in evidence["record"]["failure"]["reason"]
+    assert evaluate_evidence(evidence, _expected(evidence, [{
+        "phase": "after", "path": "/state", "op": "eq", "value": "ready",
+    }]), trust)["outcome"] == "blocked"
 
 
 def test_browser_fetch_json_action_has_closed_pointer_contract() -> None:

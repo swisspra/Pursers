@@ -143,7 +143,7 @@ BROWSER_STATE_SOURCE_KEYS = {
     "adapter", "provenance", "runtime_id", "surface", "board_id",
     "candidate_commit", "command", "command_sha256", "config_path",
     "config_sha256", "base_url", "page_url", "recipe", "env",
-    "timeout_seconds", "select_allowlist",
+    "timeout_seconds", "select_allowlist", "bridge_provenance",
 }
 ASSISTANT_BINDING_SOURCE_KEYS = BROWSER_STATE_SOURCE_KEYS | {
     "candidate_manifest", "candidate_manifest_sha256", "installed_manifest",
@@ -665,6 +665,47 @@ def _browser_action_result_paths(action: dict[str, Any]) -> set[str]:
     return paths
 
 
+def _bridge_provenance(
+    value: Any, checkout: Path,
+) -> dict[str, str]:
+    value = _closed(
+        value, {
+            "version", "wheel_path", "wheel_sha256", "command",
+            "command_sha256",
+        }, "browser bridge provenance",
+    )
+    version = _safe_id(value["version"], "browser bridge version")
+    wheel = Path(str(value["wheel_path"])).resolve()
+    command = Path(str(value["command"])).resolve()
+    if (
+        not wheel.is_file()
+        or wheel.is_relative_to(checkout)
+        or wheel.stat().st_mode & 0o022
+        or hashlib.sha256(wheel.read_bytes()).hexdigest() != value["wheel_sha256"]
+        or not SHA256.fullmatch(str(value["wheel_sha256"]))
+        or not command.is_file()
+        or not os.access(command, os.X_OK)
+        or command.is_relative_to(checkout)
+        or command.stat().st_mode & 0o022
+        or hashlib.sha256(command.read_bytes()).hexdigest()
+        != value["command_sha256"]
+        or not SHA256.fullmatch(str(value["command_sha256"]))
+    ):
+        raise TypedEvidenceError("browser bridge artifact is not verifier-pinned")
+    completed = subprocess.run(
+        [str(command), "--version"], text=True, capture_output=True,
+        check=False, timeout=10,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    if completed.returncode or completed.stdout.strip() != version:
+        raise TypedEvidenceError("browser bridge version binding changed")
+    return {
+        "version": version,
+        "wheel_sha256": value["wheel_sha256"],
+        "command_sha256": value["command_sha256"],
+    }
+
+
 def _browser_state_source(
     source_id: Any, trust: dict[str, Any], context: dict[str, Any]
 ) -> tuple[str, dict[str, Any]]:
@@ -688,6 +729,7 @@ def _browser_state_source(
     ):
         raise TypedEvidenceError("browser state source binding does not match request")
     checkout = Path(str(trust["candidate_checkout_root"])).resolve()
+    _bridge_provenance(source["bridge_provenance"], checkout)
     command = Path(str(source["command"])).resolve()
     config = Path(str(source["config_path"])).resolve()
     if (
@@ -1558,6 +1600,54 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
             "trusted_browser_state_v1", "aionui_assistant_binding_v1",
         }:
             _, trusted_source = _browser_state_source(source_id, trust, context)
+            if isinstance(record, dict) and record.get("outcome") in {
+                "failure", "blocked",
+            }:
+                record = _closed(
+                    record, {"outcome", "failure", "observer"},
+                    "browser state failure record",
+                )
+                failure = _closed(
+                    record["failure"], {
+                        "stage", "exit_code", "reason", "stdout", "stderr",
+                        "stdout_sha256", "stderr_sha256",
+                    }, "browser state failure",
+                )
+                observer = _closed(
+                    record["observer"],
+                    {"command_sha256", "config_sha256", "page_url", "bridge"},
+                    "browser failure observer",
+                )
+                exit_code = failure["exit_code"]
+                if (
+                    failure["stage"] != "browser_transition"
+                    or not isinstance(failure["reason"], str)
+                    or not failure["reason"]
+                    or len(failure["reason"].encode()) > 1024
+                    or not isinstance(failure["stdout"], str)
+                    or not isinstance(failure["stderr"], str)
+                    or len(failure["stdout"].encode()) > 4096
+                    or len(failure["stderr"].encode()) > 4096
+                    or not SHA256.fullmatch(str(failure["stdout_sha256"]))
+                    or not SHA256.fullmatch(str(failure["stderr_sha256"]))
+                    or (exit_code is not None and (
+                        not isinstance(exit_code, int)
+                        or isinstance(exit_code, bool)
+                        or exit_code <= 0
+                    ))
+                    or (record["outcome"] == "failure" and exit_code is None)
+                    or observer != {
+                        "command_sha256": trusted_source["command_sha256"],
+                        "config_sha256": trusted_source["config_sha256"],
+                        "page_url": trusted_source["page_url"],
+                        "bridge": _bridge_provenance(
+                            trusted_source["bridge_provenance"],
+                            Path(str(trust["candidate_checkout_root"])).resolve(),
+                        ),
+                    }
+                ):
+                    raise TypedEvidenceError("browser state failure evidence is invalid")
+                return evidence
             record = _closed(
                 record, {"before", "action", "after", "order", "observer"},
                 "browser state transition record",
@@ -1574,7 +1664,10 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 raise TypedEvidenceError("browser state causal order is invalid")
             observer = _closed(
                 record["observer"],
-                {"command_sha256", "config_sha256", "runtime", "page_url"},
+                {
+                    "command_sha256", "config_sha256", "runtime", "page_url",
+                    "bridge",
+                },
                 "browser observer record",
             )
             runtime = _closed(
@@ -1585,6 +1678,10 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 observer["command_sha256"] != trusted_source["command_sha256"]
                 or observer["config_sha256"] != trusted_source["config_sha256"]
                 or observer["page_url"] != trusted_source["page_url"]
+                or observer["bridge"] != _bridge_provenance(
+                    trusted_source["bridge_provenance"],
+                    Path(str(trust["candidate_checkout_root"])).resolve(),
+                )
                 or any(not isinstance(value, str) or not value for value in runtime.values())
             ):
                 raise TypedEvidenceError("browser observer binding changed")
@@ -2596,6 +2693,15 @@ def _browser_transition_call(
         "LC_ALL": "C",
         **source["env"],
     }
+    observer = {
+        "command_sha256": source["command_sha256"],
+        "config_sha256": source["config_sha256"],
+        "page_url": source["page_url"],
+        "bridge": _bridge_provenance(
+            source["bridge_provenance"],
+            Path(str(trust["candidate_checkout_root"])).resolve(),
+        ),
+    }
     try:
         completed = subprocess.run(
             [str(Path(str(source["command"])).resolve()), "transition"],
@@ -2606,9 +2712,38 @@ def _browser_transition_call(
             env=environment,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise TypedEvidenceError("trusted browser state command failed") from exc
-    if completed.returncode or len(completed.stdout.encode()) > MAX_CONFIG_BYTES:
-        raise TypedEvidenceError("trusted browser state command returned no valid result")
+        reason = f"{type(exc).__name__}: trusted browser state command failed"
+        return {
+            "outcome": "blocked",
+            "failure": {
+                "stage": "browser_transition",
+                "exit_code": None,
+                "reason": reason,
+                "stdout": "",
+                "stderr": "",
+                "stdout_sha256": hashlib.sha256(b"").hexdigest(),
+                "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+            },
+            "observer": observer,
+        }
+    stdout_bytes = completed.stdout.encode()
+    stderr_bytes = completed.stderr.encode()
+    if completed.returncode:
+        return {
+            "outcome": "failure",
+            "failure": {
+                "stage": "browser_transition",
+                "exit_code": completed.returncode,
+                "reason": "trusted browser state command returned no valid result",
+                "stdout": completed.stdout[-4096:],
+                "stderr": completed.stderr[-4096:],
+                "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
+                "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
+            },
+            "observer": observer,
+        }
+    if len(stdout_bytes) > MAX_CONFIG_BYTES:
+        raise TypedEvidenceError("trusted browser state command returned oversized output")
     try:
         result = json.loads(completed.stdout)
     except json.JSONDecodeError:
@@ -2692,12 +2827,7 @@ def _browser_transition_call(
         "action": action,
         "after": _browser_phase(result["after"], source, context, "after"),
         "order": order,
-        "observer": {
-            "command_sha256": source["command_sha256"],
-            "config_sha256": source["config_sha256"],
-            "runtime": runtime,
-            "page_url": result["page_url"],
-        },
+        "observer": {**observer, "runtime": runtime},
     }
 
 
@@ -2859,6 +2989,34 @@ def evaluate_evidence(evidence: Any, expected: Any, trust_config: Any) -> dict[s
     checks: list[dict[str, Any]] = []
     kind = evidence["kind"]
     record = evidence["record"]
+    if kind == "state_transition" and record.get("outcome") in {
+        "failure", "blocked",
+    }:
+        context = evidence["context"]
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "kind": kind,
+            "observation_id": context["observation_id"],
+            "passed": False,
+            "outcome": record["outcome"],
+            "failure": record["failure"],
+            "checks": [],
+            "correlation": {
+                "run_id": context["run_id"],
+                "action_id": context["action_id"],
+                "entity": context["entity"],
+                "surface": context["surface"],
+                "board_id": context["board_id"],
+                "candidate_commit": context["candidate_commit"],
+                "causal_index": context["causal_index"],
+                "runtime_id": evidence["source"]["runtime_id"],
+            },
+            "expected_digest": _digest(expected),
+            "evidence_id": _digest({
+                "payload_sha256": evidence["payload_sha256"],
+                "auth": evidence["auth"],
+            }),
+        }
     for conjunct in conjuncts:
         if kind == "http_response":
             conjunct = _closed(conjunct, {"target", "path", "op", "value"}, "http_response conjunct")

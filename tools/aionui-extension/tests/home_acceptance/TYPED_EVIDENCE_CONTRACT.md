@@ -77,7 +77,10 @@ the active AionUi/Personal transport and does not prove an unobserved UI action.
 
 `trusted_browser_state_v1` is a `state_transition` adapter. Its external private
 trust pins the installed `browser_observer.py` plus `observer.json`, surface,
-origin, page, candidate, board, and a closed recipe. Recipes allow only bounded
+origin, page, candidate, board, and a closed recipe. It also pins the installed
+wait-bridge executable and exact candidate wheel; every signed browser record
+contains their version, executable digest, and wheel digest in its observer
+provenance. Recipes allow only bounded
 DOM reads (`text`, `value`, `checked`, `disabled`, `count`, `class`, `hidden`,
 `integer`, and bounded `attribute:data-*` or `attribute:aria-*` properties)
 and the explicit actions `observe`, `click`, `set_value`, `select`, `submit`,
@@ -105,6 +108,14 @@ headers, the helper URL, or the helper token, and restores the page's original
 `fetch` function immediately after the action (with a bounded safety timeout).
 The observer executes the recipe in its isolated browser world and returns the
 actual correlated before/action/after selections.
+
+If the trusted browser command returns nonzero, the recorder still writes a
+signed `state_transition` evidence file with `outcome: failure`, the exact exit
+code, bounded raw stdout/stderr tails, and full stream digests. A command launch
+error or timeout similarly writes `outcome: blocked`. These envelopes retain the
+same candidate, board, action, verifier, observer, and bridge bindings. Their
+canonical evaluation is always `passed: false`; they are inspectable evidence
+of the product/runtime failure, never a substitute for a successful predicate.
 
 `aionui_assistant_binding_v1` is the closed preset variant. Its only action is
 `assistant_binding {endpoint:"/api/extensions/assistants", assistant_id, path}`.

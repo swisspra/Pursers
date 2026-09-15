@@ -1525,12 +1525,22 @@ def _prepare_aionui_typed_test_plan(
     ]) == 0
     capsys.readouterr()
     typed_dir = tmp_path / "verifier-typed"
+    bridge_command = tmp_path / "pursers-wait-bridge"
+    bridge_command.write_text(
+        "#!/usr/bin/env python3\nprint('0.1.0a16')\n", encoding="utf-8"
+    )
+    bridge_command.chmod(0o700)
+    bridge_wheel = tmp_path / "pursers_wait_bridge-0.1.0a16-py3-none-any.whl"
+    bridge_wheel.write_bytes(b"exact candidate bridge wheel fixture")
+    bridge_wheel.chmod(0o600)
     assert runner_module.main([
         "runner.py", "prepare-aionui-typed",
         "--observer", str(observer_dir),
         "--evidence", str(evidence),
         "--dir", str(typed_dir),
         "--installed-manifest", str(_copy_installed_extension(tmp_path)),
+        "--bridge-command", str(bridge_command),
+        "--bridge-wheel", str(bridge_wheel),
     ]) == 0
     result = json.loads(capsys.readouterr().out)
     plan = json.loads((evidence / "aionui-typed-plan.json").read_text())
@@ -1561,6 +1571,9 @@ def test_prepare_aionui_typed_wires_all_21_rows_and_24_records(
     }
     for row in plan["records"]:
         source = trust["state_sources"][row["conjunct"]["source_id"]]
+        assert source["bridge_provenance"]["version"] == "0.1.0a16"
+        assert len(source["bridge_provenance"]["wheel_sha256"]) == 64
+        assert len(source["bridge_provenance"]["command_sha256"]) == 64
         assert source["recipe"] == {
             "before": row["recorder"]["before"],
             "actions": row["recorder"]["action"],
