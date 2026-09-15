@@ -1015,6 +1015,7 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
         async with Client(self.mcp, mode="2026-07-28", cache=None) as raw_client:
             client, engine = await self._setup_client_and_engine(raw_client)
             central_read_calls = 0
+            central_delay_s = 0.5
 
             # Add multiple uncached ticket events into the ring buffer (none in ticket_cache)
             for i in range(12):
@@ -1055,6 +1056,7 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
 
             class UnreachableConnection:
                 async def client(self):
+                    await asyncio.sleep(central_delay_s)
                     return unreachable
 
             engine.connection = UnreachableConnection()
@@ -1071,8 +1073,10 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
             digest = await wait_server.board_digest(ctx, since=0)
             elapsed = time.monotonic() - t0
 
-            # Constant total return bound (< 0.05s) independent of ticket count
-            self.assertLess(elapsed, 0.05)
+            # Return well before the injected Central delay.  Comparing to the
+            # dependency delay preserves the prompt-return contract without a
+            # scheduler-sensitive 50 ms wall-clock deadline on shared runners.
+            self.assertLess(elapsed, central_delay_s / 2)
             # Proves no Central reads were required
             self.assertEqual(central_read_calls, 0)
             # All 12 uncached tickets present and properly constructed
