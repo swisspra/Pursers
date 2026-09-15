@@ -966,6 +966,7 @@ const helper = createHelperServer({
   token: syntheticToken,
   port: 0,
   discoveryFile: false,
+  verifyBridge: async () => ({ commands: ['seat-lifecycle', 'team-lifecycle', 'ticket-lifecycle'] }),
   runBridge: async () => [
     'push_mode=push',
     'board=sandbox-home-observer role=worker kid=synthetic-key exp=2000000000 seat_names_used=worker-1'

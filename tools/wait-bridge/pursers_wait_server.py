@@ -157,6 +157,10 @@ def _runtime_version() -> str:
 
 
 VERSION = _runtime_version()
+CLI_CAPABILITIES = {
+    "schema_version": 1,
+    "commands": ["seat-lifecycle", "team-lifecycle", "ticket-lifecycle"],
+}
 
 # --- config from env / persisted doors ------------------------------------
 
@@ -6927,6 +6931,9 @@ def _configure_runtime() -> None:
 def main() -> None:
     if "--version" in sys.argv[1:]:
         print(VERSION)
+        return
+    if sys.argv[1:] == ["--capabilities"]:
+        print(json.dumps({**CLI_CAPABILITIES, "version": VERSION}, separators=(",", ":")))
         return
     if sys.argv[1:] in (["-h"], ["--help"]):
         _door_parser().print_help()

@@ -15,6 +15,8 @@ The helper:
 - binds result reads to one explicit Central label plus board, and requires both
   identities in the Fleet response;
 - uses a separately selected wait-bridge state directory;
+- probes the resolved wait-bridge executable offline before listening and
+  refuses versions that do not advertise all three lifecycle subcommands;
 - caps request bodies at 64 KiB and never returns door values;
 - reads only the selected board from a loopback Fleet dashboard, with a 5-second
   timeout, 512 KiB response cap, no credentials, and no redirects;

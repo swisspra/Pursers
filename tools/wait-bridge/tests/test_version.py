@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -29,6 +30,30 @@ def test_cli_version_matches_installed_distribution(monkeypatch, capsys) -> None
     wait_server.main()
 
     assert capsys.readouterr().out.strip() == expected
+
+
+def test_cli_capabilities_are_offline_and_machine_readable(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN", raising=False)
+    monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("PURSERS_BRIDGE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(sys, "argv", ["pursers-wait-bridge", "--capabilities"])
+
+    def unexpected_runtime_call(*_args, **_kwargs) -> None:
+        raise AssertionError("capability discovery must stay offline")
+
+    monkeypatch.setattr(wait_server, "_configure_runtime", unexpected_runtime_call)
+    monkeypatch.setattr(wait_server.mcp, "run", unexpected_runtime_call)
+
+    wait_server.main()
+
+    assert json.loads(capsys.readouterr().out) == {
+        "schema_version": 1,
+        "commands": ["seat-lifecycle", "team-lifecycle", "ticket-lifecycle"],
+        "version": wait_server.VERSION,
+    }
+    assert not (tmp_path / "state").exists()
 
 
 def test_cli_help_does_not_configure_authenticated_runtime(
