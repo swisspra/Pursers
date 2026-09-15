@@ -80,7 +80,10 @@ def git(*args: str, cwd: Path) -> str:
 
 
 def committed_worktree(work_root: Path, ticket_id: str) -> tuple[Path, str, str]:
-    work = work_root / ticket_id
+    # Match the runtime's cross-platform ticket directory normalization.  A raw
+    # mixed-case ticket id aliases this path on default macOS filesystems but
+    # creates a different directory on Linux.
+    work = work_root / seat._component(ticket_id)
     work.mkdir(parents=True)
     git("init", "-b", "acp/test-ticket", cwd=work)
     git("config", "user.name", "ACP Test", cwd=work)
