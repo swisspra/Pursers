@@ -95,6 +95,28 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["update"] for row in received], updates)
         self.assertEqual(await prompt, {"stopReason": "end_turn"})
 
+    async def test_update_drain_waits_for_consumer_acknowledgement(self) -> None:
+        update = {"sessionUpdate": "plan", "entries": []}
+        client = self.client(
+            {
+                "promptActions": [{"type": "update", "update": update}],
+                "stopReason": "end_turn",
+            }
+        )
+
+        await self.initialized(client)
+        session_id = await client.new_session(self.root)
+        prompt = asyncio.create_task(client.prompt(session_id, "do the work"))
+        received = await client.next_update()
+        await prompt
+        drained = asyncio.create_task(client.wait_for_updates())
+        await asyncio.sleep(0)
+        self.assertFalse(drained.done())
+
+        client.acknowledge_update()
+        await drained
+        self.assertEqual(received["update"], update)
+
     async def test_permission_policy_selects_allow_option(self) -> None:
         seen: list[dict[str, Any]] = []
 

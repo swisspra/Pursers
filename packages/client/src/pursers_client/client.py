@@ -561,9 +561,17 @@ class BoardClient:
         self._remember_event(result)
         return result
 
-    async def ticket_claim(self, ticket_id: str) -> dict[str, Any]:
+    async def ticket_claim(
+        self, ticket_id: str, *, agent_name: str | None = None
+    ) -> dict[str, Any]:
         self._watched_uris.add(f"board://{self.board_id}/ticket/{ticket_id}")
-        result = await self._call("ticket_claim", {"agent_name": self.agent_name, "ticket_id": ticket_id})
+        result = await self._call(
+            "ticket_claim",
+            {
+                "agent_name": self.agent_name if agent_name is None else agent_name,
+                "ticket_id": ticket_id,
+            },
+        )
         self._remember_event(result)
         return result
 
@@ -733,13 +741,14 @@ class BoardClient:
         self,
         ticket_id: str,
         *,
+        agent_name: str | None = None,
         summary: str | None = None,
         files_changed: list[str] | None = None,
         notes: str | None = None,
         stay_active: bool = True,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
-            "agent_name": self.agent_name,
+            "agent_name": self.agent_name if agent_name is None else agent_name,
             "ticket_id": ticket_id,
             "stay_active": stay_active,
         }
@@ -764,9 +773,15 @@ class BoardClient:
             result["input_truncation"] = {"notes": notes_truncation}
         return result
 
-    async def lease_renew(self, ticket_id: str) -> dict[str, Any]:
+    async def lease_renew(
+        self, ticket_id: str, *, agent_name: str | None = None
+    ) -> dict[str, Any]:
         return await self._call(
-            "lease_renew", {"agent_name": self.agent_name, "ticket_id": ticket_id}
+            "lease_renew",
+            {
+                "agent_name": self.agent_name if agent_name is None else agent_name,
+                "ticket_id": ticket_id,
+            },
         )
 
     async def board_reap(self) -> dict[str, Any]:
