@@ -167,6 +167,7 @@ async def agent_crash_releases_with_checkpoint(tmp_path: Path) -> None:
 async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
     import central
     from mcp import Client
+    from pursers_client.client import expand_response_id_map
 
     work_root = tmp_path / "work"
     _work, branch, commit = committed_worktree(work_root, "TK-acp-e2e")
@@ -308,7 +309,9 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                         who = worker if selected_name == "acp-seat" else admin
                         if name in {"ticket_claim", "lease_renew", "ticket_submit"}:
                             self.mutation_names.append((name, selected_name))
-                        return await call(who, name, **arguments)
+                        return expand_response_id_map(
+                            await call(who, name, **arguments)
+                        )
 
                     async def ticket_claim(
                         self, ticket_id: str, *, agent_name: str | None = None
@@ -331,7 +334,7 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
 
                     async def ticket_get(self, ticket_id: str) -> dict[str, object]:
                         result = await call(worker, "ticket_get", ticket_id=ticket_id)
-                        return result
+                        return expand_response_id_map(result)
 
                     async def memory_checkpoint(
                         self,
@@ -411,7 +414,11 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                     "outcome": outcome,
                     "checkpoints": client.checkpoints,
                 }
-                final = await call(worker, "ticket_get", ticket_id="TK-acp-e2e")
+                final = expand_response_id_map(
+                    await call(
+                        worker, "ticket_get", ticket_id="TK-acp-e2e", view="full"
+                    )
+                )
                 ticket = final["ticket"]
                 assert ticket["status"] == "submitted"
                 assert ticket["files_changed"] == ["result.txt"]
