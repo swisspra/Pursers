@@ -1981,6 +1981,69 @@ def test_reinstall_with_changed_challenge_rejects_old_runtime_process(
         observer_module._probe_personal_mcp_runtime(config, personal, page_digest)
 
 
+def test_reinstall_prioritizes_old_challenge_for_foreign_runtime_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    backend = _write_backend(tmp_path, "door_connect")
+    runtime_dir = tmp_path / "personal-runtime"
+    runtime_dir.mkdir()
+    old_key = runtime_dir / "old.key"
+    new_key = runtime_dir / "new.key"
+    for key, byte in ((old_key, b"\x29"), (new_key, b"\x2a")):
+        key.write_bytes(byte * 48)
+        key.chmod(0o600)
+    monkeypatch.setattr(runner_module, "_git", _clean_candidate_git)
+    observer_dir = tmp_path / "verifier"
+
+    manifest = _write_surface_manifest(tmp_path, str(new_key))
+    assert runner_module.main([
+        "runner.py", "install-observer",
+        "--dir", str(observer_dir),
+        "--backend-command", str(backend),
+        "--surface-manifest", str(manifest),
+    ]) == 0
+    capsys.readouterr()
+
+    config = json.loads(
+        (observer_dir / "observer.json").read_text(encoding="utf-8")
+    )
+    personal = observer_module._surface_config(config, "personal")
+    runtime = personal["runtime"]
+    Path(runtime["pid_file"]).write_text("12345", encoding="utf-8")
+    Path(runtime["pid_file"]).chmod(0o600)
+    Path(runtime["receipt"]).write_text("{}", encoding="utf-8")
+    Path(runtime["receipt"]).chmod(0o600)
+    foreign_source = tmp_path / "foreign-checkout" / runtime["artifact"]
+    command = (
+        f"/usr/bin/python3 -m pursers_personal.cli mcp "
+        f"--candidate-source {foreign_source} --candidate-commit {'1' * 40} "
+        f"--board-id sandbox-foreign --acceptance-runtime-receipt "
+        f"{runtime_dir / 'foreign-runtime.json'} "
+        f"--acceptance-challenge-key {old_key}"
+    )
+    monkeypatch.setattr(
+        observer_module, "_git_identity", lambda _repository: (COMMIT, "")
+    )
+    monkeypatch.setattr(
+        observer_module,
+        "_run_identity_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=command, stderr=""
+        ),
+    )
+    page_digest = hashlib.sha256(
+        (runner_module.REPOSITORY_ROOT / personal["artifact"]).read_bytes()
+    ).hexdigest()
+
+    with pytest.raises(
+        observer_module.ObserverError,
+        match="acceptance-challenge-key changed",
+    ):
+        observer_module._probe_personal_mcp_runtime(config, personal, page_digest)
+
+
 @pytest.mark.parametrize(
     "field, value",
     [
