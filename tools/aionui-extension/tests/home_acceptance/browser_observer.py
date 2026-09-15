@@ -1967,7 +1967,11 @@ def _run_transition_backend(
         "candidate_status", "selected_board", "page_sha256",
     }
     if not isinstance(result, dict) or set(result) != expected:
-        raise _fail(EXIT_CAPTURE_FAILED, "browser transition result fields do not match schema")
+        detail = json.dumps(result, sort_keys=True, separators=(",", ":"))
+        raise _fail(
+            EXIT_CAPTURE_FAILED,
+            f"browser transition result fields do not match schema: {detail[:1024]}",
+        )
     for field in ("before", "action", "after"):
         if not isinstance(result[field], dict):
             raise _fail(EXIT_CAPTURE_FAILED, f"browser transition {field} is not structured")
