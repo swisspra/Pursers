@@ -894,6 +894,8 @@ def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     assert "spec.property === 'nonempty'" in script
     assert "DOM.resolveNode" in script
     assert "Runtime.callFunctionOn" in script
+    assert "transitionResult.exceptionDetails" in script
+    assert "browser transition failed" in script
     assert "main page world unavailable" in script
     assert "parsed.origin === helperOrigin" in script
     assert "init.credentials === 'omit'" in script

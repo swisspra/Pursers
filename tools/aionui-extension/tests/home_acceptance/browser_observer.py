@@ -1431,6 +1431,12 @@ const transitionResult = await cdp('Runtime.evaluate', {
   awaitPromise: true,
   returnByValue: true
 })
+if (transitionResult && transitionResult.exceptionDetails) {
+  const exception = transitionResult.exceptionDetails.exception
+  const detail = exception && exception.description
+    ? exception.description : transitionResult.exceptionDetails.text
+  throw new Error('browser transition failed: ' + String(detail || 'unknown error'))
+}
 if (pendingAction) {
   const captured = await cdp('Runtime.evaluate', {
     expression: `(() => {
