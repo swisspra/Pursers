@@ -163,6 +163,7 @@ test('authenticated helper exposes only the configured board results', async () 
     origin: ORIGIN,
     token: TOKEN,
     port: 0,
+    discoveryFile: false,
     runBridge: async () => '',
     runTeamCli: async () => ({ success: false }),
     fetchResults: async (board, central) => {

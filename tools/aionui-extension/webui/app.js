@@ -3,6 +3,37 @@
 const MAX_JOIN_ATTEMPTS = 3;
 const RETRY_COUNTDOWN_SECONDS = 3;
 
+function loopbackHelperOrigin(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch (_error) {
+    return null;
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const ipv4 = host.split('.').map(Number);
+  const loopback = host === 'localhost'
+    || host.endsWith('.localhost')
+    || host === '::1'
+    || (ipv4.length === 4 && ipv4[0] === 127 && ipv4.every((part) => Number.isInteger(part) && part >= 0 && part <= 255));
+  if (url.protocol !== 'http:' || !loopback || url.username || url.password || url.pathname !== '/' || url.search || url.hash) return null;
+  return url.origin;
+}
+
+async function readDiscoveredHelperOrigin(fetchImpl) {
+  const response = await fetchImpl('./helper-origin.json', {
+    cache: 'no-store',
+    credentials: 'same-origin',
+  });
+  if (!response.ok) throw new Error('helper discovery unavailable');
+  const manifest = await response.json();
+  const baseUrl = manifest?.schema_version === 1
+    ? loopbackHelperOrigin(manifest.helper_url)
+    : null;
+  if (!baseUrl) throw new Error('invalid helper discovery response');
+  return baseUrl;
+}
+
 if (typeof document !== 'undefined' && typeof fetch !== 'undefined') {
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -142,21 +173,15 @@ async function api(path, options = {}) {
   }
 }
 
-function loopbackHelperOrigin(value) {
-  let url;
+async function discoverHelperOrigin() {
+  helperUrlInput.value = '';
   try {
-    url = new URL(value);
+    const baseUrl = await readDiscoveredHelperOrigin(fetch);
+    helperUrlInput.value = baseUrl;
+    setMessage($('#helper-message'), `Found the local helper at ${baseUrl}. Enter the local access token to connect.`);
   } catch (_error) {
-    return null;
+    setMessage($('#helper-message'), 'Start the packaged helper to discover its exact loopback URL. You can still enter the printed URL manually.', 'error');
   }
-  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  const ipv4 = host.split('.').map(Number);
-  const loopback = host === 'localhost'
-    || host.endsWith('.localhost')
-    || host === '::1'
-    || (ipv4.length === 4 && ipv4[0] === 127 && ipv4.every((part) => Number.isInteger(part) && part >= 0 && part <= 255));
-  if (url.protocol !== 'http:' || !loopback || url.username || url.password || url.pathname !== '/' || url.search || url.hash) return null;
-  return url.origin;
 }
 
 function showHelper(status) {
@@ -1341,6 +1366,7 @@ syncConnectionSemantics();
 syncResultSemantics();
 updateJourney();
 showGlobal('Connect the local helper first', 'AionUi loaded Pursers Home. Authenticate the loopback helper to read the selected board.', 'info');
+discoverHelperOrigin();
 window.__PURSERS_HOME_READY__ = true;
 }
 
@@ -1665,6 +1691,7 @@ if (typeof module !== 'undefined' && module.exports) {
     joinFailure,
     mount: initialize,
     normalizeSeat,
+    readDiscoveredHelperOrigin,
     recoveryPayload,
     renderStartupView,
   };

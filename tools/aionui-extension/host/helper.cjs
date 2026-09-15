@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
+const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { createHandlers } = require('../webui/routes.js');
 const { isLoopbackHostname } = require('../security/loopback.cjs');
@@ -12,6 +13,7 @@ const { createSeatLifecycleProcess } = require('../seat_lifecycle/adapter.cjs');
 
 const DEFAULT_PORT = 43121;
 const DEFAULT_FLEET_URL = 'http://127.0.0.1:8899';
+const DEFAULT_DISCOVERY_FILE = path.join(__dirname, '..', 'webui', 'helper-origin.json');
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_FLEET_BODY_BYTES = 512 * 1024;
 const TOKEN_HEADER = 'x-pursers-home-token';
@@ -59,6 +61,35 @@ function normalizeLoopbackOrigin(value, label) {
 
 function normalizeOrigin(value) {
   return normalizeLoopbackOrigin(value, '--origin');
+}
+
+function boundHelperOrigin(address) {
+  if (!address || typeof address === 'string') fail('helper did not bind a TCP address');
+  const host = address.address.includes(':') ? `[${address.address}]` : address.address;
+  return normalizeLoopbackOrigin(`http://${host}:${address.port}`, 'bound helper origin');
+}
+
+function writeDiscoveryFile(discoveryFile, helperUrl) {
+  const target = path.resolve(discoveryFile);
+  let existing;
+  try {
+    existing = fs.lstatSync(target);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  if (existing?.isSymbolicLink()) fail('helper discovery file must not be a symlink');
+  const temporary = `${target}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+  const body = `${JSON.stringify({ helper_url: helperUrl, schema_version: 1 })}\n`;
+  try {
+    fs.writeFileSync(temporary, body, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    fs.renameSync(temporary, target);
+  } finally {
+    try {
+      fs.unlinkSync(temporary);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
 }
 
 function readPrivateTokenFile(tokenFile, label) {
@@ -331,6 +362,7 @@ function createHelperServer(options) {
   const host = options.host || '127.0.0.1';
   if (!isLoopbackHostname(host)) fail('helper host must be loopback');
   const port = options.port === undefined ? DEFAULT_PORT : parseInteger(options.port, 'port', 0, 65535);
+  const discoveryFile = options.discoveryFile === undefined ? DEFAULT_DISCOVERY_FILE : options.discoveryFile;
   const runBridge = options.runBridge || createBridgeRunner(options.bridgeCommand || 'pursers-wait-bridge', options.bridgeStateDir);
   const runTeamCli = options.runTeamCli || createTeamRunner(
     options.aioncoreCommand || 'aioncore', options.runtimeContext || null,
@@ -462,7 +494,14 @@ function createHelperServer(options) {
         server.once('error', reject);
         server.listen(port, host, resolve);
       });
-      return server.address();
+      const address = server.address();
+      try {
+        if (discoveryFile) writeDiscoveryFile(discoveryFile, boundHelperOrigin(address));
+      } catch (error) {
+        await new Promise((resolve) => server.close(resolve));
+        throw error;
+      }
+      return address;
     },
     async close() {
       if (server.listening) {
@@ -518,11 +557,13 @@ async function main() {
 }
 
 module.exports = {
+  DEFAULT_DISCOVERY_FILE,
   DEFAULT_PORT,
   DEFAULT_FLEET_URL,
   MAX_BODY_BYTES,
   MAX_FLEET_BODY_BYTES,
   TOKEN_HEADER,
+  boundHelperOrigin,
   bridgeArguments,
   createFleetResultsFetcher,
   createHelperServer,
@@ -531,6 +572,7 @@ module.exports = {
   explicitRuntimeContext,
   normalizeOrigin,
   readTokenFile,
+  writeDiscoveryFile,
 };
 
 if (require.main === module) {

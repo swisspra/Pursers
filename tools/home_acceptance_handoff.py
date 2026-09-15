@@ -411,6 +411,9 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
     installed_commit = json.loads((installed / "webui" / "candidate.json").read_text())["candidate_commit"]
     if installed_commit != args.commit:
         raise HandoffError("installed candidate identity does not match exact commit")
+    installed_helper = _regular(installed / "host" / "helper.cjs", "installed helper")
+    if _sha256(installed_helper) != args.helper_sha256:
+        raise HandoffError("installed helper does not match the approved helper digest")
 
     token = root / "helper-token"
     _write(token, secrets.token_hex(32) + "\n", 0o600)
@@ -429,7 +432,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
                     "--port", str(urlsplit(origin).port), "--data-dir", str(core_data),
                     "--app-version", args.host_version, "--identity-mode", args.identity_mode]
     helper_command = [
-        str(node), str(helper), "--board", args.board, "--central", args.central,
+        str(node), str(installed_helper), "--board", args.board, "--central", args.central,
         "--origin", origin, "--port", str(args.helper_port),
         "--token-file", str(token), "--bridge-state-dir", str(bridge_state),
         "--bridge-bin", str(bridge), "--aioncore-bin", str(aioncore),
@@ -508,6 +511,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         "approved_runtime": {"commit": args.runtime_commit},
         "bridge_runtime": bridge_runtime,
         "installed_extension": str(installed),
+        "installed_helper": str(installed_helper),
         "approved_observer": {
             "runner": str(observer_runner), "runner_sha256": args.observer_sha256,
             "backend": str(observer_backend), "backend_sha256": args.observer_backend_sha256,

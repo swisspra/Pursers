@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const {
+  DEFAULT_PORT,
   MAX_BODY_BYTES,
   TOKEN_HEADER,
   bridgeArguments,
@@ -16,6 +17,7 @@ const {
   normalizeOrigin,
   readTokenFile,
 } = require('../host/helper.cjs');
+const { readDiscoveredHelperOrigin } = require('../webui/app.js');
 
 const ORIGIN = 'http://127.0.0.1:25808';
 const TOKEN = 'a'.repeat(64);
@@ -87,6 +89,8 @@ function door(board) {
 
 async function runningHelper(overrides = {}) {
   const teamCalls = [];
+  const discoveryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pursers-helper-discovery-'));
+  const discoveryFile = overrides.discoveryFile || path.join(discoveryRoot, 'helper-origin.json');
   const helper = createHelperServer({
     board: 'sandbox-home',
     central: 'work',
@@ -110,10 +114,16 @@ async function runningHelper(overrides = {}) {
         meta: { schema_version: 1 },
       };
     },
+    discoveryFile,
     ...overrides,
   });
   const address = await helper.start();
-  return { helper, teamCalls, baseUrl: `http://127.0.0.1:${address.port}` };
+  const close = helper.close.bind(helper);
+  helper.close = async () => {
+    await close();
+    fs.rmSync(discoveryRoot, { recursive: true, force: true });
+  };
+  return { helper, teamCalls, discoveryFile, baseUrl: `http://127.0.0.1:${address.port}` };
 }
 
 function authHeaders(token = TOKEN, origin = ORIGIN) {
@@ -161,6 +171,32 @@ test('helper authenticates one exact origin and exposes selected-board status on
     assert.equal(wrongOrigin.headers.get('access-control-allow-origin'), null);
   } finally {
     await helper.close();
+  }
+});
+
+test('two isolated helpers publish their distinct non-default origins for page discovery', async () => {
+  const first = await runningHelper();
+  const second = await runningHelper({ origin: 'http://127.0.0.1:25809' });
+  try {
+    const firstManifest = JSON.parse(fs.readFileSync(first.discoveryFile, 'utf8'));
+    const secondManifest = JSON.parse(fs.readFileSync(second.discoveryFile, 'utf8'));
+    assert.notEqual(first.baseUrl, second.baseUrl);
+    assert.notEqual(first.baseUrl, `http://127.0.0.1:${DEFAULT_PORT}`);
+    assert.notEqual(second.baseUrl, `http://127.0.0.1:${DEFAULT_PORT}`);
+    assert.deepEqual(firstManifest, { helper_url: first.baseUrl, schema_version: 1 });
+    assert.deepEqual(secondManifest, { helper_url: second.baseUrl, schema_version: 1 });
+    const fetchManifest = (file) => async (resource, options) => {
+      assert.equal(resource, './helper-origin.json');
+      assert.deepEqual(options, { cache: 'no-store', credentials: 'same-origin' });
+      return new Response(fs.readFileSync(file, 'utf8'), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    assert.equal(await readDiscoveredHelperOrigin(fetchManifest(first.discoveryFile)), first.baseUrl);
+    assert.equal(await readDiscoveredHelperOrigin(fetchManifest(second.discoveryFile)), second.baseUrl);
+  } finally {
+    await Promise.all([first.helper.close(), second.helper.close()]);
   }
 });
 

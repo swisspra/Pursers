@@ -79,11 +79,11 @@
           <div class="two-column">
             <form class="card form-card" id="helper-form">
               <label class="field field-wide" for="helper-url">Helper URL
-                <span>Exact loopback origin printed when the packaged helper starts.</span>
-                <input id="helper-url" name="helper_url" type="url" value="http://127.0.0.1:43121" autocomplete="off" spellcheck="false" required>
+                <span>The packaged helper writes its exact loopback URL into this installed page when it starts.</span>
+                <input id="helper-url" name="helper_url" type="url" placeholder="Start the packaged helper to discover its URL" autocomplete="off" spellcheck="false" required>
               </label>
               <label class="field field-wide" for="helper-token">Local access token
-                <span>Read the mode-0600 token file. The value stays in page memory only.</span>
+                <span>Read <code>helper-token</code> from the helper handoff directory. Copy it locally with <code>pbcopy &lt; /PATH/TO/HANDOFF/helper-token</code>; never send it through chat or include it in a screenshot. The value stays in page memory only.</span>
                 <input id="helper-token" name="helper_token" type="password" autocomplete="new-password" spellcheck="false" minlength="32" required>
               </label>
               <div class="form-actions field-wide"><button class="button button-primary" id="connect-helper" type="submit">Connect helper</button></div>
