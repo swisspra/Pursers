@@ -908,6 +908,34 @@ def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     assert "spec.kind === 'click'" in script
 
 
+def test_transition_backend_preserves_browser_failure_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = tmp_path / "ego-browser"
+    backend.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    backend.chmod(0o700)
+    monkeypatch.setattr(
+        observer_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 1, stdout="", stderr=(
+                "Error: browser transition failed: Error: action selector absent: "
+                "[data-seat-action=\\\"pause\\\"]\n"
+                "ego's nodejs process exited with code 1.\n"
+            ),
+        ),
+    )
+    with pytest.raises(observer_module.ObserverError, match="action selector absent"):
+        observer_module._run_transition_backend(
+            {
+                "backend": {"kind": "ego-browser", "command": [str(backend)], "task_space": 27},
+                "store": tmp_path / "store",
+            },
+            "http://127.0.0.1:18921/home",
+            _transition_spec()["recipe"],
+        )
+
+
 @pytest.mark.parametrize("mode", ["success", "wrong_origin", "duplicate"])
 def test_ego_response_capture_is_target_bound_exact_once_and_restored(mode: str) -> None:
     recipe = _transition_spec()["recipe"]

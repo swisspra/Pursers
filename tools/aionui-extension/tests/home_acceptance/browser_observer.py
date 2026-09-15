@@ -1949,10 +1949,14 @@ def _run_transition_backend(
             f"browser transition backend failed ({type(exc).__name__})",
         ) from None
     if completed.returncode:
-        tail = completed.stderr.strip().splitlines()[-1:] or ["no stderr"]
+        lines = [line.strip() for line in completed.stderr.splitlines() if line.strip()]
+        detail = next(
+            (line for line in lines if "browser transition failed:" in line),
+            lines[-1] if lines else "no stderr",
+        )
         raise _fail(
             EXIT_CAPTURE_FAILED,
-            f"browser transition backend exited {completed.returncode}: {tail[0][:200]}",
+            f"browser transition backend exited {completed.returncode}: {detail[:500]}",
         )
     result: dict[str, Any] | None = None
     for stream in (completed.stdout, completed.stderr):
