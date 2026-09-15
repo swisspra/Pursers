@@ -357,6 +357,24 @@ class SeatAdminTests(unittest.TestCase):
                     text=True,
                 )
                 self.assertIn(f"pursers-wait-bridge {command}", lifecycle_help.stdout)
+            capabilities = subprocess.run(
+                [str(bridge), "--capabilities"],
+                check=True,
+                capture_output=True,
+                cwd=temp,
+                env=clean_environment,
+                text=True,
+            )
+            self.assertEqual(
+                json.loads(capabilities.stdout),
+                {
+                    "schema_version": 1,
+                    "version": _bridge_version(),
+                    "commands": [
+                        "seat-lifecycle", "team-lifecycle", "ticket-lifecycle",
+                    ],
+                },
+            )
 
     def test_invalid_identifiers_cause_zero_writes(self) -> None:
         cases = (

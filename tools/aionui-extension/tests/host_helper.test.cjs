@@ -15,12 +15,70 @@ const {
   createTeamRunner,
   explicitRuntimeContext,
   normalizeOrigin,
+  probeBridgeCompatibility,
   readTokenFile,
 } = require('../host/helper.cjs');
 const { readDiscoveredHelperOrigin } = require('../webui/app.js');
 
 const ORIGIN = 'http://127.0.0.1:25808';
 const TOKEN = 'a'.repeat(64);
+
+function fakeBridge(t, capabilities, version = '0.1.0a16') {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pursers-bridge-probe-'));
+  const command = path.join(directory, 'pursers-wait-bridge');
+  fs.writeFileSync(command, `#!/usr/bin/env node
+if (process.argv[2] === '--capabilities') {
+  process.stdout.write(${JSON.stringify(JSON.stringify(capabilities))});
+} else if (process.argv[2] === '--version') {
+  process.stdout.write(${JSON.stringify(version)});
+} else {
+  process.exitCode = 2;
+}
+`, { mode: 0o700 });
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  return command;
+}
+
+test('bridge compatibility probe accepts current lifecycle dispatch and rejects stale installs', async (t) => {
+  const current = fakeBridge(t, {
+    schema_version: 1,
+    version: '0.1.0a16',
+    commands: ['seat-lifecycle', 'team-lifecycle', 'ticket-lifecycle'],
+  });
+  assert.deepEqual(await probeBridgeCompatibility(current), {
+    executable: fs.realpathSync(current),
+    version: '0.1.0a16',
+    commands: ['seat-lifecycle', 'team-lifecycle', 'ticket-lifecycle'],
+  });
+
+  const stale = fakeBridge(t, { schema_version: 1, version: '0.1.0a16', commands: [] });
+  await assert.rejects(
+    probeBridgeCompatibility(stale),
+    (error) => error.code === 'bridge_incompatible'
+      && error.message.includes(fs.realpathSync(stale))
+      && error.message.includes('version 0.1.0a16')
+      && error.message.includes('seat-lifecycle, team-lifecycle, ticket-lifecycle')
+      && error.message.includes('uv tool install --force --reinstall /PATH/TO/EXACT-CANDIDATE/'),
+  );
+});
+
+test('helper refuses to listen when the resolved bridge lacks lifecycle dispatch', async (t) => {
+  const stale = fakeBridge(t, { schema_version: 1, version: '0.1.0a16', commands: [] });
+  const helper = createHelperServer({
+    board: 'sandbox-home',
+    central: 'work',
+    origin: ORIGIN,
+    token: TOKEN,
+    port: 0,
+    discoveryFile: false,
+    bridgeCommand: stale,
+    runBridge: async () => '',
+    runTeamCli: async () => ({ success: false }),
+  });
+  t.after(() => helper.close());
+  await assert.rejects(helper.start(), /missing subcommands: seat-lifecycle, team-lifecycle, ticket-lifecycle/);
+  assert.equal(helper.server.listening, false);
+});
 
 test('explicit issuer runtime is complete, private, and replaces ambient context', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pursers-runtime-'));
@@ -98,6 +156,7 @@ async function runningHelper(overrides = {}) {
     token: TOKEN,
     port: 0,
     coreVersion: '0.2.1',
+    verifyBridge: async () => ({ commands: ['seat-lifecycle', 'team-lifecycle', 'ticket-lifecycle'] }),
     runBridge: async (args) => {
       assert.deepEqual(args, ['status']);
       return [

@@ -15,6 +15,9 @@ credentials, receipt keys, source identity strings, action inputs, or evidence
 are not trusted. `candidate_checkout_root` is also pinned; recording fails if
 the running module is inside it.
 
+Before an acceptance run, install the wait-bridge wheel built from the exact
+candidate checkout; an older globally installed bridge is not valid evidence.
+
 ```sh
 python3 /PATH/TO/CANDIDATE/typed_evidence.py install --dir /PATH/TO/VERIFIER
 /PATH/TO/VERIFIER/typed_evidence.py record \

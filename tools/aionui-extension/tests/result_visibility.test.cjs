@@ -164,6 +164,7 @@ test('authenticated helper exposes only the configured board results', async () 
     token: TOKEN,
     port: 0,
     discoveryFile: false,
+    verifyBridge: async () => ({ commands: ['seat-lifecycle', 'team-lifecycle', 'ticket-lifecycle'] }),
     runBridge: async () => '',
     runTeamCli: async () => ({ success: false }),
     fetchResults: async (board, central) => {

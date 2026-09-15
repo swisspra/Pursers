@@ -78,7 +78,7 @@ def _args(tmp_path: Path):
     )
     bridge = _file(
         tmp_path / "bridge",
-        b"#!/bin/sh\ncase \"$1\" in\n  --version) echo 0.1.0a15;;\n  ticket-lifecycle|seat-lifecycle|team-lifecycle) test \"$2\" = --help && echo \"usage: pursers-wait-bridge $1\";;\n  *) exit 9;;\nesac\n",
+        b"#!/bin/sh\ncase \"$1\" in\n  --version) echo 0.1.0a15;;\n  --capabilities) echo '{\"schema_version\":1,\"version\":\"0.1.0a15\",\"commands\":[\"seat-lifecycle\",\"team-lifecycle\",\"ticket-lifecycle\"]}';;\n  ticket-lifecycle|seat-lifecycle|team-lifecycle) test \"$2\" = --help && echo \"usage: pursers-wait-bridge $1\";;\n  *) exit 9;;\nesac\n",
         executable=True,
     )
     values = {

@@ -24,6 +24,14 @@ const SAFE_AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const SAFE_AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const STANDALONE_ROLES = new Set(['worker', 'reviewer']);
 const STANDALONE_LIFECYCLES = new Set(['active', 'handed_off', 'retired', 'stale', 'unknown']);
+const REQUIRED_BRIDGE_COMMANDS = ['seat-lifecycle', 'team-lifecycle', 'ticket-lifecycle'];
+const BRIDGE_ENV_KEYS = [
+  'ONBOARD_CENTRAL_TOKEN',
+  'ONBOARD_CENTRAL_TOKEN_FILE',
+  'ONBOARD_CENTRAL_URL',
+  'ONBOARD_BOARD_ID',
+  'ONBOARD_AGENT_NAME',
+];
 const RUNTIME_ENV = [
   'AIONUI_BASE_URL',
   'AIONUI_USER_ID',
@@ -159,6 +167,74 @@ function runCommand(command, args, options = {}) {
       resolve(stdout);
     });
   });
+}
+
+function resolveExecutable(command, environment = process.env) {
+  const selected = String(command || '');
+  const candidates = (path.isAbsolute(selected) || selected.includes(path.sep))
+    ? [path.resolve(selected)]
+    : String(environment.PATH || '').split(path.delimiter).filter(Boolean).map((entry) => path.join(entry, selected));
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return fs.realpathSync(candidate);
+    } catch (_error) {
+      // Keep searching PATH without invoking a shell.
+    }
+  }
+  return selected;
+}
+
+async function bridgeVersion(executable, environment) {
+  try {
+    const output = String(await runCommand(executable, ['--version'], {
+      env: environment, timeout: 3000, maxBuffer: 4096,
+    })).trim();
+    return /^[A-Za-z0-9.+-]{1,80}$/.test(output) ? output : 'unknown';
+  } catch (_error) {
+    return 'unknown';
+  }
+}
+
+function boundedBridgeVersion(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9.+-]{1,80}$/.test(value)
+    ? value
+    : 'unknown';
+}
+
+async function probeBridgeCompatibility(command) {
+  const executable = resolveExecutable(command);
+  const environment = { ...process.env };
+  for (const name of [...RUNTIME_ENV, ...BRIDGE_ENV_KEYS]) delete environment[name];
+  let capabilities;
+  try {
+    const output = await runCommand(executable, ['--capabilities'], {
+      env: environment, timeout: 3000, maxBuffer: 64 * 1024,
+    });
+    capabilities = JSON.parse(String(output));
+  } catch (_error) {
+    capabilities = null;
+  }
+  const commands = capabilities && capabilities.schema_version === 1 && Array.isArray(capabilities.commands)
+    ? capabilities.commands.filter((item) => typeof item === 'string')
+    : [];
+  const missing = REQUIRED_BRIDGE_COMMANDS.filter((item) => !commands.includes(item));
+  if (missing.length === 0) {
+    return {
+      executable,
+      version: boundedBridgeVersion(capabilities.version),
+      commands,
+    };
+  }
+  const version = capabilities && boundedBridgeVersion(capabilities.version) !== 'unknown'
+    ? boundedBridgeVersion(capabilities.version)
+    : await bridgeVersion(executable, environment);
+  const error = new Error(
+    `Incompatible pursers-wait-bridge at ${executable} (version ${version}); missing subcommands: ${missing.join(', ')}. `
+    + 'Reinstall the exact candidate wheel: uv tool install --force --reinstall /PATH/TO/EXACT-CANDIDATE/pursers_wait_bridge-*.whl',
+  );
+  error.code = 'bridge_incompatible';
+  throw error;
 }
 
 function createBridgeRunner(command, stateDir) {
@@ -363,6 +439,7 @@ function createHelperServer(options) {
   if (!isLoopbackHostname(host)) fail('helper host must be loopback');
   const port = options.port === undefined ? DEFAULT_PORT : parseInteger(options.port, 'port', 0, 65535);
   const discoveryFile = options.discoveryFile === undefined ? DEFAULT_DISCOVERY_FILE : options.discoveryFile;
+  const verifyBridge = options.verifyBridge || (() => probeBridgeCompatibility(options.bridgeCommand || 'pursers-wait-bridge'));
   const runBridge = options.runBridge || createBridgeRunner(options.bridgeCommand || 'pursers-wait-bridge', options.bridgeStateDir);
   const runTeamCli = options.runTeamCli || createTeamRunner(
     options.aioncoreCommand || 'aioncore', options.runtimeContext || null,
@@ -490,6 +567,7 @@ function createHelperServer(options) {
   return {
     server,
     async start() {
+      await verifyBridge();
       await new Promise((resolve, reject) => {
         server.once('error', reject);
         server.listen(port, host, resolve);
@@ -571,7 +649,9 @@ module.exports = {
   createTeamRunner,
   explicitRuntimeContext,
   normalizeOrigin,
+  probeBridgeCompatibility,
   readTokenFile,
+  resolveExecutable,
   writeDiscoveryFile,
 };
 
