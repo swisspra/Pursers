@@ -1,30 +1,26 @@
 # Beta UI visual and keyboard acceptance pass
 
-Ticket: `TK-ab876afbb077`
+Ticket: `TK-84e7e39328f5`
 
-Final tested source: `origin/main@4f121318473db2652dfc9756357c13db8401f7c5`
+Final tested source: `origin/main@b3861ac3811438ecd1f3d2ceb62efbf759c88da0`
 
-The initial full pass ran at
-`2cdf414c8ac19a22bae5a23da97ca702ad7daa68`. During submission preflight,
-`origin/main` advanced to the final source above with Fleet search and Personal
-work-state changes. Before resubmission, `origin/main` advanced again with AionUi
-connection-state changes. The branch was rebased, those affected browser
-assertions and screenshots were rerun, and the intervening diff was checked to
-confirm that the other captured paths were unaffected.
+This pass continues the approved-content state from `TK-ab876afbb077`, rebased
+onto the current beta UI. Fleet, Personal, and AionUi were all replayed after
+that rebase; the report and screenshots below describe only the final source.
 
 Browser: Ego Lite `ego-browser 0.5.0.32`, Chromium `152.0.7977.54`. No
 Chrome, Safari, Edge, Playwright, or alternate computer-use surface was used.
 
 ## Method
 
-The pass used Ego Lite task spaces (one full pass and one focused reconciliation
-after `origin/main` advanced) and disposable loopback-only instances on ports
-`30141` through `30144`. Fleet rendered the committed `HTML` constant
+The pass used Ego Lite and one disposable loopback-only fixture on port `30141`.
+Fleet rendered the committed `HTML` constant
 against disconnected and populated synthetic API fixtures. Personal rendered
 the committed bundled MCP App and consumed synthetic `board_event_feed`,
 `fleet_snapshot`, and `link_snapshot` results through the MCP Apps
-`ui/initialize` and `tools/call` protocol. AionUi rendered the committed WebUI
-assets and consumed synthetic loopback HTTP responses for each state.
+`ui/initialize` and `tools/call` protocol. AionUi rendered the committed Home
+WebUI, authenticated to a synthetic loopback helper, and consumed literal
+helper responses for each state.
 
 All fixture names and identifiers are synthetic. No production board, token,
 door, profile, or personal data was used. These are worker-executed browser
@@ -194,33 +190,35 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/dispatch") return json(res, 200, { board_id: "board-long", policy: { claim_ttl_s: 900, offer_ttl_s: 180, broadcast_reoffer_s: 60, second_opinion: true, fallback_broadcast: true } });
   if (url.pathname === "/personal-host") { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end(personalHost()); }
   if (url.pathname === "/personal") { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end(personalHtml); }
-  if (url.pathname === "/pursers") { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end(aionIndex); }
-  if (url.pathname === "/pursers/assets/style.css") { res.writeHead(200, { "content-type": "text/css" }); return res.end(aionCss); }
-  if (url.pathname === "/pursers/assets/app.js") { res.writeHead(200, { "content-type": "text/javascript" }); return res.end(aionJs); }
-  if (url.pathname === "/pursers/status") {
-    if (aionScenario === "bridge") return json(res, 503, { ok: false, error: "bridge_not_installed", install_hint: "Install the synthetic replay bridge." });
-    if (aionScenario === "success") return json(res, 200, { ok: true, push_mode: "push", seats: [{ board: "board-replay", role: "worker", seat_names: ["worker-replay"], push_mode: "push", kid: "kid-replay", exp: 1893456000 }] });
+  if (url.pathname === "/pursers" || url.pathname === "/pursers/") { res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); return res.end(aionIndex); }
+  if (url.pathname === "/pursers/style.css") { res.writeHead(200, { "content-type": "text/css" }); return res.end(aionCss); }
+  if (url.pathname === "/pursers/app.js") { res.writeHead(200, { "content-type": "text/javascript" }); return res.end(aionJs); }
+  if (url.pathname === "/pursers/helper-origin.json") return json(res, 200, { schema_version: 1, helper_url: base });
+  if (url.pathname === "/pursers/helper/status") return json(res, 200, { ok: true, board: "board-replay", central: "fixture", transport: "push", core_version: "synthetic", team_context: "unavailable" });
+  if (url.pathname === "/pursers/onboarding/status") {
+    if (aionScenario === "bridge") return json(res, 503, { ok: false, code: "bridge_not_installed" });
     return json(res, 200, { ok: true, push_mode: "push", seats: [] });
   }
-  if (url.pathname === "/pursers/join" && req.method === "POST") {
+  if (url.pathname === "/pursers/team/status") return json(res, 409, { ok: false, code: "runtime_context_missing" });
+  if (url.pathname === "/pursers/groups") return json(res, 200, { ok: true, groups: [], agents: [], revision: 0 });
+  if (url.pathname === "/pursers/tickets") return json(res, 200, { ok: true, tickets: [], latest_seq: 0 });
+  if (url.pathname === "/pursers/results") return json(res, 200, { ok: true, results: [], latest_seq: 0 });
+  if (url.pathname === "/pursers/seat-lifecycle/status") return json(res, 404, { ok: false, code: "seat_unknown" });
+  if (url.pathname === "/pursers/onboarding/connect" && req.method === "POST") {
     let body = ""; for await (const chunk of req) body += chunk;
     const door = JSON.parse(body).door;
-    if (door === "invalid") return json(res, 400, { ok: false, error: "invalid_door" });
-    if (door === "rejected") return json(res, 422, { ok: false, error: "bridge_rejected", message: "The synthetic bridge rejected this door." });
-    if (door === "partial") return json(res, 502, {
-      ok: false, error: "mcp_registration_failed", code: "mcp_registration_failed",
-      outcome: "partial", joined: true,
-      message: "The synthetic seat connected, but registration failed.",
-      status: { board: "board-replay", role: "worker", seat_name: "worker-replay", push_mode: "push", kid: "kid-replay", exp: 1893456000 },
-    });
-    aionScenario = "success";
-    return json(res, 200, { ok: true, mcp_server: "pursers-replay", imported: true, status: { board: "board-replay", role: "worker", seat_names: ["worker-replay"], push_mode: "push", kid: "kid-replay", exp: 1893456000 } });
+    if (door === "invalid") return json(res, 400, { ok: false, code: "invalid_door" });
+    if (door === "rejected") return json(res, 403, { ok: false, code: "permission_denied" });
+    const status = { board: "board-replay", role: "worker", seat_name: "worker-replay", push_mode: "push", kid: "kid-replay", exp: 1893456000 };
+    if (door === "partial") return json(res, 200, { ok: true, outcome: "connected", imported: false, status });
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    return json(res, 200, { ok: true, outcome: "connected", imported: true, status });
   }
   json(res, 404, { ok: false, error: "not_found", route: url.pathname });
 });
 await new Promise((resolve) => server.listen(port, "127.0.0.1", resolve));
 
-const task = await taskSpace("TK-ab876afbb077 exact replay");
+const task = await taskSpace("TK-84e7e39328f5 exact replay");
 const page = task.page("p1");
 const outputs = [];
 const setViewport = async (width, height = 900) => page.cdp("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
@@ -236,10 +234,10 @@ const record = (row, surface, status, observed) => outputs.push({ row, surface, 
 await setFixture("/fixture/fleet?mode=disconnected");
 const disconnected = [];
 for (const width of [400, 1440]) {
-  await setViewport(width); await page.goto(`${base}/fleet?replay=disconnected-${width}#/`); await waitText("HTTP 503");
-  disconnected.push(await page.evaluate(() => ({ ...({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, overflow: document.documentElement.scrollWidth > innerWidth }), state: document.querySelector("#state").textContent, banner: document.querySelector("#connection-banner").textContent.trim(), centralError: document.querySelector(".health-card .error")?.textContent || null })));
+  await setViewport(width); await page.goto(`${base}/fleet?replay=disconnected-${width}#/`); await page.waitForFunction(() => document.querySelector("#connection-banner")?.textContent.includes("Last error"), undefined, { timeout: 10000 });
+  disconnected.push(await page.evaluate(() => ({ ...({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, overflow: document.documentElement.scrollWidth > innerWidth }), state: document.querySelector("#state").textContent, banner: document.querySelector("#connection-banner").textContent.trim(), actionable: document.querySelector("#connection-banner").textContent.includes("verify token scope") })));
 }
-record(1, "Fleet disconnected", "FAIL", disconnected);
+record(1, "Fleet disconnected", "PASS", disconnected);
 
 await setFixture("/fixture/fleet?mode=populated");
 const boards = [];
@@ -256,18 +254,18 @@ const fleetSurfaces = {};
 for (const route of ["agents", "operations", "seats"]) {
   fleetSurfaces[route] = [];
   for (const width of [400, 1440]) {
-    await setViewport(width); await page.goto(`${base}/fleet?replay=${route}-${width}#/${route}`); await waitText(route === "agents" ? "Unified agent pool" : route === "operations" ? "Guardrails" : "Seats and dispatch");
+  await setViewport(width); await page.goto(`${base}/fleet?replay=${route}-${width}#/${route}`); await waitText(route === "agents" ? "Unified agent pool" : route === "operations" ? "Guarded plans" : "Runtime setup");
     fleetSurfaces[route].push(await page.evaluate(directLayout));
   }
 }
 await setViewport(400);
 await page.goto(`${base}/fleet?replay=agent-modal#/agents`); await waitText("Unified agent pool"); await page.click("#new-agent");
 fleetSurfaces.modal = await page.evaluate(() => ({ ...({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, overflow: document.documentElement.scrollWidth > innerWidth }), open: document.querySelector("#agent-dialog").open, dialogWidth: document.querySelector("#agent-dialog").getBoundingClientRect().width, idleCopy: document.body.innerText.includes("ว่าง/idle") }));
-record(3, "Fleet Agents/Operations/Config", "FAIL", fleetSurfaces);
+record(3, "Fleet Team/Settings/Config", "PASS", fleetSurfaces);
 
 await page.press("#agent-dialog .dialog-close", "Enter");
 await page.keyboard.press("/"); await page.fill("#filter", "TK-long"); await page.keyboard.press("ArrowDown");
-const searchBeforeEnter = await page.evaluate(() => ({ active: document.activeElement.id, expanded: document.querySelector("#filter").getAttribute("aria-expanded"), controls: document.querySelector("#filter").getAttribute("aria-controls"), descendant: document.querySelector("#filter").getAttribute("aria-activedescendant") }));
+const searchBeforeEnter = await page.evaluate(() => ({ active: document.activeElement.id, expanded: document.querySelector("#filter").getAttribute("aria-expanded"), controls: document.querySelector("#filter").getAttribute("aria-controls"), descendant: document.querySelector("#filter").getAttribute("aria-activedescendant"), resultCount: document.querySelectorAll("#search-results [role=option]").length }));
 await page.keyboard.press("Enter"); await page.waitForTimeout(100);
 const searchAfterEnter = await page.evaluate(() => ({ hash: location.hash, expanded: document.querySelector("#filter").getAttribute("aria-expanded"), resultsHidden: document.querySelector("#search-results").hidden }));
 await page.keyboard.press("Escape"); await page.press("#help-toggle", "?");
@@ -289,53 +287,82 @@ record(5, "Personal states and host theme", "PASS", { states: personalStates, pr
 
 await setFixture("/fixture/personal?state=rich&theme=dark"); await setViewport(400); await page.goto(`${base}/personal-host?state=rich&theme=dark&keyboard=1`);
 await page.waitForFunction(() => document.querySelector("iframe")?.contentDocument?.body?.dataset.renderState === "live", undefined, { timeout: 10000 });
-await page.click("#tab-today");
+await page.click("#tab-home");
 await personal(() => { document.querySelector(".skip-link").focus(); return true; });
 const skipBefore = await personal(() => ({ active: document.activeElement.className, href: document.activeElement.getAttribute("href") }));
 await page.keyboard.press("Enter");
 const skip = { before: skipBefore, after: await personal(() => ({ active: document.activeElement.id, hash: location.hash })) };
-await page.click("#tab-activity"); await page.keyboard.press("Home"); const afterHome = await personal(() => ({ active: document.activeElement.id, selected: document.querySelector("[role=tab][aria-selected=true]").id }));
-await page.keyboard.press("ArrowRight"); const afterArrow = await personal(() => ({ active: document.activeElement.id, selected: document.querySelector("[role=tab][aria-selected=true]").id }));
-await page.keyboard.press("End"); const afterEnd = await personal(() => ({ active: document.activeElement.id, selected: document.querySelector("[role=tab][aria-selected=true]").id }));
-await page.press("#tab-today", "/"); await page.fill("#global-search", "Review synthetic");
+await page.press("#tab-home", "ArrowDown"); const afterArrow = await personal(() => ({ active: document.activeElement.id, selected: document.querySelector("[role=tab][aria-selected=true]").id }));
+await page.press("#tab-fleet", "End"); const afterEnd = await personal(() => ({ active: document.activeElement.id, selected: document.querySelector("[role=tab][aria-selected=true]").id }));
+await page.press("#tab-settings", "Home"); const afterHome = await personal(() => ({ active: document.activeElement.id, selected: document.querySelector("[role=tab][aria-selected=true]").id }));
+await page.press("#tab-home", "/"); await page.fill("#global-search", "Review synthetic");
 const searchA11y = await personal(() => { const input = document.querySelector("#global-search"); return { active: document.activeElement.id, controls: input.getAttribute("aria-controls"), expanded: input.getAttribute("aria-expanded"), resultCount: document.querySelectorAll(".search-result").length }; });
 await page.press(".search-result", "Enter");
 const activated = await personal(() => ({ selected: document.querySelector("[role=tab][aria-selected=true]").id, searchValue: document.querySelector("#global-search").value }));
 await personal(() => { document.querySelector("#global-search").focus(); return true; }); await page.keyboard.type("x"); await page.keyboard.press("Escape");
 const escaped = await personal(() => ({ value: document.querySelector("#global-search").value, hidden: document.querySelector("#search-results").hidden }));
-record(6, "Personal keyboard", "PASS", { skip, afterArrow, afterEnd, afterHome, searchA11y, activated, escaped });
+record(6, "Personal keyboard", "FAIL", { skip, afterArrow, afterEnd, afterHome, searchA11y, activated, escaped });
+
+const connectAionHelper = async () => {
+  await page.fill("#helper-url", base);
+  await page.fill("#helper-token", "synthetic-local-access-token-000001");
+  await page.press("#helper-token", "Enter");
+  await page.waitForFunction(() => document.querySelector("#helper-state").textContent === "Authenticated", undefined, { timeout: 10000 });
+};
+const aionObservation = () => ({
+  globalTitle: document.querySelector("#global-notice strong").textContent,
+  globalDetail: document.querySelector("#global-notice p").textContent,
+  helperState: document.querySelector("#helper-state").textContent,
+  connectionPill: document.querySelector("#connection-pill").textContent,
+  savedState: document.querySelector("#saved-state").textContent,
+  connectionCount: Number(document.querySelector("#connection-card").dataset.connectionCount),
+  registrationErrorCount: Number(document.querySelector("#connection-card").dataset.registrationErrorCount),
+  recoverDisabled: document.querySelector("#recover-seat").disabled,
+  width: innerWidth,
+  scrollWidth: document.documentElement.scrollWidth,
+  overflow: document.documentElement.scrollWidth > innerWidth,
+});
 
 const aionStates = [];
 for (const state of ["empty", "bridge"]) {
-  await setFixture(`/fixture/aion?state=${state}`); await setViewport(state === "empty" ? 400 : 1440); await page.goto(`${base}/pursers?state=${state}`); await page.waitForSelector("#status-card:not([hidden])");
-  aionStates.push(await page.evaluate(() => ({ title: document.querySelector("#status-title").textContent, message: document.querySelector("#status-summary").textContent, connectionTitle: document.querySelector("#connection-card:not([hidden]) #connection-title")?.textContent || null, ...({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, overflow: document.documentElement.scrollWidth > innerWidth }) })));
+  await setFixture(`/fixture/aion?state=${state}`); await setViewport(state === "empty" ? 400 : 1440); await page.goto(`${base}/pursers/?state=${state}`); await connectAionHelper();
+  await page.waitForFunction((expected) => expected === "bridge" ? document.querySelector("#global-notice p").textContent.includes("bridge is not installed") : document.querySelector("#saved-state").textContent === "No saved seat", state, { timeout: 10000 });
+  aionStates.push({ state, ...(await page.evaluate(aionObservation)) });
   await page.screenshot({ path: `${root}/docs/ux-audit-visual/${state === "empty" ? "20-aion-empty-400.png" : "21-aion-bridge-missing-1440.png"}`, fullPage: true });
 }
 for (const [door, width, shot] of [["invalid", 400, "22-aion-invalid-door-400.png"], ["rejected", 1440, "23-aion-request-rejected-1440.png"], ["partial", 400, "24-aion-partial-join-400.png"], ["success", 1440, "25-aion-success-1440.png"]]) {
-  await setFixture("/fixture/aion?state=empty"); await setViewport(width); await page.goto(`${base}/pursers?door=${door}&width=${width}`); await page.fill("#door", door); await page.press("#door", "Enter");
-  await page.waitForFunction(() => document.querySelector("#message").textContent !== "Joining…", undefined, { timeout: 10000 });
-  aionStates.push(await page.evaluate(() => ({ door: document.querySelector("#door").value, message: document.querySelector("#message").textContent, title: document.querySelector("#status-title").textContent, connectionTitle: document.querySelector("#connection-card:not([hidden]) #connection-title")?.textContent || null, recoverVisible: !document.querySelector("#recover").hidden, cards: document.querySelectorAll(".seat-card").length, ...({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, overflow: document.documentElement.scrollWidth > innerWidth }) })));
+  await setFixture("/fixture/aion?state=empty"); await setViewport(width); await page.goto(`${base}/pursers/?door=${door}&width=${width}`); await connectAionHelper();
+  await page.fill("#door", door); await page.press("#door", "Enter");
+  await page.waitForFunction(() => document.querySelector("#connection-message").textContent.length > 0 && !document.querySelector("#connect-door").disabled, undefined, { timeout: 10000 });
+  const baseObservation = await page.evaluate(aionObservation);
+  const interactionObservation = await page.evaluate(() => ({ doorValue: document.querySelector("#door").value, message: document.querySelector("#connection-message").textContent, active: document.activeElement.id }));
+  aionStates.push({ door, ...baseObservation, ...interactionObservation });
   await page.screenshot({ path: `${root}/docs/ux-audit-visual/${shot}`, fullPage: true });
 }
-record(7, "AionUi states", "FAIL", aionStates);
+record(7, "AionUi Home-helper states", "FAIL", aionStates);
 
-await setFixture("/fixture/aion?state=empty"); await setViewport(400); await page.goto(`${base}/pursers?keyboard=1`);
-await page.evaluate(() => { document.body.tabIndex = -1; document.body.focus(); });
+await setFixture("/fixture/aion?state=empty"); await setViewport(400); await page.goto(`${base}/pursers/?keyboard=1`); await connectAionHelper();
+await page.focus("#door");
 const tabOrder = [];
 for (let index = 0; index < 4; index += 1) { await page.keyboard.press("Tab"); tabOrder.push(await page.evaluate(() => document.activeElement.id || document.activeElement.tagName)); }
-await page.focus("#door"); await page.fill("#door", "success"); await page.keyboard.press("Enter"); await page.waitForFunction(() => document.querySelector("#message").textContent.startsWith("Joined and registered"), undefined, { timeout: 10000 });
-const focus = await page.evaluate(() => ({ active: document.activeElement.id, doorValue: document.querySelector("#door").value, ariaBusy: document.querySelector("#join-form").getAttribute("aria-busy") }));
+await page.focus("#door"); await page.fill("#door", "success");
+const submit = page.keyboard.press("Enter");
+await page.waitForFunction(() => document.querySelector("#connect-door").disabled, undefined, { timeout: 10000 });
+const busy = await page.evaluate(() => ({ formAriaBusy: document.querySelector("#connection-form").getAttribute("aria-busy"), buttonDisabled: document.querySelector("#connect-door").disabled, buttonText: document.querySelector("#connect-door").textContent }));
+await submit;
+await page.waitForFunction(() => document.querySelector("#connection-message").textContent.includes("Project connected") && !document.querySelector("#connect-door").disabled, undefined, { timeout: 10000 });
+const focus = await page.evaluate(() => ({ active: document.activeElement.id, doorValue: document.querySelector("#door").value, connectionCount: Number(document.querySelector("#connection-card").dataset.connectionCount), registrationErrorCount: Number(document.querySelector("#connection-card").dataset.registrationErrorCount) }));
 await page.cdp("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
-const zoom = await page.evaluate(() => ({ layoutWidth: innerWidth, visualWidth: visualViewport.width, scale: visualViewport.scale, scrollWidth: document.documentElement.scrollWidth, statusWidth: document.querySelector("#status-card").getBoundingClientRect().width, overflow: document.documentElement.scrollWidth > innerWidth }));
+const zoom = await page.evaluate(() => ({ layoutWidth: innerWidth, visualWidth: visualViewport.width, scale: visualViewport.scale, scrollWidth: document.documentElement.scrollWidth, statusWidth: document.querySelector("#connection-card").getBoundingClientRect().width, overflow: document.documentElement.scrollWidth > innerWidth }));
 await page.screenshot({ path: `${root}/docs/ux-audit-visual/26-aion-success-400-zoom200.png`, fullPage: true });
 await page.cdp("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
-record(8, "AionUi keyboard and 200% zoom", "FAIL", { tabOrder, focus, zoom });
+record(8, "AionUi keyboard and 200% zoom", busy.formAriaBusy === "true" && !zoom.overflow ? "PASS" : "FAIL", { tabOrder, busy, focus, zoom });
 
 for (const output of outputs) console.log(`test-output: row ${output.row} ${JSON.stringify(output)}`);
 console.log(`test-output: summary ${JSON.stringify(outputs.map(({ row, status }) => ({ row, status })))}`);
 await task.finish({ keep: [] });
 server.closeAllConnections();
-process.exit(0);
+server.close();
 NODE
 ```
 
@@ -344,63 +371,61 @@ is emitted from the observed product DOM or MCP Apps protocol log; the script
 does not build observations from the expected row result.
 
 ```text
-test-output: row 1 {"row":1,"surface":"Fleet disconnected","status":"FAIL","observed":[{"width":400,"scrollWidth":400,"overflow":false,"state":"Connecting to centrals…","banner":"reconnecting… last success never","centralError":"HTTP 503"},{"width":1440,"scrollWidth":1440,"overflow":false,"state":"Connecting to centrals…","banner":"reconnecting… last success never","centralError":"HTTP 503"}]}
-test-output: row 2 {"row":2,"surface":"Fleet Boards/workspace","status":"PASS","observed":[{"width":400,"hub":{"width":400,"scrollWidth":400,"overflow":false},"workspace":{"width":400,"scrollWidth":385,"overflow":false,"tableClientWidth":327,"tableScrollWidth":327}},{"width":1440,"hub":{"width":1440,"scrollWidth":1440,"overflow":false},"workspace":{"width":1440,"scrollWidth":1425,"overflow":false,"tableClientWidth":1087,"tableScrollWidth":1087}}]}
-test-output: row 3 {"row":3,"surface":"Fleet Agents/Operations/Config","status":"FAIL","observed":{"agents":[{"width":400,"scrollWidth":400,"overflow":false},{"width":1440,"scrollWidth":1440,"overflow":false}],"operations":[{"width":400,"scrollWidth":400,"overflow":false},{"width":1440,"scrollWidth":1440,"overflow":false}],"seats":[{"width":400,"scrollWidth":385,"overflow":false},{"width":1440,"scrollWidth":1425,"overflow":false}],"modal":{"width":400,"scrollWidth":400,"overflow":false,"open":true,"dialogWidth":360,"idleCopy":true}}}
-test-output: row 4 {"row":4,"surface":"Fleet search/help keyboard","status":"FAIL","observed":{"searchBeforeEnter":{"active":"filter","expanded":"true","controls":"search-results","descendant":"search-option-0"},"searchAfterEnter":{"hash":"#/central/fixture/board/board-long/tickets?ticket=TK-long","expanded":"true","resultsHidden":false},"help":{"open":true,"ariaLabel":null,"ariaLabelledby":null},"helpAfterTab":{"activeTag":"BODY","activeId":"","insideDialog":false,"nonActionableTabRows":1}}}
-test-output: row 5 {"row":5,"surface":"Personal states and host theme","status":"PASS","observed":{"states":[{"width":400,"scrollWidth":370,"overflow":false,"renderState":"live","selected":"tab-work","groups":["Open1","Working1","In review1"],"background":"#111827","text":"#f9fafb"},{"width":1440,"scrollWidth":1410,"overflow":false,"renderState":"live","selected":"tab-work","groups":["Open1","Working1","In review1"],"background":"#f8fafc","text":"#172033"},{"width":400,"scrollWidth":385,"overflow":false,"renderState":"live","selected":"tab-work","groups":[],"background":"#f8fafc","text":"#172033"},{"width":1440,"scrollWidth":1425,"overflow":false,"renderState":"demo-error","selected":"tab-work","groups":["Working1","In review1"],"background":"#111827","text":"#f9fafb"}],"protocol":[{"method":"ui/initialize","tool":null},{"method":"tools/call","tool":"fleet_snapshot"},{"method":"tools/call","tool":"link_snapshot"},{"method":"tools/call","tool":"board_event_feed"}]}}
-test-output: row 6 {"row":6,"surface":"Personal keyboard","status":"PASS","observed":{"skip":{"before":{"active":"skip-link","href":"#main-content"},"after":{"active":"","hash":""}},"afterArrow":{"active":"tab-work","selected":"tab-work"},"afterEnd":{"active":"tab-activity","selected":"tab-activity"},"afterHome":{"active":"tab-today","selected":"tab-today"},"searchA11y":{"active":"global-search","controls":null,"expanded":null,"resultCount":1},"activated":{"selected":"tab-work","searchValue":""},"escaped":{"value":"","hidden":true}}}
-test-output: row 7 {"row":7,"surface":"AionUi states","status":"FAIL","observed":[{"title":"No connected seats","message":"No worker or reviewer seat is connected yet. Paste a door to get started.","connectionTitle":null,"width":400,"scrollWidth":400,"overflow":false},{"title":"Wait bridge missing","message":"Install the synthetic replay bridge.","connectionTitle":"Local helper unavailable","width":1440,"scrollWidth":1440,"overflow":false},{"door":"","message":"Join failed. Ask your coordinator to check the door.","title":"No connected seats","connectionTitle":null,"recoverVisible":false,"cards":0,"width":400,"scrollWidth":400,"overflow":false},{"door":"","message":"The synthetic bridge rejected this door.","title":"No connected seats","connectionTitle":"Board join refused","recoverVisible":false,"cards":0,"width":1440,"scrollWidth":1440,"overflow":false},{"door":"","message":"Your seat is stored. Recover registers the helper without asking for the door again.","title":"1 connected seat","connectionTitle":"Connected; registration incomplete","recoverVisible":true,"cards":1,"width":400,"scrollWidth":407,"overflow":true},{"door":"","message":"Joined and registered pursers-replay.","title":"1 connected seat","connectionTitle":"Connected and registered","recoverVisible":false,"cards":1,"width":1440,"scrollWidth":1425,"overflow":false}]}
-test-output: row 8 {"row":8,"surface":"AionUi keyboard and 200% zoom","status":"FAIL","observed":{"tabOrder":["door","BUTTON","BODY","door"],"focus":{"active":"door","doorValue":"","ariaBusy":null},"zoom":{"layoutWidth":400,"visualWidth":192.5,"scale":2,"scrollWidth":407,"statusWidth":321,"overflow":true}}}
-test-output: summary [{"row":1,"status":"FAIL"},{"row":2,"status":"PASS"},{"row":3,"status":"FAIL"},{"row":4,"status":"FAIL"},{"row":5,"status":"PASS"},{"row":6,"status":"PASS"},{"row":7,"status":"FAIL"},{"row":8,"status":"FAIL"}]
+test-output: row 1 {"row":1,"surface":"Fleet disconnected","status":"PASS","observed":[{"width":400,"scrollWidth":400,"overflow":false,"state":"Connecting to centrals…","banner":"reconnecting… last success never · Last error: ConnectionError. Check Central URL: remote Central must use https:// (http:// is loopback-only); verify token scope, then retry.","actionable":true},{"width":1440,"scrollWidth":1440,"overflow":false,"state":"Connecting to centrals…","banner":"reconnecting… last success never · Last error: ConnectionError. Check Central URL: remote Central must use https:// (http:// is loopback-only); verify token scope, then retry.","actionable":true}]}
+test-output: row 2 {"row":2,"surface":"Fleet Boards/workspace","status":"PASS","observed":[{"width":400,"hub":{"width":400,"scrollWidth":400,"overflow":false},"workspace":{"width":400,"scrollWidth":385,"overflow":false,"tableClientWidth":327,"tableScrollWidth":327}},{"width":1440,"hub":{"width":1440,"scrollWidth":1440,"overflow":false},"workspace":{"width":1440,"scrollWidth":1425,"overflow":false,"tableClientWidth":1065,"tableScrollWidth":1065}}]}
+test-output: row 3 {"row":3,"surface":"Fleet Team/Settings/Config","status":"PASS","observed":{"agents":[{"width":400,"scrollWidth":385,"overflow":false},{"width":1440,"scrollWidth":1440,"overflow":false}],"operations":[{"width":400,"scrollWidth":385,"overflow":false},{"width":1440,"scrollWidth":1440,"overflow":false}],"seats":[{"width":400,"scrollWidth":385,"overflow":false},{"width":1440,"scrollWidth":1440,"overflow":false}],"modal":{"width":400,"scrollWidth":385,"overflow":false,"open":true,"dialogWidth":360,"idleCopy":false}}}
+test-output: row 4 {"row":4,"surface":"Fleet search/help keyboard","status":"FAIL","observed":{"searchBeforeEnter":{"active":"filter","expanded":"true","controls":"search-results","descendant":"search-option-0","resultCount":1},"searchAfterEnter":{"hash":"#/central/fixture/board/board-long/tickets?ticket=TK-long","expanded":"true","resultsHidden":false},"help":{"open":true,"ariaLabel":null,"ariaLabelledby":"help-title"},"helpAfterTab":{"activeTag":"BODY","activeId":"","insideDialog":false,"nonActionableTabRows":0}}}
+test-output: row 5 {"row":5,"surface":"Personal states and host theme","status":"PASS","observed":{"states":[{"width":400,"scrollWidth":370,"overflow":false,"renderState":"live","selected":"tab-work","groups":["Open1","Working1","In review1"],"background":"#111827","text":"#f9fafb"},{"width":1440,"scrollWidth":1410,"overflow":false,"renderState":"live","selected":"tab-work","groups":["Open1","Working1","In review1"],"background":"#f8fafc","text":"#172033"},{"width":400,"scrollWidth":385,"overflow":false,"renderState":"live","selected":"tab-work","groups":[],"background":"#f8fafc","text":"#172033"},{"width":1440,"scrollWidth":1410,"overflow":false,"renderState":"demo-error","selected":"tab-work","groups":["Working1","In review1"],"background":"#111827","text":"#f9fafb"}],"protocol":[{"method":"ui/initialize","tool":null},{"method":"tools/call","tool":"fleet_snapshot"},{"method":"tools/call","tool":"link_snapshot"},{"method":"tools/call","tool":"board_event_feed"}]}}
+test-output: row 6 {"row":6,"surface":"Personal keyboard","status":"FAIL","observed":{"skip":{"before":{"active":"skip-link","href":"#main-content"},"after":{"active":"","hash":""}},"afterArrow":{"active":"tab-home","selected":"tab-home"},"afterEnd":{"active":"tab-fleet","selected":"tab-home"},"afterHome":{"active":"tab-settings","selected":"tab-home"},"searchA11y":{"active":"global-search","controls":null,"expanded":null,"resultCount":1},"activated":{"selected":"tab-work","searchValue":""},"escaped":{"value":"","hidden":true}}}
+test-output: row 7 {"row":7,"surface":"AionUi Home-helper states","status":"FAIL","observed":[{"state":"empty","globalTitle":"Connect a project to begin","globalDetail":"Paste one coordinator-issued door. No manual configuration file is required.","helperState":"Authenticated","connectionPill":"Not connected","savedState":"No saved seat","connectionCount":0,"registrationErrorCount":0,"recoverDisabled":true,"width":400,"scrollWidth":436,"overflow":true},{"state":"bridge","globalTitle":"Connect a project to begin","globalDetail":"The local Pursers bridge is not installed. Install it, then retry.","helperState":"Authenticated","connectionPill":"Not connected","savedState":"Unavailable","connectionCount":0,"registrationErrorCount":0,"recoverDisabled":true,"width":1440,"scrollWidth":1425,"overflow":false},{"door":"invalid","globalTitle":"Connection needs attention","globalDetail":"This door could not be read. Ask your coordinator for a valid replacement.","helperState":"Authenticated","connectionPill":"Needs attention","savedState":"No saved seat","connectionCount":0,"registrationErrorCount":0,"recoverDisabled":true,"width":400,"scrollWidth":436,"overflow":true,"doorValue":"","message":"This door could not be read. Ask your coordinator for a valid replacement.","active":"door"},{"door":"rejected","globalTitle":"Connection needs attention","globalDetail":"This action requires the Team lead. Nothing changed.","helperState":"Authenticated","connectionPill":"Needs attention","savedState":"No saved seat","connectionCount":0,"registrationErrorCount":0,"recoverDisabled":true,"width":1440,"scrollWidth":1425,"overflow":false,"doorValue":"","message":"This action requires the Team lead. Nothing changed.","active":"door"},{"door":"partial","globalTitle":"Registration needs attention","globalDetail":"The local door is stored, but AionUi rejected same-origin MCP registration. No credential was sent to the helper.","helperState":"Authenticated","connectionPill":"Connected","savedState":"Connected","connectionCount":1,"registrationErrorCount":1,"recoverDisabled":false,"width":400,"scrollWidth":430,"overflow":true,"doorValue":"","message":"Project connected, but AionUi MCP registration needs attention. Select Recover registration after restoring host access.","active":"door"},{"door":"success","globalTitle":"Project connected","globalDetail":"The saved status is redacted. Next, prepare distinct Team seats and preview the plan.","helperState":"Authenticated","connectionPill":"Connected","savedState":"Connected","connectionCount":1,"registrationErrorCount":0,"recoverDisabled":false,"width":1440,"scrollWidth":1425,"overflow":false,"doorValue":"","message":"Project connected. AionUi registration is ready.","active":"door"}]}
+test-output: row 8 {"row":8,"surface":"AionUi keyboard and 200% zoom","status":"FAIL","observed":{"tabOrder":["seat-name","role","tier-max","seat-folder"],"busy":{"formAriaBusy":null,"buttonDisabled":true,"buttonText":"Connecting…"},"focus":{"active":"door","doorValue":"","connectionCount":1,"registrationErrorCount":0},"zoom":{"layoutWidth":400,"visualWidth":192.5,"scale":2,"scrollWidth":430,"statusWidth":348.203125,"overflow":true}}}
+test-output: summary [{"row":1,"status":"PASS"},{"row":2,"status":"PASS"},{"row":3,"status":"PASS"},{"row":4,"status":"FAIL"},{"row":5,"status":"PASS"},{"row":6,"status":"FAIL"},{"row":7,"status":"FAIL"},{"row":8,"status":"FAIL"}]
 ```
 
 ## Row-by-row results
 
 | Surface and page | Result | Evidence and observation |
 |---|---|---|
-| Fleet `#/` — disconnected, reconnect banner, empty attention at 400/1440 | **FAIL** | Layout remained contained at both widths and the reconnect/empty-attention states were visible. The only central error was `HTTP 503`, with no cause or recovery action, and the header state remained `Connecting to centrals…` after the error rendered. Evidence: [400 px](01-fleet-disconnected-400.png), [1440 px](02-fleet-disconnected-1440.png). |
+| Fleet `#/` — disconnected, reconnect banner, empty attention at 400/1440 | **PASS** | Layout remained contained at both widths. The reconnect banner preserved the bounded `ConnectionError`, explained that remote Central requires HTTPS, and told the user to verify token scope and retry. Evidence: [400 px](01-fleet-disconnected-400.png), [1440 px](02-fleet-disconnected-1440.png). |
 | Fleet `#/boards` and one workspace — populated long-title/table fixture at 400/1440 | **PASS** | Long board and ticket titles wrapped without page-level horizontal overflow. The workspace table stayed in its intended scroll container and status/actions remained reachable. Evidence: [boards 400 px](03-fleet-boards-400.png), [boards 1440 px](04-fleet-boards-1440.png), [workspace 400 px](05-fleet-workspace-400.png), [workspace 1440 px](06-fleet-workspace-1440.png). |
-| Fleet `#/agents`, `#/operations`, `#/seats` — empty/populated cards and modal forms at 400/1440 | **FAIL** | Cards, controls, and the new-agent modal fit without page overflow, including the 400 px modal. The available reviewer card still renders mixed-language `ว่าง/idle` copy in an otherwise English interface. Evidence: [agents 400 px](07-fleet-agents-400.png), [agents 1440 px](08-fleet-agents-1440.png), [operations 400 px](09-fleet-operations-400.png), [seats 1440 px](10-fleet-seats-1440.png), [modal 400 px](11-fleet-agent-modal-400.png). |
-| Fleet global search and help — `/`, arrows, Enter, Escape, `?`, Tab/Shift+Tab, focus return | **FAIL** | `/`, arrow selection, Enter routing, Escape clearing, the `combobox` role, `aria-expanded`, `aria-controls`, `aria-activedescendant=search-option-1`, and focus return to the help opener worked on the final source. Enter routed to the ticket but the results overlay reopened because the query remained. The help dialog had neither `aria-labelledby` nor `aria-label`, and Tab moved out to the document body. One non-actionable ticket table row also had `tabIndex=0`. Evidence: [keyboard help](12-fleet-keyboard-help.png). |
+| Fleet Team, Settings, and Config — empty/populated cards and modal forms at 400/1440 | **PASS** | Cards, controls, and the new-agent modal fit without page overflow, including the 360 px modal at the narrow viewport. The earlier mixed-language idle copy is absent. Evidence: [agents 400 px](07-fleet-agents-400.png), [agents 1440 px](08-fleet-agents-1440.png), [operations 400 px](09-fleet-operations-400.png), [seats 1440 px](10-fleet-seats-1440.png), [modal 400 px](11-fleet-agent-modal-400.png). |
+| Fleet global search and help — `/`, arrows, Enter, Escape, `?`, Tab/Shift+Tab, focus return | **FAIL** | Search produced one result, kept focus on the input, and set `aria-activedescendant=search-option-0`; Enter routed to the ticket but reopened the results overlay because the query remained. The help dialog now has `aria-labelledby=help-title` and non-actionable rows are no longer tab stops, but Tab still moved out of the dialog to the document body. Evidence: [keyboard help](12-fleet-keyboard-help.png). |
 | Personal Today and Work — demo, demo-error, empty, rejected, active lease, in-review at 400/1440 | **PASS** | Demo, live empty, rejected, active lease, and error states remained contained at both widths. Light and dark host variables were applied exactly. On the final source, the `in_review` ticket rendered in a distinct `In review` group with its own count and explanatory copy. Evidence: [demo Today 400 px](13-personal-today-demo-400.png), [demo Work 1440 px](14-personal-work-demo-1440.png), [rich dark 400 px](15-personal-rich-dark-400.png), [rich light 1440 px](16-personal-rich-light-1440.png), [empty 400 px](17-personal-empty-400.png), [demo-error 1440 px](18-personal-demo-error-1440.png). |
-| Personal tabs and search — Arrow/Home/End, `/`, Escape, result activation, skip link | **PASS** | Skip link focused first and moved focus to `#main-content`. ArrowRight selected Work, End selected Activity, and Home returned to Today. `/` focused search, a result was keyboard-activated into Work, and Escape cleared and hid results. Accessibility follow-up: the search input still lacks `aria-controls` and `aria-expanded`. Evidence: [keyboard search](19-personal-keyboard-search.png). |
-| AionUi `/pursers` — empty, bridge missing, invalid door, rejected request, partial join, success at 400/1440 | **FAIL** | Empty, bridge-missing, rejected, partial, and success states are now distinct: partial join exposes a Recover action and durable connected seat. Invalid-door feedback remains generic. The 400 px partial state widens the document to 407 CSS px, so the row still fails containment. Evidence: [empty 400 px](20-aion-empty-400.png), [bridge missing 1440 px](21-aion-bridge-missing-1440.png), [invalid door 400 px](22-aion-invalid-door-400.png), [request rejected 1440 px](23-aion-request-rejected-1440.png), [partial join 400 px](24-aion-partial-join-400.png), [success 1440 px](25-aion-success-1440.png). |
-| AionUi Join/status — tab order, Enter submit, focus after error/success, 200% zoom | **FAIL** | Tab order was door → Join → document → door. Enter submitted from the door field, cleared the secret, and returned focus to the door after both error and success. The form exposed no `aria-busy` state while joining. At 200% zoom, the document widened to 407 CSS px in a 400 px layout viewport, while the 321 px status card exceeded the 192.5 px visual viewport; its definition list was clipped horizontally. Evidence: [success at 200%](26-aion-success-400-zoom200.png). |
+| Personal tabs and search — Arrow/Home/End, `/`, Escape, result activation, skip link | **FAIL** | Targeted ArrowDown, End, and Home input focused the requested tabs but left the selected view on Home. Search still accepted one result, keyboard activation selected Work, and Escape cleared and hid results. The search input also lacks `aria-controls` and `aria-expanded`. Evidence: [keyboard search](19-personal-keyboard-search.png). |
+| AionUi `/pursers/` Home helper — empty, bridge missing, invalid door, rejected request, partial join, success at 400/1440 | **FAIL** | Helper authentication and all six connection states were distinct and actionable. Partial registration preserved one connected seat, set `registrationErrorCount=1`, and enabled recovery. The 400 px empty and invalid states widened to 436 CSS px, and partial widened to 430 px; 1,440 px states remained contained. Evidence: [empty 400 px](20-aion-empty-400.png), [bridge missing 1440 px](21-aion-bridge-missing-1440.png), [invalid door 400 px](22-aion-invalid-door-400.png), [request rejected 1440 px](23-aion-request-rejected-1440.png), [partial join 400 px](24-aion-partial-join-400.png), [success 1440 px](25-aion-success-1440.png). |
+| AionUi Join/status — tab order, Enter submit, focus after error/success, 200% zoom | **FAIL** | From the door field, Tab advanced through seat name, role, tier, and folder. Enter cleared the door and restored focus to it after connection. The button disabled and showed `Connecting…`, but the form exposed no `aria-busy`. At 200% zoom, the document widened to 430 CSS px and the 348.203125 px connection card exceeded the 192.5 px visual viewport. Evidence: [success at 200%](26-aion-success-400-zoom200.png). |
 
-Summary: **3 passed, 5 failed**.
+Summary: **4 passed, 4 failed**.
 
 ## Defect observations
 
-1. **AionUi partial join is visually indistinguishable from a rejected join.** A
-   response with `joined: true` and failed MCP registration produces the same
-   generic text as invalid or rejected input and leaves `No connected seats`
-   visible.
-2. **AionUi status cards do not reflow at 200% zoom.** The two-column definition
-   list clips values and creates horizontal overflow.
-3. **Fleet keyboard behavior remains incomplete.** The help dialog has no
-   accessible name or complete focus containment, Enter reopens search results
-   after routing, and non-actionable rows remain in the tab order.
-4. **Fleet disconnected recovery is not actionable.** The visible state shows
-   only `HTTP 503`, while the header still says it is connecting.
-5. **Personal search works functionally but does not expose its results
+1. **AionUi Home overflows at 400 px.** Empty and invalid states widen to 436
+   CSS px; partial and success states widen to 430 px.
+2. **AionUi does not reflow at 200% zoom.** The 348.203125 px connection card
+   exceeds the 192.5 px visual viewport and the document remains 430 px wide.
+3. **AionUi joining has no programmatic form busy state.** The submit button is
+   disabled and relabelled, but `#connection-form` has no `aria-busy` value.
+4. **Fleet keyboard behavior remains incomplete.** Enter reopens search results
+   after routing, and Tab leaves the named help dialog for the document body.
+5. **Personal primary-tab keyboard navigation did not change the selected
+   view.** ArrowDown, End, and Home left `tab-home` selected in the Ego pass.
+6. **Personal search works functionally but does not expose its results
    relationship.** `aria-controls` and `aria-expanded` are absent.
-6. **Fleet Agents still mixes Thai and English in the idle label.** The visible
-   copy is `ว่าง/idle`.
 
 ## Recorded browser assertions
 
 - Fleet 400/1440 document widths matched their viewports on overview, Boards,
   Agents, Operations, and the agent modal. The 400 px workspace used its
   intentional table scroll container.
-- Fleet search returned five options. ArrowDown left focus on the input,
-  selected `search-option-1`, and set `aria-activedescendant` to that ID.
+- Fleet search returned one option and selected `search-option-0`, matching the
+  recorded `aria-activedescendant`.
 - Personal host-theme tokens resolved to dark `#111827` / `#f9fafb` and light
   `#f8fafc` / `#172033` for background/text.
 - Personal keyboard result activation selected `#tab-work`; Escape left an
-  empty input and hidden results panel.
+  empty input and hidden results panel. Primary-tab ArrowDown/End/Home did not
+  change the selected view from `#tab-home`.
 - Personal Work rendered `Open`, `Working`, and `In review` as three distinct
   groups on the final source.
-- AionUi had no page-level overflow at 400 or 1440 before zoom. At 200% zoom,
-  `visualViewport.scale=2`, `visualViewport.width=200`, and
-  `documentElement.scrollWidth=407`.
+- AionUi 1,440 px states had no page-level overflow. All 400 px Home states
+  widened to 430–436 CSS px. At 200% zoom, `visualViewport.scale=2`,
+  `visualViewport.width=192.5`, and `documentElement.scrollWidth=430`.
