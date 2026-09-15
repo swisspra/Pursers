@@ -634,6 +634,172 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
             json.dumps(annotated.structured_content, ensure_ascii=False),
         )
 
+    async def test_ticket_read_views_bound_histories_and_deduplicate_ids(self) -> None:
+        ticket_id = await self.create_fat_ticket()
+        full_agent_id = "AI-" + "a" * 64
+        full_principal_id = "PR-" + "b" * 64
+
+        def seed_read_projection(document: dict[str, object]) -> None:
+            ticket = document["tickets"][ticket_id]
+            ticket["claimed_by"] = "worker-a"
+            ticket["claimed_by_agent_id"] = full_agent_id
+            ticket["claimed_by_principal_id"] = full_principal_id
+            ticket["last_claimed_by_principal_id"] = full_principal_id
+            ticket["annotations"] = [
+                {
+                    "annotation_id": "AN-decision",
+                    "kind": "decision",
+                    "text": f"use {full_principal_id} as the approved source",
+                }
+            ]
+            ticket["submission_history"][-1].update(
+                {
+                    "notes": f"branch_and_commit: example@deadbeef by {full_agent_id}",
+                    "files_changed": ["packages/central/example.py"],
+                }
+            )
+            ticket["review_history"][-1].update(
+                {
+                    "verdict": "reject",
+                    "review_notes": "fix the bounded response",
+                    "fix_instructions": "keep only the latest verdict",
+                }
+            )
+            ticket["dispatch_history"] = [
+                {"state": "offered", "kind": "work", "cycle": 0,
+                 "agent_id": full_agent_id},
+                {"state": "expired", "kind": "work", "cycle": 0,
+                 "agent_id": full_agent_id},
+                {"state": "broadcast", "kind": "work", "cycle": 0},
+                {"state": "offered", "kind": "work", "cycle": 1,
+                 "agent_id": full_agent_id},
+                {"state": "accepted", "kind": "work", "cycle": 1,
+                 "agent_id": full_agent_id},
+            ]
+
+        self.service.mutate("pursers", seed_read_projection)
+        raw = await self.call("ticket_get", ticket_id=ticket_id)
+        summary = await self.protocol_call(
+            "ticket_get", ticket_id=ticket_id, view="summary"
+        )
+        work = await self.protocol_call("ticket_get", ticket_id=ticket_id)
+        full_without_history = await self.protocol_call(
+            "ticket_get", ticket_id=ticket_id, view="full"
+        )
+        full_with_history = await self.protocol_call(
+            "ticket_get",
+            ticket_id=ticket_id,
+            view="full",
+            include_dispatch_history=True,
+        )
+        listed = await self.protocol_call(
+            "ticket_list", ticket_ids=[ticket_id]
+        )
+
+        sizes = {
+            name: len(
+                json.dumps(result.structured_content, ensure_ascii=False).encode()
+            )
+            for name, result in {
+                "raw": raw,
+                "summary": summary,
+                "work": work,
+                "full": full_without_history,
+                "full_history": full_with_history,
+                "list_work": listed,
+            }.items()
+        }
+        self.assertGreater(sizes["raw"], sizes["work"] * 5)
+        self.assertLessEqual(sizes["summary"], 2_048)
+        self.assertLessEqual(sizes["work"], 24_000)
+        self.assertLessEqual(sizes["list_work"], 25_000)
+        self.assertLess(sizes["full"], sizes["full_history"])
+
+        summary_ticket = summary.structured_content["ticket"]
+        self.assertEqual(
+            set(summary_ticket),
+            {
+                "ticket_id", "title", "status", "priority", "parked",
+                "assigned", "updated_at", "counts", "dispatch_summary",
+            },
+        )
+        work_payload = work.structured_content
+        work_ticket = work_payload["ticket"]
+        self.assertEqual(work_payload["view"], "work")
+        self.assertEqual(work_ticket["latest_verdict"]["verdict"], "reject")
+        self.assertIn("branch_and_commit", work_ticket["latest_submission"]["notes"])
+        self.assertEqual(work_ticket["annotations"][0]["kind"], "decision")
+        self.assertNotIn("dispatch_history", work_ticket)
+        self.assertEqual(
+            work_ticket["dispatch_summary"],
+            {
+                "cycles": 2,
+                "offers": 2,
+                "accepts": 1,
+                "expirations": 1,
+                "broadcasts": 1,
+                "last": work_ticket["dispatch_summary"]["last"],
+            },
+        )
+        self.assertEqual(len(work_ticket["dispatch_summary"]["last"]), 3)
+        self.assertNotIn(
+            "dispatch_history", full_without_history.structured_content["ticket"]
+        )
+        self.assertEqual(
+            len(full_with_history.structured_content["ticket"]["dispatch_history"]),
+            5,
+        )
+
+        abbreviated_agent_id = "AI-aaaaaaaa"
+        abbreviated_principal_id = "PR-bbbbbbbb"
+        self.assertEqual(work_ticket["claimed_by_agent_id"], abbreviated_agent_id)
+        self.assertEqual(
+            work_ticket["claimed_by_principal_id"], abbreviated_principal_id
+        )
+        self.assertEqual(
+            list(work_payload)[-1], "id_map", "id_map must be the trailing block"
+        )
+        self.assertEqual(work_payload["id_map"][abbreviated_agent_id], full_agent_id)
+        self.assertEqual(
+            work_payload["id_map"][abbreviated_principal_id], full_principal_id
+        )
+        serialized = json.dumps(work_payload, ensure_ascii=False)
+        self.assertEqual(serialized.count(full_agent_id), 1)
+        self.assertEqual(serialized.count(full_principal_id), 1)
+        print("ticket-read bytes: " + " ".join(f"{k}={v}" for k, v in sizes.items()))
+
+    async def test_ticket_read_view_rejects_invalid_projection_arguments(self) -> None:
+        ticket_id = await self.create_fat_ticket()
+        with self.assertRaisesRegex(Exception, "view must be summary, work, or full"):
+            await self.call("ticket_get", ticket_id=ticket_id, view="tiny")
+
+    def test_response_id_abbreviation_lengthens_colliding_prefixes(self) -> None:
+        agent_a = "AI-" + "12345678" + "a" * 56
+        agent_b = "AI-" + "12345678" + "b" * 56
+        principal_a = "PR-" + "abcdef01" + "a" * 56
+        principal_b = "PR-" + "abcdef01" + "b" * 56
+
+        compact = central.abbreviate_response_ids(
+            {
+                "agents": [agent_a, agent_b],
+                "principals": [principal_a, principal_b],
+            }
+        )
+
+        self.assertEqual(compact["agents"], ["AI-12345678a", "AI-12345678b"])
+        self.assertEqual(
+            compact["principals"], ["PR-abcdef01a", "PR-abcdef01b"]
+        )
+        self.assertEqual(
+            compact["id_map"],
+            {
+                "AI-12345678a": agent_a,
+                "AI-12345678b": agent_b,
+                "PR-abcdef01a": principal_a,
+                "PR-abcdef01b": principal_b,
+            },
+        )
+
     def test_compact_review_lease_receipt_preserves_expiry(self) -> None:
         document = {
             "generation_revision": 7,

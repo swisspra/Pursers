@@ -6756,15 +6756,34 @@ def test_dispatch_fetcher_projects_policy_gaps_offers_and_timeline() -> None:
             }
 
         async def ticket_list(self, **kwargs: object) -> dict:
-            assert kwargs == {"include_closed": False, "limit": 500}
+            assert kwargs == {
+                "include_closed": False,
+                "limit": 500,
+                "view": "work",
+            }
             return {
                 "tickets": [
                     {
                         "ticket_id": "TK-hard",
                         "title": "Hard Python work",
+                        "status": "open",
                         "tier": 3,
                         "skills_required": ["python"],
                         "dispatch_state": {"state": "unassignable", "kind": "work"},
+                        "dispatch_summary": {
+                            "cycles": 1,
+                            "offers": 1,
+                            "accepts": 0,
+                            "expirations": 1,
+                            "broadcasts": 0,
+                            "last": [
+                                {
+                                    "state": "expired",
+                                    "agent_name": "worker-low",
+                                    "at": "2030-01-01T00:01:00Z",
+                                }
+                            ],
+                        },
                     }
                 ]
             }
@@ -6803,6 +6822,16 @@ def test_dispatch_fetcher_projects_policy_gaps_offers_and_timeline() -> None:
     ]
     assert result["unclaimed_tickets"][0]["ticket_id"] == "TK-starved"
     assert result["timeline"][0]["kind"] == "ticket_offered"
+    assert result["open_tickets"][0]["dispatch_history"] == [
+        {
+            "state": "expired",
+            "agent_id": None,
+            "agent_name": "worker-low",
+            "at": "2030-01-01T00:01:00Z",
+            "reason": None,
+        }
+    ]
+    assert len(json.dumps(result, separators=(",", ":")).encode()) < 4_096
 
 
 def test_dispatch_timeline_reads_cross_seat_central_projection(
@@ -6951,7 +6980,16 @@ def test_dispatch_timeline_reads_cross_seat_central_projection(
                 return await call("board_status", dashboard_principal)
 
             async def ticket_list(self, **arguments: object) -> dict:
-                return await call("ticket_list", dashboard_principal, **arguments)
+                state["principal"] = dashboard_principal
+                tool_arguments = {"board_id": "pursers", **arguments}
+                raw = await mcp.call_tool("ticket_list", tool_arguments)
+                projected = central.project_model_tool_result(
+                    raw,
+                    service=service,
+                    tool_name="ticket_list",
+                    arguments=tool_arguments,
+                )
+                return projected.structured_content
 
             async def board_dispatch_events(self, **arguments: object) -> dict:
                 return await call(
@@ -6982,6 +7020,23 @@ def test_dispatch_timeline_reads_cross_seat_central_projection(
             "offer_expired",
             "offer_revoked",
         } <= kinds
+        projected_states = {
+            entry["state"]
+            for ticket in result["open_tickets"]
+            for entry in ticket["dispatch_history"]
+        }
+        assert "offered" in projected_states
+        assert any(
+            isinstance(ticket["dispatch_summary"], dict)
+            and ticket["dispatch_summary"]["offers"] > 0
+            for ticket in result["open_tickets"]
+        )
+        assert any(
+            isinstance(ticket["dispatch_summary"], dict)
+            and ticket["dispatch_summary"]["expirations"] > 0
+            for ticket in result["open_tickets"]
+        )
+        assert len(json.dumps(result, separators=(",", ":")).encode()) < 16_384
         assert worker_a_id != worker_b_id
 
     asyncio.run(scenario())
