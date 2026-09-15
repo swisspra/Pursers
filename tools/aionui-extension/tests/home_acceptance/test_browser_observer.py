@@ -2096,7 +2096,7 @@ def test_reinstall_prioritizes_old_challenge_for_foreign_runtime_process(
     config = json.loads(
         (observer_dir / "observer.json").read_text(encoding="utf-8")
     )
-    personal = observer_module._surface_config(config, "personal")
+    personal = observer_module._surface_config(config, "mcp-app")
     runtime = personal["runtime"]
     Path(runtime["pid_file"]).write_text("12345", encoding="utf-8")
     Path(runtime["pid_file"]).chmod(0o600)
