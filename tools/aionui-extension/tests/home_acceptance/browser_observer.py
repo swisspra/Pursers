@@ -1967,7 +1967,11 @@ def _run_transition_backend(
         "candidate_status", "selected_board", "page_sha256",
     }
     if not isinstance(result, dict) or set(result) != expected:
-        detail = json.dumps(result, sort_keys=True, separators=(",", ":"))
+        detail = (
+            json.dumps(result, sort_keys=True, separators=(",", ":"))
+            if result is not None
+            else (completed.stderr.strip() or completed.stdout.strip() or "null")[-1024:]
+        )
         raise _fail(
             EXIT_CAPTURE_FAILED,
             f"browser transition result fields do not match schema: {detail[:1024]}",
