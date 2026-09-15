@@ -297,19 +297,34 @@ def load_acceptance_contract(
         identifiers: set[str] = set()
         normalized: list[dict[str, Any]] = []
         for row in rows:
-            if not isinstance(row, dict) or set(row) != {
+            required_fields = {
                 "id", "surface", "status", "precondition", "action",
                 "expected_fact", "predicate", "evidence_source", "derivation"
-            }:
+            }
+            if (
+                not isinstance(row, dict)
+                or set(row) not in (required_fields, required_fields | {"catalogue_boundary"})
+            ):
                 fail(f"acceptance fact row fields do not match schema in {group}")
             identifier = row["id"]
             if not isinstance(identifier, str) or not identifier or identifier in identifiers:
                 fail(f"acceptance fact IDs must be unique in {group}")
             identifiers.add(identifier)
-            if row["surface"] not in {"aionui", "fleet", "personal"}:
+            if row["surface"] not in {"aionui", "fleet", "mcp-app"}:
                 fail(f"acceptance fact {identifier} has invalid surface")
             if row["status"] not in {"normative", "measured-gap"}:
                 fail(f"acceptance fact {identifier} lacks normative/measured status")
+            if "catalogue_boundary" in row:
+                boundary = row["catalogue_boundary"]
+                if (
+                    not isinstance(boundary, dict)
+                    or set(boundary) != {"kind", "reason"}
+                    or boundary.get("kind") != "unobservable_on_real_surface"
+                    or not isinstance(boundary.get("reason"), str)
+                    or not boundary["reason"].strip()
+                    or len(boundary["reason"]) > 500
+                ):
+                    fail(f"acceptance fact {identifier} has invalid catalogue boundary")
             for field in ("precondition", "action", "expected_fact", "evidence_source"):
                 if not isinstance(row[field], str) or not row[field].strip():
                     fail(f"acceptance fact {identifier} lacks {field}")

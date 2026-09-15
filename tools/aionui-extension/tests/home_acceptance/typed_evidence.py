@@ -38,7 +38,7 @@ KINDS = frozenset({
     "http_response", "mcp_tool_response", "receipt_field", "log_assertion",
     "state_transition",
 })
-SURFACES = frozenset({"aionui", "fleet", "personal"})
+SURFACES = frozenset({"aionui", "fleet", "mcp-app"})
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")

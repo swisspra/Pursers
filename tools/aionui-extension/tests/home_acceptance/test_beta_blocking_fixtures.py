@@ -5,6 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from .beta_blocking_fixture_server import _mcp_host_html
 from .beta_blocking_fixtures import BOARD_ID, FIXTURE_DIR, load_fixture, materialize_door
 
 
@@ -43,6 +44,19 @@ def test_synthetic_fixture_rows() -> None:
     assert board["board"]["id"] == BOARD_ID and board["ticket_total"] == 0 and board["tickets"] == []
     assert load_fixture("personal-board-identity")["expected_text"] == BOARD_ID
     assert len(load_fixture("personal-fleet-projects")["projects"]) >= 1
+
+
+def test_mcp_app_fixture_uses_a_postmessage_host_and_real_child_resource() -> None:
+    one = _mcp_host_html("one").decode()
+    assert 'data-host-kind="mcp-app-postmessage-fixture"' in one
+    assert 'src="/mcp-app/dashboard.html"' in one
+    assert 'request.method === "ui/initialize"' in one
+    assert 'request.method === "tools/call"' in one
+    assert "PostMessageTransport" not in one  # The exact child bundle owns the transport.
+    assert _mcp_host_html("absent").count(b"<iframe") == 0
+    assert _mcp_host_html("ambiguous").count(b"<iframe") == 2
+    assert b"sandbox-wrong-board" in _mcp_host_html("wrong-board")
+    assert b"dashboard-wrong.html" in _mcp_host_html("wrong-bytes")
 
 
 def test_each_recipe_has_an_honest_not_final_report() -> None:

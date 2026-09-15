@@ -14841,7 +14841,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -15053,7 +15053,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -15252,7 +15252,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -15451,7 +15451,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -15650,7 +15650,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -15817,7 +15817,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -16054,7 +16054,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -16244,7 +16244,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -16434,7 +16434,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -16633,7 +16633,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -16832,7 +16832,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -17053,7 +17053,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -17252,7 +17252,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -17451,7 +17451,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -17650,7 +17650,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -17849,7 +17849,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -18048,7 +18048,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -18247,7 +18247,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -18446,7 +18446,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -18645,7 +18645,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -18910,7 +18910,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -19248,7 +19248,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -19447,7 +19447,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -19702,7 +19702,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -19901,7 +19901,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -20111,7 +20111,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -20376,7 +20376,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -20575,7 +20575,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -20774,7 +20774,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -20973,7 +20973,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -21194,7 +21194,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -21393,7 +21393,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -22254,7 +22254,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -22509,7 +22509,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -22764,7 +22764,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -22963,7 +22963,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -23162,7 +23162,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -23383,7 +23383,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -23626,7 +23626,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -23825,7 +23825,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -24024,7 +24024,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -24245,7 +24245,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -24444,7 +24444,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -24643,7 +24643,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -24842,7 +24842,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [
@@ -25173,7 +25173,7 @@
         "support_status": "supported",
         "channel": "browser_action_state",
         "adapter": "trusted_browser_state_v1",
-        "surface": "personal",
+        "surface": "mcp-app",
         "page_binding": "verifier-owned exact candidate loopback page",
         "recipe": {
           "before": [

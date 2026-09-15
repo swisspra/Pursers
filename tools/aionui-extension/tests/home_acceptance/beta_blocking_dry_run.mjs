@@ -10,7 +10,7 @@ const plan = JSON.parse(await fs.readFile(recipePath, "utf8"));
 const jobs = plan.rows.filter((row) => selected.has(row.index));
 if (jobs.length !== selected.size) throw new Error(`expected ${selected.size} recipes, found ${jobs.length}`);
 
-const runRecipe = async (page, recipe) => page.evaluate(async (input) => {
+const runRecipeInDocument = async (input) => {
   const read = ({ selector, property }) => {
     const matches = [...document.querySelectorAll(selector)];
     if (property === "count") return matches.length;
@@ -45,7 +45,65 @@ const runRecipe = async (page, recipe) => page.evaluate(async (input) => {
     await new Promise((resolve) => setTimeout(resolve, input.settle_milliseconds));
   }
   return { before, action, after: capture(input.after || []) };
-}, recipe);
+};
+
+const mcpAppContext = async () => {
+  const tree = await cdp("Page.getFrameTree");
+  const root = tree && tree.frameTree;
+  if (!root) throw new Error("main frame unavailable");
+  const frames = [];
+  const collect = (entry) => {
+    frames.push(entry);
+    for (const child of entry.childFrames || []) collect(child);
+  };
+  collect(root);
+  const matches = [];
+  for (const entry of frames.slice(1)) {
+    const world = await cdp("Page.createIsolatedWorld", {
+      frameId: entry.frame.id,
+      worldName: "pursers-beta-mcp-app-dry-run",
+      grantUniveralAccess: false,
+    });
+    if (!world || !world.executionContextId) continue;
+    const probe = await cdp("Runtime.evaluate", {
+      expression: `(() => ({
+        embedded: window.parent !== window,
+        title: document.title,
+        hasBoard: Boolean(document.querySelector('#board-id')),
+        hasNavigation: Boolean(document.querySelector('#tab-home, #tab-today'))
+      }))()`,
+      contextId: world.executionContextId,
+      returnByValue: true,
+    });
+    const value = probe && probe.result ? probe.result.value : null;
+    if (value && value.embedded === true
+        && value.title === "On Board Personal Preview"
+        && value.hasBoard === true && value.hasNavigation === true) {
+      matches.push(world.executionContextId);
+    }
+  }
+  if (matches.length !== 1) {
+    throw new Error(matches.length
+      ? "Personal MCP App frame is ambiguous"
+      : "Personal MCP App frame is unavailable");
+  }
+  return matches[0];
+};
+
+const runRecipe = async (page, recipe, surface) => {
+  if (surface !== "mcp-app") return page.evaluate(runRecipeInDocument, recipe);
+  const contextId = await mcpAppContext();
+  const evaluated = await cdp("Runtime.evaluate", {
+    expression: `(${runRecipeInDocument.toString()})(${JSON.stringify(recipe)})`,
+    contextId,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (evaluated && evaluated.exceptionDetails) {
+    throw new Error(evaluated.exceptionDetails.text || "MCP App recipe failed");
+  }
+  return evaluated && evaluated.result ? evaluated.result.value : null;
+};
 
 const check = (transition, assertion) => {
   const actual = transition[assertion.phase][assertion.path];
@@ -61,7 +119,11 @@ const page = task.page("p1");
 const results = [];
 try {
   for (const row of jobs) {
-    const path = row.surface === "aionui" ? "/extension/" : row.surface === "fleet" ? "/fleet/" : "/personal/";
+    const path = row.surface === "aionui"
+      ? "/extension/"
+      : row.surface === "fleet"
+        ? "/fleet/"
+        : "/mcp-host/one/";
     await page.goto(`${origin}${path}`);
     if (row.surface === "aionui" && row.index !== 18) {
       await page.fill("#helper-url", `${origin}/`);
@@ -70,11 +132,9 @@ try {
       await page.waitForFunction(() => document.querySelector("#connection-pill")?.textContent?.trim() === "Connected", undefined, { timeout: 10_000 });
     } else if (row.surface === "fleet") {
       await page.waitForFunction(() => document.querySelector("#state")?.textContent?.includes("Updated"), undefined, { timeout: 10_000 });
-    } else if (row.surface === "personal") {
-      await page.waitForSelector("#tab-fleet", { state: "visible" });
     }
     const recipe = row.trust_source_recipe_fragment.recipe;
-    const transition = await runRecipe(page, recipe);
+    const transition = await runRecipe(page, recipe, row.surface);
     const failed = row.canonical_predicate.assertions.filter((assertion) => !check(transition, assertion));
     results.push({
       label: "NOT final",

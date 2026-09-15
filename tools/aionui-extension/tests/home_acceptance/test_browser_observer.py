@@ -223,12 +223,15 @@ def _write_surface_manifest(tmp_path: Path, challenge_key: str) -> Path:
                 },
                 "artifact": "tools/fleet-dashboard/fleet_dashboard.py",
             },
-            "personal": {
+            "mcp-app": {
                 "adapter": "pinned-signed-aionui-personal-mcp",
                 "target": {
                     "base_url": "http://127.0.0.1:18822",
                     "board_id": BOARD,
                 },
+                "candidate_manifest_url": (
+                    "http://127.0.0.1:18822/extensions/pursers/candidate.json"
+                ),
                 "artifact": (
                     "packages/personal/src/pursers_personal/resources/dashboard.html"
                 ),
@@ -599,17 +602,41 @@ def test_ego_binding_reads_are_isolated_from_page_monkeypatches() -> None:
         json.dumps(17), json.dumps("http://127.0.0.1:8766/")
     )
     assert "Page.createIsolatedWorld" in script
-    assert "pursers-verifier-observer" in script
+    assert "await taskSpace(taskSpaceRef)" in script
+    assert "pursers-verifier-host" in script
     assert script.index("Page.createIsolatedWorld") < script.index(
         "fetch('/pursers/status'"
     )
-    evaluations = script.split("Runtime.evaluate")[1:]
-    assert len(evaluations) == 4
-    assert all("contextId: contextId" in evaluation for evaluation in evaluations)
-    assert "fetch('/pursers/status'" in evaluations[0]
-    assert "candidate.json" in evaluations[1]
-    assert "document.querySelector" in evaluations[2]
-    assert "crypto.subtle.digest" in evaluations[3]
+    assert script.count("contextId: hostContextId") == 2
+    assert script.count("contextId: contextId") == 3
+    assert "fetch('/pursers/status'" in script
+    assert "candidate.json" in script
+    assert "document.querySelector" in script
+    assert "crypto.subtle.digest" in script
+
+
+def test_ego_mcp_app_capture_is_bound_to_one_embedded_personal_frame() -> None:
+    script = observer_module.EGO_SCRIPT % (
+        json.dumps(17),
+        json.dumps({
+            "page_url": "http://127.0.0.1:8766/conversation/personal",
+            "surface_id": "mcp-app",
+            "candidate_manifest_url": (
+                "http://127.0.0.1:8766/extensions/pursers/candidate.json"
+            ),
+            "expected_board": BOARD,
+        }),
+    )
+    assert "frameEntries.slice(1)" in script
+    assert "window.parent !== window" in script
+    assert "On Board Personal Preview" in script
+    assert "matches.length !== 1" in script
+    assert "Accessibility.getFullAXTree', { frameId: frameId }" in script
+    assert "host_nodes: hostNodes" in script
+    assert "contextId: hostContextId" in script
+    assert "contextId: contextId" in script
+    assert "extensions/pursers/candidate.json" in script
+    assert "Personal MCP App sandbox board did not match" in script
 
 
 def _transition_spec() -> dict[str, object]:
@@ -662,7 +689,7 @@ def test_typed_browser_transition_is_closed_and_runtime_bound(
     monkeypatch.setattr(observer_module, "_load_config", lambda: {})
     monkeypatch.setattr(
         observer_module, "_run_transition_backend",
-        lambda _config, _page, _recipe: observed,
+        lambda _config, _page, _recipe, _surface: observed,
     )
     monkeypatch.setattr(
         observer_module, "_observed_surface_binding",
@@ -1027,7 +1054,7 @@ const isolatedGlobal = {
 isolatedGlobal.window = { location: { href: pageUrl } }
 const isolatedContext = vm.createContext(isolatedGlobal)
 
-async function useOrCreateTaskSpace(value) { return value }
+async function taskSpace(value) { return value }
 async function openOrReuseTab() {}
 async function waitForLoad() {}
 async function pageInfo() { return { url: pageUrl, w: 1280, h: 800 } }
@@ -1170,7 +1197,7 @@ const isolatedGlobal = {
 }
 isolatedGlobal.window = { location: { href: pageUrl } }
 const isolatedContext = vm.createContext(isolatedGlobal)
-async function useOrCreateTaskSpace(value) { return value }
+async function taskSpace(value) { return value }
 async function openOrReuseTab() {}
 async function waitForLoad() {}
 async function pageInfo() { return { url: pageUrl, w: 1280, h: 800 } }
@@ -1341,7 +1368,7 @@ const isolatedGlobal = {
 }
 isolatedGlobal.window = { location: { href: pageUrl, origin: pageOrigin } }
 const isolatedContext = vm.createContext(isolatedGlobal)
-async function useOrCreateTaskSpace(value) { return value }
+async function taskSpace(value) { return value }
 async function openOrReuseTab() {}
 async function waitForLoad() {}
 async function pageInfo() { return { url: pageUrl, w: 1280, h: 800 } }
@@ -1469,6 +1496,12 @@ def test_prepare_expands_every_authoritative_observation_once(
     assert result["observations"] == expected == 201
     assert len(plan["commands"]) == expected
     assert len({command[command.index("--observation") + 1] for command in plan["commands"]}) == expected
+    mcp_app_commands = [
+        command
+        for command in plan["commands"]
+        if command[command.index("--surface") + 1] == "mcp-app"
+    ]
+    assert len(mcp_app_commands) == 79
     assert set(plan["typed_evidence"]) == {
         identifier
         for identifier in (
@@ -1498,6 +1531,31 @@ def test_prepare_refuses_missing_typed_evidence_contract(
     ])
     assert exit_code == runner_module.EXIT_USAGE
     assert "fields do not match schema" in capsys.readouterr().err
+
+
+def test_prepare_blocks_an_explicit_catalogue_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    observer_dir, surfaces = _write_surface_observer(tmp_path)
+    manifest_path = _write_complete_observation_manifest(tmp_path, surfaces)
+    identifier = "dashboard-ui.logic"
+    fact = dict(harness_module.REQUIRED_FACTS[identifier])
+    fact["catalogue_boundary"] = {
+        "kind": "unobservable_on_real_surface",
+        "reason": "real host omits this App state",
+    }
+    runner_harness = __import__("harness")
+    monkeypatch.setitem(runner_harness.REQUIRED_FACTS, identifier, fact)
+
+    exit_code = runner_module.main([
+        "runner.py", "prepare", "--observer", str(observer_dir),
+        "--manifest", str(manifest_path), "--evidence", str(tmp_path / "evidence"),
+    ])
+
+    assert exit_code == runner_module.EXIT_BLOCKED
+    assert "catalogue boundary dashboard-ui.logic cannot be captured" in capsys.readouterr().err
 
 
 def test_personal_surface_refuses_served_page_digest_mismatch(
@@ -1838,7 +1896,10 @@ def test_install_surface_manifest_carries_private_challenge_into_binding(
     config = json.loads(
         (observer_dir / "observer.json").read_text(encoding="utf-8")
     )
-    personal = observer_module._surface_config(config, "personal")
+    personal = observer_module._surface_config(config, "mcp-app")
+    assert personal["candidate_manifest_url"] == (
+        "http://127.0.0.1:18822/extensions/pursers/candidate.json"
+    )
     runtime = personal["runtime"]
     assert set(runtime) == {
         "artifact", "artifact_sha256", "challenge_key", "pid_file", "receipt"
@@ -1850,6 +1911,32 @@ def test_install_surface_manifest_carries_private_challenge_into_binding(
     assert runtime["artifact_sha256"] == hashlib.sha256(
         runtime_source.read_bytes()
     ).hexdigest()
+
+
+def test_install_surface_manifest_rejects_cross_origin_personal_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    challenge = tmp_path / "personal-runtime" / "acceptance-challenge.key"
+    challenge.parent.mkdir()
+    challenge.write_bytes(b"\x25" * 48)
+    challenge.chmod(0o600)
+    manifest_path = _write_surface_manifest(tmp_path, str(challenge))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["surfaces"]["mcp-app"]["candidate_manifest_url"] = (
+        "http://127.0.0.1:19999/extensions/pursers/candidate.json"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(runner_module, "_git", _clean_candidate_git)
+
+    assert runner_module.main([
+        "runner.py", "install-observer",
+        "--dir", str(tmp_path / "verifier"),
+        "--backend-command", str(_write_backend(tmp_path, "door_connect")),
+        "--surface-manifest", str(manifest_path),
+    ]) == runner_module.EXIT_USAGE
+    assert "candidate_manifest_url must name same-origin" in capsys.readouterr().err
 
 
 def test_keyboard_transition_action_is_closed_and_shared_with_evaluator() -> None:
@@ -1946,7 +2033,7 @@ def test_reinstall_with_changed_challenge_rejects_old_runtime_process(
     config = json.loads(
         (observer_dir / "observer.json").read_text(encoding="utf-8")
     )
-    personal = observer_module._surface_config(config, "personal")
+    personal = observer_module._surface_config(config, "mcp-app")
     runtime = personal["runtime"]
     runtime_source = (
         runner_module.REPOSITORY_ROOT / runtime["artifact"]
@@ -2420,7 +2507,7 @@ def test_capture_spec_without_a_nonce_is_refused(tmp_path: Path) -> None:
         "candidate_commit": COMMIT,
         "page_url": "http://127.0.0.1:8765/index.html",
         "assertions": [{"path": "nodes.0.name", "equals": "On Board Personal"}],
-        "surface_id": "personal",
+        "surface_id": "mcp-app",
     }
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
@@ -2437,7 +2524,7 @@ def test_capture_spec_nonce_must_be_lowercase_hex(tmp_path: Path, nonce: str) ->
         "candidate_commit": COMMIT,
         "page_url": "http://127.0.0.1:8765/index.html",
         "assertions": [{"path": "nodes.0.name", "equals": "On Board Personal"}],
-        "surface_id": "personal",
+        "surface_id": "mcp-app",
         "attestation_nonce": nonce,
     }
     spec_path = tmp_path / "spec.json"
