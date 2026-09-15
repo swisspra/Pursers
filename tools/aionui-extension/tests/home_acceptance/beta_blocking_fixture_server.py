@@ -7,6 +7,7 @@ Central client and cannot access production state.
 from __future__ import annotations
 
 import argparse
+import html
 import importlib.util
 import json
 import sys
@@ -14,7 +15,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from beta_blocking_fixtures import load_fixture
+try:
+    from .beta_blocking_fixtures import load_fixture
+except ImportError:  # Direct script execution.
+    from beta_blocking_fixtures import load_fixture
 
 
 HERE = Path(__file__).resolve().parent
@@ -42,6 +46,84 @@ def _fleet_html() -> str:
 FLEET_HTML = _fleet_html()
 STATUS = load_fixture("extension-status-loaded")
 FLEET = load_fixture("fleet-board")
+PERSONAL_BOARD = load_fixture("personal-board-empty")
+PERSONAL_FLEET = load_fixture("personal-fleet-projects")
+
+
+def _mcp_host_html(mode: str) -> bytes:
+    """Return a tiny MCP Apps host around the exact tracked dashboard bytes."""
+    board = json.loads(json.dumps(PERSONAL_BOARD))
+    if mode == "wrong-board":
+        board["board"]["id"] = "sandbox-wrong-board"
+    tool_results = {
+        "board_snapshot": board,
+        "board_event_feed": board,
+        "fleet_snapshot": PERSONAL_FLEET,
+        "link_snapshot": {
+            "schema_version": 1,
+            "board_id": board["board"]["id"],
+            "source_tool": "synthetic-mcp-app-host",
+            "relationship_authority": "authoritative",
+            "nodes": [],
+            "edges": [],
+        },
+    }
+    iframe_source = (
+        "/mcp-app/dashboard-wrong.html"
+        if mode == "wrong-bytes"
+        else "/mcp-app/dashboard.html"
+    )
+    if mode == "absent":
+        frames = ""
+    elif mode == "ambiguous":
+        escaped = html.escape(iframe_source, quote=True)
+        frames = (
+            f'<iframe title="Personal MCP App one" src="{escaped}" '
+            'sandbox="allow-scripts allow-same-origin"></iframe>'
+            f'<iframe title="Personal MCP App two" src="{escaped}" '
+            'sandbox="allow-scripts allow-same-origin"></iframe>'
+        )
+    else:
+        frames = (
+            f'<iframe title="Personal MCP App" src="{html.escape(iframe_source, quote=True)}" '
+            'sandbox="allow-scripts allow-same-origin"></iframe>'
+        )
+    return f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Pursers MCP Apps fixture host</title></head>
+<body data-host-kind="mcp-app-postmessage-fixture">
+  <h1>Personal MCP App fixture host</h1>
+  {frames}
+  <script>
+  const toolResults = {json.dumps(tool_results, separators=(",", ":"))};
+  window.addEventListener("message", (event) => {{
+    const request = event.data;
+    if (!request || request.jsonrpc !== "2.0" || !event.source) return;
+    const respond = (result) => event.source.postMessage(
+      {{jsonrpc: "2.0", id: request.id, result}}, "*"
+    );
+    if (request.method === "ui/initialize" && request.id !== undefined) {{
+      respond({{
+        protocolVersion: "2026-01-26",
+        hostInfo: {{name: "Pursers deterministic fixture host", version: "1.0.0"}},
+        hostCapabilities: {{}},
+        hostContext: {{theme: "light", platform: "web", locale: "en-US"}}
+      }});
+    }} else if (request.method === "tools/call" && request.id !== undefined) {{
+      const name = request.params && request.params.name;
+      if (!(name in toolResults)) {{
+        event.source.postMessage({{
+          jsonrpc: "2.0", id: request.id,
+          error: {{code: -32601, message: "fixture tool unavailable"}}
+        }}, "*");
+      }} else {{
+        respond({{content: [], structuredContent: toolResults[name]}});
+      }}
+    }}
+  }});
+  </script>
+</body>
+</html>""".encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -63,6 +145,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib hook
         route = urlsplit(self.path).path
+        if route.startswith("/mcp-host/") and route.endswith("/"):
+            mode = route.removeprefix("/mcp-host/").removesuffix("/") or "one"
+            if mode in {"one", "absent", "ambiguous", "wrong-bytes", "wrong-board"}:
+                return self._send(200, _mcp_host_html(mode), "text/html; charset=utf-8")
+        if route == "/mcp-app/dashboard.html":
+            return self._send(200, PERSONAL_HTML.read_bytes(), "text/html; charset=utf-8")
+        if route == "/mcp-app/dashboard-wrong.html":
+            return self._send(
+                200,
+                PERSONAL_HTML.read_bytes() + b"\n<!-- deliberately wrong candidate bytes -->\n",
+                "text/html; charset=utf-8",
+            )
+        if route in {"/candidate.json", "/mcp-host/candidate.json"}:
+            candidate_commit = getattr(self.server, "candidate_commit", "0" * 40)
+            return self._json({"schema_version": 1, "candidate_commit": candidate_commit})
+        if route == "/pursers/status":
+            candidate_commit = getattr(self.server, "candidate_commit", "0" * 40)
+            return self._json({
+                "schema_version": 1,
+                "host": {"product": "AionUi", "version": "2.2.1", "build": "fixture-build"},
+                "extension": {"candidate_commit": candidate_commit},
+            })
         if route in {"/extension", "/extension/"}:
             return self._send(200, (WEBUI / "index.html").read_bytes(), "text/html; charset=utf-8")
         if route == "/extension/style.css":
@@ -97,8 +201,10 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--candidate-commit", default="0" * 40)
     args = parser.parse_args()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server.candidate_commit = args.candidate_commit  # type: ignore[attr-defined]
     print(json.dumps({"origin": f"http://127.0.0.1:{server.server_port}"}), flush=True)
     server.serve_forever()
 

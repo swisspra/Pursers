@@ -16,3 +16,9 @@ Row mapping:
 dry-runs. Door descriptors contain metadata only; `beta_blocking_fixtures.py`
 materializes temporary credentials in memory. No production Central client is
 used by `beta_blocking_fixture_server.py`.
+
+The fixture server also exposes `/mcp-host/one/`, a parent host that loads the
+exact tracked Personal dashboard as a sandboxed child frame and completes the
+MCP Apps postMessage handshake. The `absent`, `ambiguous`, `wrong-bytes`, and
+`wrong-board` variants are fail-closed browser cases. They remain synthetic and
+must not be promoted to final acceptance evidence.
