@@ -91,3 +91,30 @@ product evidence.
 - Fixture, package, unit, and typed checks are non-final preflight evidence.
 - Expected predicate values are never converted into fabricated observations
   or inferred passes.
+
+## Worker-owned browser dry-run
+
+The deterministic preflight uses a disposable loopback host page with the
+tracked `dashboard.html` loaded as a sandboxed child frame. The child uses its
+bundled MCP Apps postMessage transport; the parent implements the host side of
+the `ui/initialize` handshake and answers the four read-only Personal tools
+from synthetic sandbox fixtures. The browser observer still operates through
+its generated `EGO_SCRIPT` and `EGO_TRANSITION_SCRIPT`; the fixture does not
+replace or emulate their frame-selection logic.
+
+Run the preflight with a dedicated Ego Lite task space:
+
+```sh
+python3 tools/aionui-extension/tests/home_acceptance/mcp_app_frame_dry_run.py \
+  --ego-browser /PATH/TO/ego-browser \
+  --task-space pursers-personal-mcp-app-dry-run
+```
+
+The command requires a positive capture and an in-frame tab transition. It
+also requires closed failures for an absent frame, two matching frames, altered
+dashboard bytes, a candidate manifest on a different origin, and a dashboard
+whose selected sandbox board differs from the pinned target. The reported
+`page_sha256` is calculated in the real child frame by fetching its actual
+resource URL and must equal the tracked `dashboard.html` digest. Output is
+labelled `NOT final`; it is worker preflight evidence, not reviewer-owned
+acceptance.

@@ -602,12 +602,13 @@ def test_ego_binding_reads_are_isolated_from_page_monkeypatches() -> None:
         json.dumps(17), json.dumps("http://127.0.0.1:8766/")
     )
     assert "Page.createIsolatedWorld" in script
+    assert "await taskSpace(taskSpaceRef)" in script
     assert "pursers-verifier-host" in script
     assert script.index("Page.createIsolatedWorld") < script.index(
         "fetch('/pursers/status'"
     )
     assert script.count("contextId: hostContextId") == 2
-    assert script.count("contextId: contextId") == 2
+    assert script.count("contextId: contextId") == 3
     assert "fetch('/pursers/status'" in script
     assert "candidate.json" in script
     assert "document.querySelector" in script
@@ -623,6 +624,7 @@ def test_ego_mcp_app_capture_is_bound_to_one_embedded_personal_frame() -> None:
             "candidate_manifest_url": (
                 "http://127.0.0.1:8766/extensions/pursers/candidate.json"
             ),
+            "expected_board": BOARD,
         }),
     )
     assert "frameEntries.slice(1)" in script
@@ -634,6 +636,7 @@ def test_ego_mcp_app_capture_is_bound_to_one_embedded_personal_frame() -> None:
     assert "contextId: hostContextId" in script
     assert "contextId: contextId" in script
     assert "extensions/pursers/candidate.json" in script
+    assert "Personal MCP App sandbox board did not match" in script
 
 
 def _transition_spec() -> dict[str, object]:
@@ -1051,7 +1054,7 @@ const isolatedGlobal = {
 isolatedGlobal.window = { location: { href: pageUrl } }
 const isolatedContext = vm.createContext(isolatedGlobal)
 
-async function useOrCreateTaskSpace(value) { return value }
+async function taskSpace(value) { return value }
 async function openOrReuseTab() {}
 async function waitForLoad() {}
 async function pageInfo() { return { url: pageUrl, w: 1280, h: 800 } }
@@ -1194,7 +1197,7 @@ const isolatedGlobal = {
 }
 isolatedGlobal.window = { location: { href: pageUrl } }
 const isolatedContext = vm.createContext(isolatedGlobal)
-async function useOrCreateTaskSpace(value) { return value }
+async function taskSpace(value) { return value }
 async function openOrReuseTab() {}
 async function waitForLoad() {}
 async function pageInfo() { return { url: pageUrl, w: 1280, h: 800 } }
@@ -1365,7 +1368,7 @@ const isolatedGlobal = {
 }
 isolatedGlobal.window = { location: { href: pageUrl, origin: pageOrigin } }
 const isolatedContext = vm.createContext(isolatedGlobal)
-async function useOrCreateTaskSpace(value) { return value }
+async function taskSpace(value) { return value }
 async function openOrReuseTab() {}
 async function waitForLoad() {}
 async function pageInfo() { return { url: pageUrl, w: 1280, h: 800 } }

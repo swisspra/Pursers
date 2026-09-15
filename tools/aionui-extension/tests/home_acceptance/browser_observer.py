@@ -879,13 +879,14 @@ def probe_runtime_health(base_url: str, timeout_s: float = 4.0) -> dict[str, str
 
 
 EGO_SCRIPT = """
-const taskSpace = %s
+const taskSpaceRef = %s
 const captureSpec = %s
 const target = typeof captureSpec === 'string' ? captureSpec : captureSpec.page_url
 const surfaceId = typeof captureSpec === 'string' ? 'aionui' : captureSpec.surface_id
 const candidateManifestUrl = typeof captureSpec === 'string'
   ? new URL('candidate.json', target).href : captureSpec.candidate_manifest_url
-const task = await useOrCreateTaskSpace(taskSpace)
+const expectedBoard = typeof captureSpec === 'string' ? null : captureSpec.expected_board
+const task = await taskSpace(taskSpaceRef)
 await openOrReuseTab(target, { wait: true, timeout: 25 })
 await waitForLoad()
 const info = await pageInfo()
@@ -949,6 +950,24 @@ if (surfaceId === 'mcp-app') {
   frameId = matches[0].frameId
   contextId = matches[0].contextId
   appTitle = matches[0].title
+  const ready = await cdp('Runtime.evaluate', {
+    expression: `(async () => {
+      const deadline = Date.now() + 10000
+      while (Date.now() < deadline) {
+        const node = document.querySelector('[data-helper-field="board"], [data-board-id], #board-id')
+        const board = node ? (node.getAttribute('data-board-id') || node.textContent || '').trim() : ''
+        if (board === ${JSON.stringify(expectedBoard)}) return true
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      return false
+    })()`,
+    contextId: contextId,
+    awaitPromise: true,
+    returnByValue: true
+  })
+  if (!ready || !ready.result || ready.result.value !== true) {
+    throw new Error('Personal MCP App sandbox board did not match')
+  }
 }
 if (!contextId) {
   throw new Error('isolated verifier world unavailable')
@@ -1047,14 +1066,15 @@ cliLog(JSON.stringify({
 
 
 EGO_TRANSITION_SCRIPT = """
-const taskSpace = %s
+const taskSpaceRef = %s
 const captureSpec = %s
 const target = typeof captureSpec === 'string' ? captureSpec : captureSpec.page_url
 const surfaceId = typeof captureSpec === 'string' ? 'aionui' : captureSpec.surface_id
 const candidateManifestUrl = typeof captureSpec === 'string'
   ? new URL('candidate.json', target).href : captureSpec.candidate_manifest_url
+const expectedBoard = typeof captureSpec === 'string' ? null : captureSpec.expected_board
 const recipe = %s
-const task = await useOrCreateTaskSpace(taskSpace)
+const task = await taskSpace(taskSpaceRef)
 await openOrReuseTab(target, { wait: true, timeout: 25 })
 await waitForLoad()
 const info = await pageInfo()
@@ -1110,6 +1130,24 @@ if (surfaceId === 'mcp-app') {
   }
   frameId = matches[0].frameId
   contextId = matches[0].contextId
+  const ready = await cdp('Runtime.evaluate', {
+    expression: `(async () => {
+      const deadline = Date.now() + 10000
+      while (Date.now() < deadline) {
+        const node = document.querySelector('[data-helper-field="board"], [data-board-id], #board-id')
+        const board = node ? (node.getAttribute('data-board-id') || node.textContent || '').trim() : ''
+        if (board === ${JSON.stringify(expectedBoard)}) return true
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      return false
+    })()`,
+    contextId: contextId,
+    awaitPromise: true,
+    returnByValue: true
+  })
+  if (!ready || !ready.result || ready.result.value !== true) {
+    throw new Error('Personal MCP App sandbox board did not match')
+  }
 }
 if (!contextId) throw new Error('isolated verifier world unavailable')
 const responseActions = recipe.actions.filter(spec => spec.kind === 'click_response_json')
@@ -1766,6 +1804,10 @@ def _run_backend(
                 "candidate_manifest_url": _candidate_manifest_url(
                     config, page_url, surface_id
                 ),
+                "expected_board": (
+                    _surface_config(config, surface_id)["target"]["board_id"]
+                    if surface_id == "mcp-app" else None
+                ),
             }),
         )
         extra_path = str(Path(command[0]).parent)
@@ -2053,6 +2095,10 @@ def _run_transition_backend(
                 "surface_id": surface_id,
                 "candidate_manifest_url": _candidate_manifest_url(
                     config, page_url, surface_id
+                ),
+                "expected_board": (
+                    _surface_config(config, surface_id)["target"]["board_id"]
+                    if surface_id == "mcp-app" else None
                 ),
             }),
             json.dumps(recipe),
