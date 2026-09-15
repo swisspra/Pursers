@@ -827,10 +827,8 @@ class ACPSeatRuntime:
                     nonlocal completion, completion_text_chars
                     while True:
                         params = await client.next_update()
-                        try:
-                            update = params.get("update")
-                            if not isinstance(update, dict):
-                                continue
+                        update = params.get("update")
+                        if isinstance(update, dict):
                             found = _completion_from(update)
                             if found is not None:
                                 completion = found
@@ -853,8 +851,9 @@ class ACPSeatRuntime:
                                     ticket_id,
                                     f"ACP update for {ticket_id}: {bounded}",
                                 )
-                        finally:
-                            client.acknowledge_update()
+                        # A failed checkpoint must fail the consumer before it
+                        # advances the drain barrier.
+                        client.acknowledge_update()
 
                 async def wait_for_update_drain() -> None:
                     assert updates is not None
