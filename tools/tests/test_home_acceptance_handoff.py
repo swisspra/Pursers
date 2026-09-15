@@ -61,6 +61,7 @@ def _args(tmp_path: Path):
     package = tmp_path / "candidate.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("webui/candidate.json", json.dumps({"candidate_commit": commit}))
+        archive.writestr("host/helper.cjs", b"x")
     observer = _file(tmp_path / "runner.py", b"runner")
     backend = _file(tmp_path / "browser_observer.py", b"observer")
     harness = _file(tmp_path / "harness.py", b"harness")
@@ -125,6 +126,10 @@ def test_prepare_writes_private_reproducible_handoff(tmp_path: Path, capsys) -> 
         "ticket-lifecycle", "seat-lifecycle", "team-lifecycle",
     ]
     helper_start = (root / "start-helper.sh").read_text()
+    installed_helper = root / "extensions" / "pursers-home" / "host" / "helper.cjs"
+    assert str(installed_helper) in helper_start
+    assert args.helper not in helper_start
+    assert manifest["installed_helper"] == str(installed_helper)
     assert "--central \\\n  work" in helper_start
     assert 'ps -ww -p "$pid" -o command=' in (root / "cleanup.sh").read_text()
     assert manifest["signed_host"]["identity_mode"] == "webui"
@@ -149,6 +154,15 @@ def test_prepare_writes_private_reproducible_handoff(tmp_path: Path, capsys) -> 
     assert (root / "extensions" / "pursers-home" / "webui" / "candidate.json").is_file()
     assert not Path(args.observer_install_dir).exists()
     assert capsys.readouterr().out == ""
+
+
+def test_refuses_installed_helper_that_does_not_match_approved_digest(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    with zipfile.ZipFile(args.candidate_zip, "w") as archive:
+        archive.writestr("webui/candidate.json", json.dumps({"candidate_commit": args.commit}))
+        archive.writestr("host/helper.cjs", b"different")
+    with pytest.raises(handoff.HandoffError, match="installed helper"):
+        handoff.prepare(args)
 
 
 @pytest.mark.parametrize("board", ["pursers", "production-home", "sandbox-"])
@@ -177,6 +191,21 @@ def test_generated_helper_starts_with_authenticated_board_and_central(tmp_path: 
     helper = Path(handoff.__file__).parent / "aionui-extension" / "host" / "helper.cjs"
     args.helper = str(helper)
     args.helper_sha256 = hashlib.sha256(helper.read_bytes()).hexdigest()
+    extension = helper.parents[1]
+    with zipfile.ZipFile(args.candidate_zip, "w") as archive:
+        archive.writestr("webui/candidate.json", json.dumps({"candidate_commit": args.commit}))
+        for relative in (
+            "host/helper.cjs",
+            "webui/routes.js",
+            "door/adapter.cjs",
+            "security/loopback.cjs",
+            "team/adapter.cjs",
+            "ticket_lifecycle/adapter.cjs",
+            "result_visibility/adapter.cjs",
+            "team_lifecycle/adapter.cjs",
+            "seat_lifecycle/adapter.cjs",
+        ):
+            archive.write(extension / relative, relative)
     root = Path(handoff.prepare(args)["handoff"])
     process = subprocess.Popen(
         [str(root / "start-helper.sh")],
@@ -201,9 +230,16 @@ def test_generated_helper_starts_with_authenticated_board_and_central(tmp_path: 
         assert status_payload["ok"] is True
         assert status_payload["board"] == args.board
         assert status_payload["central"] == args.central
+        discovery = json.loads(
+            (root / "extensions" / "pursers-home" / "webui" / "helper-origin.json").read_text()
+        )
+        assert discovery == {
+            "helper_url": f"http://127.0.0.1:{started['port']}",
+            "schema_version": 1,
+        }
     finally:
         if process.poll() is None:
-            subprocess.run([str(root / "cleanup.sh")], check=True, timeout=5)
+            process.terminate()
         process.wait(timeout=5)
 
 

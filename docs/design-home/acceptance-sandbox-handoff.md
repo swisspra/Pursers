@@ -108,8 +108,10 @@ directory and subdirectories are mode `0700`; metadata, assertions,
 and the random helper token are mode `0600`. The token value is never printed
 or copied into metadata. Run `start-aioncore.sh` and `start-helper.sh` in
 separate terminals. The former sets only the isolated extension/data paths and,
-for `aionpro`, the validated sandbox-only bootstrap secret; the latter binds the approved helper to the
-selected sandbox board, Central label, and exact loopback origin. `reviewer-commands.sh`
+for `aionpro`, the validated sandbox-only bootstrap secret; the latter runs the
+digest-verified installed helper beside the served web UI, writes its discoverable
+loopback URL there, and binds it to the selected sandbox board, Central label, and
+exact AionCore origin. `reviewer-commands.sh`
 installs the verifier-owned observer, runs doctor, capture, validation, and the
 live host gate. The independent verifier must replace each empty assertion
 list and capture all nine required observations; absent lifecycle capabilities

@@ -94,10 +94,25 @@ def test_assets_are_packaged_and_do_not_load_remote_dependencies() -> None:
         "#main-content", "#home", "#helper", "#connection", "#seat-lifecycle", "#team", "#progress", "#tickets", "#advanced",
         "./style.css", "./app.js", "data:", "data:,",
     })
-    assert "http://" not in html.replace("http://127.0.0.1:43121", "")
+    assert "http://" not in html
     assert "https://" not in html
     assert "@import" not in css
     assert "url(" not in css
+
+
+def test_helper_origin_is_discovered_and_token_instructions_are_specific() -> None:
+    html = read("webui/index.html")
+    script = read("webui/app.js")
+    helper_tag = re.search(r'<input id="helper-url"[^>]+>', html)
+    assert helper_tag
+    assert "43121" not in html
+    assert " value=" not in helper_tag.group(0)
+    assert "fetchImpl('./helper-origin.json'" in script
+    assert "credentials: 'same-origin'" in script
+    assert "cache: 'no-store'" in script
+    assert "loopbackHelperOrigin(manifest.helper_url)" in script
+    assert "helper-token" in html
+    assert "pbcopy &lt; /PATH/TO/HANDOFF/helper-token" in html
 
 
 def test_controls_have_touch_sized_targets_and_responsive_layout() -> None:

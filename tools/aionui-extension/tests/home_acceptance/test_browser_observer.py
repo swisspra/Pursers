@@ -938,6 +938,7 @@ const helper = createHelperServer({
   origin: pageOrigin,
   token: syntheticToken,
   port: 0,
+  discoveryFile: false,
   runBridge: async () => [
     'push_mode=push',
     'board=sandbox-home-observer role=worker kid=synthetic-key exp=2000000000 seat_names_used=worker-1'
