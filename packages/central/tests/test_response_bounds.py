@@ -773,6 +773,33 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "view must be summary, work, or full"):
             await self.call("ticket_get", ticket_id=ticket_id, view="tiny")
 
+    def test_response_id_abbreviation_lengthens_colliding_prefixes(self) -> None:
+        agent_a = "AI-" + "12345678" + "a" * 56
+        agent_b = "AI-" + "12345678" + "b" * 56
+        principal_a = "PR-" + "abcdef01" + "a" * 56
+        principal_b = "PR-" + "abcdef01" + "b" * 56
+
+        compact = central.abbreviate_response_ids(
+            {
+                "agents": [agent_a, agent_b],
+                "principals": [principal_a, principal_b],
+            }
+        )
+
+        self.assertEqual(compact["agents"], ["AI-12345678a", "AI-12345678b"])
+        self.assertEqual(
+            compact["principals"], ["PR-abcdef01a", "PR-abcdef01b"]
+        )
+        self.assertEqual(
+            compact["id_map"],
+            {
+                "AI-12345678a": agent_a,
+                "AI-12345678b": agent_b,
+                "PR-abcdef01a": principal_a,
+                "PR-abcdef01b": principal_b,
+            },
+        )
+
     def test_compact_review_lease_receipt_preserves_expiry(self) -> None:
         document = {
             "generation_revision": 7,

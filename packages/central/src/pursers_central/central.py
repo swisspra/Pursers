@@ -799,7 +799,35 @@ def project_ticket_read_response(
 
 def abbreviate_response_ids(value: Mapping[str, Any]) -> dict[str, Any]:
     """Deduplicate canonical AI-/PR- IDs into one trailing id_map."""
-    id_map: dict[str, str] = {}
+    full_ids: dict[str, None] = {}
+
+    def collect(item: Any) -> None:
+        if isinstance(item, Mapping):
+            for nested in item.values():
+                collect(nested)
+            return
+        if isinstance(item, (list, tuple)):
+            for nested in item:
+                collect(nested)
+            return
+        if isinstance(item, str):
+            for match in FULL_RESPONSE_ID_RE.finditer(item):
+                full_ids.setdefault(match.group(0), None)
+
+    collect(value)
+    aliases: dict[str, str] = {}
+    all_ids = tuple(full_ids)
+    for full in all_ids:
+        for prefix_length in range(11, len(full) + 1):
+            candidate = full[:prefix_length]
+            if all(
+                other == full or not other.startswith(candidate)
+                for other in all_ids
+            ):
+                aliases[full] = candidate
+                break
+
+    id_map = {short: full for full, short in aliases.items()}
 
     def visit(item: Any) -> Any:
         if isinstance(item, Mapping):
@@ -813,9 +841,7 @@ def abbreviate_response_ids(value: Mapping[str, Any]) -> dict[str, Any]:
 
         def replace(match: re.Match[str]) -> str:
             full = match.group(0)
-            short = full[:11]
-            id_map.setdefault(short, full)
-            return short
+            return aliases[full]
 
         return FULL_RESPONSE_ID_RE.sub(replace, item)
 

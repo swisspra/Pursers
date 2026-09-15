@@ -66,7 +66,8 @@ STATUS_ICONS = {
     "terminated": "⛔",
 }
 PRIORITY_ICONS = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}
-SHORT_RESPONSE_ID_RE = re.compile(r"\b(?:AI|PR)-[0-9a-f]{8}\b")
+SHORT_RESPONSE_ID_RE = re.compile(r"^(?:AI|PR)-[0-9a-f]{8,64}$")
+FULL_RESPONSE_ID_RE = re.compile(r"^(?:AI|PR)-[0-9a-f]{64}$")
 
 
 def expand_response_id_map(value: dict[str, Any]) -> dict[str, Any]:
@@ -74,11 +75,29 @@ def expand_response_id_map(value: dict[str, Any]) -> dict[str, Any]:
     raw_map = value.get("id_map")
     if not isinstance(raw_map, dict):
         return value
-    id_map = {
-        short: full
-        for short, full in raw_map.items()
-        if isinstance(short, str) and isinstance(full, str)
-    }
+    id_map: dict[str, str] = {}
+    for short, full in raw_map.items():
+        if not (
+            isinstance(short, str)
+            and isinstance(full, str)
+            and SHORT_RESPONSE_ID_RE.fullmatch(short)
+            and FULL_RESPONSE_ID_RE.fullmatch(full)
+            and full.startswith(short)
+            and short[:2] == full[:2]
+        ):
+            return value
+        id_map[short] = full
+    if len(set(id_map.values())) != len(id_map):
+        return value
+    if not id_map:
+        return value
+    alias_pattern = re.compile(
+        r"(?<![0-9A-Za-z])(?:"
+        + "|".join(
+            re.escape(alias) for alias in sorted(id_map, key=len, reverse=True)
+        )
+        + r")(?![0-9A-Za-z])"
+    )
 
     def visit(item: Any) -> Any:
         if isinstance(item, dict):
@@ -90,7 +109,7 @@ def expand_response_id_map(value: dict[str, Any]) -> dict[str, Any]:
             return [visit(nested) for nested in item]
         if not isinstance(item, str):
             return item
-        return SHORT_RESPONSE_ID_RE.sub(
+        return alias_pattern.sub(
             lambda match: id_map.get(match.group(0), match.group(0)), item
         )
 

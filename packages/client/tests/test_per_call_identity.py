@@ -364,6 +364,42 @@ def test_id_map_is_expanded_for_existing_client_consumers() -> None:
     assert expanded["id_map"] == compact["id_map"]
 
 
+def test_id_map_expands_colliding_prefixes_without_identity_loss() -> None:
+    agent_a = "AI-" + "12345678" + "a" * 56
+    agent_b = "AI-" + "12345678" + "b" * 56
+    principal_a = "PR-" + "abcdef01" + "a" * 56
+    principal_b = "PR-" + "abcdef01" + "b" * 56
+    compact = {
+        "agents": ["AI-12345678a", "AI-12345678b"],
+        "principals": ["PR-abcdef01a", "PR-abcdef01b"],
+        "id_map": {
+            "AI-12345678a": agent_a,
+            "AI-12345678b": agent_b,
+            "PR-abcdef01a": principal_a,
+            "PR-abcdef01b": principal_b,
+        },
+    }
+
+    expanded = expand_response_id_map(compact)
+
+    assert expanded["agents"] == [agent_a, agent_b]
+    assert expanded["principals"] == [principal_a, principal_b]
+    assert expanded["id_map"] == compact["id_map"]
+
+
+def test_id_map_keeps_payload_unchanged_when_mapping_is_not_bijective() -> None:
+    full = "AI-" + "12345678" + "a" * 56
+    compact = {
+        "agents": ["AI-12345678", "AI-12345678a"],
+        "id_map": {
+            "AI-12345678": full,
+            "AI-12345678a": full,
+        },
+    }
+
+    assert expand_response_id_map(compact) == compact
+
+
 @pytest.mark.anyio
 async def test_ticket_annotate_forwards_identity_kind_and_remembers_event(
     monkeypatch,
