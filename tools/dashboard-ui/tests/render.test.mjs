@@ -9,6 +9,7 @@ import vm from "node:vm";
 
 
 const SOURCE = readFileSync(new URL("../src/dashboard.ts", import.meta.url), "utf8");
+const ENTRY = readFileSync(new URL("../dashboard-entry.html", import.meta.url), "utf8");
 
 
 class FakeElement {
@@ -148,9 +149,26 @@ function loadRenderers() {
   const sandbox = {
     document,
     byId: (id) => document.getElementById(id),
+    fleetTable: (headers) => {
+      const wrapper = document.createElement("div");
+      const table = document.createElement("table");
+      const head = document.createElement("thead");
+      const headingRow = document.createElement("tr");
+      headers.forEach((label) => {
+        const cell = document.createElement("th");
+        cell.textContent = label;
+        headingRow.append(cell);
+      });
+      const body = document.createElement("tbody");
+      head.append(headingRow);
+      table.append(head, body);
+      wrapper.append(table);
+      return { wrapper, body };
+    },
     fleetUnavailable: false,
     linksUnavailable: false,
     projectFilter: "all",
+    snapshot: null,
   };
   vm.runInNewContext(
     javaScript,
@@ -187,6 +205,9 @@ test("agent cards execute lease rendering for future, overdue, and absent values
 
   const cards = elements.get("agents-grid").children;
   assert.equal(cards.length, 3);
+  assert.equal(cards[0].getAttribute("data-pursers-agent"), "AI-1");
+  assert.equal(cards[0].getAttribute("data-pursers-status"), "idle");
+  assert.equal(elements.get("agents-grid").getAttribute("data-pursers-state"), "ready");
   assert.match(cards[0].textContent, /5m idlelease [12]m/);
   assert.match(cards[1].textContent, /8m idlelease overdue/);
   assert.equal(cards[2].textContent.includes("lease"), false);
@@ -216,6 +237,52 @@ test("fleet render shows only nonzero bounded truncation warnings", () => {
   });
   assert.equal(warning.textContent, "");
   assert.equal(warning.children.length, 0);
+});
+
+
+test("selector contract is present on rendered board, agent, seat, and panel state", () => {
+  const { renderFleet, elements } = loadRenderers();
+  renderFleet({
+    registry_warning: null,
+    projects: [{
+      name: "Pursers", board_id: "sandbox-board", status: "active",
+      tickets_open: 1, tickets_claimed: 2, tickets_submitted: 3,
+    }],
+    pool: [{
+      agent_name: "worker-1", principal_id: "PR-1", pool_status: "busy",
+      seats: [{ board_id: "sandbox-board", project: "Pursers", current_ticket_id: "TK-1", live: true }],
+    }],
+    totals: { agents: 1, busy: 1, available: 0, stale: 0 },
+    truncation_counts: { projects: 0, boards: 0, agents: 0, tickets: 0, pool: 0 },
+  });
+
+  const boardRow = descendants(elements.get("fleet-projects")).find((node) => node.tagName === "TR" && node.getAttribute("data-pursers-board"));
+  assert.equal(boardRow.getAttribute("data-pursers-board"), "sandbox-board");
+  assert.equal(boardRow.getAttribute("data-pursers-status"), "active");
+  assert.equal(elements.get("fleet-projects").getAttribute("data-pursers-state"), "ready");
+
+  const agentRow = descendants(elements.get("fleet-pool")).find((node) => node.tagName === "TR" && node.getAttribute("data-pursers-agent"));
+  assert.equal(agentRow.getAttribute("data-pursers-agent"), "PR-1");
+  assert.equal(agentRow.getAttribute("data-pursers-status"), "busy");
+  const seat = descendants(agentRow).find((node) => node.getAttribute("data-pursers-seat"));
+  assert.equal(seat.getAttribute("data-pursers-seat"), "sandbox-board");
+  assert.equal(seat.getAttribute("data-pursers-status"), "live");
+});
+
+
+test("selector contract boots with explicit loading and empty selection values", () => {
+  for (const literal of [
+    'data-pursers-surface="personal"',
+    'data-pursers-state="loading"',
+    'data-pursers-selected-board=""',
+    'data-pursers-selected-ticket=""',
+    'data-pursers-panel="connection"',
+    'data-pursers-connection="loading"',
+    'data-pursers-panel="boards"',
+    'data-pursers-panel="tickets"',
+    'data-pursers-panel="agents"',
+    'data-pursers-panel="seats"',
+  ]) assert.ok(ENTRY.includes(literal), `missing ${literal}`);
 });
 
 

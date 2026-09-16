@@ -34,6 +34,7 @@ assert SPEC and SPEC.loader
 dashboard = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = dashboard
 SPEC.loader.exec_module(dashboard)
+import warm_home  # noqa: E402
 
 CENTRAL_SRC = MODULE_PATH.parents[2] / "packages" / "central" / "src" / "pursers_central"
 sys.path.insert(0, str(CENTRAL_SRC))
@@ -700,6 +701,7 @@ def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
         },
     ]
     assert result["agents"][0]["duplicate_name"] is False
+    assert result["agents"][0]["agent_id"] is None
     assert result["agents"][0]["pool_status"] == "busy"
     assert result["pool_summary"] == {
         "online": 1,
@@ -747,6 +749,47 @@ def test_retired_and_stale_seats_are_outside_active_pool() -> None:
     assert result["boards"][0]["stale_after_days"] == 7
 
 
+def test_agent_projection_preserves_distinct_ids_for_shared_principal() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    recent = (now - timedelta(seconds=20)).isoformat()
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-shared",
+                            "agent_name": "worker-one",
+                            "agent_id": "AI-worker-one",
+                            "last_activity_at": recent,
+                        },
+                        {
+                            "principal_id": "PR-shared",
+                            "agent_name": "worker-two",
+                            "agent_id": "AI-worker-two",
+                            "last_activity_at": recent,
+                        },
+                    ],
+                    "tickets": [],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    assert {
+        (row["agent_name"], row["agent_id"], row["principal_id"])
+        for row in result["agents"]
+    } == {
+        ("worker-one", "AI-worker-one", "PR-shared"),
+        ("worker-two", "AI-worker-two", "PR-shared"),
+    }
+
+
 def test_available_and_stale_classification() -> None:
     now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
     agents = [
@@ -779,6 +822,63 @@ def test_available_and_stale_classification() -> None:
     assert {row["agent_name"]: row["pool_status"] for row in result["agents"]} == {
         "recent": "available",
         "old": "stale",
+    }
+
+
+@pytest.mark.parametrize(
+    ("agent_status", "activity_age_seconds", "expected_status"),
+    [
+        ("busy", 539, "busy"),
+        ("busy", 540, "busy"),
+        ("busy", 541, "stale"),
+        ("working", 539, "busy"),
+        ("working", 540, "busy"),
+        ("working", 541, "stale"),
+        ("idle", 539, "available"),
+        ("idle", 540, "available"),
+        ("idle", 541, "stale"),
+    ],
+)
+def test_busy_status_respects_dispatch_activity_window(
+    agent_status: str,
+    activity_age_seconds: int,
+    expected_status: str,
+) -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "activity_window_seconds": 540,
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-1",
+                            "agent_name": "worker",
+                            "agent_id": "AI-1",
+                            "last_activity_at": (
+                                now - timedelta(seconds=activity_age_seconds)
+                            ).isoformat(),
+                            "lifecycle_status": "active",
+                            "status": agent_status,
+                        }
+                    ],
+                    "tickets": [],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    assert result["agents"][0]["pool_status"] == expected_status
+    assert result["pool_summary"] == {
+        "online": int(expected_status in {"busy", "available"}),
+        "busy": int(expected_status == "busy"),
+        "available": int(expected_status == "available"),
+        "stale": int(expected_status == "stale"),
     }
 
 
@@ -1830,6 +1930,108 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
     ) in calls
 
 
+def test_readable_unjoined_board_agents_use_dispatch_activity_window() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+
+    class Client:
+        def __init__(self, board_id: str) -> None:
+            self.board_id = board_id
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_state_get(self, **_kwargs: object) -> dict:
+            return registry({})
+
+        async def board_list(self) -> dict:
+            return {
+                "boards": [
+                    {"board_id": "home-board"},
+                    {"board_id": "readable-not-joined"},
+                ]
+            }
+
+        async def board_snapshot(self, **_kwargs: object) -> dict:
+            # Simulate a bounded snapshot that omitted the current membership rows.
+            return {"latest_seq": 0, "agents": [], "tickets": []}
+
+        async def board_status(self, **_kwargs: object) -> dict:
+            agents = []
+            if self.board_id == "readable-not-joined":
+                agents = [
+                    {
+                        "agent_id": "AI-live",
+                        "principal_id": "PR-live",
+                        "agent_name": "live-seat",
+                        "last_activity_at": (now - timedelta(seconds=539)).isoformat(),
+                        "lifecycle_status": "active",
+                        "role": "worker",
+                        "status": "idle",
+                    },
+                    {
+                        "agent_id": "AI-stale",
+                        "principal_id": "PR-stale",
+                        "agent_name": "stale-seat",
+                        "last_activity_at": (now - timedelta(seconds=541)).isoformat(),
+                        "lifecycle_status": "active",
+                        "role": "worker",
+                        "status": "idle",
+                    },
+                ]
+            return {
+                "agents": agents,
+                "dispatch_policy": {"offer_ttl_s": 180},
+            }
+
+        async def board_catchup(self, **_kwargs: object) -> dict:
+            return {"events": []}
+
+        async def ticket_list(self, **_kwargs: object) -> dict:
+            return {"tickets": []}
+
+        async def memory_read(self, **_kwargs: object) -> list[dict]:
+            return []
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="home-board",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(
+        config,
+        client_factory=lambda _url, _token, board_id, **_kwargs: Client(board_id),
+        now_factory=lambda: now,
+    )
+    try:
+        result = asyncio.run(fetcher.fetch())
+    finally:
+        fetcher.close()
+
+    assert [row["board_id"] for row in result["boards"]] == [
+        "home-board",
+        "readable-not-joined",
+    ]
+    assert result["pool_scope"] == {
+        "readable_boards": ["home-board", "readable-not-joined"],
+        "covered_boards": ["home-board", "readable-not-joined"],
+        "excluded_boards": [],
+        "configured_but_unreadable": [],
+    }
+    agents = {row["agent_name"]: row for row in result["agents"]}
+    assert agents["live-seat"]["pool_status"] == "available"
+    assert agents["stale-seat"]["pool_status"] == "stale"
+    readable_board = next(
+        row for row in result["boards"] if row["board_id"] == "readable-not-joined"
+    )
+    assert readable_board["activity_window_seconds"] == 540
+
+
 def test_ticket_detail_projects_latest_explicit_handoff_and_current_reviewer() -> None:
     detail = dashboard.project_board_detail(
         {
@@ -2573,6 +2775,135 @@ def test_board_selection_marker_is_stable_and_board_cards_are_addressable() -> N
     assert 'class="board-card" data-board-id="${esc(b.board_id)}"' in dashboard.HTML
     assert 'class="board-card" data-board-id="${esc(board.board_id)}"' in dashboard.HTML
     assert "{home:'overview',projects:'boards',settings:'seats'}" in dashboard.HTML
+
+
+def test_fleet_selector_contract_is_embedded_in_server_rendered_output() -> None:
+    required_attributes = {
+        "data-pursers-surface",
+        "data-pursers-panel",
+        "data-pursers-state",
+        "data-pursers-board",
+        "data-pursers-ticket",
+        "data-pursers-agent",
+        "data-pursers-seat",
+        "data-pursers-status",
+        "data-pursers-selected",
+        "data-pursers-selected-board",
+        "data-pursers-selected-ticket",
+        "data-pursers-connection",
+        "data-pursers-health",
+    }
+    for attribute in required_attributes:
+        assert attribute in dashboard.HTML, f"missing selector contract attribute {attribute}"
+
+    assert 'data-pursers-surface="fleet"' in dashboard.HTML
+    assert "banner.setAttribute('data-pursers-panel','connection')" in dashboard.HTML
+    assert 'data-pursers-panel="hub"' in dashboard.HTML
+    assert 'data-pursers-panel="board-detail"' in dashboard.HTML
+    assert "function applyFleetSelectorContract()" in dashboard.HTML
+    assert "new MutationObserver(applyFleetSelectorContract)" in dashboard.HTML
+    assert "card.setAttribute('data-pursers-board',id)" in dashboard.HTML
+    assert "card.setAttribute('data-pursers-status',pursersBoardStatus(id))" in dashboard.HTML
+    assert "row.setAttribute('data-pursers-ticket',id)" in dashboard.HTML
+    assert "agent.setAttribute('data-pursers-agent'" in dashboard.HTML
+    assert "row.setAttribute('data-pursers-seat',id)" in dashboard.HTML
+
+
+def test_fleet_selector_contract_replays_board_and_route_panel_states() -> None:
+    program = "\n".join(
+        [
+            "class Element {",
+            "  constructor({hidden=false,mode='ready',dataset={}}={}){this.hidden=hidden;this.mode=mode;this.dataset=dataset;this.attrs={}}",
+            "  setAttribute(name,value){this.attrs[name]=String(value)}",
+            "  getAttribute(name){return this.attrs[name]??null}",
+            "  querySelector(selector){",
+            "    if(selector==='.error')return this.mode==='error'?{}:null;",
+            "    if(selector==='.skeleton,[aria-busy=\"true\"]')return this.mode==='loading'?{}:null;",
+            "    if(selector==='.empty-guidance,.empty')return this.mode==='empty'?{}:null;",
+            "    if(selector==='[data-pursers-board],[data-pursers-ticket],[data-pursers-agent],[data-pursers-seat]')return null;",
+            "    if(selector==='.signal-dot.bad')return null;",
+            "    return null;",
+            "  }",
+            "}",
+            "const nodes={main:new Element(),marker:new Element(),banner:new Element({hidden:true}),host:new Element(),config:new Element({hidden:true,mode:'empty'}),workers:new Element({hidden:true,mode:'empty'}),detail:new Element({hidden:true,mode:'empty'}),search:new Element({hidden:true,mode:'empty'}),board:new Element({dataset:{boardId:'board-one'}})};",
+            "nodes.marker.setAttribute('data-board-id','board-one');",
+            "let current={kind:'projects'};",
+            "let fleetData={fleet:{boards:[{board_id:'board-one',status:'ready'}]}};",
+            "const route=()=>current,navKind=()=>current.kind;",
+            "const selectorMap={main:nodes.main,'#board-id':nodes.marker,'#connection-banner':nodes.banner,'#central-sections':nodes.host,'#config-view':nodes.config,'#workers-view':nodes.workers,'#detail-view':nodes.detail,'#search-results':nodes.search};",
+            "const document={querySelector(selector){if(selector==='.error')return [nodes.config,nodes.workers].some(node=>!node.hidden&&node.mode==='error')?{}:null;if(selector==='.skeleton')return [nodes.config,nodes.workers].some(node=>!node.hidden&&node.mode==='loading')?{}:null;return selectorMap[selector]||null},querySelectorAll(selector){return selector==='.board-card[data-board-id]'?[nodes.board]:[]}};",
+            "const window={addEventListener(){}};",
+            "class MutationObserver{observe(){}}",
+            "const setTimeout=callback=>callback();",
+            warm_home.SELECTOR_CONTRACT_SCRIPT,
+            "const initial={config:nodes.config.attrs['data-pursers-state'],workers:nodes.workers.attrs['data-pursers-state'],board:nodes.board.attrs['data-pursers-status']};",
+            "current={kind:'config'};nodes.config.hidden=false;nodes.config.mode='loading';pursersRoutePanelLoading();const configLoading=nodes.config.attrs['data-pursers-state'];",
+            "nodes.config.mode='ready';applyFleetSelectorContract();const configReady=nodes.config.attrs['data-pursers-state'];",
+            "nodes.config.mode='empty';applyFleetSelectorContract();const configEmpty=nodes.config.attrs['data-pursers-state'];",
+            "nodes.config.mode='error';applyFleetSelectorContract();const configError=nodes.config.attrs['data-pursers-state'];",
+            "nodes.config.hidden=true;current={kind:'workers'};nodes.workers.hidden=false;nodes.workers.mode='loading';pursersRoutePanelLoading();const workersLoading=nodes.workers.attrs['data-pursers-state'];",
+            "nodes.workers.mode='ready';applyFleetSelectorContract();const workersReady=nodes.workers.attrs['data-pursers-state'];",
+            "nodes.workers.mode='empty';applyFleetSelectorContract();const workersEmpty=nodes.workers.attrs['data-pursers-state'];",
+            "nodes.workers.mode='error';applyFleetSelectorContract();const workersError=nodes.workers.attrs['data-pursers-state'];",
+            "fleetData.fleet.boards[0].status='error';applyFleetSelectorContract();const boardError=nodes.board.attrs['data-pursers-status'];",
+            "console.log(JSON.stringify({initial,configLoading,configReady,configEmpty,configError,workersLoading,workersReady,workersEmpty,workersError,boardError,configPanel:nodes.config.attrs['data-pursers-panel'],workersPanel:nodes.workers.attrs['data-pursers-panel']}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    )
+
+    assert json.loads(completed.stdout) == {
+        "initial": {"config": "empty", "workers": "empty", "board": "ready"},
+        "configLoading": "loading",
+        "configReady": "ready",
+        "configEmpty": "empty",
+        "configError": "error",
+        "workersLoading": "loading",
+        "workersReady": "ready",
+        "workersEmpty": "empty",
+        "workersError": "error",
+        "boardError": "error",
+        "configPanel": "config",
+        "workersPanel": "seats",
+    }
+
+
+def test_aggregate_fleet_exposes_source_backed_board_status() -> None:
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Ready",
+                "board_id": "ready-board",
+                "snapshot": {"agents": [], "tickets": []},
+                "events": [],
+            },
+            {
+                "label": "Failed",
+                "board_id": "failed-board",
+                "error": "bounded failure",
+            },
+        ],
+        stale_seconds=300,
+    )
+
+    assert [(row["board_id"], row["status"]) for row in result["boards"]] == [
+        ("ready-board", "ready"),
+        ("failed-board", "error"),
+    ]
+
+
+def test_fleet_selector_contract_names_every_catalogue_row() -> None:
+    repo_root = MODULE_PATH.parents[2]
+    inventory = (repo_root / "docs/design-home/inventory.md").read_text(encoding="utf-8")
+    contract = (repo_root / "docs/design-home/fleet-selector-contract.md").read_text(encoding="utf-8")
+    catalogue_ids = set(
+        re.findall(r"^\| `(fleet(?:-dashboard)?\.[^`]+)` \| fleet \|", inventory, re.MULTILINE)
+    )
+    contract_ids = set(re.findall(r"`(fleet(?:-dashboard)?\.[^`]+)`", contract))
+
+    assert catalogue_ids
+    assert contract_ids == catalogue_ids
 
 
 def test_multi_central_routes_and_complete_javascript_are_valid() -> None:
@@ -6243,13 +6574,14 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
             source("function workerForAgent("),
             source("function renderRoleChips("),
             source("function liveAgentCard("),
-            source("function renderGuide("),
-            source("function inactiveAgentDrawer("),
-            source("function renderAgentsHub("),
-            "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
-            f"let fleetData={{personal:{{agents:{json.dumps(agents)}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
-            "const active=renderAgentsHub();showStaleAgents=true;const all=renderAgentsHub();",
-            "console.log(JSON.stringify({active,all}));",
+                source("function renderGuide("),
+                source("function inactiveAgentDrawer("),
+                source("function agentPoolScope("),
+                source("function renderAgentsHub("),
+                "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
+                f"let fleetData={{personal:{{agents:{json.dumps(agents)},pool_scope:{{covered_boards:['pursers'],excluded_boards:[{{board_id:'hidden-board',reason:'read unavailable'}}]}}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
+                "const active=renderAgentsHub();showStaleAgents=true;const all=renderAgentsHub();fleetData={personal:{agents:[fleetData.personal.agents[0]],pool_scope:{covered_boards:['pursers'],excluded_boards:[]}}};showStaleAgents=false;const filtered=renderAgentsHub();",
+                "console.log(JSON.stringify({active,all,filtered}));",
         ]
     )
     completed = subprocess.run(
@@ -6261,6 +6593,7 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
     result = json.loads(completed.stdout)
     active = result["active"]
     all_agents = result["all"]
+    filtered = result["filtered"]
 
     assert "m-stale" not in active
     assert active.index("z-busy") < active.index("a-available")
@@ -6277,6 +6610,12 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
     assert all_agents.index("a-available") < all_agents.index("m-stale")
     assert "Show active only" in all_agents
     assert 'aria-pressed="true"' in all_agents
+    assert 'data-pursers-board="pursers"' in active
+    assert 'data-pursers-status="ready"' in active
+    assert "Readable but excluded" in active
+    assert "hidden-board (read unavailable)" in active
+    assert "1 seats exist but are filtered out as stale" in filtered
+    assert "last-activity age" in filtered
 
 
 def test_agent_pool_rows_keep_details_and_default_to_active() -> None:
@@ -8843,6 +9182,83 @@ def test_agents_hub_keeps_duplicate_names_distinct_and_exposes_inactive_drawer()
     assert 'id="inactive-agent-drawer"' in result
     assert "old-seat" in result
     assert "retired" in result
+
+
+def test_agents_hub_keeps_same_principal_seats_distinct_and_filters_only_stale() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    agents = [
+        {
+            "agent_name": "live-seat-one",
+            "agent_id": "AI-live-seat-one",
+            "principal_id": "PR-shared-principal",
+            "pool_status": "available",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2030-01-01T11:59:00Z",
+        },
+        {
+            "agent_name": "live-seat-two",
+            "agent_id": "AI-live-seat-two",
+            "principal_id": "PR-shared-principal",
+            "pool_status": "busy",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2030-01-01T11:58:00Z",
+        },
+        {
+            "agent_name": "stale-seat",
+            "agent_id": "AI-stale-seat",
+            "principal_id": "PR-shared-principal",
+            "pool_status": "stale",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2029-12-01T00:00:00Z",
+        },
+    ]
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const agentStatusRank="),
+            source("function compareAgents("),
+            source("function relativeAge("),
+            source("function clippedAgentTitle("),
+            source("function agentLiveWork("),
+            source("function agentTicketLink("),
+            source("function agentVisibilityToggle("),
+            source("function pageHead("),
+            source("function agentIdentity("),
+            source("function agentIdentityLabel("),
+            source("function workerForAgent("),
+            source("function renderRoleChips("),
+            source("function liveAgentCard("),
+            source("function inactiveAgentDrawer("),
+            source("function renderAgentsHub("),
+            "const renderGuide=()=>'';",
+            "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
+            f"let fleetData={{fleet:{{agents:{json.dumps(agents)},inactive_agents:[]}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
+            "const active=renderAgentsHub();showStaleAgents=true;const all=renderAgentsHub();",
+            "console.log(JSON.stringify({active,all}));",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+
+    assert result["active"].count('<article class="agent-card"') == 2
+    assert 'data-agent-identity="AI-live-seat-one"' in result["active"]
+    assert 'data-agent-identity="AI-live-seat-two"' in result["active"]
+    assert 'data-agent-identity="AI-stale-seat"' not in result["active"]
+    assert result["all"].count('<article class="agent-card"') == 3
+    assert 'data-agent-identity="AI-stale-seat"' in result["all"]
 
 
 def test_agents_hub_does_not_attach_unidentified_worker_to_duplicate_live_names() -> None:
