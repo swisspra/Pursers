@@ -701,6 +701,7 @@ def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
         },
     ]
     assert result["agents"][0]["duplicate_name"] is False
+    assert result["agents"][0]["agent_id"] is None
     assert result["agents"][0]["pool_status"] == "busy"
     assert result["pool_summary"] == {
         "online": 1,
@@ -746,6 +747,47 @@ def test_retired_and_stale_seats_are_outside_active_pool() -> None:
     assert result["pool_summary"]["online"] == 1
     assert result["inactive_agents"][0]["agent_name"] == "retired"
     assert result["boards"][0]["stale_after_days"] == 7
+
+
+def test_agent_projection_preserves_distinct_ids_for_shared_principal() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    recent = (now - timedelta(seconds=20)).isoformat()
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-shared",
+                            "agent_name": "worker-one",
+                            "agent_id": "AI-worker-one",
+                            "last_activity_at": recent,
+                        },
+                        {
+                            "principal_id": "PR-shared",
+                            "agent_name": "worker-two",
+                            "agent_id": "AI-worker-two",
+                            "last_activity_at": recent,
+                        },
+                    ],
+                    "tickets": [],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    assert {
+        (row["agent_name"], row["agent_id"], row["principal_id"])
+        for row in result["agents"]
+    } == {
+        ("worker-one", "AI-worker-one", "PR-shared"),
+        ("worker-two", "AI-worker-two", "PR-shared"),
+    }
 
 
 def test_available_and_stale_classification() -> None:
@@ -9140,6 +9182,83 @@ def test_agents_hub_keeps_duplicate_names_distinct_and_exposes_inactive_drawer()
     assert 'id="inactive-agent-drawer"' in result
     assert "old-seat" in result
     assert "retired" in result
+
+
+def test_agents_hub_keeps_same_principal_seats_distinct_and_filters_only_stale() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    agents = [
+        {
+            "agent_name": "live-seat-one",
+            "agent_id": "AI-live-seat-one",
+            "principal_id": "PR-shared-principal",
+            "pool_status": "available",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2030-01-01T11:59:00Z",
+        },
+        {
+            "agent_name": "live-seat-two",
+            "agent_id": "AI-live-seat-two",
+            "principal_id": "PR-shared-principal",
+            "pool_status": "busy",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2030-01-01T11:58:00Z",
+        },
+        {
+            "agent_name": "stale-seat",
+            "agent_id": "AI-stale-seat",
+            "principal_id": "PR-shared-principal",
+            "pool_status": "stale",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2029-12-01T00:00:00Z",
+        },
+    ]
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const agentStatusRank="),
+            source("function compareAgents("),
+            source("function relativeAge("),
+            source("function clippedAgentTitle("),
+            source("function agentLiveWork("),
+            source("function agentTicketLink("),
+            source("function agentVisibilityToggle("),
+            source("function pageHead("),
+            source("function agentIdentity("),
+            source("function agentIdentityLabel("),
+            source("function workerForAgent("),
+            source("function renderRoleChips("),
+            source("function liveAgentCard("),
+            source("function inactiveAgentDrawer("),
+            source("function renderAgentsHub("),
+            "const renderGuide=()=>'';",
+            "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
+            f"let fleetData={{fleet:{{agents:{json.dumps(agents)},inactive_agents:[]}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
+            "const active=renderAgentsHub();showStaleAgents=true;const all=renderAgentsHub();",
+            "console.log(JSON.stringify({active,all}));",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+
+    assert result["active"].count('<article class="agent-card"') == 2
+    assert 'data-agent-identity="AI-live-seat-one"' in result["active"]
+    assert 'data-agent-identity="AI-live-seat-two"' in result["active"]
+    assert 'data-agent-identity="AI-stale-seat"' not in result["active"]
+    assert result["all"].count('<article class="agent-card"') == 3
+    assert 'data-agent-identity="AI-stale-seat"' in result["all"]
 
 
 def test_agents_hub_does_not_attach_unidentified_worker_to_duplicate_live_names() -> None:
