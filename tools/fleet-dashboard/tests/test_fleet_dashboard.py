@@ -783,6 +783,63 @@ def test_available_and_stale_classification() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("agent_status", "activity_age_seconds", "expected_status"),
+    [
+        ("busy", 539, "busy"),
+        ("busy", 540, "busy"),
+        ("busy", 541, "stale"),
+        ("working", 539, "busy"),
+        ("working", 540, "busy"),
+        ("working", 541, "stale"),
+        ("idle", 539, "available"),
+        ("idle", 540, "available"),
+        ("idle", 541, "stale"),
+    ],
+)
+def test_busy_status_respects_dispatch_activity_window(
+    agent_status: str,
+    activity_age_seconds: int,
+    expected_status: str,
+) -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "activity_window_seconds": 540,
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-1",
+                            "agent_name": "worker",
+                            "agent_id": "AI-1",
+                            "last_activity_at": (
+                                now - timedelta(seconds=activity_age_seconds)
+                            ).isoformat(),
+                            "lifecycle_status": "active",
+                            "status": agent_status,
+                        }
+                    ],
+                    "tickets": [],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    assert result["agents"][0]["pool_status"] == expected_status
+    assert result["pool_summary"] == {
+        "online": int(expected_status in {"busy", "available"}),
+        "busy": int(expected_status == "busy"),
+        "available": int(expected_status == "available"),
+        "stale": int(expected_status == "stale"),
+    }
+
+
 def test_agent_projection_marks_busy_when_claim_is_outside_ticket_window() -> None:
     now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
     result = dashboard.aggregate_fleet(

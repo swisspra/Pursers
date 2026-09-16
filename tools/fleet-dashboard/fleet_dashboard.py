@@ -3513,18 +3513,22 @@ def aggregate_fleet(
                     else None
                 )
             group["seats"][board_id] = seat_projection
-            if agent.get("status") in {"working", "busy"} and agent.get(
-                "lifecycle_status"
-            ) not in {"handed_off", "inactive"}:
+            is_live = (
+                seen_at is not None
+                and (now - seen_at).total_seconds() <= activity_window_seconds
+            )
+            if (
+                is_live
+                and agent.get("status") in {"working", "busy"}
+                and agent.get("lifecycle_status")
+                not in {"handed_off", "inactive"}
+            ):
                 group["busy"] = True
             if seen_at is not None and (
                 group["last_seen"] is None or seen_at > group["last_seen"]
             ):
                 group["last_seen"] = seen_at
-            if (
-                seen_at is not None
-                and (now - seen_at).total_seconds() <= activity_window_seconds
-            ):
+            if is_live:
                 group["live"] = True
 
         counts = {"open": 0, "claimed": 0, "submitted": 0, "closed_today": 0}
