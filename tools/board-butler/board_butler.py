@@ -66,7 +66,13 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
     PolicyRule(
         "gate-waiver",
         Outcome.ESCALATE,
-        re.compile(r"\b(?:waiv(?:e|er)|bypass|override)\b.{0,80}\b(?:gate|check|failure|requirement)\b|\b(?:gate|check|failure|requirement)\b.{0,80}\b(?:waiv(?:e|er)|bypass|override)\b", re.I),
+        re.compile(
+            r"\b(?:waiv(?:e|er)|bypass|override|accept(?:able)?|satisfy)\b.{0,160}\b(?:gate|check|failure|requirement|required|acceptance|evidence|result|replay)\b"
+            r"|\b(?:gate|check|failure|requirement|required|acceptance|evidence|result|replay)\b.{0,160}\b(?:waiv(?:e|er)|bypass|override|accept(?:able)?|satisfy)\b"
+            r"|\b(?:carry(?:ing)? forward|substitut\w*|replace)\b.{0,160}\b(?:evidence|result|replay|requirement|acceptance)\b"
+            r"|\b(?:evidence|result|replay|requirement|acceptance)\b.{0,160}\b(?:carry(?:ing)? forward|substitut\w*|replace)\b",
+            re.I | re.S,
+        ),
     ),
     PolicyRule(
         "scope-change",
@@ -76,7 +82,12 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
     PolicyRule(
         "release-decision",
         Outcome.ESCALATE,
-        re.compile(r"\b(?:release|publish|tag|ship|version bump|promote)\b", re.I),
+        re.compile(
+            r"\b(?:should|may|can|could|please|do we|must we|ready to)\b.{0,60}\b(?:release(?!-)|publish|tag|ship|promote)\b"
+            r"|\bversion bump\b"
+            r"|\b(?:release(?!-)|publish|tag|ship|promote)\b.{0,60}\b(?:now|to production|this release)\b",
+            re.I | re.S,
+        ),
     ),
     PolicyRule(
         "membership-or-registry",
@@ -87,9 +98,10 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         "coverage-blindness",
         Outcome.ESCALATE,
         re.compile(
-            r"\b(?:proceed|approve|submit|merge|continue)\b.{0,160}\b(?:suite|test|manifest)\b.{0,100}\b(?:blocked|skipped|not run|never[- ]reached|fail(?:ed|ure)?)\b"
-            r"|\b(?:suite|test|manifest)\b.{0,100}\b(?:blocked|skipped|not run|never[- ]reached|fail(?:ed|ure)?)\b.{0,160}\b(?:proceed|approve|submit|merge|continue)\b",
-            re.I,
+            r"(?=.*\b(?:suite|tests?|manifest)\b)"
+            r"(?=.*\b(?:blocked|skipped|not run|never[- ]reached|fail(?:ed|ure|ures)?|denied|gap)\b)"
+            r"(?=.*\b(?:may|can|should|please|accept|authoriz\w*|proceed|approve|submit|merge|continue|treat|waiv\w*|require\w*|rerun)\b)",
+            re.I | re.S,
         ),
         "coverage_blindness",
     ),
@@ -923,7 +935,10 @@ async def run(
                 cursor, question = await backend.wait_for_question(cursor, timeout)
                 if question is not None:
                     await process_question(backend, question, args, utc_now())
-                save_cursor(args.cursor_file, cursor)
+                # Printing a proposed draft is not durable processing. Keep
+                # dry-run questions replayable by leaving the cursor alone.
+                if not args.dry_run:
+                    save_cursor(args.cursor_file, cursor)
                 if args.once:
                     return
                 if question is None:

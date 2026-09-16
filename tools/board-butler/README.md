@@ -44,7 +44,8 @@ There is no polling fallback, repeated ticket list, or cursor-0 catch-up. The
 positive cursor file is reused across restarts; a zero or invalid cursor starts
 at the current journal watermark. A closed push stream terminates the process
 instead of reconnect-spinning. `--dry-run` prints the proposed finding and
-makes no Central write.
+makes no Central write or cursor-file update, so the same question remains
+available to a later non-dry run.
 
 Draft caps default to five per hour and two per ticket. They may be set with
 `--drafts-per-hour` and `--drafts-per-ticket`, or with the equivalent

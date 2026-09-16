@@ -80,6 +80,30 @@ def args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
         ("Is abcdef1 an ancestor of origin/main?", "decision", "MECHANICAL", "git-ancestry"),
         ("What is the status of TK-123?", "information", "MECHANICAL", "ticket-status"),
         ("May we waive the gate because abcdef1 is merged?", "information", "ESCALATE", "gate-waiver"),
+        (
+            "Please authorize carrying forward the independent replay result.",
+            "decision",
+            "ESCALATE",
+            "gate-waiver",
+        ),
+        (
+            "May I satisfy the acceptance with a product-builder replay?",
+            "decision",
+            "ESCALATE",
+            "gate-waiver",
+        ),
+        (
+            "Please accept this exact local verifier result instead.",
+            "decision",
+            "ESCALATE",
+            "gate-waiver",
+        ),
+        (
+            "AionUi suite reported 52 failures; may I submit after running release-tools?",
+            "decision",
+            "ESCALATE",
+            "coverage-blindness",
+        ),
         ("Is this okay?", "approval", "ESCALATE", "question-kind:approval"),
         ("Does this look fine?", "information", "UNKNOWN", "no-confident-policy-match"),
     ],
@@ -161,10 +185,24 @@ test-output: central 209 passed; client 98 passed; wait-bridge 297 passed; AionU
 
     finding = asyncio.run(
         butler.make_finding(
-            question(
-                "May review proceed when the AionUi suite failed for TK-1ec2ca97709b?",
-                kind="decision",
-            ),
+            {
+                **question(
+                    "Validation environment blocker: `python3 tools/ci_manifest.py run` "
+                    "passes central (209), client (98), import (106), personal "
+                    "(200/2 skipped), wait-bridge (296), fleet-dashboard (357), "
+                    "coordinator (233), worker-runtime (106), acp-seat (28/1 "
+                    "skipped), acp-agent (15), and seat-kit (116), then AionUi "
+                    "typed-evidence hits 52 environment failures because sandbox "
+                    "denies `/bin/ps` with `PermissionError: [Errno 1] Operation "
+                    "not permitted`. Source-focused MCP 2.0.0 suite passes 40 "
+                    "tests + 10 subtests. I cannot authorize unsandboxed execution. "
+                    "Continuing leak/diff validation; please treat the full-manifest "
+                    "failure as host-policy evidence or provide an authorized "
+                    "non-sandboxed validator."
+                ),
+                "ticket_id": "TK-1ec2ca97709b",
+                "question_id": "CQ-2ea9ba8fb16e245c",
+            },
             source,
             REPOSITORY_ROOT,
             "origin/main",
@@ -490,6 +528,45 @@ def test_dry_run_prints_draft_and_does_not_write(tmp_path: Path, capsys: pytest.
 
     assert backend.writes == 0
     assert json.loads(capsys.readouterr().out)["kind"] == "would_answer"
+
+
+def test_dry_run_does_not_consume_question_cursor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = args(tmp_path, dry_run=True)
+
+    class Backend(Source):
+        latest_seq = 10
+        writes = 0
+
+        async def __aenter__(self) -> "Backend":
+            self.tickets["TK-123"] = {"status": "closed"}
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def wait_for_question(
+            self, cursor: int, _timeout: float
+        ) -> tuple[int, Mapping[str, Any]]:
+            assert cursor == 10
+            return 11, question("What is the status of TK-123?")
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            return {}
+
+        async def write_findings(self, *_args: Any) -> None:
+            self.writes += 1
+
+    backend = Backend()
+    asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
+
+    assert backend.writes == 0
+    assert not options.cursor_file.exists()
+    assert json.loads(capsys.readouterr().out)["question_id"] == "CQ-source"
 
 
 def test_duplicate_question_is_idempotent_and_does_not_write(tmp_path: Path) -> None:
