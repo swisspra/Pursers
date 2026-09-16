@@ -4,16 +4,38 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 try:
-    from tools.branch_audit import SCHEMA
+    from tools.branch_audit import (
+        AuditError,
+        SCHEMA,
+        TERMINAL_STATUSES,
+        read_board_tickets,
+        read_token,
+        submitted_references,
+        ticket_id_from_branch,
+    )
 except ModuleNotFoundError:  # Direct execution from the repository root.
-    from branch_audit import SCHEMA
+    from branch_audit import (  # type: ignore[no-redef]
+        AuditError,
+        SCHEMA,
+        TERMINAL_STATUSES,
+        read_board_tickets,
+        read_token,
+        submitted_references,
+        ticket_id_from_branch,
+    )
+
+
+SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 class PruneError(RuntimeError):
@@ -55,8 +77,13 @@ def _candidate_rows(report: Mapping[str, Any], tiers: Sequence[str]) -> list[dic
                 raise PruneError(f"{branch}: candidate unexpectedly has protections")
             if branch in submitted_branches or commit in submitted_commits:
                 raise PruneError(f"{branch}: submitted review tip can never be deleted")
-            if not branch or not commit:
-                raise PruneError("candidate branch and commit are required")
+            if not branch or SHA_RE.fullmatch(commit) is None:
+                raise PruneError("candidate branch and 40-character commit are required")
+            ticket_id = ticket_id_from_branch(branch)
+            if ticket_id is None or row.get("ticket_id") != ticket_id:
+                raise PruneError(
+                    f"{branch}: candidate must retain its exact resolvable ticket ID"
+                )
             selected.append(row)
     return selected
 
@@ -71,40 +98,74 @@ def render_plan(rows: Sequence[Mapping[str, Any]], remote: str) -> str:
     return "\n".join(lines)
 
 
-def _remote_tip(repo: Path, remote: str, branch: str) -> str | None:
-    completed = subprocess.run(
-        ["git", "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
-        cwd=repo,
-        check=False,
-        capture_output=True,
-        text=True,
+async def revalidate_board_state(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    central_url: str,
+    token: str,
+    ca_file: Path | None,
+    board_ids: Sequence[str],
+) -> None:
+    """Fail closed unless every selected row is still board-safe now."""
+    ticket_ids = [str(row["ticket_id"]) for row in rows]
+    tickets_by_id, active_tickets, _boards = await read_board_tickets(
+        central_url=central_url,
+        token=token,
+        ca_file=ca_file,
+        board_ids=board_ids,
+        ticket_ids=ticket_ids,
     )
-    if completed.returncode != 0:
-        raise PruneError(f"cannot read {remote}/{branch}: {completed.stderr.strip()}")
-    line = completed.stdout.strip()
-    return line.split("\t", 1)[0] if line else None
+    submitted_branches, submitted_commits = submitted_references(active_tickets)
+    for row in rows:
+        branch = str(row["branch"])
+        commit = str(row["commit"])
+        ticket_id = str(row["ticket_id"])
+        matches = tickets_by_id.get(ticket_id, [])
+        if len(matches) != 1:
+            raise PruneError(
+                f"{branch}: ticket {ticket_id} is missing or ambiguous on the current board"
+            )
+        current = matches[0]
+        current_status = str(current.get("status"))
+        current_board = str(current.get("board_id"))
+        if current_status not in TERMINAL_STATUSES:
+            raise PruneError(
+                f"{branch}: ticket {ticket_id} is now live ({current_status})"
+            )
+        if row.get("ticket_board") != current_board:
+            raise PruneError(
+                f"{branch}: ticket board changed from {row.get('ticket_board')} "
+                f"to {current_board}"
+            )
+        if branch in submitted_branches or commit in submitted_commits:
+            raise PruneError(
+                f"{branch}: branch or audited commit is now awaiting review"
+            )
 
 
 def execute(rows: Sequence[Mapping[str, Any]], *, repo: Path, remote: str) -> None:
     for row in rows:
         branch = str(row["branch"])
         audited_tip = str(row["commit"])
-        current_tip = _remote_tip(repo, remote, branch)
-        if current_tip != audited_tip:
-            raise PruneError(
-                f"{remote}/{branch} moved or disappeared: "
-                f"audited={audited_tip} current={current_tip or 'missing'}"
-            )
-    for row in rows:
-        branch = str(row["branch"])
         completed = subprocess.run(
-            ["git", "push", remote, "--delete", branch],
+            [
+                "git",
+                "push",
+                "--porcelain",
+                f"--force-with-lease=refs/heads/{branch}:{audited_tip}",
+                remote,
+                f":refs/heads/{branch}",
+            ],
             cwd=repo,
             check=False,
+            capture_output=True,
             text=True,
         )
         if completed.returncode != 0:
-            raise PruneError(f"deletion failed for {remote}/{branch}")
+            detail = completed.stderr.strip() or completed.stdout.strip()
+            raise PruneError(
+                f"compare-and-delete failed for {remote}/{branch}: {detail}"
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -114,6 +175,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remote")
     parser.add_argument("--tier", choices=("A", "B"), action="append", required=True)
     parser.add_argument("--confirm-delete", action="store_true")
+    parser.add_argument(
+        "--central-url", default=os.environ.get("ONBOARD_CENTRAL_URL")
+    )
+    parser.add_argument("--token-file", default=os.environ.get("ONBOARD_TOKEN_FILE"))
+    parser.add_argument("--ca-file", type=Path)
+    parser.add_argument("--board", action="append", default=[])
     return parser
 
 
@@ -130,8 +197,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        board_ids = args.board or list(report.get("boards", []))
+        if not args.central_url:
+            raise PruneError(
+                "--central-url or ONBOARD_CENTRAL_URL is required for current-state revalidation"
+            )
+        if not board_ids:
+            raise PruneError("audit JSON or --board must select at least one board")
+        asyncio.run(
+            revalidate_board_state(
+                rows,
+                central_url=args.central_url,
+                token=read_token(args.token_file),
+                ca_file=args.ca_file,
+                board_ids=board_ids,
+            )
+        )
         execute(rows, repo=args.repo.resolve(), remote=remote)
-    except (OSError, ValueError, PruneError) as exc:
+    except (OSError, ValueError, AuditError, PruneError) as exc:
         print(f"branch prune failed: {exc}", file=sys.stderr)
         return 1
     return 0

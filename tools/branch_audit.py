@@ -25,7 +25,7 @@ TICKET_ID_RE = re.compile(r"(?i)(TK-[a-z0-9]+)")
 BRANCH_AND_COMMIT_RE = re.compile(
     r"(?im)^\s*branch_and_commit\s*:\s*([^\s@]+)\s*@\s*([0-9a-f]{40})\s*$"
 )
-TERMINAL_STATUSES = frozenset({"closed", "rejected", "canceled", "terminated"})
+TERMINAL_STATUSES = frozenset({"closed", "canceled"})
 AWAITING_REVIEW_STATUSES = frozenset({"submitted", "reviewing", "in_review"})
 
 
@@ -196,10 +196,10 @@ def build_report(
         elif len(matches) > 1:
             unresolved_reason = "ticket_id_is_ambiguous_across_boards"
 
-        if branch.merged_into_main:
-            category = "merged_into_main"
-        elif unresolved_reason:
+        if unresolved_reason:
             category = "no_resolvable_ticket"
+        elif branch.merged_into_main:
+            category = "merged_into_main"
         elif status in TERMINAL_STATUSES:
             category = "unmerged_terminal_ticket"
         else:
@@ -212,7 +212,7 @@ def build_report(
             protected_reasons.append("integration_branch")
         if ticket is not None and status not in TERMINAL_STATUSES:
             protected_reasons.append(f"live_ticket_status:{status}")
-        if ticket_id is not None and unresolved_reason:
+        if unresolved_reason:
             protected_reasons.append(f"unresolved_ticket:{unresolved_reason}")
         if branch.name in submitted_branches:
             protected_reasons.append("submitted_branch_awaiting_review")
@@ -420,7 +420,7 @@ async def read_board_tickets(
         return tickets_by_id, active_tickets, selected_boards
 
 
-def _read_token(path_value: str | None) -> str:
+def read_token(path_value: str | None) -> str:
     if not path_value:
         raise AuditError("--token-file or ONBOARD_TOKEN_FILE is required")
     path = Path(path_value)
@@ -468,7 +468,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     tickets_by_id, active_tickets, boards = asyncio.run(
         read_board_tickets(
             central_url=args.central_url,
-            token=_read_token(args.token_file),
+            token=read_token(args.token_file),
             ca_file=args.ca_file,
             board_ids=args.board,
             ticket_ids=ticket_ids,

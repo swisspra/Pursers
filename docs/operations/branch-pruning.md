@@ -19,7 +19,8 @@ last commit date, the ticket and board-derived status, protection reasons, and
 candidate tier:
 
 - Tier A: merged into `main` and not protected.
-- Tier B: unmerged with a terminal board ticket and not protected.
+- Tier B: unmerged with a board ticket whose current lifecycle status is exactly
+  `closed` or `canceled`, and not protected.
 
 Inspect the plan without deleting anything. This command must exit 2 and say it
 is refusing to delete because the confirmation flag is absent:
@@ -32,10 +33,17 @@ Only the operator may execute a reviewed plan:
 
 ```sh
 python3 tools/prune_branches.py /tmp/pursers-branch-audit.json \
-  --tier A --tier B --confirm-delete
+  --tier A --tier B --confirm-delete \
+  --central-url https://CENTRAL.EXAMPLE/mcp \
+  --token-file /PATH/TO/SEAT.jwt \
+  --ca-file /PATH/TO/ca.pem
 ```
 
-Immediately before deletion, the script verifies that every remote tip still
-matches the audited SHA. It always rejects `main`, the configured default
-branch, `integration/*`, live-ticket branches, and branches or commits backing
-a submission awaiting review. Re-run the audit if any remote tip moved.
+Immediately before deletion, the script re-reads authoritative board status and
+current submission references. It fails closed if a ticket is no longer exactly
+`closed` or `canceled`, cannot be resolved uniquely, or if the branch or commit
+now backs a submission awaiting review. Each remote deletion is a Git
+compare-and-delete guarded by the audited SHA, so a concurrent ref move rejects
+the deletion atomically. It always rejects `main`, the configured default
+branch, and `integration/*`. Re-run the audit if board state or a remote tip
+changed.
