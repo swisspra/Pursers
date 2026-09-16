@@ -53,7 +53,9 @@ decision annotations to ACP, renews the lease independently, and projects
 bounded updates and permission decisions to board checkpoints. On `end_turn`,
 it validates structured completion against the actual branch, full commit, and
 tip diff, publishes the branch from the parent process, and verifies the remote
-commit before submitting. Cancellation, agent failure, or invalid evidence
+commit before submitting. The last board mutation of a successful ticket is
+`ticket_submit`; lease renewal stops before that terminal mutation. Cancellation,
+agent failure, or invalid evidence
 creates a checkpoint and safely unclaims the ticket.
 
 The production runtime is macOS-only because it fails closed unless
