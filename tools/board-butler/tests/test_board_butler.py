@@ -646,6 +646,63 @@ def test_findings_merge_drops_old_rows_to_stay_bounded() -> None:
     assert merged["truncation"]["findings"] > 0
 
 
+def test_findings_merge_never_evicts_critical_coordinator_alerts() -> None:
+    critical = {
+        "kind": "privacy-leak-suspect",
+        "level": "critical",
+        "ticket_id": "TK-critical",
+        "message": "must survive",
+    }
+    old = {
+        "schema_version": 2,
+        "findings": [critical]
+        + [
+            {
+                "kind": "starved",
+                "level": "warn",
+                "ticket_id": f"TK-{index}",
+                "message": "x" * 400,
+            }
+            for index in range(20)
+        ],
+        "truncation": {"findings": 0},
+    }
+    new = {
+        "kind": "would_answer",
+        "question_id": "CQ-new",
+        "ticket_id": "TK-new",
+        "verdict": "MECHANICAL",
+        "message": "new draft",
+    }
+
+    merged = butler.merge_finding(old, new, NOW)
+
+    assert critical in merged["findings"]
+    assert merged["findings"][-1]["question_id"] == "CQ-new"
+
+
+def test_findings_merge_refuses_to_displace_a_full_critical_set() -> None:
+    old = {
+        "schema_version": 2,
+        "findings": [
+            {
+                "kind": "privacy-leak-suspect",
+                "level": "critical",
+                "ticket_id": f"TK-{index}",
+            }
+            for index in range(butler.MAX_FINDINGS)
+        ],
+        "truncation": {"findings": 0},
+    }
+
+    with pytest.raises(ValueError, match="no bounded room after critical alerts"):
+        butler.merge_finding(
+            old,
+            {"kind": "would_answer", "question_id": "CQ-new"},
+            NOW,
+        )
+
+
 def test_module_has_no_question_answer_or_ticket_mutation_path() -> None:
     source = MODULE_PATH.read_text(encoding="utf-8")
     forbidden = (

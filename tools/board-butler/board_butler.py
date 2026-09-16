@@ -577,9 +577,15 @@ def merge_finding(
             and item.get("question_id") == finding.get("question_id")
         )
     ]
-    rows.append(dict(finding))
-    omitted = max(0, len(rows) - MAX_FINDINGS)
-    result["findings"] = rows[-MAX_FINDINGS:]
+    critical = [item for item in rows if item.get("level") == "critical"]
+    if len(critical) >= MAX_FINDINGS:
+        raise ValueError("coordinator_findings has no bounded room after critical alerts")
+    ordinary = [item for item in rows if item.get("level") != "critical"]
+    ordinary_capacity = MAX_FINDINGS - len(critical) - 1
+    selected = critical + ordinary[-ordinary_capacity:] if ordinary_capacity else critical
+    selected.append(dict(finding))
+    omitted = len(rows) + 1 - len(selected)
+    result["findings"] = selected
     result["generated_at"] = now.isoformat()
     result["effective_mode"] = "shadow"
     truncation = dict(result.get("truncation", {}))
@@ -605,8 +611,12 @@ def merge_finding(
                 for index, item in enumerate(result["findings"][:-1])
                 if item.get("level") != "critical"
             ),
-            0,
+            None,
         )
+        if removable is None:
+            raise ValueError(
+                "coordinator_findings has no bounded room after critical alerts"
+            )
         result["findings"].pop(removable)
         result["truncation"]["findings"] += 1
     if len(json.dumps(result, sort_keys=True, separators=(",", ":"))) > MAX_STATE_CHARS:
