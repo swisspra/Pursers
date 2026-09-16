@@ -731,31 +731,36 @@ kind, requested_schema[, url])`, releases its work lease, and parks in the
 `needs_human` state with a structured question. The bridge delivers the
 question to the human through the host they already sit in:
 
-- `board_human_request(board_id, ticket_id, request_id)` is the primary
-  single-question path. Its hidden dependency uses `Resolve(fn)` and
-  `Elicit(message, Model)`, so one handler works in both eras. A 2026-07-28
-  client receives an `InputRequiredResult`, gathers the answer, and retries the
-  same tool with the same three arguments. A 2025-11-25 client uses the legacy
-  back-channel. The tool body sees the accepted, declined, or cancelled result
-  only after the SDK has completed the appropriate transport.
-- The primary form schema is flat. String, integer, number, boolean, and string
-  enum fields map directly. A multi-enum becomes one boolean field per choice
-  and is reconstructed before Central validates the answer. Nested values are
-  never sent to MCP elicitation. The rendered message is selected by the stable
-  `(board_id, ticket_id, request_id)` arguments and the immutable pending
-  record; timestamps and lease countdowns are not included, so question
-  pinning converges across retries.
-- `board_human_requests(boards="registry" | list, answer=None)` remains the
-  fan-out and URL-mode path. A resolver asks exactly one question, so this tool
-  intentionally returns a hand-built `InputRequiredResult` containing several
-  keyed requests. It reads `ctx.protocol_version` before choosing the modern or
-  legacy path. It must not add a `Resolve(...)` parameter: the SDK rejects a
-  handler that mixes resolver state with a declared `InputRequiredResult` arm.
-  Clients without a supported form or URL mode receive the bounded list plus
-  instructions for the explicit `answer={...}` call or dashboard fallback.
-- Passwords, API keys, access tokens, payment credentials, and other sensitive
-  fields require URL mode. Names, email addresses, usernames, ordinary request
-  prose, and file deliverables remain valid form fields.
+- `board_human_requests(boards="registry" | list, answer=None)` — without
+  `answer` it lists pending requests (`ticket_id`, board, `message`, `kind`,
+  `asked_by`, schema summary). Under the 2026-07-28 protocol, the client must
+  declare elicitation on each request in
+  `_meta.io.modelcontextprotocol/clientCapabilities`; a bare
+  `elicitation: {}` is form-only support for backwards compatibility. When
+  declared, the tool
+  returns an `InputRequiredResult` whose `inputRequests` carry one
+  `elicitation/create` per pending request: `mode: "form"` with the ticket's
+  `requested_schema` verbatim plus a mandatory `disposition` enum field
+  (`reopen | park | cancel` with titles), or `mode: "url"` when the request
+  carries a URL. If the ticket schema already owns `disposition`, the bridge
+  chooses a collision-free internal field name. `{board, ticket_id,
+  request_id}` ride `requestState`; on the
+  retried call `accept` maps to `ticket_human_resolve(action="accept",
+  content, disposition)`, `decline` to `resolve(decline, disposition from
+  content or park)`, and `cancel` leaves the request pending ("asked later").
+  On pre-2026 connections the same capability guard drives the legacy
+  `elicitation/create` back-channel and the tool returns only its final result,
+  never an `InputRequiredResult`. Clients that declared no elicitation get the list plus instructions to
+  answer via `board_human_requests(answer={"ticket_id": ..., "action": ...,
+  "content": {...}, "disposition": ...})` or the fleet dashboard. The bridge
+  never sends a mode the client did not declare. Every result exposes the
+  SDK-parsed declaration as `declared: {"form": bool, "url": bool, "raw":
+  object|null}` (inside `_meta` on `InputRequiredResult`), and the bridge writes
+  the same scrubbed value once to stderr for each call. A shared guard checks
+  schema property names and titles for secrets or credentials: passwords, API
+  keys, access tokens, and payment credentials require url mode. Names, email
+  addresses, usernames, ordinary request prose, and file deliverables remain
+  valid form fields.
 - Push: the `human_input_requested` / `human_input_resolved` journal kinds
   wake orchestrator seats; `board_digest` shows a `human_requests` section
   and `board_digest_ack` clears it.
@@ -767,56 +772,43 @@ question to the human through the host they already sit in:
   loopback guard. URL-mode requests show the target host prominently and open
   in a new tab only on click.
 
-The 2026-09-06 `elicitation_declared` probe was a legacy-handshake measurement
-and is not evidence about 2026-07-28. Modern connections have no
-server-initiated request channel; the question and answer travel through the
-MRTR result and retry. Direct calls to `ctx.elicit`, `ctx.elicit_url`,
-`ctx.session.create_message`, `ctx.session.list_roots`, or another
-`ServerSession` request helper fail on 2026-07-28 with top-level JSON-RPC
-`-32600`, not `CallToolResult(is_error=True)`. The two bridge session calls are
-confined to the pre-2026 branch.
+Elicitation host declarations (probed 2026-09-06):
 
-### Request-state keyring and manual continuation
+| Host / transport | raw declaration | measured result |
+| --- | --- | --- |
+| Claude Desktop / stdio | not captured by the pre-raw-value probe build | Live MCPB calls returned `elicitation_declared: false`; no form was rendered. An earlier fallback `answer` call accepted `choice=green`, `disposition=reopen`, and Central recorded the matching resolution. The corrected bridge will distinguish raw `null` from `{}` on the next host call. |
+| Claude Desktop / HTTP custom connector | not measured | This is a separate per-request `_meta` path; no declaration is inferred from the stdio probe. |
+| Codex app | not measured | The sandbox probe connector was not available to this Codex task, so no declaration is inferred. |
+| AionUi 2.2.1 / imported stdio bridge | no usable native form renderer | Push is available through the stored-door wait bridge; AionUi did not render the requested elicitation schema, so use the dashboard or coordinator fallback. |
+| Goose / stdio | not captured by the pre-raw-value probe build | Live stdio probe verified the fallback list + instructions path; no raw declaration was retained by that build. |
 
-Central stores its request-state keyring at
-`$ONBOARD_CENTRAL_DATA_DIR/request-state.keys` by default; override it with
-`CENTRAL_REQUEST_STATE_KEY_FILE`. The bridge uses
-`$PURSERS_BRIDGE_STATE_DIR/request-state.keys` (or its normal private state
-directory); override it with `PURSERS_REQUEST_STATE_KEY_FILE`. Each path is a
-regular 0600 file, one key per non-empty line, at least 32 bytes per key. The
-first key seals and every key unseals. Rotate only after each phase is fully
-deployed: `[OLD, NEW]`, then `[NEW, OLD]`, then `[NEW]` one request-state TTL
-after phase two. Never put the file in the repository or ticket metadata.
+The fleet dashboard is the independent browser fallback, not an MCP App UI
+resource associated with `board_human_requests`. Keeping it open does not alter
+the MCP host's per-request capability declaration.
 
-The TTL is 3600 seconds per round. One hour accommodates an interrupted human
-approval while principal, originating request, and exact rendered question
-remain cryptographically bound; each completed round receives a fresh hour.
-
-Distributed clients may persist a leg and resume it explicitly:
-
-```python
-result = await client.session.call_tool(
-    "board_human_request", arguments, allow_input_required=True
-)
-while isinstance(result, InputRequiredResult):
-    persist_opaque(result.request_state)
-    responses = await gather_input(result.input_requests)
-    result = await client.session.call_tool(
-        "board_human_request",
-        arguments,
-        input_responses=responses,
-        request_state=result.request_state,
-        allow_input_required=True,
-    )
-```
-
-Persist `request_state` as an opaque value and reuse the identical tool
-arguments. Tampered or expired state fails with `-32602 "Invalid or expired
-requestState"`. `Client.call_tool()` otherwise drives this loop automatically
-when an `elicitation_callback` is registered, with a default maximum of 10
-rounds. An `InputRequiredResult` that carries only `request_state` means the
-server is still waiting out of band: the client retries after a 50 ms backoff
-that doubles to a 250 ms cap. It is a short polling shape, not a durable human
-inbox; after 10 rounds the client stops. Pursers keeps long waits in the
-`needs_human` ticket and the fleet dashboard remains the independent browser
-fallback, not an MCP App resource.
+Live Claude Desktop probe record (2026-09-06): dependency commit `78cad2e` ran
+in a loopback sandbox Central. Ticket `TK-claude-elicitation-probe` entered
+`needs_human` with request `HR-b576ee9577c14ccd`. After correcting bare
+`elicitation: {}` to mean form-only and selecting legacy back-channel versus
+2026 MRTR by protocol version, Claude Desktop was fully restarted. Its MCPB
+call still returned `elicitation_declared: false`, so no form was rendered and
+no unsupported mode was sent. The measured fallback then submitted `action=accept`,
+`content={"choice":"green"}`, and `disposition=reopen`; Central advanced the
+journal, recorded that exact resolution, and reopened the ticket. This proves
+the capability guard and fallback round trip on the measured host, but it does
+not claim form-MRTR support that the host did not declare. A separate live
+Python SDK 2.1.1 probe using protocol `2026-07-28` and an elicitation callback
+did declare form mode on the request: the bridge returned the expected schema,
+the SDK invoked the callback, retried the tool, and Central recorded
+`action=accept`, `content={"choice":"green"}`, and `disposition=reopen` for
+request `HR-4adce4d2f75071bc`. This verifies the bridge's 2026 per-request
+capability and MRTR path independently of Claude Desktop's host support. A
+second SDK probe in `2025-11-25` legacy mode invoked the form callback over
+the back-channel and returned a final tool result (not MRTR), resolving
+request `HR-48dc39e253b9604e` with `choice=blue` and `disposition=reopen`.
+An additional operator-authorized Claude Desktop call against pending request
+`HR-667f8dd55d230060` again returned `elicitation_declared: false` and rendered
+no form. Those calls predated the `declared.raw` result field, so this record
+does not infer whether the host sent nothing or the old bridge misread its
+declaration. The corrected bridge logs and returns the SDK-parsed raw value on
+the next call.

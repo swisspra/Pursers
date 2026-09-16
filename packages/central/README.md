@@ -25,14 +25,6 @@ invite-only admission. `CENTRAL_JWT_ISSUER`, `CENTRAL_JWT_AUDIENCE`, and
 `CENTRAL_JWKS_PATH` must describe the credential issuer used by this Central
 instance. Keep the JWKS and data directory private.
 
-Modern MCP multi-round trips seal `requestState` with a restart-safe keyring.
-Central creates `request-state.keys` in its private data directory with mode
-0600, or reads the path in `CENTRAL_REQUEST_STATE_KEY_FILE`. Each non-empty
-line is one key of at least 32 bytes: the first key seals and every key
-unseals. For zero-downtime rotation, fully deploy `[OLD, NEW]`, then
-`[NEW, OLD]`, then remove `OLD` one 3600-second request-state TTL after the
-second phase is fully deployed. Never store the keyring in the repository.
-
 The startup banner prints the MCP bind URL, data directory, and health URL.
 Check the service without a credential:
 
