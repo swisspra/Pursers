@@ -800,6 +800,7 @@ def test_browser_state_timeout_is_signed_blocked_evidence(
     ("case", "reason_fragment"),
     [
         ("malformed-success", "returned invalid JSON"),
+        ("transition-invalid-bytes", "returned invalid UTF-8 output"),
         ("oversized-success", "returned oversized output"),
         ("invalid-schema-success", "result fields do not match schema"),
         ("transition-oserror", "command failed (OSError)"),
@@ -808,6 +809,7 @@ def test_browser_state_timeout_is_signed_blocked_evidence(
         ("probe-timeout", "binding probe failed (TimeoutExpired)"),
         ("probe-oversized", "binding probe returned oversized output"),
         ("probe-invalid-json", "binding probe returned invalid JSON"),
+        ("probe-invalid-bytes", "binding probe returned invalid UTF-8 output"),
         ("probe-invalid-schema", "binding probe result fields do not match schema"),
     ],
 )
@@ -875,6 +877,11 @@ def test_browser_state_adversarial_outcome_writes_independently_evaluable_eviden
                 return subprocess.CompletedProcess(
                     arguments, 0, stdout="{malformed", stderr="transition stderr"
                 )
+            if case == "transition-invalid-bytes":
+                return subprocess.CompletedProcess(
+                    arguments, 0, stdout=b"{" + (b"\xff" * 5_000) + b"}",
+                    stderr=b"transition stderr",
+                )
             if case == "oversized-success":
                 return subprocess.CompletedProcess(
                     arguments, 0, stdout=oversized, stderr="transition stderr"
@@ -902,6 +909,11 @@ def test_browser_state_adversarial_outcome_writes_independently_evaluable_eviden
         if case == "probe-invalid-json":
             return subprocess.CompletedProcess(
                 arguments, 0, stdout="{probe-malformed", stderr="probe stderr"
+            )
+        if case == "probe-invalid-bytes":
+            return subprocess.CompletedProcess(
+                arguments, 0, stdout=b"{" + (b"\xff" * 5_000) + b"}",
+                stderr=b"probe stderr",
             )
         if case == "probe-invalid-schema":
             return subprocess.CompletedProcess(
@@ -933,7 +945,10 @@ def test_browser_state_adversarial_outcome_writes_independently_evaluable_eviden
     assert reason_fragment in failure["reason"]
     assert len(failure["stdout"].encode()) <= 4096
     assert len(failure["stderr"].encode()) <= 4096
-    if case in {"malformed-success", "oversized-success", "invalid-schema-success"}:
+    if case in {
+        "malformed-success", "transition-invalid-bytes", "oversized-success",
+        "invalid-schema-success",
+    }:
         assert evidence["record"]["observer"]["binding"] == {
             "runtime": probe_value["host"],
             "candidate_commit": CANDIDATE,
@@ -950,6 +965,12 @@ def test_browser_state_adversarial_outcome_writes_independently_evaluable_eviden
         assert "probe partial stderr" in failure["stderr"]
     if case == "probe-invalid-json":
         assert "{probe-malformed" in failure["stdout"]
+    if case in {"transition-invalid-bytes", "probe-invalid-bytes"}:
+        assert "\ufffd" in failure["stdout"]
+    if case == "transition-invalid-bytes":
+        assert failure["stdout_sha256"] == hashlib.sha256(
+            b"{" + (b"\xff" * 5_000) + b"}"
+        ).hexdigest()
     if case == "probe-invalid-schema":
         assert '"unexpected": true' in failure["stdout"]
     expected = _expected(evidence, [{
@@ -958,7 +979,7 @@ def test_browser_state_adversarial_outcome_writes_independently_evaluable_eviden
     evaluation = evaluate_evidence(evidence, expected, trust)
     assert evaluation["passed"] is False
     assert evaluation["outcome"] == "blocked"
-    parent = typed_evidence.evaluate_parent_request({
+    parent_request = {
         "observation_id": context["observation_id"],
         "run_id": context["run_id"],
         "action_id": context["action_id"],
@@ -975,8 +996,24 @@ def test_browser_state_adversarial_outcome_writes_independently_evaluable_eviden
             }],
         },
         "evidence_path": str(evidence_path),
-    }, trust)
+    }
+    parent = typed_evidence.evaluate_parent_request(parent_request, trust)
     assert parent["passed"] is False
+    if case == "transition-invalid-bytes":
+        wrong_source = json.loads(json.dumps(parent_request))
+        wrong_source["conjunct"]["source_id"] = "decoy-source"
+        with pytest.raises(TypedEvidenceError, match="source does not match"):
+            typed_evidence.evaluate_parent_request(wrong_source, trust)
+
+        malformed = json.loads(json.dumps(parent_request))
+        malformed["conjunct"]["assertions"][0]["unexpected"] = True
+        with pytest.raises(TypedEvidenceError, match="fields do not match schema"):
+            typed_evidence.evaluate_parent_request(malformed, trust)
+
+        empty = json.loads(json.dumps(parent_request))
+        empty["conjunct"]["assertions"] = []
+        with pytest.raises(TypedEvidenceError, match="must contain 1-64"):
+            typed_evidence.evaluate_parent_request(empty, trust)
 
 
 def test_browser_fetch_json_action_has_closed_pointer_contract() -> None:

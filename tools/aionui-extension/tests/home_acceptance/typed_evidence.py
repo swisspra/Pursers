@@ -2835,9 +2835,12 @@ def _browser_transition_call(
         return str(value).encode()
 
     def bounded_text(value: bytes, limit: int = 4096) -> str:
-        if len(value) <= limit:
-            return value.decode("utf-8", errors="replace")
-        return value[-(limit - 3):].decode("utf-8", errors="replace")
+        decoded = value.decode("utf-8", errors="replace")
+        encoded = decoded.encode("utf-8")
+        if len(encoded) <= limit:
+            return decoded
+        tail = encoded[-(limit - 3):].decode("utf-8", errors="ignore")
+        return "..." + tail
 
     def bounded_reason(value: str) -> str:
         raw = value.encode()
@@ -2880,7 +2883,7 @@ def _browser_transition_call(
                     str(Path(str(source["command"])).resolve()),
                     "probe-browser", "--page", source["page_url"],
                 ],
-                text=True, capture_output=True, check=False,
+                text=False, capture_output=True, check=False,
                 timeout=float(source["timeout_seconds"]),
                 cwd=Path(str(source["command"])).resolve().parent,
                 env=environment,
@@ -2909,7 +2912,16 @@ def _browser_transition_call(
                 probe_stderr,
             )
         try:
-            value = json.loads(probe.stdout)
+            probe_text = probe_stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            return (
+                None,
+                "browser failure binding probe returned invalid UTF-8 output",
+                probe_stdout,
+                probe_stderr,
+            )
+        try:
+            value = json.loads(probe_text)
         except json.JSONDecodeError:
             return (
                 None,
@@ -2969,7 +2981,7 @@ def _browser_transition_call(
 
     def invalid_result(
         reason: str,
-        completed: subprocess.CompletedProcess[str],
+        completed: subprocess.CompletedProcess[Any],
     ) -> dict[str, Any]:
         binding, probe_reason, probe_stdout, probe_stderr = failure_binding()
         stdout = output_bytes(completed.stdout)
@@ -2989,8 +3001,8 @@ def _browser_transition_call(
     try:
         completed = subprocess.run(
             [str(Path(str(source["command"])).resolve()), "transition"],
-            input=json.dumps(payload, sort_keys=True),
-            text=True, capture_output=True, check=False,
+            input=json.dumps(payload, sort_keys=True).encode("utf-8"),
+            text=False, capture_output=True, check=False,
             timeout=float(source["timeout_seconds"]),
             cwd=Path(str(source["command"])).resolve().parent,
             env=environment,
@@ -3023,7 +3035,14 @@ def _browser_transition_call(
             "trusted browser state command returned oversized output", completed
         )
     try:
-        result = json.loads(completed.stdout)
+        stdout_text = stdout_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return invalid_result(
+            "trusted browser state command returned invalid UTF-8 output",
+            completed,
+        )
+    try:
+        result = json.loads(stdout_text)
     except json.JSONDecodeError:
         return invalid_result(
             "trusted browser state command returned invalid JSON", completed
@@ -3296,10 +3315,10 @@ def _semantic_contains(value: Any, expected: str) -> bool:
     return bool(needle) and needle in _normalized_semantic_text(value)
 
 
-def _evaluate_parent_fielded_conjunct(
+def _validate_parent_fielded_conjunct(
     conjunct: dict[str, Any], evidence: dict[str, Any]
-) -> bool:
-    """Evaluate the canonical parent form with exact typed paths and operators."""
+) -> list[dict[str, Any]]:
+    """Validate the canonical parent form without consulting outcome data."""
     kind = evidence["kind"]
     conjunct = _closed(
         conjunct, {"kind", "source_id", "assertions"},
@@ -3310,8 +3329,7 @@ def _evaluate_parent_fielded_conjunct(
     assertions = conjunct["assertions"]
     if not isinstance(assertions, list) or not assertions or len(assertions) > 64:
         raise TypedEvidenceError("parent conjunct assertions must contain 1-64 items")
-    record = evidence["record"]
-    checks: list[bool] = []
+    validated: list[dict[str, Any]] = []
     for assertion in assertions:
         if kind == "http_response":
             assertion = _closed(
@@ -3320,13 +3338,14 @@ def _evaluate_parent_fielded_conjunct(
             )
             target = assertion["target"]
             path = assertion["path"]
-            if target == "status" and path == "":
-                actual = record["response"]["status"]
-            elif target == "action_origin" and path == "":
-                actual = record["action_origin"]
-            elif target == "field" and isinstance(path, str) and path.startswith("/"):
-                actual = record["response"]["selected"].get(path, object())
-            else:
+            if not (
+                (target in {"status", "action_origin"} and path == "")
+                or (
+                    target == "field"
+                    and isinstance(path, str)
+                    and path.startswith("/")
+                )
+            ):
                 raise TypedEvidenceError("parent http_response assertion target/path is invalid")
         elif kind == "mcp_tool_response":
             assertion = _closed(
@@ -3338,7 +3357,6 @@ def _evaluate_parent_fielded_conjunct(
                 raise TypedEvidenceError(
                     "parent mcp_tool_response assertion path is invalid"
                 )
-            actual = record["result"]["selected"].get(path, object())
         elif kind == "receipt_field":
             assertion = _closed(
                 assertion, {"path", "op", "value"},
@@ -3347,7 +3365,6 @@ def _evaluate_parent_fielded_conjunct(
             path = assertion["path"]
             if not isinstance(path, str) or not path.startswith("/"):
                 raise TypedEvidenceError("parent receipt_field assertion path is invalid")
-            actual = record["fields"].get(path, object())
         elif kind == "log_assertion":
             assertion = _closed(
                 assertion, {"path", "op", "value"},
@@ -3356,7 +3373,6 @@ def _evaluate_parent_fielded_conjunct(
             path = assertion["path"]
             if not isinstance(path, str) or not path.startswith("/"):
                 raise TypedEvidenceError("parent log_assertion assertion path is invalid")
-            actual = _pointer(record["entry"], path)
         elif kind == "state_transition":
             assertion = _closed(
                 assertion, {"phase", "path", "op", "value"},
@@ -3366,14 +3382,60 @@ def _evaluate_parent_fielded_conjunct(
             path = assertion["path"]
             if phase not in {"before", "action", "after"}:
                 raise TypedEvidenceError("parent state_transition assertion phase is invalid")
-            if path == "/status":
-                actual = record[phase]["status"]
-            elif isinstance(path, str) and path.startswith("/"):
-                actual = record[phase]["selected"].get(path, object())
-            else:
+            if path != "/status" and not (
+                isinstance(path, str) and path.startswith("/")
+            ):
                 raise TypedEvidenceError("parent state_transition assertion path is invalid")
         else:
             raise TypedEvidenceError("parent fielded conjunct kind is unsupported")
+        op = assertion["op"]
+        expected = assertion["value"]
+        if op not in {"eq", "ne", "contains", "in", "gt", "gte", "lt", "lte"}:
+            raise TypedEvidenceError("typed assertion operator is unsupported")
+        if op == "in" and not isinstance(expected, list):
+            raise TypedEvidenceError("in expected value must be an array")
+        if op in {"gt", "gte", "lt", "lte"} and (
+            not isinstance(expected, (int, float)) or isinstance(expected, bool)
+        ):
+            raise TypedEvidenceError("ordered comparison expected value must be numeric")
+        validated.append(assertion)
+    return validated
+
+
+def _evaluate_parent_fielded_conjunct(
+    conjunct: dict[str, Any], evidence: dict[str, Any]
+) -> bool:
+    """Evaluate the canonical parent form with exact typed paths and operators."""
+    kind = evidence["kind"]
+    assertions = _validate_parent_fielded_conjunct(conjunct, evidence)
+    record = evidence["record"]
+    checks: list[bool] = []
+    for assertion in assertions:
+        if kind == "http_response":
+            target = assertion["target"]
+            path = assertion["path"]
+            if target == "status":
+                actual = record["response"]["status"]
+            elif target == "action_origin":
+                actual = record["action_origin"]
+            else:
+                actual = record["response"]["selected"].get(path, object())
+        elif kind == "mcp_tool_response":
+            actual = record["result"]["selected"].get(
+                assertion["path"], object()
+            )
+        elif kind == "receipt_field":
+            actual = record["fields"].get(assertion["path"], object())
+        elif kind == "log_assertion":
+            actual = _pointer(record["entry"], assertion["path"])
+        else:
+            phase = assertion["phase"]
+            path = assertion["path"]
+            actual = (
+                record[phase]["status"]
+                if path == "/status"
+                else record[phase]["selected"].get(path, object())
+            )
         checks.append(_compare(actual, {"op": assertion["op"], "value": assertion["value"]}))
     return all(checks)
 
@@ -3423,6 +3485,7 @@ def evaluate_parent_request(request: Any, trust_config: Any) -> dict[str, Any]:
     if kind == "state_transition" and record.get("outcome") in {
         "failure", "blocked",
     }:
+        _validate_parent_fielded_conjunct(conjunct, evidence)
         passed = False
     elif set(conjunct) == {"kind", "source_id", "assertions"}:
         passed = _evaluate_parent_fielded_conjunct(conjunct, evidence)
