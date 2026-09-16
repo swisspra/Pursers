@@ -188,6 +188,10 @@ class TypedEvidenceError(ValueError):
     """Fail-closed typed evidence contract error."""
 
 
+class _TrustBindingError(TypedEvidenceError):
+    """Runtime identity violated a verifier-pinned trust boundary."""
+
+
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(
         self, request: Request, file_pointer: Any, code: int, message: str,
@@ -2782,7 +2786,7 @@ def _browser_transition_result(
             or raw["status"] != 200
             or runtime_assistant != expected_runtime
         ):
-            raise TypedEvidenceError("runtime assistant differs from installed candidate")
+            raise _TrustBindingError("runtime assistant differs from installed candidate")
         compact = _assistant_public_binding(
             source, trust, action_spec["assistant_id"]
         )
@@ -3051,6 +3055,8 @@ def _browser_transition_call(
         return _browser_transition_result(
             result, source, context, payload, trust, observer
         )
+    except _TrustBindingError:
+        raise
     except TypedEvidenceError as exc:
         return invalid_result(
             f"trusted browser state result is invalid: {exc}", completed
