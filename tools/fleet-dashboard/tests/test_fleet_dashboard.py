@@ -9484,6 +9484,76 @@ def test_agents_hub_does_not_attach_unidentified_worker_to_duplicate_live_names(
     assert "Live pool seat · not locally managed" in result
 
 
+def test_agents_hub_includes_unrepresented_managed_worker_as_offline() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    workers = {
+        "workers": [
+            {
+                "name": "stopped-seat",
+                "role": "worker",
+                "running": False,
+                "current_work": [],
+                "host": "codex",
+                "max_tier": "standard",
+            }
+        ]
+    }
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const agentStatusRank="),
+            source("function compareAgents("),
+            source("function relativeAge("),
+            source("function clippedAgentTitle("),
+            source("function agentLiveWork("),
+            source("function agentTicketLink("),
+            source("function agentVisibilityToggle("),
+            source("function pageHead("),
+            source("function agentIdentity("),
+            source("function agentIdentityLabel("),
+            source("function workerForAgent("),
+            source("function renderRoleChips("),
+            source("function agentRoles("),
+            source("function canonicalAgentClient("),
+            source("function agentClients("),
+            source("function agentBoards("),
+            source("function agentTier("),
+            source("function agentDisplayState("),
+            source("function detailedAge("),
+            source("function leaseCountdown("),
+            source("function agentMatchesFilters("),
+            source("function agentFilterOptions("),
+            source("function agentCountStrip("),
+            source("function agentFilterBar("),
+            source("function liveAgentCard("),
+            source("function inactiveAgentDrawer("),
+            source("function renderAgentsHub("),
+            "const renderGuide=()=>'';",
+            "const managedControls=()=>'<span>MANAGED-CONTROLS</span>';",
+            f"let fleetData={{fleet:{{agents:[],inactive_agents:[]}}}},hubWorkers={{fleet:{json.dumps(workers)}}},hubGuide=null,agentFilters={{role:'all',status:'all',board:'all',client:'all'}};",
+            "console.log(renderAgentsHub());",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    ).stdout
+
+    assert result.count('<article class="agent-card') == 1
+    assert "<h3>stopped-seat</h3>" in result
+    assert 'data-pursers-status="offline"' in result
+    assert re.search(r'data-agent-status-filter="offline"[^>]*>.*?<b>1</b>', result)
+    assert "Tier standard" in result
+    assert "codex" in result
+    assert "MANAGED-CONTROLS" in result
+
+
 def test_overview_renders_exact_online_count_separately_from_central_health() -> None:
     script = "\n".join(
         re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
