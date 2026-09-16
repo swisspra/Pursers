@@ -20,6 +20,7 @@ sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
+from mcp import Client  # noqa: E402
 from mcp.server.connection import Connection  # noqa: E402
 from mcp.types import (  # noqa: E402
     ClientCapabilities,
@@ -184,6 +185,75 @@ class HumanRequestsCoreTests(unittest.TestCase):
         self.assertIsInstance(result, dict)
         self.assertEqual(result["pending"], [])
         self.assertNotIn("inputRequests", str(type(result)))
+
+    def test_primary_resolver_handler_completes_both_protocol_eras(self) -> None:
+        fake = self._client_with_form_request()
+
+        async def fake_client(_context):
+            return fake
+
+        async def answer(_context, _params):
+            return ElicitResult(
+                action="accept",
+                content={"answer": "yes", "disposition": "reopen"},
+            )
+
+        async def exercise() -> list[str]:
+            versions = []
+            for mode in ("legacy", "auto"):
+                async with Client(
+                    wait_server.mcp,
+                    mode=mode,
+                    elicitation_callback=answer,
+                ) as client:
+                    result = await client.call_tool(
+                        "board_human_request",
+                        {
+                            "board_id": "proj-a",
+                            "ticket_id": "TK-1",
+                            "request_id": "REQ-1",
+                        },
+                    )
+                    self.assertFalse(result.is_error)
+                    versions.append(str(client.protocol_version))
+            return versions
+
+        with mock.patch.object(wait_server, "_client_for_tool", fake_client):
+            versions = run(exercise())
+        self.assertEqual(versions, ["2025-11-25", "2026-07-28"])
+        self.assertEqual(len(fake.resolved), 2)
+        self.assertTrue(all(call["content"] == {"answer": "yes"} for call in fake.resolved))
+
+    def test_primary_resolver_flattens_multi_enum(self) -> None:
+        model = wait_server._human_elicitation_model(
+            {
+                "type": "object",
+                "properties": {
+                    "labels": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["red", "blue"]},
+                    },
+                    "_pursers_choice_0_0": {"type": "string"},
+                },
+                "required": ["labels"],
+            }
+        )
+        rendered = model.model_json_schema(by_alias=True)
+        flattened = next(
+            name
+            for name in rendered["properties"]
+            if name.startswith("_pursers_choice_")
+            and name != "_pursers_choice_0_0"
+        )
+        self.assertEqual(rendered["properties"][flattened]["type"], "boolean")
+        self.assertNotIn("array", str(rendered["properties"]))
+        value = model.model_validate(
+            {flattened: True, "disposition": "park"}
+        )
+        self.assertEqual(
+            wait_server._human_elicitation_content(value),
+            ({"labels": ["red"]}, "park"),
+        )
 
     def test_fallback_when_client_declares_no_elicitation(self) -> None:
         client = self._client_with_form_request()

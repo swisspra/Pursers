@@ -69,7 +69,7 @@ from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pursers_client import (
     CENTRAL_EVENT_KINDS,
@@ -96,11 +96,23 @@ from pursers_client import (
     SUBMITTED_RELEVANT_KINDS,
     WORKER_WAIT_KINDS,
     human_form_safety,
+    REQUEST_STATE_TTL_S,
+    load_or_create_request_state_keys,
     parse_project_registry,
     registry_work_dirs,
     resolve_registry_target,
 )
-from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver import (
+    AcceptedElicitation,
+    CancelledElicitation,
+    Context,
+    DeclinedElicitation,
+    Elicit,
+    ElicitationResult,
+    MCPServer,
+    RequestStateSecurity,
+    Resolve,
+)
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import (
     ClientCapabilities,
@@ -111,6 +123,7 @@ from mcp.types import (
 )
 from mcp.types.version import is_version_at_least
 from mcp.server.subscriptions import ResourceUpdated
+from pydantic import BaseModel, ConfigDict, Field, create_model
 from agent_naming import resolve_agent_name
 import door_state
 from backlog import (
@@ -3098,7 +3111,26 @@ async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
 
 BRIDGE_DEPRECATED_TOOLS: frozenset[str] = frozenset()
 
-mcp = MCPServer("Pursers Wait Bridge", version=VERSION, lifespan=_lifespan)
+
+def _request_state_key_path() -> Path:
+    configured = os.environ.get("PURSERS_REQUEST_STATE_KEY_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return door_state.default_state_dir() / "request-state.keys"
+
+
+_REQUEST_STATE_SECURITY = RequestStateSecurity(
+    keys=load_or_create_request_state_keys(_request_state_key_path()),
+    ttl=REQUEST_STATE_TTL_S,
+)
+
+
+mcp = MCPServer(
+    "Pursers Wait Bridge",
+    version=VERSION,
+    lifespan=_lifespan,
+    request_state_security=_REQUEST_STATE_SECURITY,
+)
 mcp._lowlevel_server.middleware.append(
     SessionCaptureMiddleware(_get_orchestrator_engine, _get_lease_keepalive)
 )
@@ -3440,6 +3472,269 @@ async def _resolve_human_request(
     if content:
         arguments["content"] = content
     return await view._call("ticket_human_resolve", arguments)
+
+
+async def _find_pending_human_request(
+    client: BoardClient,
+    *,
+    board_id: str,
+    ticket_id: str,
+    request_id: str,
+) -> dict[str, Any]:
+    """Fetch one immutable pending request selected by explicit tool arguments."""
+
+    pending = await _collect_pending_human_requests(client, [board_id])
+    match = next(
+        (
+            item
+            for item in pending
+            if item["ticket_id"] == ticket_id and item["request_id"] == request_id
+        ),
+        None,
+    )
+    if match is None:
+        raise ToolError(
+            f"no pending human request found for {board_id}/{ticket_id}/{request_id}"
+        )
+    return match
+
+
+def _literal_strings(values: list[str]) -> Any:
+    """Build a runtime Literal whose only arms are strings."""
+
+    return Literal.__getitem__(tuple(values))
+
+
+def _human_elicitation_model(schema: Any) -> type[BaseModel]:
+    """Flatten a needs_human schema into MCP's primitive elicitation surface."""
+
+    source = schema if isinstance(schema, dict) else {}
+    properties = source.get("properties")
+    properties = properties if isinstance(properties, dict) else {}
+    required = {
+        str(item) for item in source.get("required", [])
+    } if isinstance(source.get("required"), list) else set()
+    model_fields: dict[str, tuple[Any, Any]] = {}
+    projection: dict[str, Any] = {"scalars": {}, "arrays": {}}
+    used_aliases = set(properties)
+
+    for index, (name, raw_definition) in enumerate(properties.items()):
+        definition = raw_definition if isinstance(raw_definition, dict) else {}
+        field_type = definition.get("type")
+        if field_type == "array":
+            items = definition.get("items")
+            choices = items.get("enum") if isinstance(items, dict) else None
+            if not isinstance(choices, list) or not all(
+                isinstance(choice, str) for choice in choices
+            ):
+                raise ToolError("human request array fields must be string enums")
+            flattened: list[tuple[str, str]] = []
+            for choice_index, choice in enumerate(choices):
+                internal = f"field_{index}_choice_{choice_index}"
+                alias = f"_pursers_choice_{index}_{choice_index}"
+                suffix = 1
+                while alias in used_aliases:
+                    suffix += 1
+                    alias = f"_pursers_choice_{index}_{choice_index}_{suffix}"
+                used_aliases.add(alias)
+                title = str(definition.get("title") or name)
+                model_fields[internal] = (
+                    bool,
+                    Field(
+                        default=False,
+                        alias=alias,
+                        title=f"{title}: {choice}",
+                        description=(
+                            f"Select this option to include {choice!r} in {name!r}."
+                        ),
+                    ),
+                )
+                flattened.append((alias, choice))
+            projection["arrays"][name] = {
+                "choices": flattened,
+                "required": name in required,
+            }
+            continue
+
+        python_type: Any
+        if field_type == "string":
+            choices = definition.get("enum")
+            if not isinstance(choices, list) and isinstance(
+                definition.get("oneOf"), list
+            ):
+                choices = [
+                    item.get("const")
+                    for item in definition["oneOf"]
+                    if isinstance(item, dict)
+                ]
+            if isinstance(choices, list):
+                if not choices or not all(isinstance(choice, str) for choice in choices):
+                    raise ToolError("human request choices must be strings")
+                python_type = _literal_strings(choices)
+            else:
+                python_type = str
+        elif field_type == "integer":
+            python_type = int
+        elif field_type == "number":
+            python_type = float
+        elif field_type == "boolean":
+            python_type = bool
+        else:
+            raise ToolError("human request fields must be flat primitive values")
+
+        field_args: dict[str, Any] = {
+            "alias": name,
+            "title": definition.get("title") or name,
+        }
+        if isinstance(definition.get("description"), str):
+            field_args["description"] = definition["description"]
+        if field_type == "string" and "enum" not in definition and "oneOf" not in definition:
+            if "minLength" in definition:
+                field_args["min_length"] = definition["minLength"]
+            if "maxLength" in definition:
+                field_args["max_length"] = definition["maxLength"]
+        if field_type in {"integer", "number"}:
+            if "minimum" in definition:
+                field_args["ge"] = definition["minimum"]
+            if "maximum" in definition:
+                field_args["le"] = definition["maximum"]
+        default = ... if name in required else definition.get("default", None)
+        internal = f"field_{index}"
+        model_fields[internal] = (
+            python_type,
+            Field(default=default, **field_args),
+        )
+        projection["scalars"][name] = internal
+
+    disposition_alias = _disposition_field_name(source)
+    disposition_internal = "pursers_disposition"
+    model_fields[disposition_internal] = (
+        _literal_strings(list(HUMAN_DISPOSITIONS)),
+        Field(
+            default=...,
+            alias=disposition_alias,
+            title="Disposition",
+            description=(
+                "reopen: resume with this answer; park: keep waiting; "
+                "cancel: cancel the ticket"
+            ),
+        ),
+    )
+    projection["disposition"] = disposition_alias
+    model = create_model(
+        "NeedsHumanResponse",
+        __config__=ConfigDict(extra="forbid", populate_by_name=True),
+        **model_fields,
+    )
+    setattr(model, "__pursers_projection__", projection)
+    return model
+
+
+def _human_elicitation_content(value: BaseModel) -> tuple[dict[str, Any], str]:
+    """Rebuild Central's original answer shape from the flat elicitation model."""
+
+    projection = getattr(type(value), "__pursers_projection__", None)
+    if not isinstance(projection, dict):
+        raise ToolError("human elicitation projection is unavailable")
+    raw = value.model_dump(by_alias=True, exclude_none=True)
+    disposition = raw.pop(projection["disposition"], None)
+    if disposition not in HUMAN_DISPOSITIONS:
+        raise ToolError("human elicitation disposition is invalid")
+    content: dict[str, Any] = {}
+    for name in projection["scalars"]:
+        if name in raw:
+            content[name] = raw[name]
+    for name, array_projection in projection["arrays"].items():
+        selected = [
+            choice
+            for alias, choice in array_projection["choices"]
+            if raw.get(alias) is True
+        ]
+        if selected or array_projection["required"]:
+            content[name] = selected
+    return content, str(disposition)
+
+
+async def _resolve_one_human_request(
+    board_id: str,
+    ticket_id: str,
+    request_id: str,
+    ctx: Context,
+) -> Elicit[BaseModel]:
+    """Return one stable question; Resolve chooses MRTR or legacy transport."""
+
+    client = await _client_for_tool(ctx)
+    item = await _find_pending_human_request(
+        client,
+        board_id=board_id,
+        ticket_id=ticket_id,
+        request_id=request_id,
+    )
+    if item.get("url"):
+        raise ToolError(
+            "this request requires URL elicitation; use board_human_requests or the dashboard"
+        )
+    form_safe, safety_reason = human_form_safety(
+        item.get("message"), item.get("requested_schema")
+    )
+    if not form_safe:
+        raise ToolError(safety_reason or SENSITIVE_FORM_FALLBACK)
+    message = f"[{board_id}/{ticket_id}] {item['message']}"[:HUMAN_MESSAGE_CHARS]
+    return Elicit(message, _human_elicitation_model(item.get("requested_schema")))
+
+
+@mcp.tool()
+async def board_human_request(
+    board_id: str,
+    ticket_id: str,
+    request_id: str,
+    response: Annotated[
+        ElicitationResult[BaseModel], Resolve(_resolve_one_human_request)
+    ],
+    ctx: Context,
+) -> dict[str, Any]:
+    """Answer one pending needs_human request in the current MCP host."""
+
+    client = await _client_for_tool(ctx)
+    await _find_pending_human_request(
+        client,
+        board_id=board_id,
+        ticket_id=ticket_id,
+        request_id=request_id,
+    )
+    if isinstance(response, CancelledElicitation):
+        return {
+            "ok": True,
+            "resolved": [],
+            "deferred": [{"board": board_id, "ticket_id": ticket_id, "request_id": request_id}],
+        }
+    if isinstance(response, AcceptedElicitation):
+        content, disposition = _human_elicitation_content(response.data)
+        action = "accept"
+    elif isinstance(response, DeclinedElicitation):
+        content, disposition, action = {}, "park", "decline"
+    else:
+        raise ToolError("unsupported human elicitation result")
+    result = await _resolve_human_request(
+        client,
+        board_id=board_id,
+        ticket_id=ticket_id,
+        request_id=request_id,
+        action=action,
+        content=content or None,
+        disposition=disposition,
+    )
+    return {
+        "ok": True,
+        "resolved": [{
+            "board": board_id,
+            "ticket_id": ticket_id,
+            "request_id": request_id,
+            "action": action,
+            "disposition": disposition,
+        }],
+        "result": result,
+    }
 
 
 def _human_fallback_instructions() -> str:
@@ -3899,10 +4194,13 @@ async def board_human_requests(
     list includes instructions for answering via `answer` or the dashboard.
     """
     client = await _client_for_tool(ctx)
+    try:
+        protocol_version = ctx.protocol_version
+    except Exception:
+        protocol_version = "2026-07-28"
     capabilities: Any = None
     responses: Any = None
     state: str | None = None
-    protocol_version = "2026-07-28"
     try:
         capabilities = ctx.client_capabilities
     except Exception:
@@ -3921,11 +4219,6 @@ async def board_human_requests(
     except Exception:
         responses = None
         state = None
-    try:
-        protocol_version = ctx.protocol_version
-    except Exception:
-        pass
-
     async def legacy_elicit_form(
         message: str, requested_schema: dict[str, Any]
     ) -> Any:
