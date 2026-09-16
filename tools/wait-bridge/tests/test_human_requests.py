@@ -19,6 +19,12 @@ CLIENT_SRC = REPOSITORY / "packages" / "client" / "src"
 sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
+_REQUEST_STATE_TEST_DIR = Path(
+    tempfile.mkdtemp(prefix="pursers-wait-request-state-tests-")
+)
+os.environ["PURSERS_REQUEST_STATE_KEY_FILE"] = str(
+    _REQUEST_STATE_TEST_DIR / "request-state.keys"
+)
 
 from mcp import Client  # noqa: E402
 from mcp.server.connection import Connection  # noqa: E402

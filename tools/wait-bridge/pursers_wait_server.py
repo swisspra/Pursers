@@ -114,6 +114,7 @@ from mcp.server.mcpserver import (
     Resolve,
 )
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.request_state import AESGCMRequestStateCodec
 from mcp.types import (
     ClientCapabilities,
     ElicitRequest,
@@ -3119,8 +3120,25 @@ def _request_state_key_path() -> Path:
     return door_state.default_state_dir() / "request-state.keys"
 
 
+class _LazyRequestStateCodec:
+    """Load the shared keyring only when MRTR traffic needs the codec."""
+
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _codec() -> AESGCMRequestStateCodec:
+        return AESGCMRequestStateCodec(
+            load_or_create_request_state_keys(_request_state_key_path())
+        )
+
+    def seal(self, payload: bytes) -> str:
+        return self._codec().seal(payload)
+
+    def unseal(self, token: str) -> bytes:
+        return self._codec().unseal(token)
+
+
 _REQUEST_STATE_SECURITY = RequestStateSecurity(
-    keys=load_or_create_request_state_keys(_request_state_key_path()),
+    codec=_LazyRequestStateCodec(),
     ttl=REQUEST_STATE_TTL_S,
 )
 

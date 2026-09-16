@@ -1,6 +1,10 @@
 """Executable MCP 2026-07-28 MRTR and dual-era contracts."""
 
 import asyncio
+import os
+from pathlib import Path
+import subprocess
+import sys
 from typing import Annotated, Literal
 
 import pytest
@@ -20,12 +24,42 @@ from mcp.types import ElicitResult, InputRequiredResult
 from pydantic import BaseModel
 
 
+WAIT_BRIDGE = Path(__file__).resolve().parents[1]
+REPOSITORY = WAIT_BRIDGE.parents[1]
+
+
 class Choice(BaseModel):
     choice: Literal["yes", "no"]
 
 
 async def _answer(_context, _params) -> ElicitResult:
     return ElicitResult(action="accept", content={"choice": "yes"})
+
+
+def test_wait_bridge_import_defers_request_state_keyring_io(tmp_path: Path) -> None:
+    key_dir = tmp_path / "read-only-state"
+    key_dir.mkdir()
+    key_dir.chmod(0o500)
+    key_path = key_dir / "request-state.keys"
+    environment = os.environ.copy()
+    environment["PURSERS_REQUEST_STATE_KEY_FILE"] = str(key_path)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(REPOSITORY / "packages/client/src"), str(WAIT_BRIDGE)]
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", "import pursers_wait_server"],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        key_dir.chmod(0o700)
+
+    assert completed.returncode == 0, completed.stderr
+    assert not key_path.exists()
 
 
 def _resolver_server(
