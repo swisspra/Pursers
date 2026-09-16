@@ -2706,121 +2706,14 @@ def _browser_phase(
     return result
 
 
-def _browser_transition_call(
-    source: dict[str, Any], context: dict[str, Any], trust: dict[str, Any]
+def _browser_transition_result(
+    result: Any,
+    source: dict[str, Any],
+    context: dict[str, Any],
+    payload: dict[str, Any],
+    trust: dict[str, Any],
+    observer: dict[str, Any],
 ) -> dict[str, Any]:
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "context": context,
-        "surface_id": source["surface"],
-        "target": {"base_url": source["base_url"], "board_id": source["board_id"]},
-        "candidate_commit": source["candidate_commit"],
-        "page_url": source["page_url"],
-        "recipe": source["recipe"],
-    }
-    environment = {
-        "PATH": os.defpath,
-        "LANG": "C",
-        "LC_ALL": "C",
-        **source["env"],
-    }
-    observer = {
-        "command_sha256": source["command_sha256"],
-        "config_sha256": source["config_sha256"],
-        "page_url": source["page_url"],
-        "bridge": _bridge_provenance(
-            source["bridge_provenance"],
-            Path(str(trust["candidate_checkout_root"])).resolve(),
-        ),
-    }
-
-    def failure_binding() -> dict[str, Any] | None:
-        probe = subprocess.run(
-            [str(Path(str(source["command"])).resolve()), "probe-browser", "--page", source["page_url"]],
-            text=True, capture_output=True, check=False,
-            timeout=float(source["timeout_seconds"]),
-            cwd=Path(str(source["command"])).resolve().parent,
-            env=environment,
-        )
-        if probe.returncode or len(probe.stdout.encode()) > MAX_CONFIG_BYTES:
-            return None
-        try:
-            value = json.loads(probe.stdout)
-        except json.JSONDecodeError:
-            return None
-        keys = {
-            "observed_page_url", "screenshot_bytes", "screenshot_sha256",
-            "snapshot_nodes", "snapshot_bytes", "host", "candidate_commit",
-            "selected_board", "evidence_written",
-        }
-        if not isinstance(value, dict) or set(value) != keys:
-            return None
-        host = _closed(
-            value["host"], {"product", "version", "build", "source"},
-            "browser failure runtime binding",
-        )
-        if (
-            value["observed_page_url"] != source["page_url"]
-            or value["candidate_commit"] != source["candidate_commit"]
-            or value["selected_board"] != source["board_id"]
-            or value["evidence_written"] is not False
-            or not SHA256.fullmatch(str(value["screenshot_sha256"]))
-            or any(not isinstance(item, str) or not item for item in host.values())
-        ):
-            return None
-        return {
-            "runtime": host,
-            "candidate_commit": value["candidate_commit"],
-            "selected_board": value["selected_board"],
-            "screenshot_sha256": value["screenshot_sha256"],
-        }
-    try:
-        completed = subprocess.run(
-            [str(Path(str(source["command"])).resolve()), "transition"],
-            input=json.dumps(payload, sort_keys=True),
-            text=True, capture_output=True, check=False,
-            timeout=float(source["timeout_seconds"]),
-            cwd=Path(str(source["command"])).resolve().parent,
-            env=environment,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        reason = f"{type(exc).__name__}: trusted browser state command failed"
-        return {
-            "outcome": "blocked",
-            "failure": {
-                "stage": "browser_transition",
-                "exit_code": None,
-                "reason": reason,
-                "stdout": "",
-                "stderr": "",
-                "stdout_sha256": hashlib.sha256(b"").hexdigest(),
-                "stderr_sha256": hashlib.sha256(b"").hexdigest(),
-            },
-            "observer": {**observer, "binding": None},
-        }
-    stdout_bytes = completed.stdout.encode()
-    stderr_bytes = completed.stderr.encode()
-    if completed.returncode:
-        binding = failure_binding()
-        return {
-            "outcome": "failure" if binding is not None else "blocked",
-            "failure": {
-                "stage": "browser_transition",
-                "exit_code": completed.returncode,
-                "reason": "trusted browser state command returned no valid result",
-                "stdout": completed.stdout[-4096:],
-                "stderr": completed.stderr[-4096:],
-                "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
-                "stderr_sha256": hashlib.sha256(stderr_bytes).hexdigest(),
-            },
-            "observer": {**observer, "binding": binding},
-        }
-    if len(stdout_bytes) > MAX_CONFIG_BYTES:
-        raise TypedEvidenceError("trusted browser state command returned oversized output")
-    try:
-        result = json.loads(completed.stdout)
-    except json.JSONDecodeError:
-        raise TypedEvidenceError("trusted browser state command returned invalid JSON") from None
     expected_keys = {
         "schema_version", "context", "surface_id", "target", "candidate_commit",
         "page_url", "runtime", "before", "action", "after", "order",
@@ -2902,6 +2795,247 @@ def _browser_transition_call(
         "order": order,
         "observer": {**observer, "runtime": runtime},
     }
+
+
+def _browser_transition_call(
+    source: dict[str, Any], context: dict[str, Any], trust: dict[str, Any]
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "context": context,
+        "surface_id": source["surface"],
+        "target": {"base_url": source["base_url"], "board_id": source["board_id"]},
+        "candidate_commit": source["candidate_commit"],
+        "page_url": source["page_url"],
+        "recipe": source["recipe"],
+    }
+    environment = {
+        "PATH": os.defpath,
+        "LANG": "C",
+        "LC_ALL": "C",
+        **source["env"],
+    }
+    observer = {
+        "command_sha256": source["command_sha256"],
+        "config_sha256": source["config_sha256"],
+        "page_url": source["page_url"],
+        "bridge": _bridge_provenance(
+            source["bridge_provenance"],
+            Path(str(trust["candidate_checkout_root"])).resolve(),
+        ),
+    }
+
+    def output_bytes(value: Any) -> bytes:
+        if value is None:
+            return b""
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            return value.encode()
+        return str(value).encode()
+
+    def bounded_text(value: bytes, limit: int = 4096) -> str:
+        if len(value) <= limit:
+            return value.decode("utf-8", errors="replace")
+        return value[-(limit - 3):].decode("utf-8", errors="replace")
+
+    def bounded_reason(value: str) -> str:
+        raw = value.encode()
+        if len(raw) <= 1024:
+            return value
+        return raw[:1021].decode("utf-8", errors="replace")
+
+    def failure_result(
+        reason: str,
+        *,
+        exit_code: int | None,
+        stdout: bytes,
+        stderr: bytes,
+        binding: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "outcome": (
+                "failure"
+                if binding is not None and exit_code is not None and exit_code > 0
+                else "blocked"
+            ),
+            "failure": {
+                "stage": "browser_transition",
+                "exit_code": exit_code,
+                "reason": bounded_reason(reason),
+                "stdout": bounded_text(stdout),
+                "stderr": bounded_text(stderr),
+                "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+                "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+            },
+            "observer": {**observer, "binding": binding},
+        }
+
+    def failure_binding() -> tuple[
+        dict[str, Any] | None, str | None, bytes, bytes
+    ]:
+        try:
+            probe = subprocess.run(
+                [
+                    str(Path(str(source["command"])).resolve()),
+                    "probe-browser", "--page", source["page_url"],
+                ],
+                text=True, capture_output=True, check=False,
+                timeout=float(source["timeout_seconds"]),
+                cwd=Path(str(source["command"])).resolve().parent,
+                env=environment,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return (
+                None,
+                f"browser failure binding probe failed ({type(exc).__name__})",
+                output_bytes(getattr(exc, "stdout", None)),
+                output_bytes(getattr(exc, "stderr", None)),
+            )
+        probe_stdout = output_bytes(probe.stdout)
+        probe_stderr = output_bytes(probe.stderr)
+        if probe.returncode:
+            return (
+                None,
+                f"browser failure binding probe exited {probe.returncode}",
+                probe_stdout,
+                probe_stderr,
+            )
+        if len(probe_stdout) > MAX_CONFIG_BYTES:
+            return (
+                None,
+                "browser failure binding probe returned oversized output",
+                probe_stdout,
+                probe_stderr,
+            )
+        try:
+            value = json.loads(probe.stdout)
+        except json.JSONDecodeError:
+            return (
+                None,
+                "browser failure binding probe returned invalid JSON",
+                probe_stdout,
+                probe_stderr,
+            )
+        keys = {
+            "observed_page_url", "screenshot_bytes", "screenshot_sha256",
+            "snapshot_nodes", "snapshot_bytes", "host", "candidate_commit",
+            "selected_board", "evidence_written",
+        }
+        if not isinstance(value, dict) or set(value) != keys:
+            return (
+                None,
+                "browser failure binding probe result fields do not match schema",
+                probe_stdout,
+                probe_stderr,
+            )
+        try:
+            host = _closed(
+                value["host"], {"product", "version", "build", "source"},
+                "browser failure runtime binding",
+            )
+        except TypedEvidenceError:
+            return (
+                None,
+                "browser failure binding probe runtime fields do not match schema",
+                probe_stdout,
+                probe_stderr,
+            )
+        if (
+            value["observed_page_url"] != source["page_url"]
+            or value["candidate_commit"] != source["candidate_commit"]
+            or value["selected_board"] != source["board_id"]
+            or value["evidence_written"] is not False
+            or not SHA256.fullmatch(str(value["screenshot_sha256"]))
+            or any(not isinstance(item, str) or not item for item in host.values())
+        ):
+            return (
+                None,
+                "browser failure binding probe result is invalid",
+                probe_stdout,
+                probe_stderr,
+            )
+        return (
+            {
+                "runtime": host,
+                "candidate_commit": value["candidate_commit"],
+                "selected_board": value["selected_board"],
+                "screenshot_sha256": value["screenshot_sha256"],
+            },
+            None,
+            probe_stdout,
+            probe_stderr,
+        )
+
+    def invalid_result(
+        reason: str,
+        completed: subprocess.CompletedProcess[str],
+    ) -> dict[str, Any]:
+        binding, probe_reason, probe_stdout, probe_stderr = failure_binding()
+        stdout = output_bytes(completed.stdout)
+        stderr = output_bytes(completed.stderr)
+        if probe_reason is not None:
+            reason = f"{reason}; {probe_reason}"
+            stdout += b"\n[binding-probe]\n" + probe_stdout
+            stderr += b"\n[binding-probe]\n" + probe_stderr
+        return failure_result(
+            reason,
+            exit_code=None,
+            stdout=stdout,
+            stderr=stderr,
+            binding=binding,
+        )
+
+    try:
+        completed = subprocess.run(
+            [str(Path(str(source["command"])).resolve()), "transition"],
+            input=json.dumps(payload, sort_keys=True),
+            text=True, capture_output=True, check=False,
+            timeout=float(source["timeout_seconds"]),
+            cwd=Path(str(source["command"])).resolve().parent,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return failure_result(
+            f"trusted browser state command failed ({type(exc).__name__})",
+            exit_code=None,
+            stdout=output_bytes(getattr(exc, "stdout", None)),
+            stderr=output_bytes(getattr(exc, "stderr", None)),
+        )
+    stdout_bytes = output_bytes(completed.stdout)
+    stderr_bytes = output_bytes(completed.stderr)
+    if completed.returncode:
+        binding, probe_reason, probe_stdout, probe_stderr = failure_binding()
+        reason = f"trusted browser state command exited {completed.returncode}"
+        if probe_reason is not None:
+            reason = f"{reason}; {probe_reason}"
+            stdout_bytes += b"\n[binding-probe]\n" + probe_stdout
+            stderr_bytes += b"\n[binding-probe]\n" + probe_stderr
+        return failure_result(
+            reason,
+            exit_code=completed.returncode,
+            stdout=stdout_bytes,
+            stderr=stderr_bytes,
+            binding=binding,
+        )
+    if len(stdout_bytes) > MAX_CONFIG_BYTES:
+        return invalid_result(
+            "trusted browser state command returned oversized output", completed
+        )
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return invalid_result(
+            "trusted browser state command returned invalid JSON", completed
+        )
+    try:
+        return _browser_transition_result(
+            result, source, context, payload, trust, observer
+        )
+    except TypedEvidenceError as exc:
+        return invalid_result(
+            f"trusted browser state result is invalid: {exc}", completed
+        )
 
 
 def _record_transition(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -3286,7 +3420,11 @@ def evaluate_parent_request(request: Any, trust_config: Any) -> dict[str, Any]:
         raise TypedEvidenceError("parent conjunct kind does not match evidence")
     record = evidence["record"]
     source_id = evidence["source"]["source_id"]
-    if set(conjunct) == {"kind", "source_id", "assertions"}:
+    if kind == "state_transition" and record.get("outcome") in {
+        "failure", "blocked",
+    }:
+        passed = False
+    elif set(conjunct) == {"kind", "source_id", "assertions"}:
         passed = _evaluate_parent_fielded_conjunct(conjunct, evidence)
     elif kind == "http_response":
         conjunct = _closed(

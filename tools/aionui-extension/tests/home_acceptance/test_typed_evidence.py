@@ -796,6 +796,189 @@ def test_browser_state_timeout_is_signed_blocked_evidence(
     }]), trust)["outcome"] == "blocked"
 
 
+@pytest.mark.parametrize(
+    ("case", "reason_fragment"),
+    [
+        ("malformed-success", "returned invalid JSON"),
+        ("oversized-success", "returned oversized output"),
+        ("invalid-schema-success", "result fields do not match schema"),
+        ("transition-oserror", "command failed (OSError)"),
+        ("transition-timeout", "command failed (TimeoutExpired)"),
+        ("probe-oserror", "binding probe failed (OSError)"),
+        ("probe-timeout", "binding probe failed (TimeoutExpired)"),
+        ("probe-oversized", "binding probe returned oversized output"),
+        ("probe-invalid-json", "binding probe returned invalid JSON"),
+        ("probe-invalid-schema", "binding probe result fields do not match schema"),
+    ],
+)
+def test_browser_state_adversarial_outcome_writes_independently_evaluable_evidence(
+    tmp_path: Path,
+    http_server: str,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    reason_fragment: str,
+) -> None:
+    real_check_output = subprocess.check_output
+
+    def checked_output(arguments: list[str], **kwargs: Any) -> str:
+        if arguments[0] != "/bin/ps":
+            return real_check_output(arguments, **kwargs)
+        if arguments[-1] == "command=":
+            artifact = (
+                _candidate_checkout(tmp_path)
+                / "tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py"
+            )
+            return (
+                f"{sys.executable} {artifact} --typed-evidence-http-server "
+                f"{http_server.rsplit(':', 1)[1]}\n"
+            )
+        return "Mon Sep 16 04:00:00 2026\n"
+
+    monkeypatch.setattr(subprocess, "check_output", checked_output)
+    trust, context, recorder = _browser_state_trust(tmp_path, http_server)
+    source = trust["state_sources"]["aionui-start"]
+    probe_value = {
+        "observed_page_url": source["page_url"],
+        "screenshot_bytes": 100,
+        "screenshot_sha256": "a" * 64,
+        "snapshot_nodes": 10,
+        "snapshot_bytes": 100,
+        "host": {
+            "product": "AionUi", "version": "2.2.2", "build": "build-1",
+            "source": "signed-aionui-webui-listener",
+        },
+        "candidate_commit": CANDIDATE,
+        "selected_board": BOARD,
+        "evidence_written": False,
+    }
+    oversized = "x" * (typed_evidence.MAX_CONFIG_BYTES + 1)
+    real_run = subprocess.run
+
+    def adversarial_run(
+        arguments: list[str], **_kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        if arguments[0] == "git":
+            return real_run(arguments, **_kwargs)
+        if arguments[1] == "--version":
+            return subprocess.CompletedProcess(
+                arguments, 0, stdout="0.1.0a16\n", stderr=""
+            )
+        if arguments[1] == "transition":
+            if case == "transition-oserror":
+                raise OSError("transition unavailable")
+            if case == "transition-timeout":
+                raise subprocess.TimeoutExpired(
+                    arguments, timeout=10, output="transition partial stdout",
+                    stderr="transition partial stderr",
+                )
+            if case == "malformed-success":
+                return subprocess.CompletedProcess(
+                    arguments, 0, stdout="{malformed", stderr="transition stderr"
+                )
+            if case == "oversized-success":
+                return subprocess.CompletedProcess(
+                    arguments, 0, stdout=oversized, stderr="transition stderr"
+                )
+            if case == "invalid-schema-success":
+                return subprocess.CompletedProcess(
+                    arguments, 0, stdout=json.dumps({"unexpected": True}),
+                    stderr="transition stderr",
+                )
+            return subprocess.CompletedProcess(
+                arguments, 8, stdout="transition stdout", stderr="transition stderr"
+            )
+        assert arguments[1] == "probe-browser"
+        if case == "probe-oserror":
+            raise OSError("probe unavailable")
+        if case == "probe-timeout":
+            raise subprocess.TimeoutExpired(
+                arguments, timeout=10, output="probe partial stdout",
+                stderr="probe partial stderr",
+            )
+        if case == "probe-oversized":
+            return subprocess.CompletedProcess(
+                arguments, 0, stdout=oversized, stderr="probe stderr"
+            )
+        if case == "probe-invalid-json":
+            return subprocess.CompletedProcess(
+                arguments, 0, stdout="{probe-malformed", stderr="probe stderr"
+            )
+        if case == "probe-invalid-schema":
+            return subprocess.CompletedProcess(
+                arguments, 0, stdout=json.dumps({"unexpected": True}),
+                stderr="probe stderr",
+            )
+        return subprocess.CompletedProcess(
+            arguments, 0, stdout=json.dumps(probe_value), stderr=""
+        )
+
+    monkeypatch.setattr(typed_evidence.subprocess, "run", adversarial_run)
+    request = _request("state_transition", recorder, context)
+    request_path = tmp_path / "request.json"
+    trust_path = tmp_path / "trust.json"
+    evidence_path = tmp_path / "evidence.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    trust_path.write_text(json.dumps(trust), encoding="utf-8")
+    trust_path.chmod(0o600)
+
+    assert typed_evidence.main([
+        "record", "--request", str(request_path), "--trust", str(trust_path),
+        "--output", str(evidence_path),
+    ]) == 0
+    assert evidence_path.is_file()
+    assert evidence_path.stat().st_mode & 0o077 == 0
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    failure = evidence["record"]["failure"]
+    assert evidence["record"]["outcome"] == "blocked"
+    assert reason_fragment in failure["reason"]
+    assert len(failure["stdout"].encode()) <= 4096
+    assert len(failure["stderr"].encode()) <= 4096
+    if case in {"malformed-success", "oversized-success", "invalid-schema-success"}:
+        assert evidence["record"]["observer"]["binding"] == {
+            "runtime": probe_value["host"],
+            "candidate_commit": CANDIDATE,
+            "selected_board": BOARD,
+            "screenshot_sha256": "a" * 64,
+        }
+    else:
+        assert evidence["record"]["observer"]["binding"] is None
+    if case == "transition-timeout":
+        assert "transition partial stdout" in failure["stdout"]
+        assert "transition partial stderr" in failure["stderr"]
+    if case == "probe-timeout":
+        assert "probe partial stdout" in failure["stdout"]
+        assert "probe partial stderr" in failure["stderr"]
+    if case == "probe-invalid-json":
+        assert "{probe-malformed" in failure["stdout"]
+    if case == "probe-invalid-schema":
+        assert '"unexpected": true' in failure["stdout"]
+    expected = _expected(evidence, [{
+        "phase": "after", "path": "/state", "op": "eq", "value": "ready",
+    }])
+    evaluation = evaluate_evidence(evidence, expected, trust)
+    assert evaluation["passed"] is False
+    assert evaluation["outcome"] == "blocked"
+    parent = typed_evidence.evaluate_parent_request({
+        "observation_id": context["observation_id"],
+        "run_id": context["run_id"],
+        "action_id": context["action_id"],
+        "entity": context["entity"],
+        "causal_index": context["causal_index"],
+        "surface_id": context["surface"],
+        "board_id": context["board_id"],
+        "candidate_commit": context["candidate_commit"],
+        "conjunct": {
+            "kind": "state_transition", "source_id": "aionui-start",
+            "assertions": [{
+                "phase": "after", "path": "/state", "op": "eq",
+                "value": "ready",
+            }],
+        },
+        "evidence_path": str(evidence_path),
+    }, trust)
+    assert parent["passed"] is False
+
+
 def test_browser_fetch_json_action_has_closed_pointer_contract() -> None:
     action = {
         "kind": "click_response_json",
