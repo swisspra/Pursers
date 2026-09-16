@@ -49,6 +49,10 @@ suite before submitting.
 8. Submit the full commit SHA, exact changed-file list, and literal test evidence.
 9. A reviewer under a different principal independently checks that exact SHA.
 10. Address a rejection only after the ticket is reoffered and claimed again.
+11. Reuse the ticket branch for rejection fixes when the fix allows it; do not
+    create one remote branch per attempt.
+12. After a ticket closes, delete your own remote ticket branch. Never delete a
+    branch that backs a live ticket or a submission awaiting review.
 
 ## Commits and pull requests
 

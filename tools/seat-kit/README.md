@@ -275,8 +275,11 @@ The generated `AGENTS.md` and `.goosehints` contain the relentless loop:
    reports a moved remote tip, refresh the SHA evidence before retrying.
 6. **RE-ARM** — After a successful submit, leave its branch immutable and
    immediately wait for the next eligible ticket; do not wait for review.
-7. **RETRY CUES** — On a later rejection cue, get the ticket, follow its fix
-   instructions in a fresh candidate branch, resubmit, then re-arm again.
+7. **RETRY CUES** — On a later rejection cue, get the ticket, reuse its existing
+   branch when the fix allows it, follow the fix instructions, resubmit, then
+   re-arm again. Do not create a remote branch per rejection attempt.
+8. **CLEAN UP** — After the ticket closes, delete your own remote ticket branch.
+   Never delete a live ticket branch or a submitted branch awaiting review.
 
 **Never** poll `bin/board.sh list` in a loop. The wait verb blocks on Central's
 subscriptions/listen, using zero model turns except the re-arm.
