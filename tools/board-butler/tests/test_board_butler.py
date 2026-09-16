@@ -14,6 +14,7 @@ import pytest
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "board_butler.py"
+REPOSITORY_ROOT = MODULE_PATH.parents[2]
 SPEC = importlib.util.spec_from_file_location("board_butler", MODULE_PATH)
 assert SPEC and SPEC.loader
 butler = importlib.util.module_from_spec(SPEC)
@@ -144,6 +145,64 @@ def test_missing_mechanical_evidence_fails_closed_to_unknown(tmp_path: Path) -> 
     assert finding["verdict"] == "UNKNOWN"
     assert "incomplete" in finding["message"]
     assert "evidence_error=ValueError" in finding["evidence"]
+
+
+def test_real_tk_1ec_submission_escalates_when_covering_aionui_suite_failed() -> None:
+    source = Source()
+    # Sanitized from product ticket TK-1ec2ca97709b latest submission metadata and
+    # AN-000000001054.  This is the regression that earned the binding amendment.
+    source.tickets["TK-1ec2ca97709b"] = {
+        "notes": """\
+cumulative_files_changed: ["packages/central/README.md","packages/central/src/pursers_central/central.py","packages/client/src/pursers_client/__init__.py","packages/client/src/pursers_client/request_state.py","packages/client/tests/test_request_state.py","tools/wait-bridge/README.md","tools/wait-bridge/pursers_wait_server.py","tools/wait-bridge/tests/test_human_requests.py","tools/wait-bridge/tests/test_mrtr_protocol.py"]
+test-command: python3 tools/ci_manifest.py run
+test-output: central 209 passed; client 98 passed; wait-bridge 297 passed; AionUi: 52 failed, 229 passed, 3 skipped; every failure is sandbox denial of /bin/ps
+"""
+    }
+
+    finding = asyncio.run(
+        butler.make_finding(
+            question(
+                "May review proceed when the AionUi suite failed for TK-1ec2ca97709b?",
+                kind="decision",
+            ),
+            source,
+            REPOSITORY_ROOT,
+            "origin/main",
+            NOW,
+        )
+    )
+
+    assert finding["verdict"] == "ESCALATE"
+    assert finding["policy_rule"] == "coverage-blindness"
+    assert "packages/client/src/pursers_client/__init__.py -> aionui-extension" in finding["message"]
+    assert "tools/ci_manifest.py" in finding["evidence"]
+
+
+def test_blocked_suite_unrelated_to_docs_only_diff_is_mechanical() -> None:
+    source = Source()
+    source.tickets["TK-docs"] = {
+        "notes": """\
+cumulative_files_changed: ["docs/design-home/example.md"]
+test-command: python3 tools/ci_manifest.py run
+test-output: AionUi: 52 failed, 229 passed, 3 skipped; sandbox denied /bin/ps
+"""
+    }
+
+    finding = asyncio.run(
+        butler.make_finding(
+            question(
+                "May review proceed when the AionUi suite failed for TK-docs?",
+                kind="decision",
+            ),
+            source,
+            REPOSITORY_ROOT,
+            "origin/main",
+            NOW,
+        )
+    )
+
+    assert finding["verdict"] == "MECHANICAL"
+    assert "do not cover the submitted diff" in finding["message"]
 
 
 def test_git_ancestry_draft_consumes_real_repository_state(tmp_path: Path) -> None:
@@ -346,6 +405,43 @@ def test_quiet_once_has_one_push_wait_and_zero_central_writes(tmp_path: Path) ->
     assert backend.reads == 0
     assert backend.writes == 0
     assert json.loads(options.cursor_file.read_text())["cursor"] == 44
+
+
+def test_cursor_zero_is_not_reused_for_catchup(tmp_path: Path) -> None:
+    cursor = tmp_path / "cursor.json"
+    cursor.write_text('{"cursor": 0}\n', encoding="utf-8")
+
+    assert butler.load_cursor(cursor) is None
+
+
+def test_closed_resident_push_stream_does_not_reconnect_spin(tmp_path: Path) -> None:
+    options = args(tmp_path)
+    options.once = False
+
+    class ClosedBackend:
+        latest_seq = 44
+        waits = 0
+
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "ClosedBackend":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def wait_for_question(
+            self, cursor: int, _timeout: None
+        ) -> tuple[int, None]:
+            self.waits += 1
+            return cursor, None
+
+    backend = ClosedBackend()
+    with pytest.raises(RuntimeError, match="push subscription ended"):
+        asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
+
+    assert backend.waits == 1
 
 
 def test_dry_run_prints_draft_and_does_not_write(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

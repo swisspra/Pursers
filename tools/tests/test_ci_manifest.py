@@ -16,6 +16,7 @@ sys.path.insert(0, str(TOOLS))
 from ci_manifest import (  # noqa: E402
     SUITES,
     Suite,
+    covering_suites,
     parse_collected_count,
     pytest_target,
     suite_environment,
@@ -32,6 +33,21 @@ def test_central_suite_covers_board_move_regression() -> None:
     central = next(suite for suite in SUITES if suite.name == "central")
     assert central.path == "packages/central/tests"
     assert (REPOSITORY_ROOT / central.path / "test_board_move.py").is_file()
+
+
+def test_manifest_declares_cross_package_acceptance_coverage() -> None:
+    coverage = covering_suites(
+        [
+            "packages/client/src/pursers_client/__init__.py",
+            "docs/design-home/example.md",
+        ]
+    )
+
+    assert coverage["packages/client/src/pursers_client/__init__.py"] == (
+        "client",
+        "aionui-extension",
+    )
+    assert coverage["docs/design-home/example.md"] == ()
 
 
 def test_manifest_rejects_an_unlisted_test_directory(tmp_path: Path) -> None:

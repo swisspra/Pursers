@@ -27,24 +27,65 @@ class Suite:
     name: str
     path: str
     cwd: str = "."
+    covers: tuple[str, ...] = ()
 
 
 SUITES: tuple[Suite, ...] = (
-    Suite("central", "packages/central/tests"),
-    Suite("client", "packages/client/tests"),
-    Suite("import", "packages/import/tests", cwd="packages/import"),
-    Suite("personal", "packages/personal/tests"),
-    Suite("wait-bridge", "tools/wait-bridge/tests"),
-    Suite("fleet-dashboard", "tools/fleet-dashboard/tests"),
-    Suite("coordinator", "tools/coordinator/tests"),
-    Suite("board-butler", "tools/board-butler/tests"),
-    Suite("worker-runtime", "tools/worker-runtime/tests"),
-    Suite("acp-seat", "tools/acp-seat/tests"),
-    Suite("acp-agent", "tools/acp-agent/tests"),
-    Suite("seat-kit", "tools/seat-kit/tests"),
-    Suite("aionui-extension", "tools/aionui-extension/tests"),
-    Suite("release-tools", "tools/tests"),
+    Suite("central", "packages/central/tests", covers=("packages/central",)),
+    Suite("client", "packages/client/tests", covers=("packages/client",)),
+    Suite(
+        "import",
+        "packages/import/tests",
+        cwd="packages/import",
+        covers=("packages/import",),
+    ),
+    Suite("personal", "packages/personal/tests", covers=("packages/personal",)),
+    Suite("wait-bridge", "tools/wait-bridge/tests", covers=("tools/wait-bridge",)),
+    Suite(
+        "fleet-dashboard",
+        "tools/fleet-dashboard/tests",
+        covers=("tools/fleet-dashboard",),
+    ),
+    Suite("coordinator", "tools/coordinator/tests", covers=("tools/coordinator",)),
+    Suite("board-butler", "tools/board-butler/tests", covers=("tools/board-butler",)),
+    Suite(
+        "worker-runtime",
+        "tools/worker-runtime/tests",
+        covers=("tools/worker-runtime",),
+    ),
+    Suite("acp-seat", "tools/acp-seat/tests", covers=("tools/acp-seat",)),
+    Suite("acp-agent", "tools/acp-agent/tests", covers=("tools/acp-agent",)),
+    Suite("seat-kit", "tools/seat-kit/tests", covers=("tools/seat-kit",)),
+    Suite(
+        "aionui-extension",
+        "tools/aionui-extension/tests",
+        covers=("tools/aionui-extension", "packages/client", "packages/personal"),
+    ),
+    Suite("release-tools", "tools/tests", covers=("tools",)),
 )
+
+
+def covering_suites(
+    changed_paths: Sequence[str], suites: Sequence[Suite] = SUITES
+) -> dict[str, tuple[str, ...]]:
+    """Map changed repository paths to every manifest suite that covers them."""
+    result: dict[str, tuple[str, ...]] = {}
+    for raw_path in changed_paths:
+        path = raw_path.strip().strip("/")
+        if not path or path.startswith("../"):
+            raise ValueError(f"invalid repository path in coverage query: {raw_path!r}")
+        names = tuple(
+            suite.name
+            for suite in suites
+            if any(
+                path == prefix.strip("/")
+                or path.startswith(prefix.strip("/") + "/")
+                for prefix in suite.covers
+                if prefix.strip("/")
+            )
+        )
+        result[path] = names
+    return result
 
 
 def repository_root() -> Path:

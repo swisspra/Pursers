@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 from contextlib import aclosing
@@ -83,6 +84,16 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         re.compile(r"\b(?:membership|invite|admit|retire seat|registry|register board|project registry|change role)\b", re.I),
     ),
     PolicyRule(
+        "coverage-blindness",
+        Outcome.ESCALATE,
+        re.compile(
+            r"\b(?:proceed|approve|submit|merge|continue)\b.{0,160}\b(?:suite|test|manifest)\b.{0,100}\b(?:blocked|skipped|not run|never[- ]reached|fail(?:ed|ure)?)\b"
+            r"|\b(?:suite|test|manifest)\b.{0,100}\b(?:blocked|skipped|not run|never[- ]reached|fail(?:ed|ure)?)\b.{0,160}\b(?:proceed|approve|submit|merge|continue)\b",
+            re.I,
+        ),
+        "coverage_blindness",
+    ),
+    PolicyRule(
         "git-ancestry",
         Outcome.MECHANICAL,
         re.compile(r"\b(?:ancestor|descendant|merged|contained in|reachable from)\b.{0,120}\b(?:main|origin/main|[0-9a-f]{7,40})\b|\b[0-9a-f]{7,40}\b.{0,120}\b(?:ancestor|descendant|merged|contained in|reachable from)\b", re.I),
@@ -121,6 +132,7 @@ class Evidence:
     source: str
     detail: str
     answer: str
+    outcome: Outcome | None = None
 
 
 class EvidenceSource(Protocol):
@@ -227,6 +239,124 @@ def _git_ancestry(repo: Path, sha: str, target: str) -> Evidence:
     )
 
 
+def _submission_evidence(ticket: Mapping[str, Any]) -> tuple[list[str], str]:
+    history = ticket.get("submission_history", [])
+    submission = (
+        history[-1]
+        if isinstance(history, list) and history and isinstance(history[-1], Mapping)
+        else {}
+    )
+    notes = ticket.get("notes") or submission.get("notes") or ""
+    if not isinstance(notes, str):
+        notes = ""
+    match = re.search(r"(?m)^cumulative_files_changed:\s*(\[[^\n]*\])\s*$", notes)
+    changed: Any = None
+    if match:
+        try:
+            changed = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            changed = None
+    if not isinstance(changed, list) or not all(isinstance(item, str) for item in changed):
+        changed = submission.get("files_changed", ticket.get("files_changed", []))
+    if not isinstance(changed, list) or not changed or not all(
+        isinstance(item, str) and item for item in changed
+    ):
+        raise ValueError("submission has no readable changed-file evidence")
+    outputs = "\n".join(
+        line.partition(":")[2].strip()
+        for line in notes.splitlines()
+        if line.startswith(("test-output:", "test_output:"))
+    )
+    if not outputs:
+        raise ValueError("submission has no readable test-output evidence")
+    return changed, outputs
+
+
+def _manifest_coverage(repo: Path, changed: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    manifest_path = repo / "tools" / "ci_manifest.py"
+    if not manifest_path.is_file():
+        raise ValueError("tools/ci_manifest.py is unavailable")
+    namespace = runpy.run_path(str(manifest_path))
+    mapper = namespace.get("covering_suites")
+    if not callable(mapper):
+        raise ValueError("ci manifest does not declare suite coverage")
+    result = mapper(changed)
+    if not isinstance(result, dict):
+        raise ValueError("ci manifest returned invalid suite coverage")
+    return result
+
+
+def _suite_statuses(output: str, suite_names: Sequence[str]) -> dict[str, str]:
+    clauses = [part.strip() for part in re.split(r"[;\n]", output) if part.strip()]
+    result: dict[str, str] = {}
+    for name in suite_names:
+        aliases = {name.lower(), name.lower().replace("-", " ")}
+        if name == "aionui-extension":
+            aliases.add("aionui")
+        matching = [
+            clause
+            for clause in clauses
+            if any(re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", clause.lower()) for alias in aliases)
+        ]
+        combined = " ".join(matching).lower()
+        if not combined:
+            result[name] = "never-reached"
+        elif re.search(r"\b(?:fail(?:ed|ure|ures)?|blocked|denied|not run|never[- ]reached)\b", combined):
+            result[name] = "failed"
+        elif "skipped" in combined and not re.search(r"\b(?:pass(?:ed)?|green)\b|\d+", combined):
+            result[name] = "skipped"
+        else:
+            result[name] = "passed"
+    return result
+
+
+async def _coverage_blindness(
+    question: Mapping[str, Any], source: EvidenceSource, repo: Path
+) -> Evidence:
+    message = str(question.get("message", ""))
+    target = _identifier(r"\bTK-[0-9A-Za-z-]+\b", message) or str(
+        question.get("ticket_id", "")
+    )
+    if not target:
+        raise ValueError("coverage check needs a ticket identifier")
+    payload = await source.ticket_get(target)
+    ticket = payload.get("ticket", payload)
+    if not isinstance(ticket, Mapping):
+        raise ValueError(f"ticket {target} is unreadable")
+    changed, output = _submission_evidence(ticket)
+    coverage = _manifest_coverage(repo, changed)
+    required = sorted({name for names in coverage.values() for name in names})
+    statuses = _suite_statuses(output, required)
+    incomplete = sorted(name for name, status in statuses.items() if status != "passed")
+    affected = {
+        path: [name for name in names if name in incomplete]
+        for path, names in coverage.items()
+        if any(name in incomplete for name in names)
+    }
+    source_name = f"Central ticket_get({target}).latest_submission + tools/ci_manifest.py"
+    detail = json.dumps(
+        {"changed_paths": changed, "covering_suites": coverage, "suite_statuses": statuses},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if affected:
+        pairs = ", ".join(
+            f"{path} -> {','.join(names)}" for path, names in sorted(affected.items())
+        )
+        return Evidence(
+            source=source_name,
+            detail=detail,
+            answer=f"Would escalate: covering suite evidence is incomplete ({pairs}).",
+            outcome=Outcome.ESCALATE,
+        )
+    return Evidence(
+        source=source_name,
+        detail=detail,
+        answer="The blocked or skipped suites do not cover the submitted diff; mechanical review may proceed.",
+        outcome=Outcome.MECHANICAL,
+    )
+
+
 async def evaluate_mechanical(
     classification: Classification,
     question: Mapping[str, Any],
@@ -236,6 +366,8 @@ async def evaluate_mechanical(
 ) -> Evidence:
     message = str(question.get("message", ""))
     ticket_id = str(question.get("ticket_id", ""))
+    if classification.evaluator == "coverage_blindness":
+        return await _coverage_blindness(question, source, repo)
     if classification.evaluator == "git_ancestry":
         sha = _identifier(r"(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])", message)
         if sha is None:
@@ -336,11 +468,13 @@ async def make_finding(
         answer=f"Would escalate: {classification.rule}.",
     )
     outcome = classification.outcome
-    if outcome is Outcome.MECHANICAL:
+    if classification.evaluator is not None:
         try:
             evidence = await evaluate_mechanical(
                 classification, question, source, repo, integration_ref
             )
+            if evidence.outcome is not None:
+                outcome = evidence.outcome
         except Exception as exc:
             outcome = Outcome.UNKNOWN
             evidence = Evidence(
@@ -674,7 +808,7 @@ def load_cursor(path: Path) -> int | None:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
     cursor = value.get("cursor") if isinstance(value, Mapping) else None
-    return cursor if isinstance(cursor, int) and not isinstance(cursor, bool) and cursor >= 0 else None
+    return cursor if isinstance(cursor, int) and not isinstance(cursor, bool) and cursor > 0 else None
 
 
 def save_cursor(path: Path, cursor: int) -> None:
@@ -769,6 +903,8 @@ async def run(
                 save_cursor(args.cursor_file, cursor)
                 if args.once:
                     return
+                if question is None:
+                    raise RuntimeError("board butler push subscription ended")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

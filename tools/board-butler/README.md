@@ -11,6 +11,12 @@ incomplete evidence also escalates. Mechanical drafts cite one named product or
 repository source: `git merge-base`, `ticket_get`, a ticket annotation, or a
 seat capability row.
 
+Questions that propose proceeding despite a blocked, skipped, failed, or
+never-reached suite use the coverage map declared by `tools/ci_manifest.py`.
+The butler compares the submitted cumulative file list with the quoted suite
+results. A non-passing suite escalates only when it covers the diff; an
+unrelated blocked suite does not turn a docs-only submission into an escalation.
+
 The runner acquires an exclusive pidfile lock before reading credentials or
 opening Central. It joins as a coordinator with `can_work=false` and
 `can_review=false`, then refuses to run if another working or reviewing seat
@@ -35,8 +41,10 @@ python3 tools/board-butler/board_butler.py \
 Without `--once`, the process holds one reconnecting journal/seat subscription
 and sleeps inside the push stream until a coordinator-question cue arrives.
 There is no polling fallback, repeated ticket list, or cursor-0 catch-up. The
-cursor file is reused across restarts. `--dry-run` prints the proposed finding
-and makes no Central write.
+positive cursor file is reused across restarts; a zero or invalid cursor starts
+at the current journal watermark. A closed push stream terminates the process
+instead of reconnect-spinning. `--dry-run` prints the proposed finding and
+makes no Central write.
 
 Draft caps default to five per hour and two per ticket. They may be set with
 `--drafts-per-hour` and `--drafts-per-ticket`, or with the equivalent
