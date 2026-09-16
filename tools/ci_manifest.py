@@ -37,6 +37,7 @@ SUITES: tuple[Suite, ...] = (
     Suite("wait-bridge", "tools/wait-bridge/tests"),
     Suite("fleet-dashboard", "tools/fleet-dashboard/tests"),
     Suite("coordinator", "tools/coordinator/tests"),
+    Suite("board-butler", "tools/board-butler/tests"),
     Suite("worker-runtime", "tools/worker-runtime/tests"),
     Suite("acp-seat", "tools/acp-seat/tests"),
     Suite("acp-agent", "tools/acp-agent/tests"),
