@@ -1946,7 +1946,8 @@ bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>
 4. **DO** -- Work only in the returned fleet clone (or this seat's own clone). The operator checkout is read-only for seats. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
 5. **SUBMIT** -- Push the candidate, put exactly one `branch_and_commit: platform/branch @ <full-40-hex-sha>` line in code-ticket notes, then run `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Preflight verifies the exact remote tip before `ticket_submit` and adds machine-derived metadata. Correct any preflight error and retry. Normal `board_join` may renew an already-held lease. Notes are capped at 5000 characters.
 6. **RE-ARM** -- After a successful submit, leave its branch immutable and return immediately to WAIT for the next eligible ticket; do not wait for review.
-7. **RETRY CUES** -- On a later rejection cue, GET the ticket, follow its fix instructions in a fresh candidate branch, resubmit, then re-arm again.
+7. **RETRY CUES** -- On a later rejection cue, GET the ticket, reuse its existing branch when the fix allows it, follow the fix instructions, resubmit, then re-arm again. Do not create a remote branch per rejection attempt.
+8. **CLEAN UP** -- After the ticket closes, delete your own remote ticket branch. Never delete a live ticket branch or a submitted branch awaiting review.
 
 Never poll `bin/board.sh list` in a loop. Polling exists only behind the explicit `wait --poll` fallback. The default wait blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
     else:

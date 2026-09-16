@@ -343,6 +343,8 @@ def test_generated_directives_explain_holder_wakes_and_claimable_broadcasts(
         reviewer_text = (reviewer / name).read_text(encoding="utf-8")
         assert "reason=held_ticket_update" in worker_text
         assert "fix and resubmit a rejection" in worker_text
+        assert "reuse its existing branch" in worker_text
+        assert "delete your own remote ticket branch" in worker_text
         assert "dispatch_state.state=broadcast" in worker_text
         assert "Never claim a ticket offered to another seat" in worker_text
         assert "A review broadcast is also claimable" in reviewer_text
