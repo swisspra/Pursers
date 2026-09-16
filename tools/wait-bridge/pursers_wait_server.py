@@ -2325,6 +2325,23 @@ def _extract_notes_subset(ticket: dict[str, Any], keys: list[str]) -> dict[str, 
     return result
 
 
+def _bound_transition_ends(
+    transitions: list[dict[str, Any]], limit: int | None
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep a bounded oldest/newest view and report the omitted middle."""
+    if limit is None or len(transitions) <= limit:
+        return transitions, 0
+    if type(limit) is not int or limit < 1:
+        raise ValueError("max_transitions_per_ticket must be a positive integer")
+    if limit == 1:
+        return transitions[-1:], len(transitions) - 1
+
+    oldest_count = (limit + 1) // 2
+    newest_count = limit - oldest_count
+    retained = transitions[:oldest_count] + transitions[-newest_count:]
+    return retained, len(transitions) - len(retained)
+
+
 class OrchestratorEngine:
     """Continuous background subscriber and digest aggregator for leader seats."""
 
@@ -2682,7 +2699,18 @@ class OrchestratorEngine:
         boards: list[str] | str = "registry",
         group_by: str = "ticket",
         include_notes_keys: list[str] | None = None,
+        max_transitions_per_ticket: int | None = None,
     ) -> dict[str, Any]:
+        if (
+            max_transitions_per_ticket is not None
+            and (
+                type(max_transitions_per_ticket) is not int
+                or max_transitions_per_ticket < 1
+            )
+        ):
+            raise ValueError(
+                "max_transitions_per_ticket must be a positive integer"
+            )
         keys = ["branch_and_commit"] if include_notes_keys is None else list(include_notes_keys)
 
         async with self.lock:
@@ -2721,6 +2749,7 @@ class OrchestratorEngine:
         tickets: list[dict[str, Any]] = []
         new_tickets: list[dict[str, Any]] = []
         annotations: list[dict[str, Any]] = []
+        transition_targets: dict[tuple[str, str], set[str]] = {}
 
         for (bid, tid), evs in by_ticket.items():
             cache_key = f"{bid}:{tid}"
@@ -2750,6 +2779,22 @@ class OrchestratorEngine:
                     "at": str(ticket_data.get("created_at") or ""),
                 })
 
+            transition_targets[(bid, tid)] = {
+                str(transition["to"]) for transition in transitions
+            }
+            latest_closed_at = next(
+                (
+                    transition["at"]
+                    for transition in reversed(transitions)
+                    if transition["to"] == "closed"
+                ),
+                None,
+            )
+
+            transitions, transitions_omitted_count = _bound_transition_ends(
+                transitions, max_transitions_per_ticket
+            )
+
             status_now = str(ticket_data.get("status") or (transitions[-1]["to"] if transitions else "open"))
             title = str(ticket_data.get("title") or evs[0].get("title") or "")
             claimed_by = ticket_data.get("claimed_by") or ticket_data.get("claimed_by_agent_name") or ticket_data.get("claimed_by_agent_id")
@@ -2766,12 +2811,7 @@ class OrchestratorEngine:
                     rejection_count = int(ev["rejection_count"])
 
             notes_subset = _extract_notes_subset(ticket_data, keys)
-            closed_at = ticket_data.get("closed_at")
-            if closed_at is None:
-                for tr in reversed(transitions):
-                    if tr["to"] == "closed":
-                        closed_at = tr["at"]
-                        break
+            closed_at = ticket_data.get("closed_at") or latest_closed_at
 
             is_watched = (
                 tid in self.watched_ticket_ids
@@ -2818,6 +2858,7 @@ class OrchestratorEngine:
                 "board_id": bid,
                 "title": title,
                 "transitions": transitions,
+                "transitions_omitted_count": transitions_omitted_count,
                 "status_now": status_now,
                 "review": {
                     "verdict": verdict,
@@ -2856,12 +2897,30 @@ class OrchestratorEngine:
         counts = {
             "total_tickets": len(tickets),
             "total_transitions": sum(len(t["transitions"]) for t in tickets),
+            "transitions_omitted": sum(
+                int(t["transitions_omitted_count"]) for t in tickets
+            ),
             "new": len(new_tickets),
-            "submitted": sum(1 for t in tickets if any(tr["to"] == "submitted" for tr in t["transitions"])),
+            "submitted": sum(
+                1
+                for t in tickets
+                if "submitted"
+                in transition_targets[(t["board_id"], t["ticket_id"])]
+            ),
             "approved": sum(1 for t in tickets if (t.get("review") or {}).get("verdict") == "approve"),
             "rejected": sum(1 for t in tickets if (t.get("review") or {}).get("verdict") == "reject"),
-            "closed": sum(1 for t in tickets if any(tr["to"] == "closed" for tr in t["transitions"])),
-            "cancelled": sum(1 for t in tickets if any(tr["to"] == "cancelled" for tr in t["transitions"])),
+            "closed": sum(
+                1
+                for t in tickets
+                if "closed"
+                in transition_targets[(t["board_id"], t["ticket_id"])]
+            ),
+            "cancelled": sum(
+                1
+                for t in tickets
+                if "cancelled"
+                in transition_targets[(t["board_id"], t["ticket_id"])]
+            ),
             "annotations": len(annotations),
         }
 
@@ -3172,8 +3231,9 @@ async def board_digest(
     boards: list[str] | str = "registry",
     group_by: str = "ticket",
     include_notes_keys: list[str] | None = None,
+    max_transitions_per_ticket: int | None = None,
 ) -> dict[str, Any]:
-    """Return grouped, deduplicated board changes since last ack or given cursors."""
+    """Return grouped changes, optionally capped per ticket at useful ends."""
     engine = await _engine_for_tool(ctx)
     selected_keys = (
         ["branch_and_commit"] if include_notes_keys is None else list(include_notes_keys)
@@ -3183,6 +3243,7 @@ async def board_digest(
         boards=boards,
         group_by=group_by,
         include_notes_keys=selected_keys,
+        max_transitions_per_ticket=max_transitions_per_ticket,
     )
     meter = engine.meter
     if meter is not None:

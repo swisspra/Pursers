@@ -360,6 +360,104 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await engine.stop_subscriber()
 
+    async def test_digest_caps_long_transition_history_and_reports_omissions(
+        self,
+    ) -> None:
+        digest_tool = next(
+            tool
+            for tool in await wait_server.mcp.list_tools()
+            if tool.name == "board_digest"
+        )
+        self.assertIn(
+            "max_transitions_per_ticket",
+            digest_tool.input_schema["properties"],
+        )
+
+        engine = wait_server.OrchestratorEngine(
+            connection=None,
+            meter=SimpleNamespace(),
+            state_path=self.root / "bounded-digest.json",
+        )
+        ticket_id = "TK-long-history"
+        engine.active_boards = [wait_server.BOARD_ID]
+        engine.cursor_map = {wait_server.BOARD_ID: 52}
+        engine.ring_buffer = [
+            {
+                "id": f"EV-{seq:04d}",
+                "seq": seq,
+                "board_id": wait_server.BOARD_ID,
+                "ticket_id": ticket_id,
+                "kind": "ticket_status_changed",
+                "status_from": f"state-{seq - 1}",
+                "status_to": (
+                    "submitted"
+                    if seq == 20
+                    else "closed"
+                    if seq == 30
+                    else f"state-{seq}"
+                ),
+                "actor": "worker-agent",
+                "occurred_at": f"2030-01-01T00:{seq:02d}:00Z",
+            }
+            for seq in range(1, 53)
+        ]
+        engine.ticket_cache[f"{wait_server.BOARD_ID}:{ticket_id}"] = {
+            "ticket_id": ticket_id,
+            "title": "Long transition history",
+            "status": "state-52",
+            "annotations": [],
+        }
+
+        uncapped = await engine.build_digest(since=0)
+        uncapped_ticket = uncapped["tickets"][0]
+        self.assertEqual(len(uncapped_ticket["transitions"]), 52)
+        self.assertEqual(uncapped_ticket["transitions_omitted_count"], 0)
+
+        expected = {
+            1: (["state-52"], 51),
+            2: (["state-1", "state-52"], 50),
+            10: (
+                [
+                    "state-1",
+                    "state-2",
+                    "state-3",
+                    "state-4",
+                    "state-5",
+                    "state-48",
+                    "state-49",
+                    "state-50",
+                    "state-51",
+                    "state-52",
+                ],
+                42,
+            ),
+        }
+        for limit, (states, omitted) in expected.items():
+            with self.subTest(limit=limit):
+                digest = await engine.build_digest(
+                    since=0, max_transitions_per_ticket=limit
+                )
+                ticket = digest["tickets"][0]
+                self.assertLessEqual(len(ticket["transitions"]), limit)
+                self.assertEqual(
+                    [transition["to"] for transition in ticket["transitions"]],
+                    states,
+                )
+                self.assertEqual(
+                    ticket["transitions_omitted_count"], omitted
+                )
+                self.assertEqual(digest["counts"]["total_transitions"], limit)
+                self.assertEqual(
+                    digest["counts"]["transitions_omitted"], omitted
+                )
+                self.assertEqual(digest["counts"]["submitted"], 1)
+                self.assertEqual(digest["counts"]["closed"], 1)
+
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            await engine.build_digest(
+                since=0, max_transitions_per_ticket=0
+            )
+
     async def test_digest_projects_new_annotations_without_status_transitions(
         self,
     ) -> None:

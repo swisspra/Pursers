@@ -660,6 +660,23 @@ dashboard shows current-hour returns/bytes and 24-hour cue/timeout outcomes.
 Subscription failures are retained under `push_unavailable` until that seat
 records a healthy push return, so poll fallback is visible outside stderr.
 
+## Orchestrator digest bounds
+
+`board_digest(..., max_transitions_per_ticket=N)` declares an exact per-ticket
+cap: every returned ticket satisfies `len(ticket["transitions"]) <= N` and
+reports the number removed as `transitions_omitted_count`. With a cap of one,
+the newest transition is retained. Larger caps split the allowance across the
+oldest and newest ends, preserving both lifecycle context and the latest
+action. Omitting the argument preserves the complete transition list; the only
+default-response addition is `transitions_omitted_count: 0`.
+
+The parameter applies only to each ticket's `transitions` array. Digest
+annotations remain event-backed and appear both per ticket and in the top-level
+`annotations` array; `dispatch_history` is not returned; and `new_tickets` has
+at most one row per grouped ticket. The subscriber retains at most 5,000 total
+events in its ring buffer. There is no separate serialized-byte cap, so callers
+should acknowledge cursors promptly as well as selecting a transition cap.
+
 Run the bridge tests with:
 
 ```sh
