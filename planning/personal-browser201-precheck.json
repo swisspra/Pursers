@@ -1,0 +1,840 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "personal_browser201_feasibility_precheck",
+  "precheck_only": true,
+  "candidate_commit": "b3861ac3811438ecd1f3d2ceb62efbf759c88da0",
+  "candidate_ref": "origin/main",
+  "catalogue_source": "docs/design-home/context/acceptance-facts.json",
+  "landed_product_route": {
+    "merge_commit": "6084b434",
+    "source_ref": "origin/codex/TK-93e833c54d6c-personal-route-worker13@88fbafe5",
+    "ancestor_of_candidate": true,
+    "surface": "mcp-app",
+    "product_path": "verifier-supplied signed AionUi conversation page -> exactly one live Personal MCP App frame",
+    "resource_uri": "ui://pursers/dashboard",
+    "resource_source": "packages/personal/src/pursers_personal/apps_server.py",
+    "observer_source": "tools/aionui-extension/tests/home_acceptance/browser_observer.py",
+    "decision_source": "docs/design-home/personal-browser-acceptance-decision.md"
+  },
+  "working_selector_contract": {
+    "source_ref": "codex/TK-9ca52e7ad8bf-personal-route@1c8807df975fd63968cfe6de9b66ee0c1513a9f3",
+    "path": "docs/design-home/personal-selector-contract.md",
+    "present_at_candidate": false,
+    "ancestor_of_candidate": false
+  },
+  "static_observation": {
+    "data_pursers_attributes_in_personal_sources": 0,
+    "legacy_personal_attributes_present": true,
+    "live_runtime_opened": false,
+    "browser_task_space_opened": false,
+    "catalogue_predicates_evaluated": 79,
+    "existing_bindings_found": 77,
+    "missing_bindings_found": 2,
+    "note": "Current bindings include existing DOM IDs/ARIA/data attributes and product MCP responses/receipts; data-pursers-* is not treated as a prerequisite."
+  },
+  "summary": {
+    "rows": 79,
+    "bindable_today": 77,
+    "candidate_or_adapter_change": 2,
+    "runtime_attempted": 0,
+    "success": 0,
+    "failure": 0,
+    "blocked": 2
+  },
+  "stop_reason": "Predicate-by-predicate static audit found current landed bindings for 77 rows. Runtime capture was not attempted. Two predicates remain blocked because their existing feed_error strings are not rendered into the DOM/AX tree.",
+  "required_change": "Expose the existing sanitized feed_error value for dashboard-ui.state.permission-denied and personal.activity-error, then freeze a candidate and run Browser201 capture. Do not add a second Personal route, and do not require data-pursers-* for the other 77 rows.",
+  "rows": [
+    {
+      "id": "dashboard-ui.logic",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "AX name `Today` on `#tab-home[role=tab][data-view=home]`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "AX name `Today` on `#tab-home[role=tab][data-view=home]`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#dashboard-ui.logic.predicate"
+    },
+    {
+      "id": "dashboard-ui.shell",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "document title / AX name `On Board Personal Preview` in `dashboard-entry.html`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/dashboard-entry.html",
+      "current_binding": "document title / AX name `On Board Personal Preview` in `dashboard-entry.html`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#dashboard-ui.shell.predicate"
+    },
+    {
+      "id": "dashboard-ui.state.empty-tickets",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text `No current work` under `#home-work`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text `No current work` under `#home-work`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#dashboard-ui.state.empty-tickets.predicate"
+    },
+    {
+      "id": "dashboard-ui.state.error",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text `Connection interrupted` at `#health-title`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text `Connection interrupted` at `#health-title`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#dashboard-ui.state.error.predicate"
+    },
+    {
+      "id": "dashboard-ui.state.loading",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`#main-content[aria-busy=true]` plus `#connection-title` loading text",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#main-content[aria-busy=true]` plus `#connection-title` loading text",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#dashboard-ui.state.loading.predicate"
+    },
+    {
+      "id": "dashboard-ui.state.permission-denied",
+      "outcome": "BLOCKED",
+      "classification": "candidate_or_adapter_change",
+      "required_binding": "`#connection-detail` after a permission-denied tool failure",
+      "reason": "The live error string is stored in `feed_error`, but `renderConnection` replaces it with generic retry copy, so `Permission denied` is absent from the DOM/AX tree.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#connection-detail` after a permission-denied tool failure",
+      "missing_change": "Render the existing sanitized `feed_error` value in the named live region; no new route or credential path is required.",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#dashboard-ui.state.permission-denied.predicate"
+    },
+    {
+      "id": "dashboard-ui.state.search-empty",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text `No matching loaded data` under `#search-results-list`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text `No matching loaded data` under `#search-results-list`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#dashboard-ui.state.search-empty.predicate"
+    },
+    {
+      "id": "dashboard-ui.state.stale",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`#connection-title` / `#health-mode[data-tone=warning]` and `body[data-render-state=stale]`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#connection-title` / `#health-mode[data-tone=warning]` and `body[data-render-state=stale]`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#dashboard-ui.state.stale.predicate"
+    },
+    {
+      "id": "dashboard-ui.styles",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`document.documentElement[data-theme]` changes from `light` to `dark` via host context",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.css",
+      "current_binding": "`document.documentElement[data-theme]` changes from `light` to `dark` via host context",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#dashboard-ui.styles.predicate"
+    },
+    {
+      "id": "personal-mcp.state.board-empty",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`board_snapshot` response JSON at `/ticket_total` and `/tickets`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`board_snapshot` response JSON at `/ticket_total` and `/tickets`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal-mcp.state.board-empty.predicate"
+    },
+    {
+      "id": "personal-mcp.state.fleet-unavailable",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`fleet_snapshot` response JSON at `/registry_warning` and `/projects/*`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`fleet_snapshot` response JSON at `/registry_warning` and `/projects/*`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal-mcp.state.fleet-unavailable.predicate"
+    },
+    {
+      "id": "personal-mcp.state.links-empty",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`link_snapshot` response JSON at `/returned_node_count` and `/returned_edge_count`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`link_snapshot` response JSON at `/returned_node_count` and `/returned_edge_count`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal-mcp.state.links-empty.predicate"
+    },
+    {
+      "id": "personal-mcp.state.memory-empty",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`board_snapshot` response JSON at `/highlights/important_pinned`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`board_snapshot` response JSON at `/highlights/important_pinned`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal-mcp.state.memory-empty.predicate"
+    },
+    {
+      "id": "personal-mcp.state.not-onboarded",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`board_snapshot` response JSON at `/data_mode`, `/connected`, `/stale`, and `/feed_error`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`board_snapshot` response JSON at `/data_mode`, `/connected`, `/stale`, and `/feed_error`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal-mcp.state.not-onboarded.predicate"
+    },
+    {
+      "id": "personal-mcp.state.ticket-not-found",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`ticket_get` tool-error text for an absent ticket ID",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`ticket_get` tool-error text for an absent ticket ID",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal-mcp.state.ticket-not-found.predicate"
+    },
+    {
+      "id": "personal-mcp.surface",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`personal-runtime-receipt.server_name` from the existing acceptance receipt",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`personal-runtime-receipt.server_name` from the existing acceptance receipt",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal-mcp.surface.predicate"
+    },
+    {
+      "id": "personal.activity-bounded-feed",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`#tab-activity`, `#view-activity`, and text/count at `#activity-total` / `#activity-list`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#tab-activity`, `#view-activity`, and text/count at `#activity-total` / `#activity-list`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.activity-bounded-feed.predicate"
+    },
+    {
+      "id": "personal.activity-cursor",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "cursor text at `#settings-diagnostics-details`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "cursor text at `#settings-diagnostics-details`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.activity-cursor.predicate"
+    },
+    {
+      "id": "personal.activity-dropped-events",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "dropped-event text under `#activity-notice`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "dropped-event text under `#activity-notice`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.activity-dropped-events.predicate"
+    },
+    {
+      "id": "personal.activity-empty",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text `No matching activity` under `#activity-list`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text `No matching activity` under `#activity-list`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.activity-empty.predicate"
+    },
+    {
+      "id": "personal.activity-error",
+      "outcome": "BLOCKED",
+      "classification": "candidate_or_adapter_change",
+      "required_binding": "`#activity-notice` or another live region containing `feed_error`",
+      "reason": "`refreshFeed` records `Local feed unavailable` in `feed_error`, but the Activity view never renders that value, so the predicate text is absent from the DOM/AX tree.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#activity-notice` or another live region containing `feed_error`",
+      "missing_change": "Render the existing sanitized `feed_error` value in the named live region; no new route or credential path is required.",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.activity-error.predicate"
+    },
+    {
+      "id": "personal.activity-has-more-resync",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "resync text under `#activity-notice` plus `#load-more-btn[hidden=false]`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "resync text under `#activity-notice` plus `#load-more-btn[hidden=false]`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.activity-has-more-resync.predicate"
+    },
+    {
+      "id": "personal.activity-offline",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`#connection-title` and `body[data-scenario=demo]`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#connection-title` and `body[data-scenario=demo]`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.activity-offline.predicate"
+    },
+    {
+      "id": "personal.activity-scope",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "AX name under `#activity-scope` / `#activity-scope-copy`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "AX name under `#activity-scope` / `#activity-scope-copy`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.activity-scope.predicate"
+    },
+    {
+      "id": "personal.activity-stale",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`#connection-title` and `body[data-render-state=stale]`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#connection-title` and `body[data-render-state=stale]`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.activity-stale.predicate"
+    },
+    {
+      "id": "personal.agents-current-ticket",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "current-ticket text in `#agents-grid .agent-card`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "current-ticket text in `#agents-grid .agent-card`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.agents-current-ticket.predicate"
+    },
+    {
+      "id": "personal.agents-duplicate-identity",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "duplicate-identity notice in `#agents-grid .agent-card`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "duplicate-identity notice in `#agents-grid .agent-card`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.agents-duplicate-identity.predicate"
+    },
+    {
+      "id": "personal.agents-duplicate-name",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`#agents-grid .agent-card` duplicate-name pill",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#agents-grid .agent-card` duplicate-name pill",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.agents-duplicate-name.predicate"
+    },
+    {
+      "id": "personal.agents-empty",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text `No agents yet` under `#agents-grid`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text `No agents yet` under `#agents-grid`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.agents-empty.predicate"
+    },
+    {
+      "id": "personal.agents-focus",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "focus text in `#agents-grid .agent-card`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "focus text in `#agents-grid .agent-card`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.agents-focus.predicate"
+    },
+    {
+      "id": "personal.agents-idle-lease",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "idle and lease text in `#agents-grid .agent-card`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "idle and lease text in `#agents-grid .agent-card`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.agents-idle-lease.predicate"
+    },
+    {
+      "id": "personal.agents-platform",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "platform pill in `#agents-grid .agent-card`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "platform pill in `#agents-grid .agent-card`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.agents-platform.predicate"
+    },
+    {
+      "id": "personal.agents-role",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "role pill in `#agents-grid .agent-card`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "role pill in `#agents-grid .agent-card`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.agents-role.predicate"
+    },
+    {
+      "id": "personal.agents-stale",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`#agents-grid .agent-card[data-stale=true]`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#agents-grid .agent-card[data-stale=true]`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.agents-stale.predicate"
+    },
+    {
+      "id": "personal.agents-total-live",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "count text at `#agents-total`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "count text at `#agents-total`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.agents-total-live.predicate"
+    },
+    {
+      "id": "personal.board-identity",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "board text at `#board-id`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "board text at `#board-id`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.board-identity.predicate"
+    },
+    {
+      "id": "personal.connection-banner",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "AX name / text at `#connection-banner #connection-title`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "AX name / text at `#connection-banner #connection-title`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.connection-banner.predicate"
+    },
+    {
+      "id": "personal.data-provenance",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "AX name / text at `#source`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "AX name / text at `#source`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.data-provenance.predicate"
+    },
+    {
+      "id": "personal.fleet-empty",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text `No registered projects` under `#fleet-projects`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text `No registered projects` under `#fleet-projects`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.fleet-empty.predicate"
+    },
+    {
+      "id": "personal.fleet-online-busy-available-stale",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "counts at `#fleet-agents`, `#fleet-busy`, `#fleet-available`, and `#fleet-stale`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "counts at `#fleet-agents`, `#fleet-busy`, `#fleet-available`, and `#fleet-stale`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.fleet-online-busy-available-stale.predicate"
+    },
+    {
+      "id": "personal.fleet-project-seats",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "seat chips under `#fleet-pool .fleet-seats`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "seat chips under `#fleet-pool .fleet-seats`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.fleet-project-seats.predicate"
+    },
+    {
+      "id": "personal.fleet-project-ticket-counts",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "project row cells under `#fleet-projects tbody`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "project row cells under `#fleet-projects tbody`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.fleet-project-ticket-counts.predicate"
+    },
+    {
+      "id": "personal.fleet-projects",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "project rows under `#fleet-projects tbody`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "project rows under `#fleet-projects tbody`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.fleet-projects.predicate"
+    },
+    {
+      "id": "personal.fleet-registry-warning",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "registry warning text under `#fleet-warning`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "registry warning text under `#fleet-warning`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.fleet-registry-warning.predicate"
+    },
+    {
+      "id": "personal.fleet-shared-pool",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "shared-pool rows under `#fleet-pool tbody`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "shared-pool rows under `#fleet-pool tbody`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.fleet-shared-pool.predicate"
+    },
+    {
+      "id": "personal.fleet-truncation",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "partial-snapshot notice under `#fleet-warning`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "partial-snapshot notice under `#fleet-warning`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.fleet-truncation.predicate"
+    },
+    {
+      "id": "personal.fleet-unavailable",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text `Fleet data unavailable` under `#fleet-projects`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text `Fleet data unavailable` under `#fleet-projects`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.fleet-unavailable.predicate"
+    },
+    {
+      "id": "personal.health",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "AX name under `#health-card` / `#health-title`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "AX name under `#health-card` / `#health-title`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.health.predicate"
+    },
+    {
+      "id": "personal.keyboard-tabs",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`[role=tab][data-view]` `aria-selected` and corresponding `[data-panel][hidden]`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`[role=tab][data-view]` `aria-selected` and corresponding `[data-panel][hidden]`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.keyboard-tabs.predicate"
+    },
+    {
+      "id": "personal.links-edge-types",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "edge headings and values under `#links-groups`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "edge headings and values under `#links-groups`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.links-edge-types.predicate"
+    },
+    {
+      "id": "personal.links-empty",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text `No explicit links` under `#links-groups`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text `No explicit links` under `#links-groups`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.links-empty.predicate"
+    },
+    {
+      "id": "personal.links-node-edge-totals",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "count text at `#links-total`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "count text at `#links-total`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.links-node-edge-totals.predicate"
+    },
+    {
+      "id": "personal.links-pinned",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "Pinned pill under `#links-groups`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "Pinned pill under `#links-groups`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.links-pinned.predicate"
+    },
+    {
+      "id": "personal.links-source-label",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "authority/source text at `#links-source`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "authority/source text at `#links-source`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.links-source-label.predicate"
+    },
+    {
+      "id": "personal.links-truncation",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "truncation notice under `#links-notice`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "truncation notice under `#links-notice`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.links-truncation.predicate"
+    },
+    {
+      "id": "personal.links-unavailable",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "AX name / text under `#links-groups`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "AX name / text under `#links-groups`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.links-unavailable.predicate"
+    },
+    {
+      "id": "personal.refresh",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "AX name on `#refresh` button",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "AX name on `#refresh` button",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.refresh.predicate"
+    },
+    {
+      "id": "personal.search-no-results",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`#global-search` value and text under `#search-results-list`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#global-search` value and text under `#search-results-list`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.search-no-results.predicate"
+    },
+    {
+      "id": "personal.search-results",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`#global-search` value, `#search-results[hidden=false]`, and `.search-result` count",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`#global-search` value, `#search-results[hidden=false]`, and `.search-result` count",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.search-results.predicate"
+    },
+    {
+      "id": "personal.source-board-event-feed",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`board_event_feed` response JSON at `/events`, `/event_cursor`, `/has_more`, and `/error`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`board_event_feed` response JSON at `/events`, `/event_cursor`, `/has_more`, and `/error`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.source-board-event-feed.predicate"
+    },
+    {
+      "id": "personal.source-board-snapshot",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`board_snapshot` response JSON at `/board/id`, `/data_mode`, `/connected`, and `/stale`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`board_snapshot` response JSON at `/board/id`, `/data_mode`, `/connected`, and `/stale`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.source-board-snapshot.predicate"
+    },
+    {
+      "id": "personal.source-fleet-snapshot",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`fleet_snapshot` response JSON at `/projects`, `/pool`, and `/totals`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`fleet_snapshot` response JSON at `/projects`, `/pool`, and `/totals`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.source-fleet-snapshot.predicate"
+    },
+    {
+      "id": "personal.source-link-snapshot",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`link_snapshot` response JSON at `/source_tool`, `/relationship_authority`, and returned counts",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "current_binding": "`link_snapshot` response JSON at `/source_tool`, `/relationship_authority`, and returned counts",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.source-link-snapshot.predicate"
+    },
+    {
+      "id": "personal.theme",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "AX name under `#settings-appearance`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "AX name under `#settings-appearance`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.theme.predicate"
+    },
+    {
+      "id": "personal.today-active-agents",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "before/after text and rows under `#home-team`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "before/after text and rows under `#home-team`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.today-active-agents.predicate"
+    },
+    {
+      "id": "personal.today-current-work",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "before/after text and rows under `#home-work`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "before/after text and rows under `#home-work`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.today-current-work.predicate"
+    },
+    {
+      "id": "personal.today-important-pinned-note",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text under `#important-pinned`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text under `#important-pinned`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.today-important-pinned-note.predicate"
+    },
+    {
+      "id": "personal.today-latest-handoff",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text under `#latest-handoff`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text under `#latest-handoff`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.today-latest-handoff.predicate"
+    },
+    {
+      "id": "personal.today-recent-activity",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "sequence text and row count under `#recent-activity`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "sequence text and row count under `#recent-activity`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.today-recent-activity.predicate"
+    },
+    {
+      "id": "personal.today-status-metrics",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "counts at `#metric-open`, `#metric-working`, and `#metric-submitted`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "counts at `#metric-open`, `#metric-working`, and `#metric-submitted`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.today-status-metrics.predicate"
+    },
+    {
+      "id": "personal.work-abandonment",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "abandonment pill in `#work-groups [data-ticket-id]`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "abandonment pill in `#work-groups [data-ticket-id]`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.work-abandonment.predicate"
+    },
+    {
+      "id": "personal.work-lease",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "`[data-lease-expires-at]` within `#work-groups`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "`[data-lease-expires-at]` within `#work-groups`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.work-lease.predicate"
+    },
+    {
+      "id": "personal.work-no-ticket",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "text `No tickets yet` under `#work-groups`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "text `No tickets yet` under `#work-groups`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.work-no-ticket.predicate"
+    },
+    {
+      "id": "personal.work-ownership",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "owner metadata under `#work-detail #detail-body` and ticket cards in `#work-groups`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "owner metadata under `#work-detail #detail-body` and ticket cards in `#work-groups`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.work-ownership.predicate"
+    },
+    {
+      "id": "personal.work-priority",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "priority pill in `#work-groups [data-ticket-id]`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "priority pill in `#work-groups [data-ticket-id]`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.work-priority.predicate"
+    },
+    {
+      "id": "personal.work-rejection",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "Needs-attention group text under `#work-groups`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "Needs-attention group text under `#work-groups`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.work-rejection.predicate"
+    },
+    {
+      "id": "personal.work-review-readiness",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "Submitted group text under `#work-groups`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "Submitted group text under `#work-groups`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.work-review-readiness.predicate"
+    },
+    {
+      "id": "personal.work-status-groups",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "group headings under `#work-groups`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "group headings under `#work-groups`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.work-status-groups.predicate"
+    },
+    {
+      "id": "personal.work-total",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "count text at `#work-total`",
+      "reason": "The landed Personal route already exposes this catalogue predicate through the named current binding; no data-pursers-* selector is required.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "current_binding": "count text at `#work-total`",
+      "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.work-total.predicate"
+    }
+  ]
+}
