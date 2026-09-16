@@ -205,6 +205,22 @@ test-output: AionUi: 52 failed, 229 passed, 3 skipped; sandbox denied /bin/ps
     assert "do not cover the submitted diff" in finding["message"]
 
 
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("AionUi: 3 skipped", "skipped"),
+        ("AionUi: 0 passed, 3 skipped", "skipped"),
+        ("AionUi: 229 passed, 3 skipped", "passed"),
+    ],
+)
+def test_suite_status_does_not_treat_skip_counts_as_passes(
+    output: str, expected: str
+) -> None:
+    assert butler._suite_statuses(output, ["aionui-extension"]) == {
+        "aionui-extension": expected
+    }
+
+
 def test_git_ancestry_draft_consumes_real_repository_state(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     subprocess.run(

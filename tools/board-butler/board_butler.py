@@ -299,11 +299,19 @@ def _suite_statuses(output: str, suite_names: Sequence[str]) -> dict[str, str]:
             if any(re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", clause.lower()) for alias in aliases)
         ]
         combined = " ".join(matching).lower()
+        pass_counts = [
+            int(match.group(1))
+            for match in re.finditer(r"\b(\d+)\s+passed\b", combined)
+        ]
+        without_pass_counts = re.sub(r"\b\d+\s+passed\b", "", combined)
+        has_pass = any(count > 0 for count in pass_counts) or bool(
+            re.search(r"\b(?:pass|passed|green)\b", without_pass_counts)
+        )
         if not combined:
             result[name] = "never-reached"
         elif re.search(r"\b(?:fail(?:ed|ure|ures)?|blocked|denied|not run|never[- ]reached)\b", combined):
             result[name] = "failed"
-        elif "skipped" in combined and not re.search(r"\b(?:pass(?:ed)?|green)\b|\d+", combined):
+        elif "skipped" in combined and not has_pass:
             result[name] = "skipped"
         else:
             result[name] = "passed"
