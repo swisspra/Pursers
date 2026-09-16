@@ -7,6 +7,7 @@ Final tested source: `origin/main@b3861ac3811438ecd1f3d2ceb62efbf759c88da0`
 This pass continues the approved-content state from `TK-ab876afbb077`, rebased
 onto the current beta UI. Fleet, Personal, and AionUi were all replayed after
 that rebase; the report and screenshots below describe only the final source.
+This follow-up retains the same acceptance evidence and report-only scope.
 
 Browser: Ego Lite `ego-browser 0.5.0.32`, Chromium `152.0.7977.54`. No
 Chrome, Safari, Edge, Playwright, or alternate computer-use surface was used.
