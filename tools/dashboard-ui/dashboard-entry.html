@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>On Board Personal Preview</title>
   </head>
-  <body data-scenario="demo" data-render-state="loading">
+  <body data-scenario="demo" data-render-state="loading" data-pursers-surface="personal" data-pursers-state="loading" data-pursers-selected-board="" data-pursers-selected-ticket="">
     <a class="skip-link" href="#main-content">Skip to dashboard</a>
 
     <div class="app-shell">
@@ -96,7 +96,7 @@
           <span id="search-count" class="search-count" aria-live="polite"></span>
         </section>
 
-        <section id="connection-banner" class="connection-banner" role="status" aria-live="polite">
+        <section id="connection-banner" class="connection-banner" role="status" aria-live="polite" data-pursers-panel="connection" data-pursers-state="loading" data-pursers-connection="loading">
           <span class="status-dot" aria-hidden="true"></span>
           <div>
             <strong id="connection-title">Loading board</strong>
@@ -254,7 +254,7 @@
                 <option value="other">Other or unknown</option>
               </select>
               <p id="project-filter-help" class="sr-only">Filters only the projects already loaded in this read-only projection.</p>
-              <div id="fleet-projects" class="card-grid"></div>
+              <div id="fleet-projects" class="card-grid" data-pursers-panel="boards" data-pursers-state="loading"></div>
             </section>
             <section class="card" aria-labelledby="projects-empty-title" id="projects-empty-card" hidden>
               <h2 id="projects-empty-title">No work yet?</h2>
@@ -274,8 +274,8 @@
             </div>
             <div id="work-notice"></div>
             <div class="work-layout">
-              <div id="work-groups" class="work-groups"></div>
-              <section class="card detail-card" id="work-detail" aria-labelledby="detail-title" hidden>
+              <div id="work-groups" class="work-groups" data-pursers-panel="tickets" data-pursers-state="loading"></div>
+              <section class="card detail-card" id="work-detail" aria-labelledby="detail-title" data-pursers-panel="ticket-detail" data-pursers-state="empty" data-pursers-selected-ticket="" hidden>
                 <div class="section-heading">
                   <div><p class="section-kicker">Ticket detail</p><h2 id="detail-title">Select a ticket</h2></div>
                   <button class="ghost-button" type="button" id="detail-close">Close</button>
@@ -314,11 +314,11 @@
             </section>
             <section class="card" aria-labelledby="roster-title">
               <div class="section-heading"><div><p class="section-kicker">Roster</p><h2 id="roster-title">Team roster</h2></div></div>
-              <div id="agents-grid" class="agents-grid"></div>
+              <div id="agents-grid" class="agents-grid" data-pursers-panel="agents" data-pursers-state="loading"></div>
             </section>
             <section class="card" aria-labelledby="fleet-pool-title">
               <div class="section-heading"><div><p class="section-kicker">Shared workers</p><h2 id="fleet-pool-title">Cross-project pool</h2></div></div>
-              <div id="fleet-pool"></div>
+              <div id="fleet-pool" data-pursers-panel="seats" data-pursers-state="loading"></div>
             </section>
             <div class="team-grid">
               <section class="card" aria-labelledby="model-title">

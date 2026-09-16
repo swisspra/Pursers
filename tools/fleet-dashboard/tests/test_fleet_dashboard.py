@@ -2575,6 +2575,50 @@ def test_board_selection_marker_is_stable_and_board_cards_are_addressable() -> N
     assert "{home:'overview',projects:'boards',settings:'seats'}" in dashboard.HTML
 
 
+def test_fleet_selector_contract_is_embedded_in_server_rendered_output() -> None:
+    required_attributes = {
+        "data-pursers-surface",
+        "data-pursers-panel",
+        "data-pursers-state",
+        "data-pursers-board",
+        "data-pursers-ticket",
+        "data-pursers-agent",
+        "data-pursers-seat",
+        "data-pursers-status",
+        "data-pursers-selected",
+        "data-pursers-selected-board",
+        "data-pursers-selected-ticket",
+        "data-pursers-connection",
+        "data-pursers-health",
+    }
+    for attribute in required_attributes:
+        assert attribute in dashboard.HTML, f"missing selector contract attribute {attribute}"
+
+    assert 'data-pursers-surface="fleet"' in dashboard.HTML
+    assert "banner.setAttribute('data-pursers-panel','connection')" in dashboard.HTML
+    assert 'data-pursers-panel="hub"' in dashboard.HTML
+    assert 'data-pursers-panel="board-detail"' in dashboard.HTML
+    assert "function applyFleetSelectorContract()" in dashboard.HTML
+    assert "new MutationObserver(applyFleetSelectorContract)" in dashboard.HTML
+    assert "card.setAttribute('data-pursers-board',id)" in dashboard.HTML
+    assert "row.setAttribute('data-pursers-ticket',id)" in dashboard.HTML
+    assert "agent.setAttribute('data-pursers-agent'" in dashboard.HTML
+    assert "row.setAttribute('data-pursers-seat',id)" in dashboard.HTML
+
+
+def test_fleet_selector_contract_names_every_catalogue_row() -> None:
+    repo_root = MODULE_PATH.parents[2]
+    inventory = (repo_root / "docs/design-home/inventory.md").read_text(encoding="utf-8")
+    contract = (repo_root / "docs/design-home/fleet-selector-contract.md").read_text(encoding="utf-8")
+    catalogue_ids = set(
+        re.findall(r"^\| `(fleet(?:-dashboard)?\.[^`]+)` \| fleet \|", inventory, re.MULTILINE)
+    )
+    contract_ids = set(re.findall(r"`(fleet(?:-dashboard)?\.[^`]+)`", contract))
+
+    assert catalogue_ids
+    assert contract_ids == catalogue_ids
+
+
 def test_multi_central_routes_and_complete_javascript_are_valid() -> None:
     scripts = re.findall(r"<script>(.*?)</script>", dashboard.HTML, flags=re.DOTALL | re.IGNORECASE)
     completed = subprocess.run(

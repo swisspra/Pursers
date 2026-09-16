@@ -774,6 +774,10 @@ function renderConnection(data: Snapshot): void {
     detailText = "Authorized Central projection; credentials remain outside the View.";
   }
   if (banner.dataset.tone !== tone) banner.dataset.tone = tone;
+  const contractState = tone === "error" ? "error" : "ready";
+  const connectionState = tone === "live" ? "connected" : tone === "error" ? "error" : tone;
+  banner.setAttribute("data-pursers-state", contractState);
+  banner.setAttribute("data-pursers-connection", connectionState);
   setTextIfChanged(title, titleText);
   setTextIfChanged(detail, detailText);
 }
@@ -1182,6 +1186,9 @@ function renderWork(data: Snapshot): void {
       card.tabIndex = 0;
       card.setAttribute("role", "button");
       card.setAttribute("aria-label", `Open ${ticket.id}: ${ticket.title}`);
+      card.setAttribute("data-pursers-ticket", ticket.id);
+      card.setAttribute("data-pursers-status", ticket.status);
+      card.setAttribute("data-pursers-selected", String(ticket.id === selectedTicketId));
       card.dataset.ticketId = ticket.id;
       card.dataset.selected = String(ticket.id === selectedTicketId);
       const copy = element("div");
@@ -1205,7 +1212,9 @@ function renderWork(data: Snapshot): void {
     section.append(items);
     return section;
   }).filter((item): item is HTMLElement => item !== null);
-  byId("work-groups").replaceChildren(...(rendered.length ? rendered : [emptyState("No tickets yet", "Tickets created through agent chat will appear here.")]));
+  const workGroups = byId("work-groups");
+  workGroups.setAttribute("data-pursers-state", rendered.length ? "ready" : "empty");
+  workGroups.replaceChildren(...(rendered.length ? rendered : [emptyState("No tickets yet", "Tickets created through agent chat will appear here.")]));
   renderTicketDetail(data);
 }
 
@@ -1214,10 +1223,16 @@ function renderTicketDetail(data: Snapshot): void {
   const ticket = data.tickets.find((item) => item.id === selectedTicketId);
   if (!ticket) {
     panel.hidden = true;
+    panel.setAttribute("data-pursers-state", "empty");
+    panel.setAttribute("data-pursers-selected-ticket", "");
+    document.body.setAttribute("data-pursers-selected-ticket", "");
     selectedTicketId = null;
     return;
   }
   panel.hidden = false;
+  panel.setAttribute("data-pursers-state", "ready");
+  panel.setAttribute("data-pursers-selected-ticket", ticket.id);
+  document.body.setAttribute("data-pursers-selected-ticket", ticket.id);
   byId("detail-title").textContent = `${ticket.id} · ${ticket.title}`;
   const body = element("div", "stack-list");
   body.append(element("p", undefined, ticket.description || "No description was provided."));
@@ -1253,6 +1268,8 @@ function renderAgents(data: Snapshot): void {
   const orderedAgents = [...data.agents].sort((left, right) => Number(left.stale) - Number(right.stale));
   const cards = orderedAgents.map((agent) => {
     const card = element("article", "agent-card");
+    card.setAttribute("data-pursers-agent", agent.id || agent.name);
+    card.setAttribute("data-pursers-status", agent.status);
     card.dataset.stale = String(agent.stale);
     const heading = element("div", "agent-heading");
     const identity = element("div", "agent-heading");
@@ -1294,7 +1311,9 @@ function renderAgents(data: Snapshot): void {
     }
     return card;
   });
-  byId("agents-grid").replaceChildren(...(cards.length ? cards : [emptyState("No agents yet", "Agents appear after they join this local board.")]));
+  const agentsGrid = byId("agents-grid");
+  agentsGrid.setAttribute("data-pursers-state", cards.length ? "ready" : "empty");
+  agentsGrid.replaceChildren(...(cards.length ? cards : [emptyState("No agents yet", "Agents appear after they join this local board.")]));
   const working = data.agents.filter((agent) => !agent.stale && ["working", "busy", "claimed", "in_progress"].includes(agent.status)).length;
   const available = data.agents.filter((agent) => !agent.stale).length - working;
   byId("team-health").replaceChildren(
@@ -1384,6 +1403,7 @@ function renderFleet(data: FleetSnapshot | null): void {
   navCount.textContent = unavailable ? "" : String(data.projects.length);
   navCount.hidden = unavailable || data.projects.length === 0;
   const projectContainer = byId<HTMLElement>("fleet-projects");
+  projectContainer.setAttribute("data-pursers-state", unavailable ? "error" : projects.length ? "ready" : "empty");
   if (!projects.length) {
     projectContainer.replaceChildren(emptyState(
       unavailable ? "Fleet data unavailable" : "No registered projects",
@@ -1393,6 +1413,9 @@ function renderFleet(data: FleetSnapshot | null): void {
     const { wrapper, body } = fleetTable(["Name", "Board", "Status", "Open", "Claimed", "Submitted"]);
     projects.forEach((project) => {
       const row = element("tr");
+      row.setAttribute("data-pursers-board", project.board_id ?? "");
+      row.setAttribute("data-pursers-status", project.status ?? "unknown");
+      row.setAttribute("data-pursers-selected", String(project.board_id === snapshot?.board.id));
       row.append(
         element("td", undefined, project.name ?? "—"),
         element("td", "fleet-mono", project.board_id ?? "—"),
@@ -1409,6 +1432,7 @@ function renderFleet(data: FleetSnapshot | null): void {
   byId<HTMLElement>("projects-empty-card").hidden = unavailable || data.projects.length > 0;
   const pool = unavailable ? [] : data.pool;
   const poolContainer = byId<HTMLElement>("fleet-pool");
+  poolContainer.setAttribute("data-pursers-state", unavailable ? "error" : pool.length ? "ready" : "empty");
   if (!pool.length) {
     poolContainer.replaceChildren(emptyState(
       unavailable ? "Agent pool unavailable" : "No pool entries",
@@ -1418,6 +1442,8 @@ function renderFleet(data: FleetSnapshot | null): void {
     const { wrapper, body } = fleetTable(["Agent", "Pool status", "Seats"]);
     pool.forEach((entry) => {
       const row = element("tr");
+      row.setAttribute("data-pursers-agent", entry.principal_id ?? entry.agent_name ?? "");
+      row.setAttribute("data-pursers-status", entry.pool_status ?? "unknown");
       row.dataset.stale = String(entry.pool_status === "stale");
       const identity = element("td");
       identity.append(
@@ -1433,6 +1459,8 @@ function renderFleet(data: FleetSnapshot | null): void {
           const project = seat.project ?? seat.board_id ?? "—";
           const ticket = shortTicketId(seat.current_ticket_id) ?? "—";
           const chip = pill(`${project}:${ticket}`, seat.live === false ? "warning" : undefined);
+          chip.setAttribute("data-pursers-seat", seat.board_id ?? project);
+          chip.setAttribute("data-pursers-status", seat.live === false ? "stale" : "live");
           if (seat.board_id) chip.title = `board ${seat.board_id}`;
           seatList.append(chip);
         });
@@ -1735,6 +1763,8 @@ function render(data: Snapshot): void {
   lastRenderSignature = signature;
   document.body.dataset.scenario = data.data_mode;
   document.body.dataset.renderState = data.data_mode === "demo-error" ? "demo-error" : data.feed_error && data.data_mode !== "demo" ? "error" : data.data_mode;
+  document.body.setAttribute("data-pursers-state", data.data_mode === "demo-error" || data.feed_error && data.data_mode !== "demo" ? "error" : "ready");
+  document.body.setAttribute("data-pursers-selected-board", data.board.id);
   main.setAttribute("aria-busy", "false");
   byId("name").textContent = data.board.name;
   byId("board-id").textContent = data.board.id;

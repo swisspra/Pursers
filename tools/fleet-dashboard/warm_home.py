@@ -40,6 +40,44 @@ const warmSyncHubBefore=syncHub;syncHub=function(){const current=route();if(!cur
 """
 
 
+SELECTOR_CONTRACT_SCRIPT = r"""
+function pursersContractState(root){
+  if(root.querySelector('.error'))return'error';
+  if(root.querySelector('.skeleton,[aria-busy="true"]'))return'loading';
+  if(root.querySelector('.empty-guidance,.empty')&&!root.querySelector('[data-pursers-board],[data-pursers-ticket],[data-pursers-agent],[data-pursers-seat]'))return'empty';
+  return'ready';
+}
+function pursersTicketId(link){const match=String(link?.getAttribute('href')||'').match(/[?&]ticket=([^&]+)/);if(!match)return'';try{return decodeURIComponent(match[1])}catch{return match[1]}}
+function applyFleetSelectorContract(){
+  const main=document.querySelector('main'),marker=document.querySelector('#board-id'),current=route?.();
+  const selectedBoard=marker?.getAttribute('data-board-id')||'',selectedTicket=current?.kind==='board'&&current.ticket?current.ticket:'';
+  main?.setAttribute('data-pursers-surface','fleet');
+  main?.setAttribute('data-pursers-state',document.querySelector('.error')?'error':document.querySelector('.skeleton')?'loading':'ready');
+  marker?.setAttribute('data-pursers-selected-board',selectedBoard);
+  marker?.setAttribute('data-pursers-selected-ticket',selectedTicket);
+  const banner=document.querySelector('#connection-banner');
+  if(banner){const failed=!banner.hidden;banner.setAttribute('data-pursers-panel','connection');banner.setAttribute('data-pursers-state',failed?'error':'ready');banner.setAttribute('data-pursers-connection',failed?'reconnecting':'connected')}
+  const host=document.querySelector('#central-sections'),kind=navKind?.(),panelByView={projects:'boards',work:'tickets',team:'agents',settings:'config'};
+  if(host){host.setAttribute('data-pursers-panel',panelByView[kind]||'hub');host.setAttribute('data-pursers-state',pursersContractState(host))}
+  for(const panel of document.querySelectorAll('.boards-list')){panel.setAttribute('data-pursers-panel','boards');panel.setAttribute('data-pursers-state',pursersContractState(panel))}
+  for(const card of document.querySelectorAll('.board-card[data-board-id]')){const id=card.dataset.boardId||'';card.setAttribute('data-pursers-board',id);card.setAttribute('data-pursers-selected',String(id===selectedBoard))}
+  for(const row of document.querySelectorAll('.warm-row')){const link=row.querySelector('a.id[href*="ticket="]'),id=pursersTicketId(link);if(!id)continue;const heading=row.closest('.warm-section')?.querySelector('.section-title h3'),status=String(heading?.textContent||row.querySelector('.status')?.textContent||'unknown').trim().replaceAll(' ','_');row.setAttribute('data-pursers-ticket',id);row.setAttribute('data-pursers-status',status);row.setAttribute('data-pursers-selected',String(id===selectedTicket))}
+  for(const ticket of document.querySelectorAll('[data-ticket]')){const id=ticket.dataset.ticket||'';ticket.setAttribute('data-pursers-ticket',id);ticket.setAttribute('data-pursers-status',String(ticket.querySelector('.status')?.textContent||'unknown').trim());ticket.setAttribute('data-pursers-selected',String(id===selectedTicket))}
+  for(const panel of document.querySelectorAll('.warm-list'))if(panel.querySelector('[data-pursers-ticket]')){panel.setAttribute('data-pursers-panel','tickets');panel.setAttribute('data-pursers-state',pursersContractState(panel))}
+  for(const agent of document.querySelectorAll('.agent-card[data-agent-identity]')){agent.setAttribute('data-pursers-agent',agent.dataset.agentIdentity||'');agent.setAttribute('data-pursers-status',String(agent.querySelector('.agent-card-state .status')?.textContent||'unknown').trim())}
+  for(const panel of document.querySelectorAll('.agent-grid')){panel.setAttribute('data-pursers-panel','agents');panel.setAttribute('data-pursers-state',pursersContractState(panel))}
+  for(const row of document.querySelectorAll('.seat-layout table tbody tr')){const id=String(row.querySelector('.id')?.textContent||'').trim();if(!id)continue;row.setAttribute('data-pursers-seat',id);row.setAttribute('data-pursers-status',String(row.querySelector('.status')?.textContent||'unknown').trim())}
+  const seatPanel=document.querySelector('.seat-layout');if(seatPanel){seatPanel.setAttribute('data-pursers-panel','seats');seatPanel.setAttribute('data-pursers-state',pursersContractState(seatPanel))}
+  const detail=document.querySelector('#detail-view');if(detail){detail.setAttribute('data-pursers-panel','board-detail');detail.setAttribute('data-pursers-state',detail.hidden?'empty':pursersContractState(detail));detail.setAttribute('data-pursers-selected-ticket',selectedTicket)}
+  const search=document.querySelector('#search-results');if(search){search.setAttribute('data-pursers-panel','search');search.setAttribute('data-pursers-state',search.hidden?'empty':pursersContractState(search))}
+  for(const card of document.querySelectorAll('.health-card'))card.setAttribute('data-pursers-health',card.querySelector('.signal-dot.bad')?'reconnecting':'connected');
+}
+applyFleetSelectorContract();
+new MutationObserver(applyFleetSelectorContract).observe(document.querySelector('main'),{childList:true,subtree:true});
+window.addEventListener('hashchange',()=>setTimeout(applyFleetSelectorContract,0));
+"""
+
+
 OLD_SIDEBAR = r"""<aside class="sidebar" aria-label="Primary navigation"><a class="brand" href="#/"><span class="brand-mark">P</span><span>Pursers Fleet</span></a><nav class="primary-nav"><a data-nav="overview" href="#/"><span class="nav-icon">⌂</span>Overview</a><a data-nav="boards" href="#/boards"><span class="nav-icon">▦</span>Boards</a><a data-nav="agents" href="#/agents"><span class="nav-icon">◎</span>Agents</a><a data-nav="operations" href="#/operations"><span class="nav-icon">⚙</span>Operations</a><a data-nav="seats" href="#/seats"><span class="nav-icon">⌘</span>Config</a></nav><div class="sidebar-foot">Loopback control plane<br>bounded reads · guarded writes</div></aside>"""
 WARM_SIDEBAR = r"""<aside class="sidebar" aria-label="Primary navigation"><a class="brand" href="#/home"><span class="brand-mark">P</span><span class="brand-copy">Pursers Fleet<small>Your calm work home</small></span></a><section class="context-switcher" aria-label="Workspace context"><span class="context-label">Context</span><span class="context-option active">▣ <span>WORK</span><span class="context-dot" aria-hidden="true"></span></span><span class="context-option">⌂ <span>PERSONAL</span></span></section><nav class="primary-nav"><a data-nav="home" href="#/home"><span class="nav-icon">⌂</span>Home</a><a data-nav="projects" href="#/projects"><span class="nav-icon">▦</span>Projects</a><a data-nav="work" href="#/work"><span class="nav-icon">✓</span>Work</a><a data-nav="team" href="#/team"><span class="nav-icon">◎</span>Team</a><a data-nav="approvals" href="#/approvals"><span class="nav-icon">◇</span>Approvals</a><a data-nav="activity" href="#/activity"><span class="nav-icon">↻</span>Activity</a><a data-nav="settings" href="#/settings"><span class="nav-icon">⚙</span>Settings</a></nav><div class="sidebar-foot"><b>Local Fleet control</b><span>Bounded reads · guarded writes<br>Secrets stay redacted</span></div></aside>"""
 
@@ -50,4 +88,34 @@ def apply_warm_guided_home(html: str) -> str:
         raise ValueError("Fleet dashboard sidebar contract changed")
     html = html.replace(OLD_SIDEBAR, WARM_SIDEBAR, 1)
     html = html.replace("</style>", WARM_GUIDED_HOME_CSS + "\n</style>", 1)
-    return html.replace("</script></body>", "</script><script>\n" + WARM_GUIDED_HOME_SCRIPT + "\n</script></body>", 1)
+    html = html.replace(
+        "<main>",
+        '<main data-pursers-surface="fleet" data-pursers-state="loading">',
+        1,
+    )
+    html = html.replace(
+        'id="board-id" data-helper-field="board"',
+        'id="board-id" data-helper-field="board" data-pursers-selected-board="" data-pursers-selected-ticket=""',
+        1,
+    )
+    for element_id, panel, state in (
+        ("central-sections", "hub", "loading"),
+        ("detail-view", "board-detail", "empty"),
+        ("config-view", "config", "empty"),
+        ("workers-view", "seats", "empty"),
+        ("search-results", "search", "empty"),
+    ):
+        html = html.replace(
+            f'id="{element_id}"',
+            f'id="{element_id}" data-pursers-panel="{panel}" data-pursers-state="{state}"',
+            1,
+        )
+    return html.replace(
+        "</script></body>",
+        "</script><script>\n"
+        + WARM_GUIDED_HOME_SCRIPT
+        + "\n</script><script>\n"
+        + SELECTOR_CONTRACT_SCRIPT
+        + "\n</script></body>",
+        1,
+    )
