@@ -83,6 +83,7 @@ from evidence_trace import CORRELATION_HEADERS, EvidenceTrace, EvidenceTraceConf
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
 DEFAULT_HOME_BOARD = "pursers"
+DISPATCH_ACTIVITY_WINDOW_MULTIPLIER = 3.0
 SNAPSHOT_LIMIT = 1_000
 DISPATCH_TICKET_LIMIT = 500
 TICKET_LIST_LIMIT = 500
@@ -3363,6 +3364,14 @@ def aggregate_fleet(
     for raw in board_rows[:MAX_BOARDS]:
         board_id = _clip(raw.get("board_id"), MAX_LABEL_CHARS)
         label = _clip(raw.get("label") or board_id, MAX_LABEL_CHARS)
+        activity_window_seconds = raw.get("activity_window_seconds")
+        if (
+            isinstance(activity_window_seconds, bool)
+            or not isinstance(activity_window_seconds, (int, float))
+            or activity_window_seconds <= 0
+        ):
+            activity_window_seconds = stale_seconds
+        activity_window_seconds = int(activity_window_seconds)
         error = raw.get("error")
         if error:
             boards.append(
@@ -3379,6 +3388,7 @@ def aggregate_fleet(
                     },
                     "tickets": [],
                     "events": [],
+                    "activity_window_seconds": activity_window_seconds,
                     "truncated": False,
                 }
             )
@@ -3444,6 +3454,7 @@ def aggregate_fleet(
                     "agent_ids_by_board": {},
                     "last_seen": None,
                     "busy": False,
+                    "live": False,
                 },
             )
             group["boards"].add(board_id)
@@ -3502,7 +3513,7 @@ def aggregate_fleet(
                     else None
                 )
             group["seats"][board_id] = seat_projection
-            if agent.get("status") == "working" and agent.get(
+            if agent.get("status") in {"working", "busy"} and agent.get(
                 "lifecycle_status"
             ) not in {"handed_off", "inactive"}:
                 group["busy"] = True
@@ -3510,6 +3521,11 @@ def aggregate_fleet(
                 group["last_seen"] is None or seen_at > group["last_seen"]
             ):
                 group["last_seen"] = seen_at
+            if (
+                seen_at is not None
+                and (now - seen_at).total_seconds() <= activity_window_seconds
+            ):
+                group["live"] = True
 
         counts = {"open": 0, "claimed": 0, "submitted": 0, "closed_today": 0}
         ticket_rows: list[dict[str, Any]] = []
@@ -3652,6 +3668,7 @@ def aggregate_fleet(
                     snapshot.get("board", {}).get("stale_after_days", 3)
                     if isinstance(snapshot.get("board"), dict) else 3
                 ),
+                "activity_window_seconds": activity_window_seconds,
                 "snapshot_truncation": snapshot.get("_snapshot_truncation"),
                 "truncated": bool(
                     snapshot.get("truncated") or len(ticket_rows) > MAX_TICKET_ROWS
@@ -3667,9 +3684,7 @@ def aggregate_fleet(
         last_seen = group["last_seen"]
         if group["busy"]:
             status = "busy"
-        elif (
-            last_seen is not None and (now - last_seen).total_seconds() <= stale_seconds
-        ):
+        elif group["live"]:
             status = "available"
         else:
             status = "stale"
@@ -3701,6 +3716,7 @@ def aggregate_fleet(
     return {
         "generated_at": now.isoformat(),
         "stale_after_seconds": stale_seconds,
+        "activity_window_multiplier": DISPATCH_ACTIVITY_WINDOW_MULTIPLIER,
         "pool_summary": {
             "online": busy + available,
             "busy": busy,
@@ -3959,6 +3975,9 @@ class FleetFetcher:
         self._intake_write_lock = threading.Lock()
         self._intake_submissions: dict[str, list[tuple[str, datetime]]] = {}
         self._board_work_dirs: dict[str, str | None] = {}
+        self._readable_boards: list[tuple[str, str]] = []
+        self._excluded_readable_boards: list[dict[str, str]] = []
+        self._configured_but_unreadable: list[str] = []
         self._client_pool = _FleetClientPool(config, client_factory)
 
     def enable_client_reuse(self) -> None:
@@ -3976,10 +3995,41 @@ class FleetFetcher:
     async def _boards(self) -> list[tuple[str, str]]:
         async with self._client(self.config.home_board) as client:
             registry = await client.board_state_get(key="project_registry")
+            try:
+                listed = await _client_call(client, "board_list", {})
+            except (AttributeError, BoardClientError):
+                listed = {"boards": []}
         self._board_work_dirs = parse_project_work_dirs(
             registry, self.config.home_board
         )
-        return parse_project_registry(registry, self.config.home_board)
+        registry_boards = parse_project_registry(registry, self.config.home_board)
+        labels = {board_id: label for label, board_id in registry_boards}
+        readable = listed.get("boards") if isinstance(listed, dict) else None
+        readable_ids: list[str] = []
+        for row in readable if isinstance(readable, list) else []:
+            if not isinstance(row, dict):
+                continue
+            board_id = row.get("board_id")
+            if not isinstance(board_id, str) or not BOARD_ID_RE.fullmatch(board_id):
+                continue
+            labels.setdefault(board_id, board_id)
+            if board_id not in readable_ids:
+                readable_ids.append(board_id)
+        self._readable_boards = [(labels[board_id], board_id) for board_id in readable_ids]
+        configured_only = [
+            (label, board_id)
+            for label, board_id in registry_boards
+            if board_id not in readable_ids
+        ]
+        candidates = self._readable_boards + configured_only
+        included = candidates[:MAX_BOARDS]
+        self._excluded_readable_boards = [
+            {"board_id": board_id, "reason": "dashboard board limit"}
+            for _label, board_id in self._readable_boards
+            if (_label, board_id) not in included
+        ]
+        self._configured_but_unreadable = [board_id for _label, board_id in configured_only]
+        return included
 
     async def fetch_project_registry(self) -> dict[str, Any]:
         """Return validated registry data plus a CAS digest for Config writes."""
@@ -4098,6 +4148,42 @@ class FleetFetcher:
                 snapshot = await client.board_snapshot(
                     limit=SNAPSHOT_LIMIT, max_bytes=SNAPSHOT_MAX_BYTES,
                     include_retired=True,
+                )
+                try:
+                    status = await _client_call(
+                        client, "board_status", {"include_retired": True}
+                    )
+                except (AttributeError, BoardClientError):
+                    status = {}
+                status_agents = status.get("agents") if isinstance(status, dict) else None
+                snapshot_agents = snapshot.get("agents")
+                agents_by_id = {
+                    item.get("agent_id"): item
+                    for item in (
+                        snapshot_agents if isinstance(snapshot_agents, list) else []
+                    )
+                    if isinstance(item, dict)
+                    and isinstance(item.get("agent_id"), str)
+                }
+                for item in status_agents if isinstance(status_agents, list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    agent_id = item.get("agent_id")
+                    if isinstance(agent_id, str):
+                        agents_by_id[agent_id] = item
+                snapshot["agents"] = list(agents_by_id.values())
+                dispatch_policy = (
+                    status.get("dispatch_policy") if isinstance(status, dict) else None
+                )
+                offer_ttl_s = (
+                    dispatch_policy.get("offer_ttl_s")
+                    if isinstance(dispatch_policy, dict)
+                    else None
+                )
+                activity_window_seconds = (
+                    int(DISPATCH_ACTIVITY_WINDOW_MULTIPLIER * offer_ttl_s)
+                    if isinstance(offer_ttl_s, int) and not isinstance(offer_ttl_s, bool)
+                    else self.config.stale_seconds
                 )
                 snapshot_tickets = snapshot.get("tickets")
                 snapshot_tickets = (
@@ -4297,6 +4383,7 @@ class FleetFetcher:
                 "event_resync_required": event_feed["resync_required"],
                 "human_requests": human_requests[:10],
                 "handoff_memories": handoff_memories,
+                "activity_window_seconds": activity_window_seconds,
             }
         except Exception as exc:  # noqa: BLE001 - isolate one unavailable board.
             return {
@@ -4317,7 +4404,38 @@ class FleetFetcher:
                 for label, board_id in boards
             )
         )
-        return aggregate_fleet(rows, stale_seconds=self.config.stale_seconds)
+        result = aggregate_fleet(
+            rows,
+            stale_seconds=self.config.stale_seconds,
+            now=self.now_factory(),
+        )
+        covered = {
+            row.get("board_id")
+            for row in rows
+            if isinstance(row, dict)
+            and not row.get("error")
+            and row.get("board_id")
+            in {board_id for _label, board_id in self._readable_boards}
+        }
+        excluded = list(self._excluded_readable_boards)
+        excluded.extend(
+            {
+                "board_id": str(row.get("board_id") or "unknown"),
+                "reason": f"read unavailable: {row.get('error')}",
+            }
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("error")
+            and row.get("board_id")
+            in {board_id for _label, board_id in self._readable_boards}
+        )
+        result["pool_scope"] = {
+            "readable_boards": [board_id for _label, board_id in self._readable_boards],
+            "covered_boards": sorted(board_id for board_id in covered if board_id),
+            "excluded_boards": excluded,
+            "configured_but_unreadable": self._configured_but_unreadable,
+        }
+        return result
 
     async def fetch_board(self, board_id: str) -> dict[str, Any]:
         if not BOARD_ID_RE.fullmatch(board_id):
@@ -7295,11 +7413,12 @@ function liveAgentCardTimingV1IdentityV1(central,a){const managed=workerForAgent
 // merge retained main roster-timing live card below.
 function liveAgentCardTimingV1(central,a){const managed=workerByName(central,a.agent_name),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[],work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))];return `<article class="agent-card"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||'worker')}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', ')||'None recorded')}</span></div><div class="agent-card-state"><span class="status">${esc(a.pool_status||'Not observed')}</span><span class="meta">Last seen ${esc(relativeAge(a.last_seen))}</span></div></div>${work.length?work.map(s=>`<div class="work-row"><span class="severity${a.pool_status==='stale'?' critical':''}"></span><div>${agentTicketLink(central,s)}<span class="meta">Status ${esc(s.current_ticket_status||s.status||a.pool_status||'Not observed')}</span><span class="meta">${esc(s.project||`${s.role||managed?.role||'worker'} · ${s.board_id}`)}</span></div><span class="meta work-timing">${esc(agentRosterTiming(a,s))}</span></div>`).join(''):`<div class="work-row empty-work"><span class="severity${a.pool_status==='stale'?' critical':''}"></span><div><b>Current ticket</b><span class="meta">None recorded</span></div><span class="meta work-timing">${esc(agentRosterTiming(a,{}))}</span></div>`}${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`}
 // end retained live card renderers.
-function liveAgentCard(central,a){const managed=workerForAgent(central,a),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[];const work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))];const identity=agentIdentityLabel(a),duplicate=a.duplicate_name?`<span class="warning">Duplicate name · identity ${esc(identity)}</span>`:`<span class="meta">Identity ${esc(identity)}</span>`;const severity=`severity${a.pool_status==='stale'?' critical':''}`,timing=s=>typeof agentRosterTiming==='function'?agentRosterTiming(a,s):'Not observed';return `<article class="agent-card" data-agent-identity="${esc(agentIdentity(a))}"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||'worker')}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', ')||'None recorded')}</span>${duplicate}</div><div class="agent-card-state"><span class="status">${esc(a.pool_status||'Not observed')}</span><span class="meta">Last seen ${esc(relativeAge(a.last_seen))}</span></div></div>${work.length?work.map(s=>`<div class="work-row"><span class="${severity}"></span><div>${agentTicketLink(central,s)}<span class="meta">Status ${esc(s.current_ticket_status||s.status||a.pool_status||'Not observed')}</span><span class="meta">${esc(s.project||`${s.role||managed?.role||'worker'} · ${s.board_id}`)}</span></div><span class="meta work-timing">${esc(timing(s))}</span></div>`).join(''):`<div class="work-row empty-work"><span class="${severity}"></span><div><b>Current ticket</b><span class="meta">None recorded</span></div><span class="meta work-timing">${esc(timing({}))}</span></div>`}${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`;}
+function liveAgentCard(central,a){const managed=workerForAgent(central,a),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[];const work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))];const identity=agentIdentityLabel(a),duplicate=a.duplicate_name?`<span class="warning">Duplicate name · identity ${esc(identity)}</span>`:`<span class="meta">Identity ${esc(identity)}</span>`;const severity=`severity${a.pool_status==='stale'?' critical':''}`,timing=s=>typeof agentRosterTiming==='function'?agentRosterTiming(a,s):'Not observed';return `<article class="agent-card" data-agent-identity="${esc(agentIdentity(a))}" data-pursers-agent="${esc(agentIdentity(a))}" data-pursers-status="${esc(a.pool_status||'unknown')}"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||'worker')}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', ')||'None recorded')}</span>${duplicate}</div><div class="agent-card-state"><span class="status">${esc(a.pool_status||'Not observed')}</span><span class="meta">Last seen ${esc(relativeAge(a.last_seen))}</span></div></div>${work.length?work.map(s=>`<div class="work-row"><span class="${severity}"></span><div>${agentTicketLink(central,s)}<span class="meta">Status ${esc(s.current_ticket_status||s.status||a.pool_status||'Not observed')}</span><span class="meta">${esc(s.project||`${s.role||managed?.role||'worker'} · ${s.board_id}`)}</span></div><span class="meta work-timing">${esc(timing(s))}</span></div>`).join(''):`<div class="work-row empty-work"><span class="${severity}"></span><div><b>Current ticket</b><span class="meta">None recorded</span></div><span class="meta work-timing">${esc(timing({}))}</span></div>`}${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`;}
 function managedControls(central,w,includeWork=true){const p=w.pressure,work=w.current_work||[],logs=w.log_tail||[];return `<div class="pressure-line">${p?pressureBadge(p):'<span class="status">pressure unavailable</span>'}<span class="meta">${p?`${esc(p.latest_estimated_tokens)} tokens / poll`:'No local sample'}</span></div>${includeWork?work.map(x=>`<div class="work-row"><span class="severity"></span><div><b>${esc(x.ticket_title||x.ticket_id)}</b><span class="meta">${esc(x.role||w.role)} · ${esc(x.board_id)}</span></div><span class="id">${esc(x.ticket_id)}</span></div>`).join(''):''}<div class="agent-actions"><button data-hub-agent-action="test" data-central="${esc(central)}" data-name="${esc(w.name)}">Test</button><button data-hub-agent-action="start" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'disabled':''}>Start</button><button data-hub-agent-action="stop" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'':'disabled'}>Stop</button><button data-hub-agent-action="restart" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'':'disabled'}>Restart</button>${w.seat_exists?'':`<button data-hub-copy="${esc(w.seat_admin_command)}">Copy seat command</button>`}</div><details><summary>Log tail · last 20 lines</summary><pre class="log-tail">${esc(logs.join('\n')||'No log output yet.')}</pre></details>`}
 function renderGuide(){if(!hubGuide)return'';return `<section class="card pool"><div class="section-title"><h3>Finish ${esc(hubGuide.name)}</h3><span class="status">2 steps</span></div><div class="guide"><div class="guide-step"><b>1 · Provision seat</b><p class="muted">Run once, copy it, then Refresh to auto-detect.</p><code>${esc(hubGuide.seat_admin_command||'Seat already detected.')}</code>${hubGuide.seat_exists?'':'<button type="button" class="button" data-hub-copy="'+esc(hubGuide.seat_admin_command)+'">Copy command</button>'}</div><div class="guide-step"><b>2 · Start agent</b><p class="muted">Start unlocks after the seat and token are detected.</p><button type="button" class="primary-action" data-hub-agent-action="start" data-central="${esc(hubGuide.central)}" data-name="${esc(hubGuide.name)}" ${hubGuide.seat_exists?'':'disabled'}>Start</button></div></div></section>`}
 function inactiveAgentDrawer(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const a of d.inactive_agents||[])rows.push({central,agent:a});if(!rows.length)return'';return `<details id="inactive-agent-drawer" class="card pool"><summary>Retired / inactive agents · ${rows.length}</summary><div class="table-scroll"><table><thead><tr><th>Name</th><th>Lifecycle</th><th>Board</th><th>Stable identity</th><th>Last seen</th></tr></thead><tbody>${rows.sort((x,y)=>x.agent.agent_name.localeCompare(y.agent.agent_name)||agentIdentity(x.agent).localeCompare(agentIdentity(y.agent))).map(x=>`<tr><td><b>${esc(x.agent.agent_name)}</b><div class="meta">${esc(x.central)}</div></td><td><span class="status">${esc(x.agent.lifecycle_status||'inactive')}</span></td><td>${esc(x.agent.board_id||'—')}</td><td class="id">${esc(agentIdentityLabel(x.agent))}</td><td>${esc(relativeAge(x.agent.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`}
-function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){const key=`${central}/${agentIdentity(a)}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}for(const w of hubWorkers[central]?.workers||[]){const stable=Boolean(w.principal_id||w.agent_id),liveMatches=(d.agents||[]).filter(a=>a.agent_name===w.name);if(!stable&&liveMatches.length)continue;const key=`${central}/${agentIdentity(w)}`;if(!seen.has(key)){const work=w.current_work||[];records.push({central,agent:{agent_name:w.name,agent_id:w.agent_id,principal_id:w.principal_id,pool_status:work.length?'busy':w.running?'available':'stale',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null}});seen.add(key)}}}const cards=records.filter(x=>showStaleAgents||x.agent.pool_status==='busy'||x.agent.pool_status==='available').sort((a,b)=>compareAgents(a.agent,b.agent)||a.central.localeCompare(b.central)||agentIdentity(a.agent).localeCompare(agentIdentity(b.agent))).map(x=>liveAgentCard(x.central,x.agent)),action=`<div class="agent-actions">${agentVisibilityToggle()}<button id="new-agent" class="primary-action" type="button">+ New agent</button></div>`;return `${pageHead('Agents','Unified agent pool','Live workers, reviewers, local API agents, claims, pressure, controls, and bounded logs.',action)}${renderGuide()}<p id="hub-agent-status" class="muted"></p><section class="agent-grid">${cards.join('')||`<p class="empty">${showStaleAgents?'No agents available.':'No active agents available.'}</p>`}</section>${inactiveAgentDrawer()}`}
+function agentPoolScope(){const covered=[],excluded=[],unreadable=[];for(const [central,d] of Object.entries(fleetData)){const scope=d.pool_scope||{};for(const board of scope.covered_boards||[])covered.push({central,board});for(const row of scope.excluded_boards||[])excluded.push({central,...row});for(const board of scope.configured_but_unreadable||[])unreadable.push({central,board})}const state=excluded.length?'error':covered.length?'ready':'empty';return `<section class="card pool agent-pool-scope" data-pursers-panel="agents" data-pursers-state="${state}"><h3>Pool scope</h3><p class="muted">Boards covered: ${covered.length?covered.map(x=>`<span class="pill" data-pursers-board="${esc(x.board)}" data-pursers-status="ready">${esc(x.central)} · ${esc(x.board)}</span>`).join(' '):'none'}</p>${excluded.length?`<p class="warning">Readable but excluded: ${excluded.map(x=>`<span data-pursers-board="${esc(x.board_id)}" data-pursers-status="error">${esc(x.central)} · ${esc(x.board_id)} (${esc(x.reason||'unavailable')})</span>`).join(', ')}</p>`:''}${unreadable.length?`<p class="meta">Configured but not readable: ${unreadable.map(x=>`${esc(x.central)} · ${esc(x.board)}`).join(', ')}</p>`:''}</section>`}
+function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){const key=`${central}/${agentIdentity(a)}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}for(const w of hubWorkers[central]?.workers||[]){const stable=Boolean(w.principal_id||w.agent_id),liveMatches=(d.agents||[]).filter(a=>a.agent_name===w.name);if(!stable&&liveMatches.length)continue;const key=`${central}/${agentIdentity(w)}`;if(!seen.has(key)){const work=w.current_work||[];records.push({central,agent:{agent_name:w.name,agent_id:w.agent_id,principal_id:w.principal_id,pool_status:work.length?'busy':w.running?'available':'stale',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null}});seen.add(key)}}}const visible=records.filter(x=>showStaleAgents||x.agent.pool_status==='busy'||x.agent.pool_status==='available'),cards=visible.sort((a,b)=>compareAgents(a.agent,b.agent)||a.central.localeCompare(b.central)||agentIdentity(a.agent).localeCompare(agentIdentity(b.agent))).map(x=>liveAgentCard(x.central,x.agent)),empty=records.length===0?'No seats exist in the covered boards.':!showStaleAgents&&visible.length===0?`${records.length} seats exist but are filtered out as stale. Select Show stale to view their last-activity age.`:'No seats match the current view.',scope=typeof agentPoolScope==='function'?agentPoolScope():'',action=`<div class="agent-actions">${agentVisibilityToggle()}<button id="new-agent" class="primary-action" type="button">+ New agent</button></div>`;return `${pageHead('Agents','Unified agent pool','Live workers, reviewers, local API agents, claims, pressure, controls, and bounded logs.',action)}${renderGuide()}${scope}<p id="hub-agent-status" class="muted"></p><section class="agent-grid" data-pursers-panel="agents" data-pursers-state="${cards.length?'ready':records.length?'empty':'empty'}">${cards.join('')||`<p class="empty">${esc(empty)}</p>`}</section>${inactiveAgentDrawer()}`}
 function renderOperationsHub(){const cards=centralLabels.map(central=>{const d=fleetData[central],routes=(d?.boards||[]).map(b=>`<a href="${boardHref(central,b.board_id,'routes')}">${esc(b.label)} routes</a>`).join('');return `<article class="ops-card"><p class="eyebrow">${esc(central)}</p><h3>Control plane</h3><p class="muted">Policy, protocol pressure, and provenance routes.</p><div class="card-actions"><a class="primary-action" href="${centralHref(central,'config')}">Config</a><a href="${centralHref(central,'overhead')}">Overhead</a></div><div class="route-links">${routes||'<span class="empty">Boards loading…</span>'}</div></article>`}).join('');return `${pageHead('Operations','Operations','Coordinator policy, overhead details, and routes—without expanding the board write surface.')}<section class="ops-grid">${cards||'<div class="skeleton"></div>'}</section><section class="card pool"><h3>Guardrails</h3><p class="muted">Board writes remain exactly <code>coordinator_config</code> and <code>coordinator_intake</code>. Agent actions stay local under <code>/api/workers</code>.</p></section>`}
 function renderHub(){const host=document.querySelector('#central-sections'),kind=navKind();if(!['overview','boards','agents','operations'].includes(kind))return;syncBoardSelection();host.innerHTML=kind==='boards'?renderBoardsHub():kind==='agents'?renderAgentsHub():kind==='operations'?renderOperationsHub():renderOverview();const newest=Object.values(fleetData).map(d=>d.generated_at).sort().at(-1);document.querySelector('#state').textContent=newest?`Updated ${fmt(newest)}`:'Connecting to centrals…';bindInteractive(host);bindHub();renderSearchResults();syncNav()}
 renderFleet=renderHub;

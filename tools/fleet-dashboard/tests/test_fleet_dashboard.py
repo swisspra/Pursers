@@ -1831,6 +1831,108 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
     ) in calls
 
 
+def test_readable_unjoined_board_agents_use_dispatch_activity_window() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+
+    class Client:
+        def __init__(self, board_id: str) -> None:
+            self.board_id = board_id
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_state_get(self, **_kwargs: object) -> dict:
+            return registry({})
+
+        async def board_list(self) -> dict:
+            return {
+                "boards": [
+                    {"board_id": "home-board"},
+                    {"board_id": "readable-not-joined"},
+                ]
+            }
+
+        async def board_snapshot(self, **_kwargs: object) -> dict:
+            # Simulate a bounded snapshot that omitted the current membership rows.
+            return {"latest_seq": 0, "agents": [], "tickets": []}
+
+        async def board_status(self, **_kwargs: object) -> dict:
+            agents = []
+            if self.board_id == "readable-not-joined":
+                agents = [
+                    {
+                        "agent_id": "AI-live",
+                        "principal_id": "PR-live",
+                        "agent_name": "live-seat",
+                        "last_activity_at": (now - timedelta(seconds=539)).isoformat(),
+                        "lifecycle_status": "active",
+                        "role": "worker",
+                        "status": "idle",
+                    },
+                    {
+                        "agent_id": "AI-stale",
+                        "principal_id": "PR-stale",
+                        "agent_name": "stale-seat",
+                        "last_activity_at": (now - timedelta(seconds=541)).isoformat(),
+                        "lifecycle_status": "active",
+                        "role": "worker",
+                        "status": "idle",
+                    },
+                ]
+            return {
+                "agents": agents,
+                "dispatch_policy": {"offer_ttl_s": 180},
+            }
+
+        async def board_catchup(self, **_kwargs: object) -> dict:
+            return {"events": []}
+
+        async def ticket_list(self, **_kwargs: object) -> dict:
+            return {"tickets": []}
+
+        async def memory_read(self, **_kwargs: object) -> list[dict]:
+            return []
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="home-board",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(
+        config,
+        client_factory=lambda _url, _token, board_id, **_kwargs: Client(board_id),
+        now_factory=lambda: now,
+    )
+    try:
+        result = asyncio.run(fetcher.fetch())
+    finally:
+        fetcher.close()
+
+    assert [row["board_id"] for row in result["boards"]] == [
+        "home-board",
+        "readable-not-joined",
+    ]
+    assert result["pool_scope"] == {
+        "readable_boards": ["home-board", "readable-not-joined"],
+        "covered_boards": ["home-board", "readable-not-joined"],
+        "excluded_boards": [],
+        "configured_but_unreadable": [],
+    }
+    agents = {row["agent_name"]: row for row in result["agents"]}
+    assert agents["live-seat"]["pool_status"] == "available"
+    assert agents["stale-seat"]["pool_status"] == "stale"
+    readable_board = next(
+        row for row in result["boards"] if row["board_id"] == "readable-not-joined"
+    )
+    assert readable_board["activity_window_seconds"] == 540
+
+
 def test_ticket_detail_projects_latest_explicit_handoff_and_current_reviewer() -> None:
     detail = dashboard.project_board_detail(
         {
@@ -6373,13 +6475,14 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
             source("function workerForAgent("),
             source("function renderRoleChips("),
             source("function liveAgentCard("),
-            source("function renderGuide("),
-            source("function inactiveAgentDrawer("),
-            source("function renderAgentsHub("),
-            "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
-            f"let fleetData={{personal:{{agents:{json.dumps(agents)}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
-            "const active=renderAgentsHub();showStaleAgents=true;const all=renderAgentsHub();",
-            "console.log(JSON.stringify({active,all}));",
+                source("function renderGuide("),
+                source("function inactiveAgentDrawer("),
+                source("function agentPoolScope("),
+                source("function renderAgentsHub("),
+                "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
+                f"let fleetData={{personal:{{agents:{json.dumps(agents)},pool_scope:{{covered_boards:['pursers'],excluded_boards:[{{board_id:'hidden-board',reason:'read unavailable'}}]}}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
+                "const active=renderAgentsHub();showStaleAgents=true;const all=renderAgentsHub();fleetData={personal:{agents:[fleetData.personal.agents[0]],pool_scope:{covered_boards:['pursers'],excluded_boards:[]}}};showStaleAgents=false;const filtered=renderAgentsHub();",
+                "console.log(JSON.stringify({active,all,filtered}));",
         ]
     )
     completed = subprocess.run(
@@ -6391,6 +6494,7 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
     result = json.loads(completed.stdout)
     active = result["active"]
     all_agents = result["all"]
+    filtered = result["filtered"]
 
     assert "m-stale" not in active
     assert active.index("z-busy") < active.index("a-available")
@@ -6407,6 +6511,12 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
     assert all_agents.index("a-available") < all_agents.index("m-stale")
     assert "Show active only" in all_agents
     assert 'aria-pressed="true"' in all_agents
+    assert 'data-pursers-board="pursers"' in active
+    assert 'data-pursers-status="ready"' in active
+    assert "Readable but excluded" in active
+    assert "hidden-board (read unavailable)" in active
+    assert "1 seats exist but are filtered out as stale" in filtered
+    assert "last-activity age" in filtered
 
 
 def test_agent_pool_rows_keep_details_and_default_to_active() -> None:
