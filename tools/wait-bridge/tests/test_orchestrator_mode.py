@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = ROOT.parents[1]
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 CLIENT_SRC = REPOSITORY / "packages" / "client" / "src"
 CENTRAL_SRC = REPOSITORY / "packages" / "central" / "src" / "pursers_central"
 sys.path.insert(0, str(CENTRAL_SRC))
@@ -373,40 +374,20 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
             digest_tool.input_schema["properties"],
         )
 
+        replay = json.loads(
+            (FIXTURES / "digest_churn_ticket.json").read_text(encoding="utf-8")
+        )
         engine = wait_server.OrchestratorEngine(
             connection=None,
             meter=SimpleNamespace(),
             state_path=self.root / "bounded-digest.json",
         )
-        ticket_id = "TK-long-history"
-        engine.active_boards = [wait_server.BOARD_ID]
-        engine.cursor_map = {wait_server.BOARD_ID: 52}
-        engine.ring_buffer = [
-            {
-                "id": f"EV-{seq:04d}",
-                "seq": seq,
-                "board_id": wait_server.BOARD_ID,
-                "ticket_id": ticket_id,
-                "kind": "ticket_status_changed",
-                "status_from": f"state-{seq - 1}",
-                "status_to": (
-                    "submitted"
-                    if seq == 20
-                    else "closed"
-                    if seq == 30
-                    else f"state-{seq}"
-                ),
-                "actor": "worker-agent",
-                "occurred_at": f"2030-01-01T00:{seq:02d}:00Z",
-            }
-            for seq in range(1, 53)
-        ]
-        engine.ticket_cache[f"{wait_server.BOARD_ID}:{ticket_id}"] = {
-            "ticket_id": ticket_id,
-            "title": "Long transition history",
-            "status": "state-52",
-            "annotations": [],
-        }
+        ticket_id = replay["ticket"]["ticket_id"]
+        board_id = replay["ticket"]["board_id"]
+        engine.active_boards = [board_id]
+        engine.cursor_map = {board_id: replay["cursor"]}
+        engine.ring_buffer = replay["events"]
+        engine.ticket_cache[f"{board_id}:{ticket_id}"] = replay["ticket"]
 
         uncapped = await engine.build_digest(since=0)
         uncapped_ticket = uncapped["tickets"][0]
@@ -414,20 +395,20 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(uncapped_ticket["transitions_omitted_count"], 0)
 
         expected = {
-            1: (["state-52"], 51),
-            2: (["state-1", "state-52"], 50),
+            1: (["closed"], 51),
+            2: (["open", "closed"], 50),
             10: (
                 [
-                    "state-1",
-                    "state-2",
-                    "state-3",
-                    "state-4",
-                    "state-5",
-                    "state-48",
-                    "state-49",
-                    "state-50",
-                    "state-51",
-                    "state-52",
+                    "open",
+                    "claimed",
+                    "submitted",
+                    "reviewing",
+                    "rejected",
+                    "claimed",
+                    "submitted",
+                    "reviewing",
+                    "approved",
+                    "closed",
                 ],
                 42,
             ),
