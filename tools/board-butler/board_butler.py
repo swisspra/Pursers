@@ -183,11 +183,16 @@ def parse_time(value: Any) -> datetime | None:
 
 
 def classify_question(message: str, kind: str = "information") -> Classification:
-    if kind in {"approval", "decision"}:
-        return Classification(Outcome.ESCALATE, f"question-kind:{kind}")
+    # An approval request is itself authority-bearing.  A decision-labelled
+    # question can still ask for a deterministic fact, so content rules get a
+    # chance to prove it mechanical before the fail-closed kind fallback.
+    if kind == "approval":
+        return Classification(Outcome.ESCALATE, "question-kind:approval")
     for rule in POLICY_TABLE:
         if rule.pattern.search(message):
             return Classification(rule.outcome, rule.name, rule.evaluator)
+    if kind == "decision":
+        return Classification(Outcome.ESCALATE, "question-kind:decision")
     return Classification(Outcome.UNKNOWN, "no-confident-policy-match")
 
 
@@ -336,7 +341,7 @@ async def make_finding(
             evidence = await evaluate_mechanical(
                 classification, question, source, repo, integration_ref
             )
-        except (OSError, ValueError) as exc:
+        except Exception as exc:
             outcome = Outcome.UNKNOWN
             evidence = Evidence(
                 source=f"policy_table:{classification.rule}",
@@ -421,7 +426,7 @@ def merge_finding(
         for item in state.get("findings", [])
         if isinstance(item, Mapping)
         and not (
-            item.get("kind") == "would_answer"
+            item.get("kind") in {"would_answer", "butler_rate_limited"}
             and item.get("question_id") == finding.get("question_id")
         )
     ]
@@ -486,6 +491,14 @@ def assert_independent_identity(
         raise IdentityConflict("board butler must join with role=coordinator")
     principal_id = getattr(identity, "principal_id", None)
     agent_id = getattr(identity, "agent_id", None)
+    own_rows = [agent for agent in agents if agent.get("agent_id") == agent_id]
+    if len(own_rows) != 1:
+        raise IdentityConflict("board butler identity is absent or duplicated")
+    own_caps = own_rows[0].get("capabilities", {})
+    if not isinstance(own_caps, Mapping):
+        own_caps = {}
+    if own_caps.get("can_work") is not False or own_caps.get("can_review") is not False:
+        raise IdentityConflict("board butler seat must disable work and review")
     conflicts = []
     for agent in agents:
         if agent.get("agent_id") == agent_id or agent.get("principal_id") != principal_id:
@@ -493,7 +506,11 @@ def assert_independent_identity(
         caps = agent.get("capabilities", {})
         if not isinstance(caps, Mapping):
             caps = {}
-        if caps.get("can_work") is True or caps.get("can_review") is True:
+        active_role = (
+            agent.get("lifecycle_status") == "active"
+            and agent.get("role") in {"worker", "reviewer"}
+        )
+        if active_role or caps.get("can_work") is True or caps.get("can_review") is True:
             conflicts.append(str(agent.get("agent_name", agent.get("agent_id"))))
     if conflicts:
         raise IdentityConflict(
@@ -676,7 +693,12 @@ def limits_from_config(
     butler = config.get("board_butler", {})
     if not isinstance(butler, Mapping):
         butler = {}
-    per_hour = butler.get("drafts_per_hour", args.drafts_per_hour)
+    intake = config.get("intake", {})
+    if not isinstance(intake, Mapping):
+        intake = {}
+    per_hour = butler.get(
+        "drafts_per_hour", intake.get("rate_per_hour", args.drafts_per_hour)
+    )
     per_ticket = butler.get("drafts_per_ticket", args.drafts_per_ticket)
     if not isinstance(per_hour, int) or isinstance(per_hour, bool) or not 1 <= per_hour <= 100:
         per_hour = args.drafts_per_hour
@@ -693,6 +715,19 @@ async def process_question(
 ) -> dict[str, Any]:
     raw = await backend.findings()
     state, previous_value = _decode_state(raw)
+    question_id = str(question.get("question_id", ""))
+    existing = next(
+        (
+            dict(item)
+            for item in state.get("findings", [])
+            if isinstance(item, Mapping)
+            and item.get("kind") in {"would_answer", "butler_rate_limited"}
+            and str(item.get("question_id", "")) == question_id
+        ),
+        None,
+    )
+    if existing is not None:
+        return existing
     config = await backend.coordinator_config()
     per_hour, per_ticket = limits_from_config(config, args)
     reason = rate_limit_reason(
@@ -729,9 +764,9 @@ async def run(
             while True:
                 timeout = float(args.wait_timeout) if args.once else None
                 cursor, question = await backend.wait_for_question(cursor, timeout)
-                save_cursor(args.cursor_file, cursor)
                 if question is not None:
                     await process_question(backend, question, args, utc_now())
+                save_cursor(args.cursor_file, cursor)
                 if args.once:
                     return
 

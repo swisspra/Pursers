@@ -76,6 +76,7 @@ def args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
         ("Should we publish and tag this release?", "information", "ESCALATE", "release-decision"),
         ("Register this new board in the project registry", "information", "ESCALATE", "membership-or-registry"),
         ("Is abcdef1 an ancestor of origin/main?", "information", "MECHANICAL", "git-ancestry"),
+        ("Is abcdef1 an ancestor of origin/main?", "decision", "MECHANICAL", "git-ancestry"),
         ("What is the status of TK-123?", "information", "MECHANICAL", "ticket-status"),
         ("May we waive the gate because abcdef1 is merged?", "information", "ESCALATE", "gate-waiver"),
         ("Is this okay?", "approval", "ESCALATE", "question-kind:approval"),
@@ -230,6 +231,13 @@ def test_identity_rejects_shared_worker_or_reviewer_principal() -> None:
     )
     agents = [
         {
+            "agent_id": "AI-butler",
+            "agent_name": "board-butler-1",
+            "principal_id": "PR-shared",
+            "role": "coordinator",
+            "capabilities": {"can_work": False, "can_review": False},
+        },
+        {
             "agent_id": "AI-worker",
             "agent_name": "worker-1",
             "principal_id": "PR-shared",
@@ -248,12 +256,41 @@ def test_identity_accepts_distinct_non_working_principal() -> None:
         identity,
         [
             {
+                "agent_id": "AI-butler",
+                "principal_id": "PR-butler",
+                "role": "coordinator",
+                "capabilities": {"can_work": False, "can_review": False},
+            },
+            {
                 "agent_id": "AI-worker",
                 "principal_id": "PR-worker",
                 "capabilities": {"can_work": True, "can_review": False},
             }
         ],
     )
+
+
+def test_identity_rejects_active_worker_role_even_with_disabled_caps() -> None:
+    identity = SimpleNamespace(
+        agent_id="AI-butler", principal_id="PR-shared", role="coordinator"
+    )
+    agents = [
+        {
+            "agent_id": "AI-butler",
+            "principal_id": "PR-shared",
+            "role": "coordinator",
+            "capabilities": {"can_work": False, "can_review": False},
+        },
+        {
+            "agent_id": "AI-worker",
+            "principal_id": "PR-shared",
+            "role": "worker",
+            "lifecycle_status": "active",
+            "capabilities": {"can_work": False, "can_review": False},
+        },
+    ]
+    with pytest.raises(butler.IdentityConflict, match="also works or reviews"):
+        butler.assert_independent_identity(identity, agents)
 
 
 def test_identity_fails_closed_on_truncated_agent_view() -> None:
@@ -341,6 +378,78 @@ def test_dry_run_prints_draft_and_does_not_write(tmp_path: Path, capsys: pytest.
     assert json.loads(capsys.readouterr().out)["kind"] == "would_answer"
 
 
+def test_duplicate_question_is_idempotent_and_does_not_write(tmp_path: Path) -> None:
+    options = args(tmp_path)
+    existing = {
+        "kind": "would_answer",
+        "ticket_id": "TK-source",
+        "question_id": "CQ-source",
+        "verdict": "MECHANICAL",
+        "observed_at": NOW.isoformat(),
+    }
+
+    class Backend(Source):
+        writes = 0
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {
+                "state": {
+                    "value": json.dumps(
+                        {"schema_version": 2, "findings": [existing]}
+                    )
+                }
+            }
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            raise AssertionError("duplicate must return before extra reads")
+
+        async def write_findings(self, *_args: Any) -> None:
+            self.writes += 1
+
+    backend = Backend()
+    result = asyncio.run(
+        butler.process_question(backend, question("anything"), options, NOW)
+    )
+
+    assert result == existing
+    assert backend.writes == 0
+
+
+def test_cursor_is_not_committed_before_finding_write(tmp_path: Path) -> None:
+    options = args(tmp_path)
+
+    class FailingBackend(Source):
+        latest_seq = 10
+
+        async def __aenter__(self) -> "FailingBackend":
+            self.tickets["TK-123"] = {"status": "closed"}
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def wait_for_question(
+            self, cursor: int, _timeout: float
+        ) -> tuple[int, Mapping[str, Any]]:
+            assert cursor == 10
+            return 11, question("What is the status of TK-123?")
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            return {}
+
+        async def write_findings(self, *_args: Any) -> None:
+            raise RuntimeError("simulated CAS failure")
+
+    backend = FailingBackend()
+    with pytest.raises(RuntimeError, match="simulated CAS failure"):
+        asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
+
+    assert not options.cursor_file.exists()
+
+
 def test_rate_limits_are_configurable_and_reported() -> None:
     state = {
         "findings": [
@@ -358,6 +467,20 @@ def test_rate_limits_are_configurable_and_reported() -> None:
     finding = butler.rate_limit_finding(question("anything"), "per_hour", NOW)
     assert finding["kind"] == "butler_rate_limited"
     assert finding["evidence"] == "source=board_butler_rate_limit; limit=per_hour"
+
+
+def test_rate_limit_reuses_coordinator_intake_shape(tmp_path: Path) -> None:
+    options = args(tmp_path)
+    assert butler.limits_from_config(
+        {"intake": {"rate_per_hour": 7}}, options
+    ) == (7, 2)
+    assert butler.limits_from_config(
+        {
+            "intake": {"rate_per_hour": 7},
+            "board_butler": {"drafts_per_hour": 3, "drafts_per_ticket": 1},
+        },
+        options,
+    ) == (3, 1)
 
 
 def test_findings_merge_is_bounded_and_dedupes_question_id() -> None:

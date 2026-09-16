@@ -41,7 +41,13 @@ and makes no Central write.
 Draft caps default to five per hour and two per ticket. They may be set with
 `--drafts-per-hour` and `--drafts-per-ticket`, or with the equivalent
 `board_butler.drafts_per_hour` and `board_butler.drafts_per_ticket` keys in
-`coordinator_config`. A cap hit is reported as `butler_rate_limited`.
+`coordinator_config`. When no butler-specific hourly override exists, the
+runner reuses `coordinator_config.intake.rate_per_hour`. A cap hit is reported
+as `butler_rate_limited`.
+
+Question handling is replay-safe. The durable cursor advances only after the
+finding write succeeds, and a repeated question ID reuses its existing finding
+without consuming a cap or issuing another write.
 
 Run the suite with:
 
