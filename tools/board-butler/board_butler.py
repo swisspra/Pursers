@@ -309,12 +309,17 @@ def _suite_statuses(output: str, suite_names: Sequence[str]) -> dict[str, str]:
         )
         if not combined:
             result[name] = "never-reached"
-        elif re.search(r"\b(?:fail(?:ed|ure|ures)?|blocked|denied|not run|never[- ]reached)\b", combined):
+        elif re.search(
+            r"\b(?:fail(?:ed|ure|ures)?|blocked|denied|errors?|timed? out|not run|never[- ]reached)\b",
+            combined,
+        ):
             result[name] = "failed"
-        elif "skipped" in combined and not has_pass:
+        elif has_pass:
+            result[name] = "passed"
+        elif "skipped" in combined:
             result[name] = "skipped"
         else:
-            result[name] = "passed"
+            result[name] = "never-reached"
     return result
 
 

@@ -211,6 +211,8 @@ test-output: AionUi: 52 failed, 229 passed, 3 skipped; sandbox denied /bin/ps
         ("AionUi: 3 skipped", "skipped"),
         ("AionUi: 0 passed, 3 skipped", "skipped"),
         ("AionUi: 229 passed, 3 skipped", "passed"),
+        ("AionUi: command timed out", "failed"),
+        ("AionUi: execution evidence unavailable", "never-reached"),
     ],
 )
 def test_suite_status_does_not_treat_skip_counts_as_passes(
