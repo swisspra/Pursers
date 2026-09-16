@@ -10,7 +10,7 @@ The contract uses only the `data-pursers-*` namespace:
 - `data-pursers-board`, `data-pursers-ticket`, `data-pursers-agent`, and `data-pursers-seat` contain stable product identifiers on rows or cards.
 - `data-pursers-selected-board` and `data-pursers-selected-ticket` contain the current selection, including the empty string when nothing is selected.
 - `data-pursers-selected="true|false"` exposes selection state on addressable board and ticket rows.
-- `data-pursers-status` contains the source-backed status for board, ticket, agent, or seat rows.
+- `data-pursers-status` contains the source-backed status for board, ticket, agent, or seat rows. Fleet board rows use `ready` after a successful bounded snapshot and `error` when that board read failed.
 - `data-pursers-connection="loading|connected|reconnecting|error|demo|stale"` and `data-pursers-health="connected|reconnecting"` expose connection and health state as text values.
 
 ## Catalogue bindings
@@ -22,7 +22,7 @@ Repeated catalogue entries use the same binding. The attribute locates the real 
 | `fleet-dashboard.surface`; `fleet.theme`; `fleet.density`; `fleet.keyboard-help`; `fleet.refresh-pause-resume`; `fleet.updated-state`; `fleet.unknown-route-recovery` | Fleet root | `[data-pursers-surface="fleet"]` and `data-pursers-state` | Stable surface root and its current render state. |
 | `fleet-dashboard.state.empty-centrals`; `fleet-dashboard.state.loading-board`; `fleet-dashboard.state.error-board`; `fleet-dashboard.state.bounded`; `fleet-dashboard.state.truncated-tickets`; `fleet-dashboard.state.edit-paused`; `fleet-dashboard.state.empty-workers`; `fleet-dashboard.state.empty-agents`; `fleet-dashboard.state.routes-unavailable` | Owning hub, board-detail, agents, seats, or config panel | `[data-pursers-panel]` plus `data-pursers-state` | The observer reads `loading`, `ready`, `empty`, or `error` from the panel rather than inferring it from placeholder styling. |
 | `fleet-dashboard.state.offline`; `fleet.central-availability-isolation`; `fleet.default-central-aliases`; `fleet.hub-overview` | Connection banner or Central health card | `[data-pursers-panel="connection"][data-pursers-connection]` or `[data-pursers-health]` | Connection and Central health are explicit values rather than coloured dots. |
-| `fleet.board-cards`; `fleet.hub-boards`; `fleet.add-project-board`; `fleet.add-project-registry` | Board list and board card | `[data-pursers-panel="boards"] [data-pursers-board]` | The panel exposes its state and each card exposes its exact board identifier. |
+| `fleet.board-cards`; `fleet.hub-boards`; `fleet.add-project-board`; `fleet.add-project-registry` | Board list and board card | `[data-pursers-panel="boards"] [data-pursers-board][data-pursers-status]` | The panel exposes its state and each card exposes its exact board identifier plus source-backed `ready` or `error` status. |
 | `fleet.board-detail-activity`; `fleet.board-detail-metadata`; `fleet.board-detail-truncation`; `fleet.findings`; `fleet.intake`; `fleet.tab-tickets`; `fleet.tab-timeline`; `fleet.tab-changes`; `fleet.tab-flow`; `fleet.tab-routes` | Selected board marker and board-detail panel | `[data-pursers-selected-board]` and `[data-pursers-panel="board-detail"]` | The selected board is readable directly; the detail panel owns the loaded, empty, and error states. |
 | `fleet.active-ticket-rows`; `fleet.ticket-counts` | Ticket panel and ticket row | `[data-pursers-panel="tickets"] [data-pursers-ticket][data-pursers-status]` | Every ticket row exposes its identifier and source-backed status. |
 | `fleet.agent-current-claims`; `fleet.agent-duplicate-names`; `fleet.agent-pool`; `fleet.agent-retired-stale-drawer`; `fleet.hub-agents`; `fleet.pool-online`; `fleet.pool-busy`; `fleet.pool-available`; `fleet.pool-stale` | Agent panel, agent card, and seat chip or row | `[data-pursers-panel="agents"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]` | Agent and seat identity and status are values, including stale or active pool state. |
@@ -55,6 +55,7 @@ document.querySelector('#board-id').getAttribute('data-pursers-selected-board');
 document.querySelector('#board-id').getAttribute('data-pursers-selected-ticket');
 [...document.querySelectorAll('[data-pursers-board]')].map((node) => ({
   board: node.getAttribute('data-pursers-board'),
+  status: node.getAttribute('data-pursers-status'),
   selected: node.getAttribute('data-pursers-selected'),
 }));
 [...document.querySelectorAll('[data-pursers-ticket]')].map((node) => ({

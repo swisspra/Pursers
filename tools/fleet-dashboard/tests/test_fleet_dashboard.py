@@ -34,6 +34,7 @@ assert SPEC and SPEC.loader
 dashboard = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = dashboard
 SPEC.loader.exec_module(dashboard)
+import warm_home  # noqa: E402
 
 CENTRAL_SRC = MODULE_PATH.parents[2] / "packages" / "central" / "src" / "pursers_central"
 sys.path.insert(0, str(CENTRAL_SRC))
@@ -2601,9 +2602,94 @@ def test_fleet_selector_contract_is_embedded_in_server_rendered_output() -> None
     assert "function applyFleetSelectorContract()" in dashboard.HTML
     assert "new MutationObserver(applyFleetSelectorContract)" in dashboard.HTML
     assert "card.setAttribute('data-pursers-board',id)" in dashboard.HTML
+    assert "card.setAttribute('data-pursers-status',pursersBoardStatus(id))" in dashboard.HTML
     assert "row.setAttribute('data-pursers-ticket',id)" in dashboard.HTML
     assert "agent.setAttribute('data-pursers-agent'" in dashboard.HTML
     assert "row.setAttribute('data-pursers-seat',id)" in dashboard.HTML
+
+
+def test_fleet_selector_contract_replays_board_and_route_panel_states() -> None:
+    program = "\n".join(
+        [
+            "class Element {",
+            "  constructor({hidden=false,mode='ready',dataset={}}={}){this.hidden=hidden;this.mode=mode;this.dataset=dataset;this.attrs={}}",
+            "  setAttribute(name,value){this.attrs[name]=String(value)}",
+            "  getAttribute(name){return this.attrs[name]??null}",
+            "  querySelector(selector){",
+            "    if(selector==='.error')return this.mode==='error'?{}:null;",
+            "    if(selector==='.skeleton,[aria-busy=\"true\"]')return this.mode==='loading'?{}:null;",
+            "    if(selector==='.empty-guidance,.empty')return this.mode==='empty'?{}:null;",
+            "    if(selector==='[data-pursers-board],[data-pursers-ticket],[data-pursers-agent],[data-pursers-seat]')return null;",
+            "    if(selector==='.signal-dot.bad')return null;",
+            "    return null;",
+            "  }",
+            "}",
+            "const nodes={main:new Element(),marker:new Element(),banner:new Element({hidden:true}),host:new Element(),config:new Element({hidden:true,mode:'empty'}),workers:new Element({hidden:true,mode:'empty'}),detail:new Element({hidden:true,mode:'empty'}),search:new Element({hidden:true,mode:'empty'}),board:new Element({dataset:{boardId:'board-one'}})};",
+            "nodes.marker.setAttribute('data-board-id','board-one');",
+            "let current={kind:'projects'};",
+            "let fleetData={fleet:{boards:[{board_id:'board-one',status:'ready'}]}};",
+            "const route=()=>current,navKind=()=>current.kind;",
+            "const selectorMap={main:nodes.main,'#board-id':nodes.marker,'#connection-banner':nodes.banner,'#central-sections':nodes.host,'#config-view':nodes.config,'#workers-view':nodes.workers,'#detail-view':nodes.detail,'#search-results':nodes.search};",
+            "const document={querySelector(selector){if(selector==='.error')return [nodes.config,nodes.workers].some(node=>!node.hidden&&node.mode==='error')?{}:null;if(selector==='.skeleton')return [nodes.config,nodes.workers].some(node=>!node.hidden&&node.mode==='loading')?{}:null;return selectorMap[selector]||null},querySelectorAll(selector){return selector==='.board-card[data-board-id]'?[nodes.board]:[]}};",
+            "const window={addEventListener(){}};",
+            "class MutationObserver{observe(){}}",
+            "const setTimeout=callback=>callback();",
+            warm_home.SELECTOR_CONTRACT_SCRIPT,
+            "const initial={config:nodes.config.attrs['data-pursers-state'],workers:nodes.workers.attrs['data-pursers-state'],board:nodes.board.attrs['data-pursers-status']};",
+            "current={kind:'config'};nodes.config.hidden=false;nodes.config.mode='loading';pursersRoutePanelLoading();const configLoading=nodes.config.attrs['data-pursers-state'];",
+            "nodes.config.mode='ready';applyFleetSelectorContract();const configReady=nodes.config.attrs['data-pursers-state'];",
+            "nodes.config.mode='empty';applyFleetSelectorContract();const configEmpty=nodes.config.attrs['data-pursers-state'];",
+            "nodes.config.mode='error';applyFleetSelectorContract();const configError=nodes.config.attrs['data-pursers-state'];",
+            "nodes.config.hidden=true;current={kind:'workers'};nodes.workers.hidden=false;nodes.workers.mode='loading';pursersRoutePanelLoading();const workersLoading=nodes.workers.attrs['data-pursers-state'];",
+            "nodes.workers.mode='ready';applyFleetSelectorContract();const workersReady=nodes.workers.attrs['data-pursers-state'];",
+            "nodes.workers.mode='empty';applyFleetSelectorContract();const workersEmpty=nodes.workers.attrs['data-pursers-state'];",
+            "nodes.workers.mode='error';applyFleetSelectorContract();const workersError=nodes.workers.attrs['data-pursers-state'];",
+            "fleetData.fleet.boards[0].status='error';applyFleetSelectorContract();const boardError=nodes.board.attrs['data-pursers-status'];",
+            "console.log(JSON.stringify({initial,configLoading,configReady,configEmpty,configError,workersLoading,workersReady,workersEmpty,workersError,boardError,configPanel:nodes.config.attrs['data-pursers-panel'],workersPanel:nodes.workers.attrs['data-pursers-panel']}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    )
+
+    assert json.loads(completed.stdout) == {
+        "initial": {"config": "empty", "workers": "empty", "board": "ready"},
+        "configLoading": "loading",
+        "configReady": "ready",
+        "configEmpty": "empty",
+        "configError": "error",
+        "workersLoading": "loading",
+        "workersReady": "ready",
+        "workersEmpty": "empty",
+        "workersError": "error",
+        "boardError": "error",
+        "configPanel": "config",
+        "workersPanel": "seats",
+    }
+
+
+def test_aggregate_fleet_exposes_source_backed_board_status() -> None:
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Ready",
+                "board_id": "ready-board",
+                "snapshot": {"agents": [], "tickets": []},
+                "events": [],
+            },
+            {
+                "label": "Failed",
+                "board_id": "failed-board",
+                "error": "bounded failure",
+            },
+        ],
+        stale_seconds=300,
+    )
+
+    assert [(row["board_id"], row["status"]) for row in result["boards"]] == [
+        ("ready-board", "ready"),
+        ("failed-board", "error"),
+    ]
 
 
 def test_fleet_selector_contract_names_every_catalogue_row() -> None:

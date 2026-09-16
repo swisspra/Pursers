@@ -3369,6 +3369,7 @@ def aggregate_fleet(
                 {
                     "board_id": board_id,
                     "label": label,
+                    "status": "error",
                     "error": _clip(error, MAX_LABEL_CHARS),
                     "counts": {
                         "open": 0,
@@ -3635,6 +3636,7 @@ def aggregate_fleet(
             {
                 "board_id": board_id,
                 "label": label,
+                "status": "ready",
                 "counts": rendered_counts,
                 "human_requests": human_rows,
                 "tickets": ticket_rows[:MAX_TICKET_ROWS],
