@@ -96,6 +96,11 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+LOCKED_SOURCE_PACKAGES = {
+    "pursers-central": ("packages/central/src", "pursers_central"),
+    "pursers-client": ("packages/client/src", "pursers_client"),
+}
+
 
 class ReleaseTrainError(RuntimeError):
     pass
@@ -292,6 +297,46 @@ def _pyproject(path: Path) -> dict:
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
+def _component_source_lock_errors(root: Path, lock: dict) -> list[str]:
+    """Compare locked wheel members with the source bytes that produce them."""
+    errors: list[str] = []
+    components = lock.get("components", {})
+    for distribution, (source_relative, import_name) in LOCKED_SOURCE_PACKAGES.items():
+        source_root = root / source_relative / import_name
+        if not source_root.is_dir():
+            continue
+        locked = components.get(distribution, {}).get("members", {})
+        prefix = f"{import_name}/"
+        locked_source = {
+            member: digest
+            for member, digest in locked.items()
+            if member.startswith(prefix)
+        }
+        actual_source = {
+            f"{import_name}/{path.relative_to(source_root).as_posix()}": hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in sorted(source_root.rglob("*"))
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix not in {".pyc", ".pyo"}
+        }
+        for member in sorted(actual_source.keys() - locked_source.keys()):
+            errors.append(
+                f"component-lock.json: {distribution} source member missing: {member}"
+            )
+        for member in sorted(locked_source.keys() - actual_source.keys()):
+            errors.append(
+                f"component-lock.json: {distribution} locked member has no source: {member}"
+            )
+        for member in sorted(actual_source.keys() & locked_source.keys()):
+            if actual_source[member] != locked_source[member]:
+                errors.append(
+                    f"component-lock.json: {distribution} source digest mismatch: {member}"
+                )
+    return errors
+
+
 def check(root: Path, versions: ReleaseVersions) -> list[str]:
     errors: list[str] = []
     package = versions.packages
@@ -371,6 +416,7 @@ def check(root: Path, versions: ReleaseVersions) -> list[str]:
         errors.append("component-lock.json: dashboard size mismatch")
     if lock.get("view", {}).get("sha256") != hashlib.sha256(payload).hexdigest():
         errors.append("component-lock.json: dashboard hash mismatch")
+    errors.extend(_component_source_lock_errors(root, lock))
     return errors
 
 

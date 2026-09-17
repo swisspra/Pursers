@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -154,3 +155,26 @@ def test_check_detects_wait_bridge_source_constant_drift(tmp_path: Path) -> None
     errors = release_train.check(root, manifest)
 
     assert any("SOURCE_VERSION '0.1.0a15' != '0.1.0a16'" in error for error in errors)
+
+
+def test_component_source_lock_check_passes_fresh_and_fails_stale_lock(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "packages/client/src/pursers_client/client.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    member = "pursers_client/client.py"
+    lock = {
+        "components": {
+            "pursers-client": {
+                "members": {member: hashlib.sha256(source.read_bytes()).hexdigest()}
+            }
+        }
+    }
+
+    assert release_train._component_source_lock_errors(tmp_path, lock) == []
+
+    source.write_text("VALUE = 2\n", encoding="utf-8")
+    assert release_train._component_source_lock_errors(tmp_path, lock) == [
+        "component-lock.json: pursers-client source digest mismatch: " + member
+    ]

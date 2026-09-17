@@ -29,7 +29,7 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import TokenVerifier, principal_components
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.context import HandlerResult, ServerRequestContext
-from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver import Context, MCPServer, RequestStateSecurity
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.subscriptions import InMemorySubscriptionBus
 from mcp.shared.exceptions import MCPError
@@ -73,6 +73,8 @@ from pursers_client import (
     TICKET_CLAIM_REFUSED,
     TICKET_PARKED,
     TICKET_UNPARKED,
+    REQUEST_STATE_TTL_S,
+    load_or_create_request_state_keys,
 )
 
 from cursor import CursorStore
@@ -2943,6 +2945,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     resource_url = f"http://{host}:{port}/mcp"
     service = CentralBoard(data_root)
     subscription_bus = InMemorySubscriptionBus()
+    request_state_key_path = Path(
+        os.environ.get("CENTRAL_REQUEST_STATE_KEY_FILE", "").strip()
+        or data_root / "request-state.keys"
+    )
+    request_state_security = RequestStateSecurity(
+        keys=load_or_create_request_state_keys(request_state_key_path),
+        ttl=REQUEST_STATE_TTL_S,
+    )
     reaper_context = Context(subscriptions=subscription_bus)
     reaper_principal = Principal(
         "PR-central-reaper", "central-reaper", frozenset()
@@ -3094,6 +3104,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ),
         middleware=[SubscriptionAuthorization(service)],
         subscriptions=subscription_bus,
+        request_state_security=request_state_security,
         lifespan=central_lifespan,
     )
     membership_role_default_notes: set[tuple[str, str, str]] = set()
