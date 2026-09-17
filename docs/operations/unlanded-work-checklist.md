@@ -2,6 +2,8 @@
 
 Audit date: 2026-09-17. Baseline: `origin/main` at `ef4295f03e4702ed2278437b3b5fb9faa1ed13e4`.
 
+Related operational dependency sweep: [untracked runtime and merge dependencies](untracked-runtime-dependencies.md).
+
 ## Method and scope
 
 The target set is the 77 ticket IDs whose remote branches begin with `codex/`, `integration/`, or `operator/` and for which no such branch is an ancestor of the baseline. The all-branch audit saw 570 remote branches; 482 were in those prefixes. The count remains exactly 77 despite drift from the earlier 481-branch snapshot.
