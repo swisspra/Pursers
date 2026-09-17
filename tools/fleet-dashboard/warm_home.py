@@ -24,7 +24,7 @@ body{font-family:"DM Sans",ui-sans-serif,system-ui,-apple-system,BlinkMacSystemF
 WARM_GUIDED_HOME_SCRIPT = r"""
 const warmLegacyRoute=route,warmHubKinds=new Set(['home','projects','work','team','approvals','activity','settings']);
 route=function(){const match=location.hash.match(/^#\/(home|projects|work|team|approvals|activity|settings)$/);return match?{kind:match[1]}:warmLegacyRoute()};for(const kind of warmHubKinds)hubKinds.add(kind);
-navKind=function(){const current=route();if(!current)return'home';if(warmHubKinds.has(current.kind))return current.kind;if(current.kind==='boards')return'projects';if(current.kind==='agents')return'team';if(['operations','seats','config','overhead','workers'].includes(current.kind))return'settings';if(current.kind==='board')return'work';return'home'};
+navKind=function(){const current=route();if(!current)return'home';if(warmHubKinds.has(current.kind))return current.kind;if(current.kind==='boards')return'projects';if(current.kind==='agents')return'team';if(current.kind==='seats')return'seats';if(['operations','config','overhead','workers'].includes(current.kind))return'settings';if(current.kind==='board')return'work';return'home'};
 function warmBoards(){const rows=[];for(const [central,data] of Object.entries(fleetData))for(const board of data.boards||[])rows.push({central,board});return rows}
 function warmTickets(){const rows=[];for(const item of warmBoards())for(const ticket of item.board.tickets||[])rows.push({...item,ticket});return rows}
 function warmTruthStrip(){return '<div class="truth-strip" aria-label="Data boundaries"><span class="status">WORK</span><span class="status">Local</span><span class="status">Bounded data</span><span class="status">Guarded writes</span></div>'}
