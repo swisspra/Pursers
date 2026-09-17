@@ -384,6 +384,10 @@ COORDINATOR_SCOPE = "board:coordinate"
 INTAKE_SCOPE = "board:intake"
 INTAKE_ORIGIN = "coordinator-intake"
 INTAKE_STATE_KEYS = frozenset({"coordinator_intake", "coordinator_findings"})
+COORDINATOR_STATE_KEYS = frozenset({"coordinator_findings"})
+BUTLER_EVALUATION_STATE_RE = re.compile(
+    r"^board_butler_evaluation\.CQ-[0-9A-Za-z-]+$"
+)
 INTAKE_CORE_OVERRIDE_FIELDS = frozenset({"origin", "coordinator_op_key"})
 DEFAULT_INTAKE_RATE_LIMIT_PER_HOUR = 10
 MAX_INTAKE_RATE_LIMIT_PER_HOUR = 1_000
@@ -12646,9 +12650,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         else:
             require_scope(principal, COORDINATOR_SCOPE)
             authority = "coordinate"
-        if authority == "coordinate" and key != "coordinator_findings":
+        if (
+            authority == "coordinate"
+            and key not in COORDINATOR_STATE_KEYS
+            and not BUTLER_EVALUATION_STATE_RE.fullmatch(key)
+        ):
             raise PermissionError(
-                "coordinator authorization permits only coordinator_findings state"
+                "coordinator authorization permits only coordinator_findings "
+                "and per-question board_butler_evaluation state"
             )
         if authority == "intake" and key not in INTAKE_STATE_KEYS:
             raise PermissionError(

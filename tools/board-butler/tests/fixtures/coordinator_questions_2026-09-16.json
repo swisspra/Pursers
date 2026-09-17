@@ -10,6 +10,15 @@
       "answer": "Superseded by your own ancestry correction in CQ-7bf548bf5e084198, which is answered. No separate decision. Disposition: AN-000000001048.",
       "expected_verdict": "MECHANICAL",
       "recorded_disposition": "ESCALATE",
+      "mark": "should_have_escalated",
+      "mark_population": "retrospective_operator",
+      "marked_by": {
+        "agent_id": "AI-3f94318ce493a803e96c3e61f12459caf5c44eff7490a1db94484d75e95ee93c",
+        "agent_name": "fable5-main",
+        "principal_id": "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+      },
+      "marked_at": "2026-09-17T12:08:46.324109+00:00",
+      "mark_source_question_id": "CQ-d57827ee2d7e88ed",
       "observation": "The butler would classify the ticket-status wording as MECHANICAL, disagreeing with the recorded coordinator disposition that treated the document choice as a decision."
     },
     {
@@ -20,6 +29,15 @@
       "answer": "DECISION: record separately, do not omit. ACP P1 (c69deacfb9a7dfa10f459a5120d1cf8f44655d83), MCP 2.2.0 (f66a7a1d; current pins are 2.2.0) and the Connect-helper actual-origin fix (f243441491e02d94c83c3c3032c005bd9e8ea4e1) belong in a \"Resolved before freeze\" section with their tracking ids, never in current limitations. Your ancestry correction is accepted: the CodeQL regex and principal-independence fixes were correctly kept as live limitations at b3861ac3811438ecd1f3d2ceb62efbf759c88da0; re-verify both against the frozen b2 base at freeze time and move whichever has landed. The document at f96d0fcc6de0b133b643d4adb75acda55addec03 already does this and mong1-reviewer-6 found no document defect in it. No rewrite required. Full disposition: AN-000000001048.",
       "expected_verdict": "ESCALATE",
       "recorded_disposition": "ESCALATE",
+      "mark": "correct_escalation",
+      "mark_population": "retrospective_operator",
+      "marked_by": {
+        "agent_id": "AI-3f94318ce493a803e96c3e61f12459caf5c44eff7490a1db94484d75e95ee93c",
+        "agent_name": "fable5-main",
+        "principal_id": "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+      },
+      "marked_at": "2026-09-17T12:08:46.324109+00:00",
+      "mark_source_question_id": "CQ-d57827ee2d7e88ed",
       "observation": "The butler would ESCALATE the request about how the document should represent resolved items, matching the recorded coordinator disposition."
     },
     {
@@ -30,6 +48,15 @@
       "answer": "Yes. A sandboxed seat reports the exact environment limit and claims no pass; the Full Access rerun belongs to a Full Access seat. Now moot in practice: mong1-worker-6 produced an exit-0 full manifest at f96d0fcc6de0b133b643d4adb75acda55addec03. Note the separate ACP-seat gate: the blocking failure is a product defect now tracked as TK-1430a4b5d7f2, and AN-000000001048 carries a bounded waiver for candidates with no diff under tools/acp-seat/.",
       "expected_verdict": "ESCALATE",
       "recorded_disposition": "ESCALATE",
+      "mark": "correct_escalation",
+      "mark_population": "retrospective_operator",
+      "marked_by": {
+        "agent_id": "AI-3f94318ce493a803e96c3e61f12459caf5c44eff7490a1db94484d75e95ee93c",
+        "agent_name": "fable5-main",
+        "principal_id": "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+      },
+      "marked_at": "2026-09-17T12:08:46.324109+00:00",
+      "mark_source_question_id": "CQ-d57827ee2d7e88ed",
       "observation": "The butler would ESCALATE the request to proceed with a failed covering suite, matching the recorded coordinator disposition."
     }
   ],
