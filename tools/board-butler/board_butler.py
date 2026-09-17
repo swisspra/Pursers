@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 STATE_KEY = "coordinator_findings"
@@ -33,6 +34,10 @@ DEFAULT_URL = "http://127.0.0.1:8766/mcp"
 DEFAULT_AGENT_NAME = "board-butler-1"
 DEFAULT_DRAFTS_PER_HOUR = 5
 DEFAULT_DRAFTS_PER_TICKET = 2
+DEFAULT_DRAFTS_PER_BOARD = 20
+DEFAULT_HOLD_BEFORE_POST_S = 3_600
+DEFAULT_VETO_COUNT = 3
+DEFAULT_VETO_WINDOW_S = 3_600
 MAX_FINDINGS = 50
 MAX_STATE_CHARS = 4_800
 QUESTION_EVENT = "coordinator_question_asked"
@@ -44,6 +49,64 @@ COORDINATOR_ALWAYS_ASK_CATEGORIES = (
     "membership-roles",
     "board-registry",
 )
+AUTO_CANDIDATE_CLASSES = (
+    "ancestry",
+    "ticket_status",
+    "seat_capability",
+    "waiver_applicability",
+    "corpus_lookup",
+    "coverage_check",
+)
+NEVER_AUTO_CLASSES = (
+    "scope_change",
+    "gate_waiver",
+    "release",
+    "membership",
+    "registry",
+)
+ANSWER_CLASSES = AUTO_CANDIDATE_CLASSES + NEVER_AUTO_CLASSES
+CITABLE_EVIDENCE_KINDS = (
+    "git_ancestry",
+    "ticket_status",
+    "annotation",
+    "seat_capability",
+    "manifest_coverage",
+    "corpus",
+)
+POLICY_CLASS = {
+    "gate-waiver": "gate_waiver",
+    "scope-change": "scope_change",
+    "release-decision": "release",
+    "membership-or-registry": "registry",
+    "coverage-blindness": "coverage_check",
+    "production-code-authority": "scope_change",
+    "git-ancestry": "ancestry",
+    "ticket-status": "ticket_status",
+    "annotation-coverage": "waiver_applicability",
+    "seat-capability": "seat_capability",
+}
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+# Declared beside coordinator_config and deliberately narrower than arbitrary
+# JSON.  Validation below enforces this schema, including nested unknown keys.
+BOARD_BUTLER_CONFIG_SCHEMA: dict[str, Any] = {
+    "schema_version": 1,
+    "keys": ("schema_version", "global", "projects", "boards"),
+    "setting_keys": (
+        "mode",
+        "answer_scope",
+        "required_evidence_kinds",
+        "ceilings",
+        "hold_before_post_s",
+        "active_windows",
+        "kill_switch",
+        "auto_demote",
+        "classification",
+        "drafting",
+    ),
+    "precedence": ("safe_defaults", "global", "project", "board"),
+    "runtime": "shadow-only",
+}
 
 
 class Outcome(str, Enum):
@@ -150,6 +213,7 @@ class Classification:
 
 @dataclass(frozen=True)
 class Evidence:
+    kind: str
     source: str
     detail: str
     answer: str
@@ -167,6 +231,70 @@ class AlreadyRunning(RuntimeError):
 
 class IdentityConflict(RuntimeError):
     """Raised when the butler shares a principal with a worker/reviewer seat."""
+
+
+class ButlerConfigError(ValueError):
+    """Raised when coordinator_config cannot be interpreted safely."""
+
+
+@dataclass(frozen=True)
+class EffectiveConfig:
+    configured_mode: str
+    future_active_state: str
+    demotion_reason: str | None
+    answer_scope: dict[str, str]
+    required_evidence_kinds: tuple[str, ...]
+    drafts_per_hour: int
+    drafts_per_ticket: int
+    drafts_per_board: int
+    hold_before_post_s: int
+    active_windows: tuple[dict[str, Any], ...]
+    kill_switch: bool
+    veto_count: int
+    veto_window_s: int
+    classification_model: str | None
+    classification_endpoint_ref: str | None
+    classification_key_ref: str | None
+    drafting_model: str | None
+    drafting_endpoint_ref: str | None
+    drafting_key_ref: str | None
+    source_layers: tuple[str, ...]
+
+    def as_finding(self) -> dict[str, Any]:
+        return {
+            "schema_version": BOARD_BUTLER_CONFIG_SCHEMA["schema_version"],
+            "configured_mode": self.configured_mode,
+            # Sending code intentionally does not exist in this ticket.
+            "effective_mode": "shadow",
+            "future_active_state": self.future_active_state,
+            "demotion_reason": self.demotion_reason,
+            "answer_scope": dict(self.answer_scope),
+            "required_evidence_kinds": list(self.required_evidence_kinds),
+            "ceilings": {
+                "per_hour": self.drafts_per_hour,
+                "per_ticket": self.drafts_per_ticket,
+                "per_board": self.drafts_per_board,
+            },
+            "hold_before_post_s": self.hold_before_post_s,
+            "active_windows": [dict(item) for item in self.active_windows],
+            "kill_switch": self.kill_switch,
+            "auto_demote": {
+                "veto_count": self.veto_count,
+                "window_s": self.veto_window_s,
+            },
+            "classification": {
+                "model": self.classification_model,
+                "endpoint_ref": self.classification_endpoint_ref,
+                "key_ref": self.classification_key_ref,
+            },
+            "drafting": {
+                "model": self.drafting_model,
+                "endpoint_ref": self.drafting_endpoint_ref,
+                "key_ref": self.drafting_key_ref,
+            },
+            "source_layers": list(self.source_layers),
+            "precedence": list(BOARD_BUTLER_CONFIG_SCHEMA["precedence"]),
+        }
 
 
 class SingletonLock:
@@ -215,6 +343,349 @@ def parse_time(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _reject_unknown_keys(
+    value: Mapping[str, Any], allowed: Sequence[str], path: str
+) -> None:
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        raise ButlerConfigError(f"{path} has unknown keys: {', '.join(unknown)}")
+
+
+def _bounded_int(value: Any, path: str, minimum: int, maximum: int) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not minimum <= value <= maximum
+    ):
+        raise ButlerConfigError(f"{path} must be an integer from {minimum} to {maximum}")
+    return value
+
+
+def _optional_reference(value: Any, path: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value) > 300:
+        raise ButlerConfigError(f"{path} must be null or a non-empty reference")
+    return value
+
+
+def _validate_window(value: Any, path: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ButlerConfigError(f"{path} must be an object")
+    _reject_unknown_keys(value, ("days", "start", "end", "timezone"), path)
+    days = value.get("days")
+    if (
+        not isinstance(days, list)
+        or not days
+        or any(day not in WEEKDAYS for day in days)
+        or len(set(days)) != len(days)
+    ):
+        raise ButlerConfigError(f"{path}.days must contain unique weekday names")
+    start, end = value.get("start"), value.get("end")
+    clock = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+    if not isinstance(start, str) or not clock.fullmatch(start):
+        raise ButlerConfigError(f"{path}.start must be HH:MM")
+    if not isinstance(end, str) or not clock.fullmatch(end):
+        raise ButlerConfigError(f"{path}.end must be HH:MM")
+    if start == end:
+        raise ButlerConfigError(f"{path}.start and end must differ")
+    zone = value.get("timezone")
+    if not isinstance(zone, str) or not zone:
+        raise ButlerConfigError(f"{path}.timezone must name an IANA timezone")
+    try:
+        ZoneInfo(zone)
+    except ZoneInfoNotFoundError as exc:
+        raise ButlerConfigError(f"{path}.timezone is unknown") from exc
+    return {"days": list(days), "start": start, "end": end, "timezone": zone}
+
+
+def _validate_settings(value: Any, path: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ButlerConfigError(f"{path} must be an object")
+    _reject_unknown_keys(value, BOARD_BUTLER_CONFIG_SCHEMA["setting_keys"], path)
+    result: dict[str, Any] = {}
+    if "mode" in value:
+        if value["mode"] not in {"shadow", "active"}:
+            raise ButlerConfigError(f"{path}.mode must be shadow or active")
+        result["mode"] = value["mode"]
+    if "answer_scope" in value:
+        scope = value["answer_scope"]
+        if not isinstance(scope, Mapping):
+            raise ButlerConfigError(f"{path}.answer_scope must be an object")
+        _reject_unknown_keys(scope, ANSWER_CLASSES, f"{path}.answer_scope")
+        normalized: dict[str, str] = {}
+        for name, disposition in scope.items():
+            if disposition not in {"auto", "escalate"}:
+                raise ButlerConfigError(
+                    f"{path}.answer_scope.{name} must be auto or escalate"
+                )
+            if name in NEVER_AUTO_CLASSES and disposition == "auto":
+                raise ButlerConfigError(f"{path}.answer_scope.{name} can never be auto")
+            normalized[str(name)] = str(disposition)
+        result["answer_scope"] = normalized
+    if "required_evidence_kinds" in value:
+        kinds = value["required_evidence_kinds"]
+        if (
+            not isinstance(kinds, list)
+            or not kinds
+            or any(kind not in CITABLE_EVIDENCE_KINDS for kind in kinds)
+            or len(set(kinds)) != len(kinds)
+        ):
+            raise ButlerConfigError(
+                f"{path}.required_evidence_kinds must be a non-empty unique citable list"
+            )
+        result["required_evidence_kinds"] = list(kinds)
+    if "ceilings" in value:
+        ceilings = value["ceilings"]
+        if not isinstance(ceilings, Mapping):
+            raise ButlerConfigError(f"{path}.ceilings must be an object")
+        _reject_unknown_keys(
+            ceilings, ("per_hour", "per_ticket", "per_board"), f"{path}.ceilings"
+        )
+        result["ceilings"] = {
+            name: _bounded_int(raw, f"{path}.ceilings.{name}", 1, limit)
+            for name, raw, limit in (
+                ("per_hour", ceilings.get("per_hour"), 100),
+                ("per_ticket", ceilings.get("per_ticket"), 20),
+                ("per_board", ceilings.get("per_board"), 500),
+            )
+            if name in ceilings
+        }
+    if "hold_before_post_s" in value:
+        result["hold_before_post_s"] = _bounded_int(
+            value["hold_before_post_s"], f"{path}.hold_before_post_s", 0, 604_800
+        )
+    if "active_windows" in value:
+        windows = value["active_windows"]
+        if not isinstance(windows, list):
+            raise ButlerConfigError(f"{path}.active_windows must be a list")
+        result["active_windows"] = [
+            _validate_window(item, f"{path}.active_windows[{index}]")
+            for index, item in enumerate(windows)
+        ]
+    if "kill_switch" in value:
+        if not isinstance(value["kill_switch"], bool):
+            raise ButlerConfigError(f"{path}.kill_switch must be boolean")
+        result["kill_switch"] = value["kill_switch"]
+    if "auto_demote" in value:
+        demote = value["auto_demote"]
+        if not isinstance(demote, Mapping):
+            raise ButlerConfigError(f"{path}.auto_demote must be an object")
+        _reject_unknown_keys(
+            demote, ("veto_count", "window_s"), f"{path}.auto_demote"
+        )
+        result["auto_demote"] = {
+            name: _bounded_int(raw, f"{path}.auto_demote.{name}", minimum, maximum)
+            for name, raw, minimum, maximum in (
+                ("veto_count", demote.get("veto_count"), 1, 100),
+                ("window_s", demote.get("window_s"), 60, 2_592_000),
+            )
+            if name in demote
+        }
+    for task in ("classification", "drafting"):
+        if task not in value:
+            continue
+        selected = value[task]
+        if not isinstance(selected, Mapping):
+            raise ButlerConfigError(f"{path}.{task} must be an object")
+        _reject_unknown_keys(selected, ("model", "endpoint_ref", "key_ref"), f"{path}.{task}")
+        result[task] = {
+            name: _optional_reference(selected.get(name), f"{path}.{task}.{name}")
+            for name in ("model", "endpoint_ref", "key_ref")
+            if name in selected
+        }
+    return result
+
+
+def _merge_settings(base: dict[str, Any], override: Mapping[str, Any]) -> None:
+    for key, value in override.items():
+        if key in {"answer_scope", "ceilings", "auto_demote", "classification", "drafting"}:
+            base[key] = {**base[key], **value}
+        else:
+            base[key] = value
+
+
+def _window_allows(now: datetime, windows: Sequence[Mapping[str, Any]]) -> bool:
+    for window in windows:
+        local = now.astimezone(ZoneInfo(str(window["timezone"])))
+        weekday = WEEKDAYS[local.weekday()]
+        previous_weekday = WEEKDAYS[(local.weekday() - 1) % len(WEEKDAYS)]
+        current = local.hour * 60 + local.minute
+        start_h, start_m = (int(item) for item in str(window["start"]).split(":"))
+        end_h, end_m = (int(item) for item in str(window["end"]).split(":"))
+        start, end = start_h * 60 + start_m, end_h * 60 + end_m
+        if start < end and weekday in window["days"] and start <= current < end:
+            return True
+        if start > end and (
+            (weekday in window["days"] and current >= start)
+            or (previous_weekday in window["days"] and current < end)
+        ):
+            return True
+    return False
+
+
+def _recent_vetoes(state: Mapping[str, Any], now: datetime, window_s: int) -> int:
+    board_butler = state.get("board_butler", {})
+    history = (
+        board_butler.get("veto_history", [])
+        if isinstance(board_butler, Mapping)
+        else []
+    )
+    if isinstance(history, list):
+        def veto_time(item: Any) -> datetime | None:
+            if isinstance(item, int) and not isinstance(item, bool):
+                return datetime.fromtimestamp(item, tz=timezone.utc)
+            if isinstance(item, Mapping):
+                return parse_time(item.get("at"))
+            return parse_time(item)
+
+        durable = [
+            item
+            for item in history
+            if (stamp := veto_time(item)) is not None
+            and now - stamp < timedelta(seconds=window_s)
+        ]
+        if durable:
+            return len(durable)
+    total = 0
+    for item in state.get("findings", []):
+        if not isinstance(item, Mapping):
+            continue
+        hold = item.get("hold", {})
+        if not isinstance(hold, Mapping) or hold.get("status") != "vetoed":
+            continue
+        vetoed_at = parse_time(hold.get("vetoed_at"))
+        if vetoed_at is not None and now - vetoed_at < timedelta(seconds=window_s):
+            total += 1
+    return total
+
+
+def resolve_config(
+    document: Mapping[str, Any],
+    args: argparse.Namespace,
+    state: Mapping[str, Any],
+    now: datetime,
+    *,
+    project_name: str | None = None,
+) -> EffectiveConfig:
+    intake = document.get("intake", {})
+    intake_rate = intake.get("rate_per_hour") if isinstance(intake, Mapping) else None
+    default_hour = (
+        intake_rate
+        if isinstance(intake_rate, int)
+        and not isinstance(intake_rate, bool)
+        and 1 <= intake_rate <= 100
+        else args.drafts_per_hour
+    )
+    merged: dict[str, Any] = {
+        "mode": "shadow",
+        "answer_scope": {name: "escalate" for name in ANSWER_CLASSES},
+        "required_evidence_kinds": list(CITABLE_EVIDENCE_KINDS),
+        "ceilings": {
+            "per_hour": default_hour,
+            "per_ticket": args.drafts_per_ticket,
+            "per_board": args.drafts_per_board,
+        },
+        "hold_before_post_s": DEFAULT_HOLD_BEFORE_POST_S,
+        "active_windows": [],
+        "kill_switch": True,
+        "auto_demote": {
+            "veto_count": DEFAULT_VETO_COUNT,
+            "window_s": DEFAULT_VETO_WINDOW_S,
+        },
+        "classification": {"model": None, "endpoint_ref": None, "key_ref": None},
+        "drafting": {"model": None, "endpoint_ref": None, "key_ref": None},
+    }
+    sources = ["safe_defaults"]
+    raw = document.get("board_butler")
+    if raw is not None:
+        if not isinstance(raw, Mapping):
+            raise ButlerConfigError("coordinator_config.board_butler must be an object")
+        _reject_unknown_keys(
+            raw,
+            BOARD_BUTLER_CONFIG_SCHEMA["keys"],
+            "coordinator_config.board_butler",
+        )
+        if raw.get("schema_version") != BOARD_BUTLER_CONFIG_SCHEMA["schema_version"]:
+            raise ButlerConfigError("coordinator_config.board_butler.schema_version must be 1")
+        global_settings = _validate_settings(
+            raw.get("global", {}), "coordinator_config.board_butler.global"
+        )
+        _merge_settings(merged, global_settings)
+        if global_settings:
+            sources.append("global")
+        for collection_name, selected_name in (
+            (
+                "projects",
+                project_name
+                if project_name is not None
+                else getattr(args, "project", None),
+            ),
+            ("boards", args.home_board),
+        ):
+            collection = raw.get(collection_name, {})
+            if not isinstance(collection, Mapping):
+                raise ButlerConfigError(
+                    f"coordinator_config.board_butler.{collection_name} must be an object"
+                )
+            for name, settings in collection.items():
+                if not isinstance(name, str) or not name:
+                    raise ButlerConfigError(
+                        f"coordinator_config.board_butler.{collection_name} names must be non-empty"
+                    )
+                validated = _validate_settings(
+                    settings, f"coordinator_config.board_butler.{collection_name}.{name}"
+                )
+                if selected_name is not None and name == selected_name:
+                    _merge_settings(merged, validated)
+                    sources.append(f"{collection_name[:-1]}:{name}")
+    board_state = state.get("board_butler", {})
+    persisted_kill = (
+        isinstance(board_state, Mapping)
+        and isinstance(board_state.get("kill_switch"), Mapping)
+        and board_state["kill_switch"].get("engaged") is True
+    )
+    kill_switch = bool(merged["kill_switch"] or persisted_kill)
+    veto_count = _recent_vetoes(state, now, merged["auto_demote"]["window_s"])
+    demotion_reason: str | None = None
+    if kill_switch:
+        future_state = "killed"
+        demotion_reason = "kill_switch"
+    elif merged["mode"] == "shadow":
+        future_state = "shadow"
+    elif not _window_allows(now, merged["active_windows"]):
+        future_state = "outside_active_window"
+    elif veto_count >= merged["auto_demote"]["veto_count"]:
+        future_state = "auto_demoted"
+        demotion_reason = (
+            f"{veto_count} vetoes in {merged['auto_demote']['window_s']} seconds"
+        )
+    else:
+        future_state = "eligible"
+    return EffectiveConfig(
+        configured_mode=merged["mode"],
+        future_active_state=future_state,
+        demotion_reason=demotion_reason,
+        answer_scope=dict(merged["answer_scope"]),
+        required_evidence_kinds=tuple(merged["required_evidence_kinds"]),
+        drafts_per_hour=merged["ceilings"]["per_hour"],
+        drafts_per_ticket=merged["ceilings"]["per_ticket"],
+        drafts_per_board=merged["ceilings"]["per_board"],
+        hold_before_post_s=merged["hold_before_post_s"],
+        active_windows=tuple(dict(item) for item in merged["active_windows"]),
+        kill_switch=kill_switch,
+        veto_count=merged["auto_demote"]["veto_count"],
+        veto_window_s=merged["auto_demote"]["window_s"],
+        classification_model=merged["classification"]["model"],
+        classification_endpoint_ref=merged["classification"]["endpoint_ref"],
+        classification_key_ref=merged["classification"]["key_ref"],
+        drafting_model=merged["drafting"]["model"],
+        drafting_endpoint_ref=merged["drafting"]["endpoint_ref"],
+        drafting_key_ref=merged["drafting"]["key_ref"],
+        source_layers=tuple(sources),
+    )
+
+
 def classify_question(message: str, kind: str = "information") -> Classification:
     # An approval request is itself authority-bearing.  A decision-labelled
     # question can still ask for a deterministic fact, so content rules get a
@@ -254,6 +725,7 @@ def _git_ancestry(repo: Path, sha: str, target: str) -> Evidence:
         raise ValueError(check.stderr.strip() or "git ancestry check failed")
     yes = check.returncode == 0
     return Evidence(
+        kind="git_ancestry",
         source=f"git merge-base --is-ancestor {full_sha} {target}",
         detail=f"exit_code={check.returncode}",
         answer=f"{full_sha} {'is' if yes else 'is not'} an ancestor of {target}.",
@@ -378,12 +850,14 @@ async def _coverage_blindness(
             f"{path} -> {','.join(names)}" for path, names in sorted(affected.items())
         )
         return Evidence(
+            kind="manifest_coverage",
             source=source_name,
             detail=detail,
             answer=f"Would escalate: covering suite evidence is incomplete ({pairs}).",
             outcome=Outcome.ESCALATE,
         )
     return Evidence(
+        kind="manifest_coverage",
         source=source_name,
         detail=detail,
         answer="The blocked or skipped suites do not cover the submitted diff; mechanical review may proceed.",
@@ -417,6 +891,7 @@ async def evaluate_mechanical(
         if not isinstance(status, str):
             raise ValueError(f"ticket {target} has no readable status")
         return Evidence(
+            kind="ticket_status",
             source=f"Central ticket_get({target})",
             detail=f"status={status}",
             answer=f"{target} is {status}.",
@@ -440,6 +915,7 @@ async def evaluate_mechanical(
         )
         if annotation is None:
             return Evidence(
+                kind="annotation",
                 source=f"Central ticket_get({target}).annotations",
                 detail=f"annotation_id={annotation_id}; found=false",
                 answer=f"{annotation_id} is not present on {target}; it cannot be treated as coverage.",
@@ -447,6 +923,7 @@ async def evaluate_mechanical(
         text = str(annotation.get("text", annotation.get("message", "")))
         kind = str(annotation.get("kind", "unknown"))
         return Evidence(
+            kind="annotation",
             source=f"Central ticket_get({target}).annotations[{annotation_id}]",
             detail=f"kind={kind}; text={text[:180]}",
             answer=f"{annotation_id} exists on {target} as kind={kind}; its recorded text must govern coverage.",
@@ -479,6 +956,7 @@ async def evaluate_mechanical(
             "lifecycle_status": agent.get("lifecycle_status"),
         }
         return Evidence(
+            kind="seat_capability",
             source=f"Central board_snapshot.agents[{name}]",
             detail=json.dumps(detail, sort_keys=True, separators=(",", ":")),
             answer=f"{name} has {detail}.",
@@ -497,6 +975,7 @@ async def make_finding(
     kind = str(question.get("kind", "information"))
     classification = classify_question(message, kind)
     evidence = Evidence(
+        kind="policy",
         source=f"policy_table:{classification.rule}",
         detail=f"question_kind={kind}",
         answer=f"Would escalate: {classification.rule}.",
@@ -512,6 +991,7 @@ async def make_finding(
         except Exception as exc:
             outcome = Outcome.UNKNOWN
             evidence = Evidence(
+                kind="policy",
                 source=f"policy_table:{classification.rule}",
                 detail=f"evidence_error={type(exc).__name__}: {exc}",
                 answer="Would escalate because the mechanical evidence was incomplete.",
@@ -530,7 +1010,9 @@ async def make_finding(
         "question_kind": kind,
         "verdict": outcome.value,
         "policy_rule": classification.rule,
+        "answer_class": POLICY_CLASS.get(classification.rule, "unknown"),
         "message": evidence.answer,
+        "evidence_kind": evidence.kind,
         "evidence": f"source={evidence.source}; {evidence.detail}",
         "next_action": next_action,
         "mode": "shadow",
@@ -561,10 +1043,12 @@ def _decode_state(raw: Mapping[str, Any] | None) -> tuple[dict[str, Any], str | 
 
 def rate_limit_reason(
     state: Mapping[str, Any],
+    board_id: str,
     ticket_id: str,
     now: datetime,
     per_hour: int,
     per_ticket: int,
+    per_board: int,
 ) -> str | None:
     findings = state.get("findings", [])
     drafts = [
@@ -582,6 +1066,8 @@ def rate_limit_reason(
         return "per_hour"
     if sum(str(item.get("ticket_id")) == ticket_id for item in drafts) >= per_ticket:
         return "per_ticket"
+    if sum(str(item.get("board_id")) == board_id for item in drafts) >= per_board:
+        return "per_board"
     return None
 
 
@@ -594,7 +1080,7 @@ def merge_finding(
         for item in state.get("findings", [])
         if isinstance(item, Mapping)
         and not (
-            item.get("kind") in {"would_answer", "butler_rate_limited"}
+            item.get("kind") in {"would_answer", "butler_queued", "butler_config_invalid"}
             and item.get("question_id") == finding.get("question_id")
         )
     ]
@@ -612,12 +1098,14 @@ def merge_finding(
     truncation = dict(result.get("truncation", {}))
     truncation["findings"] = int(truncation.get("findings", 0) or 0) + omitted
     result["truncation"] = truncation
-    result["board_butler"] = {
+    board_butler = dict(result.get("board_butler", {}))
+    board_butler.update({
         "schema_version": SCHEMA_VERSION,
         "last_question_id": finding.get("question_id"),
         "last_verdict": finding.get("verdict"),
         "updated_at": now.isoformat(),
-    }
+    })
+    result["board_butler"] = board_butler
     # Match the coordinator's bounded state convention and keep the new draft.
     # Older non-critical findings are removed first; the truncation count makes
     # that loss explicit instead of relying on Central's 5,000-character cap.
@@ -649,17 +1137,164 @@ def rate_limit_finding(
     question: Mapping[str, Any], reason: str, now: datetime
 ) -> dict[str, Any]:
     return {
-        "kind": "butler_rate_limited",
+        "kind": "butler_queued",
         "level": "warn",
         "board_id": str(question.get("board_id", "unknown")),
         "ticket_id": str(question.get("ticket_id", "")),
         "question_id": str(question.get("question_id", "")),
+        "verdict": Outcome.ESCALATE.value,
         "message": f"Board butler draft cap hit: {reason}.",
         "evidence": f"source=board_butler_rate_limit; limit={reason}",
-        "next_action": "Coordinator handles the question without a butler draft.",
+        "queue_reason": reason,
+        "next_action": "Queued for the coordinator; the question was not dropped.",
         "mode": "shadow",
         "observed_at": now.isoformat(),
     }
+
+
+def config_invalid_finding(
+    question: Mapping[str, Any], error: ButlerConfigError, now: datetime
+) -> dict[str, Any]:
+    return {
+        "kind": "butler_config_invalid",
+        "level": "critical",
+        "board_id": str(question.get("board_id", "unknown")),
+        "ticket_id": str(question.get("ticket_id", "")),
+        "question_id": str(question.get("question_id", "")),
+        "verdict": Outcome.ESCALATE.value,
+        "message": "Board butler configuration is invalid; queued for the coordinator.",
+        "evidence": f"source=coordinator_config; error={error}",
+        "next_action": "Correct the declared schema before enabling any automation.",
+        "mode": "shadow",
+        "observed_at": now.isoformat(),
+    }
+
+
+def decorate_finding(
+    finding: Mapping[str, Any], config: EffectiveConfig, now: datetime
+) -> dict[str, Any]:
+    result = dict(finding)
+    answer_class = str(result.get("answer_class", "unknown"))
+    configured_action = config.answer_scope.get(answer_class, "escalate")
+    evidence_kind = str(result.get("evidence_kind", ""))
+    evidence_allowed = evidence_kind in config.required_evidence_kinds
+    result["configured_action"] = configured_action
+    result["auto_eligible"] = bool(
+        result.get("verdict") == Outcome.MECHANICAL.value
+        and configured_action == "auto"
+        and evidence_allowed
+        and config.future_active_state == "eligible"
+    )
+    if configured_action == "auto" and not evidence_allowed:
+        result["auto_eligible"] = False
+        result["next_action"] = (
+            "Coordinator handles the question because the configured evidence floor was not met."
+        )
+    release_at = now + timedelta(seconds=config.hold_before_post_s)
+    result["hold"] = {
+        "status": "shadow",
+        "drafted_at": now.isoformat(),
+        "release_at": release_at.isoformat(),
+        "vetoable_until": release_at.isoformat(),
+        "veto_reason": None,
+    }
+    result["effective_config"] = config.as_finding()
+    return result
+
+
+def _bound_control_state(
+    state: dict[str, Any], *, preserve_question_id: str | None = None
+) -> dict[str, Any]:
+    findings = state.get("findings", [])
+    if not isinstance(findings, list):
+        findings = []
+        state["findings"] = findings
+    truncation = dict(state.get("truncation", {}))
+    while len(json.dumps(state, sort_keys=True, separators=(",", ":"))) > MAX_STATE_CHARS:
+        removable = next(
+            (
+                index
+                for index, item in enumerate(findings)
+                if isinstance(item, Mapping)
+                and item.get("level") != "critical"
+                and item.get("question_id") != preserve_question_id
+            ),
+            None,
+        )
+        if removable is None:
+            raise ValueError("coordinator_findings has no bounded room for control state")
+        findings.pop(removable)
+        truncation["findings"] = int(truncation.get("findings", 0) or 0) + 1
+        state["truncation"] = truncation
+    return state
+
+
+def veto_question(
+    state: Mapping[str, Any], question_id: str, reason: str, now: datetime
+) -> dict[str, Any]:
+    normalized_reason = reason.strip()
+    if not normalized_reason or len(normalized_reason) > 200:
+        raise ValueError("a veto reason from 1 to 200 characters is required")
+    result = dict(state)
+    findings = [dict(item) for item in state.get("findings", []) if isinstance(item, Mapping)]
+    selected = next(
+        (item for item in findings if str(item.get("question_id", "")) == question_id),
+        None,
+    )
+    if selected is None:
+        raise ValueError(f"no durable draft exists for {question_id}")
+    hold = dict(selected.get("hold", {}))
+    hold.update(
+        {
+            "status": "vetoed",
+            "veto_reason": normalized_reason,
+            "vetoed_at": now.isoformat(),
+        }
+    )
+    selected["hold"] = hold
+    result["findings"] = findings
+    board_butler = dict(result.get("board_butler", {}))
+    board_butler["last_veto"] = {
+        "question_id": question_id,
+        "reason": normalized_reason,
+        "at": now.isoformat(),
+    }
+    history = board_butler.get("veto_history", [])
+    history = [
+        item
+        if isinstance(item, (str, int)) and not isinstance(item, bool)
+        else str(item.get("at"))
+        for item in history
+        if (isinstance(item, (str, int)) and not isinstance(item, bool))
+        or (isinstance(item, Mapping) and isinstance(item.get("at"), str))
+    ]
+    history.append(int(now.timestamp()))
+    board_butler["veto_history"] = history[-100:]
+    board_butler["updated_at"] = now.isoformat()
+    result["board_butler"] = board_butler
+    result["generated_at"] = now.isoformat()
+    result["effective_mode"] = "shadow"
+    return _bound_control_state(result, preserve_question_id=question_id)
+
+
+def engage_kill_switch(
+    state: Mapping[str, Any], reason: str, now: datetime
+) -> dict[str, Any]:
+    normalized_reason = reason.strip() or "operator"
+    if len(normalized_reason) > 200:
+        raise ValueError("a kill-switch reason cannot exceed 200 characters")
+    result = dict(state)
+    board_butler = dict(result.get("board_butler", {}))
+    board_butler["kill_switch"] = {
+        "engaged": True,
+        "reason": normalized_reason,
+        "at": now.isoformat(),
+    }
+    board_butler["updated_at"] = now.isoformat()
+    result["board_butler"] = board_butler
+    result["generated_at"] = now.isoformat()
+    result["effective_mode"] = "shadow"
+    return _bound_control_state(result)
 
 
 def assert_independent_identity(
@@ -715,6 +1350,7 @@ class CentralBackend:
         self.identity: Any = None
         self._context: Any = None
         self.latest_seq = 0
+        self.project_name: str | None = None
 
     async def __aenter__(self) -> "CentralBackend":
         from pursers_client import BoardClient
@@ -735,6 +1371,7 @@ class CentralBackend:
             assert_complete_agent_view(status)
             assert_independent_identity(self.identity, status.get("agents", []))
             self.latest_seq = max(0, int(status.get("latest_seq", 0) or 0))
+            self.project_name = await self._project_name_from_registry()
         except BaseException:
             await self._context.__aexit__(*sys.exc_info())
             self.client = None
@@ -765,6 +1402,30 @@ class CentralBackend:
         except json.JSONDecodeError:
             return {}
         return parsed if isinstance(parsed, Mapping) else {}
+
+    async def _project_name_from_registry(self) -> str | None:
+        try:
+            raw = await self.client.board_state_get("project_registry")
+        except Exception:
+            return None
+        state = raw.get("state", {})
+        value = state.get("value") if isinstance(state, Mapping) else None
+        try:
+            document = json.loads(value) if isinstance(value, str) else value
+        except json.JSONDecodeError:
+            return None
+        projects = document.get("projects") if isinstance(document, Mapping) else None
+        if not isinstance(projects, Mapping):
+            return None
+        matches = [
+            name
+            for name, row in projects.items()
+            if isinstance(name, str)
+            and isinstance(row, Mapping)
+            and row.get("board_id") == self.args.home_board
+            and row.get("status", "active") == "active"
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     async def findings(self) -> Mapping[str, Any]:
         try:
@@ -865,26 +1526,6 @@ def save_cursor(path: Path, cursor: int) -> None:
     temporary.replace(path)
 
 
-def limits_from_config(
-    config: Mapping[str, Any], args: argparse.Namespace
-) -> tuple[int, int]:
-    butler = config.get("board_butler", {})
-    if not isinstance(butler, Mapping):
-        butler = {}
-    intake = config.get("intake", {})
-    if not isinstance(intake, Mapping):
-        intake = {}
-    per_hour = butler.get(
-        "drafts_per_hour", intake.get("rate_per_hour", args.drafts_per_hour)
-    )
-    per_ticket = butler.get("drafts_per_ticket", args.drafts_per_ticket)
-    if not isinstance(per_hour, int) or isinstance(per_hour, bool) or not 1 <= per_hour <= 100:
-        per_hour = args.drafts_per_hour
-    if not isinstance(per_ticket, int) or isinstance(per_ticket, bool) or not 1 <= per_ticket <= 20:
-        per_ticket = args.drafts_per_ticket
-    return per_hour, per_ticket
-
-
 async def process_question(
     backend: CentralBackend,
     question: Mapping[str, Any],
@@ -899,17 +1540,45 @@ async def process_question(
             dict(item)
             for item in state.get("findings", [])
             if isinstance(item, Mapping)
-            and item.get("kind") in {"would_answer", "butler_rate_limited"}
+            and item.get("kind")
+            in {"would_answer", "butler_queued", "butler_config_invalid"}
             and str(item.get("question_id", "")) == question_id
         ),
         None,
     )
     if existing is not None:
         return existing
-    config = await backend.coordinator_config()
-    per_hour, per_ticket = limits_from_config(config, args)
+    document = await backend.coordinator_config()
+    try:
+        config = resolve_config(
+            document,
+            args,
+            state,
+            now,
+            project_name=getattr(backend, "project_name", None),
+        )
+    except ButlerConfigError as exc:
+        safe_config = resolve_config(
+            {}, args, state, now, project_name=getattr(backend, "project_name", None)
+        )
+        finding = decorate_finding(
+            config_invalid_finding(question, exc, now), safe_config, now
+        )
+        merged = merge_finding(state, finding, now)
+        encoded = json.dumps(merged, sort_keys=True, separators=(",", ":"))
+        if args.dry_run:
+            print(json.dumps(finding, indent=2, sort_keys=True))
+        else:
+            await backend.write_findings(encoded, previous_value)
+        return finding
     reason = rate_limit_reason(
-        state, str(question.get("ticket_id", "")), now, per_hour, per_ticket
+        state,
+        str(question.get("board_id", args.home_board)),
+        str(question.get("ticket_id", "")),
+        now,
+        config.drafts_per_hour,
+        config.drafts_per_ticket,
+        config.drafts_per_board,
     )
     finding = (
         rate_limit_finding(question, reason, now)
@@ -918,6 +1587,7 @@ async def process_question(
             question, backend, args.repo, args.integration_ref, now
         )
     )
+    finding = decorate_finding(finding, config, now)
     merged = merge_finding(state, finding, now)
     encoded = json.dumps(merged, sort_keys=True, separators=(",", ":"))
     if args.dry_run:
@@ -925,6 +1595,22 @@ async def process_question(
     else:
         await backend.write_findings(encoded, previous_value)
     return finding
+
+
+async def apply_control_action(
+    backend: CentralBackend, args: argparse.Namespace, now: datetime
+) -> None:
+    raw = await backend.findings()
+    state, previous_value = _decode_state(raw)
+    if args.kill_switch:
+        state = engage_kill_switch(state, args.control_reason, now)
+    elif args.veto_question:
+        state = veto_question(state, args.veto_question, args.control_reason, now)
+    else:
+        return
+    await backend.write_findings(
+        json.dumps(state, sort_keys=True, separators=(",", ":")), previous_value
+    )
 
 
 async def run(
@@ -936,6 +1622,9 @@ async def run(
     with SingletonLock(args.pid_file):
         token = _read_token(args.token_path)
         async with backend_factory(args, token) as backend:
+            if args.kill_switch or args.veto_question:
+                await apply_control_action(backend, args, utc_now())
+                return
             cursor = load_cursor(args.cursor_file)
             if cursor is None:
                 cursor = backend.latest_seq
@@ -966,9 +1655,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cursor-file", type=Path, required=True)
     parser.add_argument("--drafts-per-hour", type=int, default=DEFAULT_DRAFTS_PER_HOUR)
     parser.add_argument("--drafts-per-ticket", type=int, default=DEFAULT_DRAFTS_PER_TICKET)
+    parser.add_argument("--drafts-per-board", type=int, default=DEFAULT_DRAFTS_PER_BOARD)
+    parser.add_argument("--project", default=os.environ.get("PURSERS_PROJECT"))
     parser.add_argument("--wait-timeout", type=int, default=180)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    controls = parser.add_mutually_exclusive_group()
+    controls.add_argument("--kill-switch", action="store_true")
+    controls.add_argument("--veto-question")
+    parser.add_argument("--control-reason", default="operator")
     args = parser.parse_args(argv)
     for name in ("token_path", "repo", "pid_file", "cursor_file"):
         value = getattr(args, name)
@@ -980,8 +1675,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--drafts-per-hour must be between 1 and 100")
     if not 1 <= args.drafts_per_ticket <= 20:
         parser.error("--drafts-per-ticket must be between 1 and 20")
+    if not 1 <= args.drafts_per_board <= 500:
+        parser.error("--drafts-per-board must be between 1 and 500")
     if args.wait_timeout < 1:
         parser.error("--wait-timeout must be positive")
+    if (args.kill_switch or args.veto_question) and args.dry_run:
+        parser.error("control actions cannot be combined with --dry-run")
+    if args.veto_question and not args.control_reason.strip():
+        parser.error("--veto-question requires a non-empty --control-reason")
+    if len(args.control_reason.strip()) > 200:
+        parser.error("--control-reason cannot exceed 200 characters")
     return args
 
 

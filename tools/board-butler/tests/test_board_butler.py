@@ -69,9 +69,14 @@ def args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
         cursor_file=tmp_path / "cursor.json",
         drafts_per_hour=5,
         drafts_per_ticket=2,
+        drafts_per_board=20,
+        project="Pursers",
         wait_timeout=1,
         once=True,
         dry_run=dry_run,
+        kill_switch=False,
+        veto_question=None,
+        control_reason="operator",
     )
 
 
@@ -681,6 +686,152 @@ def test_duplicate_question_is_idempotent_and_does_not_write(tmp_path: Path) -> 
     assert backend.writes == 0
 
 
+def test_process_question_reports_every_effective_value_and_durable_hold(
+    tmp_path: Path,
+) -> None:
+    options = args(tmp_path)
+
+    class Backend(Source):
+        written: dict[str, Any] | None = None
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            return {
+                "board_butler": {
+                    "schema_version": 1,
+                    "global": {
+                        "mode": "active",
+                        "kill_switch": False,
+                        "answer_scope": {"ticket_status": "auto"},
+                        "required_evidence_kinds": ["ticket_status"],
+                        "ceilings": {
+                            "per_hour": 4,
+                            "per_ticket": 2,
+                            "per_board": 8,
+                        },
+                        "hold_before_post_s": 300,
+                        "active_windows": [
+                            {
+                                "days": ["wed"],
+                                "start": "00:00",
+                                "end": "23:59",
+                                "timezone": "UTC",
+                            }
+                        ],
+                        "auto_demote": {"veto_count": 2, "window_s": 1800},
+                    },
+                }
+            }
+
+        async def write_findings(self, value: str, _expected: str | None) -> None:
+            self.written = json.loads(value)
+
+    backend = Backend()
+    backend.tickets["TK-123"] = {"status": "closed"}
+    finding = asyncio.run(
+        butler.process_question(
+            backend,
+            question("What is the status of TK-123?"),
+            options,
+            NOW,
+        )
+    )
+
+    assert finding["auto_eligible"] is True
+    assert finding["configured_action"] == "auto"
+    assert finding["hold"]["status"] == "shadow"
+    assert finding["hold"]["release_at"] == (
+        NOW + butler.timedelta(seconds=300)
+    ).isoformat()
+    effective = finding["effective_config"]
+    assert effective["effective_mode"] == "shadow"
+    assert effective["future_active_state"] == "eligible"
+    assert effective["ceilings"] == {
+        "per_hour": 4,
+        "per_ticket": 2,
+        "per_board": 8,
+    }
+    assert set(effective) == {
+        "schema_version",
+        "configured_mode",
+        "effective_mode",
+        "future_active_state",
+        "demotion_reason",
+        "answer_scope",
+        "required_evidence_kinds",
+        "ceilings",
+        "hold_before_post_s",
+        "active_windows",
+        "kill_switch",
+        "auto_demote",
+        "classification",
+        "drafting",
+        "source_layers",
+        "precedence",
+    }
+    assert backend.written is not None
+    assert backend.written["findings"][-1]["hold"] == finding["hold"]
+
+
+def test_invalid_config_fails_closed_and_queues_question(tmp_path: Path) -> None:
+    options = args(tmp_path)
+
+    class Backend(Source):
+        written: dict[str, Any] | None = None
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            return {
+                "board_butler": {
+                    "schema_version": 1,
+                    "global": {"answer_scope": {"release": "auto"}},
+                }
+            }
+
+        async def write_findings(self, value: str, _expected: str | None) -> None:
+            self.written = json.loads(value)
+
+    backend = Backend()
+    finding = asyncio.run(
+        butler.process_question(backend, question("anything"), options, NOW)
+    )
+
+    assert finding["kind"] == "butler_config_invalid"
+    assert finding["verdict"] == "ESCALATE"
+    assert finding["effective_config"]["effective_mode"] == "shadow"
+    assert backend.written is not None
+
+
+def test_control_action_persists_kill_switch_without_waiting(tmp_path: Path) -> None:
+    options = args(tmp_path)
+    options.kill_switch = True
+    options.control_reason = "operator incident"
+
+    class Backend:
+        written: dict[str, Any] | None = None
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {}
+
+        async def write_findings(self, value: str, _expected: str | None) -> None:
+            self.written = json.loads(value)
+
+    backend = Backend()
+    asyncio.run(butler.apply_control_action(backend, options, NOW))
+
+    assert backend.written is not None
+    assert backend.written["effective_mode"] == "shadow"
+    assert backend.written["board_butler"]["kill_switch"] == {
+        "engaged": True,
+        "reason": "operator incident",
+        "at": NOW.isoformat(),
+    }
+
+
 def test_cursor_is_not_committed_before_finding_write(tmp_path: Path) -> None:
     options = args(tmp_path)
 
@@ -721,6 +872,7 @@ def test_rate_limits_are_configurable_and_reported() -> None:
         "findings": [
             {
                 "kind": "would_answer",
+                "board_id": "pursers",
                 "ticket_id": "TK-source",
                 "question_id": f"CQ-{index}",
                 "observed_at": NOW.isoformat(),
@@ -728,25 +880,291 @@ def test_rate_limits_are_configurable_and_reported() -> None:
             for index in range(2)
         ]
     }
-    assert butler.rate_limit_reason(state, "TK-source", NOW, 5, 2) == "per_ticket"
-    assert butler.rate_limit_reason(state, "TK-other", NOW, 2, 5) == "per_hour"
+    assert (
+        butler.rate_limit_reason(state, "pursers", "TK-source", NOW, 5, 2, 20)
+        == "per_ticket"
+    )
+    assert (
+        butler.rate_limit_reason(state, "pursers", "TK-other", NOW, 2, 5, 20)
+        == "per_hour"
+    )
+    assert (
+        butler.rate_limit_reason(state, "pursers", "TK-other", NOW, 5, 5, 2)
+        == "per_board"
+    )
     finding = butler.rate_limit_finding(question("anything"), "per_hour", NOW)
-    assert finding["kind"] == "butler_rate_limited"
+    assert finding["kind"] == "butler_queued"
+    assert finding["verdict"] == "ESCALATE"
     assert finding["evidence"] == "source=board_butler_rate_limit; limit=per_hour"
+    assert "not dropped" in finding["next_action"]
 
 
-def test_rate_limit_reuses_coordinator_intake_shape(tmp_path: Path) -> None:
+def test_default_rate_limit_reuses_coordinator_intake_shape(tmp_path: Path) -> None:
     options = args(tmp_path)
-    assert butler.limits_from_config(
-        {"intake": {"rate_per_hour": 7}}, options
-    ) == (7, 2)
-    assert butler.limits_from_config(
+    config = butler.resolve_config(
+        {"intake": {"rate_per_hour": 7}}, options, {"findings": []}, NOW
+    )
+    assert (config.drafts_per_hour, config.drafts_per_ticket, config.drafts_per_board) == (
+        7,
+        2,
+        20,
+    )
+
+
+@pytest.mark.parametrize(
+    "board_butler",
+    [
+        {"schema_version": 1, "global": {"unexpected": True}},
+        {"schema_version": 1, "global": {"required_evidence_kinds": []}},
         {
-            "intake": {"rate_per_hour": 7},
-            "board_butler": {"drafts_per_hour": 3, "drafts_per_ticket": 1},
+            "schema_version": 1,
+            "global": {"answer_scope": {"gate_waiver": "auto"}},
         },
+        {"schema_version": 1, "global": {"allow_self_review": True}},
+        {"schema_version": 1, "global": {"allow_merge_main": True}},
+        {
+            "schema_version": 1,
+            "global": {"classification": {"api_key": "forbidden"}},
+        },
+        {
+            "schema_version": 1,
+            "global": {
+                "active_windows": [
+                    {
+                        "days": ["wed"],
+                        "start": "00:00",
+                        "end": "00:00",
+                        "timezone": "UTC",
+                    }
+                ]
+            },
+        },
+        {"global": {}},
+    ],
+)
+def test_declared_config_schema_rejects_unknown_unsafe_or_incomplete_values(
+    tmp_path: Path, board_butler: dict[str, Any]
+) -> None:
+    with pytest.raises(butler.ButlerConfigError):
+        butler.resolve_config(
+            {"board_butler": board_butler}, args(tmp_path), {"findings": []}, NOW
+        )
+
+
+def test_config_precedence_is_safe_defaults_then_global_project_board(
+    tmp_path: Path,
+) -> None:
+    options = args(tmp_path)
+    options.project = "Other"
+    document = {
+        "board_butler": {
+            "schema_version": 1,
+            "global": {
+                "kill_switch": False,
+                "ceilings": {"per_hour": 9, "per_ticket": 8, "per_board": 90},
+                "answer_scope": {"ancestry": "auto"},
+            },
+            "projects": {
+                "Pursers": {
+                    "ceilings": {"per_hour": 7},
+                    "hold_before_post_s": 900,
+                },
+                "Other": {"ceilings": {"per_hour": 99}},
+            },
+            "boards": {
+                "pursers": {
+                    "ceilings": {"per_ticket": 3},
+                    "hold_before_post_s": 600,
+                }
+            },
+        }
+    }
+    config = butler.resolve_config(
+        document,
         options,
-    ) == (3, 1)
+        {"findings": []},
+        NOW,
+        project_name="Pursers",
+    )
+
+    assert (config.drafts_per_hour, config.drafts_per_ticket, config.drafts_per_board) == (
+        7,
+        3,
+        90,
+    )
+    assert config.hold_before_post_s == 600
+    assert config.answer_scope["ancestry"] == "auto"
+    assert config.answer_scope["gate_waiver"] == "escalate"
+    assert config.source_layers == (
+        "safe_defaults",
+        "global",
+        "project:Pursers",
+        "board:pursers",
+    )
+
+
+def test_project_override_name_is_resolved_from_project_registry() -> None:
+    class Client:
+        async def board_state_get(self, key: str) -> Mapping[str, Any]:
+            assert key == "project_registry"
+            return {
+                "state": {
+                    "value": json.dumps(
+                        {
+                            "schema_version": 1,
+                            "projects": {
+                                "Pursers": {
+                                    "board_id": "pursers",
+                                    "status": "active",
+                                },
+                                "Other": {"board_id": "other", "status": "active"},
+                            },
+                        }
+                    )
+                }
+            }
+
+    backend = object.__new__(butler.CentralBackend)
+    backend.client = Client()
+    backend.args = SimpleNamespace(home_board="pursers")
+
+    assert asyncio.run(backend._project_name_from_registry()) == "Pursers"
+
+
+def test_active_window_and_task_model_references_are_preserved_exactly(
+    tmp_path: Path,
+) -> None:
+    document = {
+        "board_butler": {
+            "schema_version": 1,
+            "global": {
+                "mode": "active",
+                "kill_switch": False,
+                "answer_scope": {"ticket_status": "auto"},
+                "required_evidence_kinds": ["ticket_status"],
+                "active_windows": [
+                    {
+                        "days": ["wed"],
+                        "start": "00:00",
+                        "end": "23:59",
+                        "timezone": "UTC",
+                    }
+                ],
+                "classification": {
+                    "model": "Model/Classify-Exact",
+                    "endpoint_ref": "endpoint://classification",
+                    "key_ref": "secret-ref://classification",
+                },
+                "drafting": {
+                    "model": "Model/Draft-Exact",
+                    "endpoint_ref": "endpoint://drafting",
+                    "key_ref": "secret-ref://drafting",
+                },
+            },
+        }
+    }
+    config = butler.resolve_config(document, args(tmp_path), {"findings": []}, NOW)
+    reported = config.as_finding()
+
+    assert config.future_active_state == "eligible"
+    assert reported["effective_mode"] == "shadow"
+    assert reported["classification"] == {
+        "model": "Model/Classify-Exact",
+        "endpoint_ref": "endpoint://classification",
+        "key_ref": "secret-ref://classification",
+    }
+    assert reported["drafting"]["model"] == "Model/Draft-Exact"
+
+
+def test_overnight_active_window_uses_previous_day_after_midnight() -> None:
+    window = {
+        "days": ["wed"],
+        "start": "22:00",
+        "end": "02:00",
+        "timezone": "UTC",
+    }
+
+    assert butler._window_allows(
+        butler.datetime(2026, 9, 16, 23, 0, tzinfo=butler.timezone.utc), [window]
+    )
+    assert butler._window_allows(
+        butler.datetime(2026, 9, 17, 1, 0, tzinfo=butler.timezone.utc), [window]
+    )
+    assert not butler._window_allows(
+        butler.datetime(2026, 9, 17, 3, 0, tzinfo=butler.timezone.utc), [window]
+    )
+
+
+def test_durable_hold_veto_and_auto_demote_arithmetic(tmp_path: Path) -> None:
+    options = args(tmp_path)
+    document = {
+        "board_butler": {
+            "schema_version": 1,
+            "global": {
+                "mode": "active",
+                "kill_switch": False,
+                "active_windows": [
+                    {
+                        "days": ["wed"],
+                        "start": "00:00",
+                        "end": "23:59",
+                        "timezone": "UTC",
+                    }
+                ],
+                "hold_before_post_s": 600,
+                "auto_demote": {"veto_count": 2, "window_s": 3600},
+            },
+        }
+    }
+    config = butler.resolve_config(document, options, {"findings": []}, NOW)
+    first = butler.decorate_finding(
+        {
+            "kind": "would_answer",
+            "question_id": "CQ-1",
+            "verdict": "MECHANICAL",
+            "answer_class": "ticket_status",
+            "evidence_kind": "ticket_status",
+        },
+        config,
+        NOW,
+    )
+    assert first["hold"]["release_at"] == (NOW + butler.timedelta(seconds=600)).isoformat()
+    state = butler.veto_question(
+        {"findings": [first]}, "CQ-1", "operator disagreed", NOW
+    )
+    second = dict(first)
+    second["question_id"] = "CQ-2"
+    state["findings"].append(second)
+    state = butler.veto_question(
+        state, "CQ-2", "second operator disagreement", NOW
+    )
+
+    restored = json.loads(json.dumps(state))
+    assert len(restored["board_butler"]["veto_history"]) == 2
+    # The arithmetic survives pruning the larger finding rows and a restart.
+    restored["findings"] = []
+    demoted = butler.resolve_config(document, options, restored, NOW)
+    assert demoted.future_active_state == "auto_demoted"
+    assert demoted.demotion_reason == "2 vetoes in 3600 seconds"
+    assert state["findings"][0]["hold"]["veto_reason"] == "operator disagreed"
+
+
+def test_persisted_kill_switch_forces_future_shadow_eligibility_off(
+    tmp_path: Path,
+) -> None:
+    document = {
+        "board_butler": {
+            "schema_version": 1,
+            "global": {"mode": "active", "kill_switch": False},
+        }
+    }
+    state = butler.engage_kill_switch({"findings": []}, "incident", NOW)
+    config = butler.resolve_config(document, args(tmp_path), state, NOW)
+
+    assert config.kill_switch is True
+    assert config.future_active_state == "killed"
+    assert config.demotion_reason == "kill_switch"
+    assert state["effective_mode"] == "shadow"
 
 
 def test_findings_merge_is_bounded_and_dedupes_question_id() -> None:

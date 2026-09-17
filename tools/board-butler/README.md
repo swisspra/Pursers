@@ -47,12 +47,88 @@ instead of reconnect-spinning. `--dry-run` prints the proposed finding and
 makes no Central write or cursor-file update, so the same question remains
 available to a later non-dry run.
 
-Draft caps default to five per hour and two per ticket. They may be set with
-`--drafts-per-hour` and `--drafts-per-ticket`, or with the equivalent
-`board_butler.drafts_per_hour` and `board_butler.drafts_per_ticket` keys in
-`coordinator_config`. When no butler-specific hourly override exists, the
-runner reuses `coordinator_config.intake.rate_per_hour`. A cap hit is reported
-as `butler_rate_limited`.
+## Declared configuration
+
+`coordinator_config.board_butler` is a strict versioned document. Unknown or
+invalid keys fail closed and queue the question for the coordinator. Effective
+settings resolve in this documented order: safe defaults, `global`, the named
+`projects` override, then the `boards` override. Later layers change only the
+keys they declare. The runner resolves the project name by matching its home
+board in `project_registry`; `--project` is only the explicit fallback when a
+registry row is unavailable or ambiguous.
+
+```json
+{
+  "board_butler": {
+    "schema_version": 1,
+    "global": {
+      "mode": "shadow",
+      "answer_scope": {
+        "ancestry": "escalate",
+        "ticket_status": "escalate",
+        "seat_capability": "escalate",
+        "waiver_applicability": "escalate",
+        "corpus_lookup": "escalate",
+        "coverage_check": "escalate"
+      },
+      "required_evidence_kinds": [
+        "git_ancestry", "ticket_status", "annotation",
+        "seat_capability", "manifest_coverage", "corpus"
+      ],
+      "ceilings": {"per_hour": 5, "per_ticket": 2, "per_board": 20},
+      "hold_before_post_s": 3600,
+      "active_windows": [
+        {"days": ["mon", "tue"], "start": "00:00", "end": "06:00", "timezone": "UTC"}
+      ],
+      "kill_switch": true,
+      "auto_demote": {"veto_count": 3, "window_s": 3600},
+      "classification": {
+        "model": null, "endpoint_ref": null, "key_ref": null
+      },
+      "drafting": {"model": null, "endpoint_ref": null, "key_ref": null}
+    },
+    "projects": {"Pursers": {"ceilings": {"per_hour": 4}}},
+    "boards": {"pursers": {"hold_before_post_s": 7200}}
+  }
+}
+```
+
+The class list is not a general permission switch. `scope_change`,
+`gate_waiver`, `release`, `membership`, and `registry` are permanently
+escalation-only; validation rejects attempts to set them to `auto`. An empty or
+disabled evidence floor is also rejected, as are self-review, merge-to-main,
+and inline API-key fields because none belong to the schema. Model, endpoint,
+and credential values are references only; the credential itself stays in the
+provider's secret store.
+
+The three draft ceilings are real queue boundaries. A hit produces a
+`butler_queued` finding with an `ESCALATE` verdict instead of dropping the
+question. The default hourly value reuses `intake.rate_per_hour` when that
+value is valid. Every finding reports the fully resolved settings and their
+source layers.
+
+Each draft contains a durable hold record with draft, release, and veto times,
+so restarts do not reset the timer. Held drafts are projected into Fleet's
+**Waiting for you** surface. Record a veto (including its required reason) or
+engage the immediate kill switch with one-shot control commands:
+
+```sh
+python3 tools/board-butler/board_butler.py <normal arguments> \
+  --veto-question CQ-example --control-reason "evidence is stale"
+python3 tools/board-butler/board_butler.py <normal arguments> \
+  --kill-switch --control-reason "operator incident"
+```
+
+Vetoes inside `auto_demote.window_s` are counted from durable control state;
+at `auto_demote.veto_count` the future active-mode eligibility demotes to
+shadow and reports the reason. Active windows accept IANA timezones and
+weekday names (`mon` through `sun`), including overnight windows.
+
+This deliverable remains shadow-only even if configuration requests `active`:
+`effective_mode` is always reported as `shadow`, and there is still no sending
+method. `future_active_state` reports whether a later active-mode implementation
+would be eligible, outside its window, killed, or auto-demoted. This preserves
+the operator's knobs without silently enabling the separate active-mode scope.
 
 Question handling is replay-safe. The durable cursor advances only after the
 finding write succeeds, and a repeated question ID reuses its existing finding
