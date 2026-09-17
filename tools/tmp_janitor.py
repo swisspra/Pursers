@@ -115,6 +115,31 @@ def _owner_file_state(path: Path) -> tuple[bool | None, str]:
     return True, f"owner pid {pid} is live"
 
 
+def _lsof_use_state(
+    command: list[str],
+    *,
+    active_reason: str,
+    runner: RunCommand,
+) -> tuple[bool | None, str]:
+    """Interpret one lsof probe without discarding partial positive results."""
+    result = runner(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    lines = result.stdout.splitlines()
+    if any(re.fullmatch(r"p\d+", line) for line in lines):
+        # macOS lsof can emit a complete matching record but still exit 1 for a
+        # +D traversal. Positive evidence wins regardless of that exit status.
+        return True, active_reason
+    if result.returncode not in (0, 1) or result.stderr.strip():
+        return None, "lsof could not complete an in-use probe"
+    if result.stdout.strip():
+        return None, "lsof returned an unrecognized partial result"
+    return False, "no matching lsof records"
+
+
 def process_use_state(
     path: Path,
     *,
@@ -125,18 +150,23 @@ def process_use_state(
     if marker_active is None or marker_active:
         return marker_active, marker_reason
 
-    lsof = runner(
-        [LSOF_EXECUTABLE, "-nP", "-F", "p", "+D", os.fspath(path)],
-        check=False,
-        capture_output=True,
-        text=True,
+    root_active, root_reason = _lsof_use_state(
+        [LSOF_EXECUTABLE, "-nP", "-F", "pfn", os.fspath(path)],
+        active_reason=(
+            "a live process has the root itself open or as its working directory"
+        ),
+        runner=runner,
     )
-    if lsof.returncode == 0 and any(
-        line.startswith("p") for line in lsof.stdout.splitlines()
-    ):
-        return True, "an open file handle or working directory is inside the root"
-    if lsof.returncode not in (0, 1) or lsof.stderr.strip():
-        return None, "lsof could not inspect the complete root"
+    if root_active is None or root_active:
+        return root_active, root_reason
+
+    tree_active, tree_reason = _lsof_use_state(
+        [LSOF_EXECUTABLE, "-nP", "-F", "p", "+D", os.fspath(path)],
+        active_reason="an open file handle or working directory is inside the root",
+        runner=runner,
+    )
+    if tree_active is None or tree_active:
+        return tree_active, tree_reason
 
     process_list = runner(
         ["/bin/ps", "eww", "-axo", "pid=,command="],

@@ -63,6 +63,67 @@ def test_in_use_check_refuses_a_live_directory(tmp_path: Path) -> None:
         holder.wait(timeout=10)
 
 
+def test_delete_refuses_process_with_cwd_exactly_at_candidate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    candidate = tmp_path / "seat-cache"
+    candidate.mkdir()
+    make_old(candidate)
+    environment = os.environ.copy()
+    for name in ("TMPDIR", "TMP", "TEMP", "TEMPDIR", "PYTEST_DEBUG_TEMPROOT"):
+        environment.pop(name, None)
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time; print('ready', flush=True); time.sleep(30)",
+        ],
+        cwd=candidate,
+        env=environment,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ready"
+        assert tmp_janitor.run(
+            [candidate], older_than_seconds=3_600, delete=True
+        ) == 0
+        assert candidate.is_dir()
+        output = capsys.readouterr().out
+        assert f"SKIP {candidate}" in output
+        assert "in use" in output
+        assert "working directory" in output
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_partial_lsof_positive_result_is_active(tmp_path: Path) -> None:
+    candidate = tmp_path / "seat-cache"
+    candidate.mkdir()
+    make_old(candidate)
+    calls = 0
+
+    def partial_runner(
+        command: list[str], **_kwargs: object
+    ) -> SimpleNamespace:
+        nonlocal calls
+        if Path(command[0]).name == "lsof":
+            calls += 1
+            if calls == 2:
+                return completed(returncode=1, stdout="p123\nfcwd\n")
+        return idle_runner(command)
+
+    result = tmp_janitor.inspect_candidate(
+        candidate, older_than_seconds=3_600, runner=partial_runner
+    )
+
+    assert result.selected is False
+    assert "inside the root" in result.reason
+
+
 def test_dry_run_deletes_nothing_and_reports_exact_candidate(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
