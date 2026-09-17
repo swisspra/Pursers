@@ -19,6 +19,8 @@ import runpy
 import stat
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -41,6 +43,9 @@ DEFAULT_VETO_COUNT = 3
 DEFAULT_VETO_WINDOW_S = 3_600
 MAX_FINDINGS = 50
 MAX_STATE_CHARS = 4_800
+MAX_PROVIDER_RESPONSE_BYTES = 1_000_000
+MAX_PROVIDER_DRAFT_CHARS = 2_000
+PROVIDER_TIMEOUT_S = 30.0
 QUESTION_EVENT = "coordinator_question_asked"
 # Mirrored from coordinator.DEFAULT_ALWAYS_ASK_CATEGORIES.  The policy rules
 # below express these as gate/scope/release, membership, and registry hazards.
@@ -382,6 +387,95 @@ def resolve_provider_runtime(
         key_prefix=getattr(config, f"{task}_key_prefix"),
         validation_path=getattr(config, f"{task}_validation_path"),
     )
+
+
+def _provider_draft_text(document: Any) -> str | None:
+    if not isinstance(document, Mapping):
+        return None
+    choices = document.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+        message = choices[0].get("message")
+        if isinstance(message, Mapping) and isinstance(message.get("content"), str):
+            return message["content"]
+        if isinstance(choices[0].get("text"), str):
+            return choices[0]["text"]
+    output_text = document.get("output_text")
+    return output_text if isinstance(output_text, str) else None
+
+
+async def draft_with_provider(
+    runtime: ProviderRuntime,
+    question: Mapping[str, Any],
+    finding: Mapping[str, Any],
+) -> str:
+    """Create one bounded shadow draft without exposing provider credentials."""
+    request_body = json.dumps(
+        {
+            "model": runtime.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Draft one concise coordinator-facing answer in shadow mode. "
+                        "Preserve the supplied verdict and evidence; never claim that "
+                        "an action was taken. Return plain text only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "question": str(question.get("message", "")),
+                            "question_kind": str(question.get("kind", "information")),
+                            "verdict": finding.get("verdict"),
+                            "policy_rule": finding.get("policy_rule"),
+                            "evidence": finding.get("evidence"),
+                            "fallback_draft": finding.get("message"),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                },
+            ],
+            "max_tokens": 256,
+            "temperature": 0,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    def request() -> str:
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            **runtime.request_headers(),
+        }
+        raw = urllib.request.Request(
+            urllib.parse.urljoin(
+                runtime.endpoint.rstrip("/") + "/", "chat/completions"
+            ),
+            data=request_body,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(raw, timeout=PROVIDER_TIMEOUT_S) as response:
+            payload = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
+        if len(payload) > MAX_PROVIDER_RESPONSE_BYTES:
+            raise ValueError("provider response exceeded the safe bound")
+        document = json.loads(payload)
+        text = _provider_draft_text(document)
+        if text is None:
+            raise ValueError("provider response had no draft text")
+        text = text.strip()
+        if (
+            not text
+            or len(text) > MAX_PROVIDER_DRAFT_CHARS
+            or any(ord(character) < 0x20 and character not in "\n\t" for character in text)
+            or (runtime.credential and runtime.credential in text)
+        ):
+            raise ValueError("provider draft was unsafe")
+        return text
+
+    return await asyncio.to_thread(request)
 
 
 class SingletonLock:
@@ -1730,7 +1824,7 @@ async def process_question(
         # Runtime objects stay local and are never serialized into findings.
         secret_root = getattr(args, "provider_secrets_dir", None)
         resolve_provider_runtime(config, "classification", secret_root)
-        resolve_provider_runtime(config, "drafting", secret_root)
+        drafting_provider = resolve_provider_runtime(config, "drafting", secret_root)
     except ButlerConfigError as exc:
         safe_config = resolve_config(
             {}, args, state, now, project_name=getattr(backend, "project_name", None)
@@ -1754,13 +1848,24 @@ async def process_question(
         config.drafts_per_ticket,
         config.drafts_per_board,
     )
-    finding = (
-        rate_limit_finding(question, reason, now)
-        if reason
-        else await make_finding(
+    if reason:
+        finding = rate_limit_finding(question, reason, now)
+    else:
+        finding = await make_finding(
             question, backend, args.repo, args.integration_ref, now
         )
-    )
+        if drafting_provider is not None:
+            try:
+                finding["message"] = await draft_with_provider(
+                    drafting_provider, question, finding
+                )
+                finding["draft_source"] = "configured_provider"
+            except Exception:
+                finding["verdict"] = Outcome.UNKNOWN.value
+                finding["message"] = (
+                    "Would escalate because the configured drafting provider failed."
+                )
+                finding["draft_source"] = "configured_provider_failed"
     finding = decorate_finding(finding, config, now)
     merged = merge_finding(state, finding, now)
     encoded = json.dumps(merged, sort_keys=True, separators=(",", ":"))

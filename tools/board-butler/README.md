@@ -109,6 +109,15 @@ non-secret `extra_headers`, `key_header`, `key_prefix`, and a relative
 re-resolves them and reads the referenced key at the start of every question
 cycle. No process restart or hand edit is required.
 
+When the drafting provider is configured, the resident sends one bounded
+OpenAI-compatible chat-completions request to the configured endpoint for each
+question that clears the local rate limits. The request uses the exact selected
+model, optional headers, and credential read from `key_ref`; none of those secret
+bytes enter the prompt. Deterministic policy and evidence still set the verdict,
+and the provider supplies only the shadow draft text. A provider failure or a
+response that contains the credential fails closed to a fixed, key-free
+escalation message.
+
 The three draft ceilings are real queue boundaries. A hit produces a
 `butler_queued` finding with an `ESCALATE` verdict instead of dropping the
 question. The default hourly value reuses `intake.rate_per_hour` when that
