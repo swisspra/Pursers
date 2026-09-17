@@ -5749,6 +5749,10 @@ def test_dense_agent_grid_filters_counts_and_selector_contract_are_present() -> 
     assert ".dense-agent-grid{grid-template-columns:repeat(auto-fit,minmax(min(210px,100%),1fr))" in html
     assert "@media(min-width:1200px){.dense-agent-grid{grid-template-columns:repeat(6" in html
     assert ':root[data-density="compact"] .dense-agent-grid{grid-template-columns:repeat(8' in html
+    assert "@media(min-width:1200px) and (max-height:900px){main.agents-route{padding-block:12px}" in html
+    assert '.dense-agent-grid,:root[data-density="compact"] .dense-agent-grid{grid-template-columns:repeat(6' in html
+    assert ".dense-agent-grid .agent-card:not(.agent-state-stale) .agent-age{display:none}" in html
+    assert ".dense-agent-grid .agent-card>.meta,.dense-agent-grid .agent-ops,.dense-agent-grid .agent-ticket-row>.meta" in html
     assert "@media(max-width:430px){.agent-count-strip,.agent-filters{grid-template-columns:1fr}" in html
     assert ".dense-agent-grid{max-height:62vh;overflow-y:auto" in html
     assert "declared&&declared!=='unknown'?declared:observed" in html
