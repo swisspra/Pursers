@@ -4,10 +4,11 @@ Status: source-derived, read-only preparation. This report does not claim that
 the candidate was installed, that a Personal process was launched, that a
 browser observation passed, or that the Beta candidate is approved.
 
-The working Pursers source for this investigation is
-`7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a`. The final verifier must substitute
-the independently approved final SHA and must rederive every candidate value
-from that exact clean checkout.
+The original working Pursers source for this investigation is
+`7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a`. The current recovery re-check used
+Pursers source `7b657627ef8a714d871eb67fdb56c5f8a2ef2560` on 2026-09-17. The final
+verifier must substitute the independently approved final SHA and must rederive
+every candidate value from that exact clean checkout.
 
 ## Observations
 
@@ -23,7 +24,7 @@ the AionCore binary version, `0.2.2`; using that default makes the working
 manifest's `engine.aionui="^2.2.1"` incompatible and filters the extension.
 
 The working candidate currently derives `name="pursers"`, `version="0.1.0"`,
-and 26 archive entries. These are observations, not frozen release inputs. The
+and 27 archive entries. These are observations, not frozen release inputs. The
 final verifier must derive the name, version, archive filename, entry allowlist,
 and embedded `candidate_commit` again from the final approved artifact.
 
