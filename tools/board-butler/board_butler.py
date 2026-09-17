@@ -16,10 +16,11 @@ import json
 import os
 import re
 import runpy
+import stat
 import subprocess
 import sys
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -255,9 +256,17 @@ class EffectiveConfig:
     classification_model: str | None
     classification_endpoint_ref: str | None
     classification_key_ref: str | None
+    classification_extra_headers: dict[str, str]
+    classification_key_header: str
+    classification_key_prefix: str
+    classification_validation_path: str
     drafting_model: str | None
     drafting_endpoint_ref: str | None
     drafting_key_ref: str | None
+    drafting_extra_headers: dict[str, str]
+    drafting_key_header: str
+    drafting_key_prefix: str
+    drafting_validation_path: str
     source_layers: tuple[str, ...]
 
     def as_finding(self) -> dict[str, Any]:
@@ -286,15 +295,93 @@ class EffectiveConfig:
                 "model": self.classification_model,
                 "endpoint_ref": self.classification_endpoint_ref,
                 "key_ref": self.classification_key_ref,
+                "extra_headers": dict(self.classification_extra_headers),
+                "key_header": self.classification_key_header,
+                "key_prefix": self.classification_key_prefix,
+                "validation_path": self.classification_validation_path,
             },
             "drafting": {
                 "model": self.drafting_model,
                 "endpoint_ref": self.drafting_endpoint_ref,
                 "key_ref": self.drafting_key_ref,
+                "extra_headers": dict(self.drafting_extra_headers),
+                "key_header": self.drafting_key_header,
+                "key_prefix": self.drafting_key_prefix,
+                "validation_path": self.drafting_validation_path,
             },
             "source_layers": list(self.source_layers),
             "precedence": list(BOARD_BUTLER_CONFIG_SCHEMA["precedence"]),
         }
+
+
+@dataclass(frozen=True)
+class ProviderRuntime:
+    """Cycle-local provider values; the credential is deliberately non-representable."""
+
+    endpoint: str
+    model: str
+    credential: str = field(repr=False)
+    extra_headers: dict[str, str] = field(default_factory=dict)
+    key_header: str = "Authorization"
+    key_prefix: str = "Bearer"
+    validation_path: str = "models"
+
+    def request_headers(self) -> dict[str, str]:
+        headers = dict(self.extra_headers)
+        if self.credential:
+            headers[self.key_header] = f"{self.key_prefix} {self.credential}".strip()
+        return headers
+
+
+def resolve_provider_runtime(
+    config: EffectiveConfig, task: str, secrets_dir: str | Path | None = None
+) -> ProviderRuntime | None:
+    """Resolve one provider at cycle time while keeping its key out of findings."""
+    if task not in {"classification", "drafting"}:
+        raise ButlerConfigError("provider task is invalid")
+    endpoint = getattr(config, f"{task}_endpoint_ref")
+    model = getattr(config, f"{task}_model")
+    key_ref = getattr(config, f"{task}_key_ref")
+    if endpoint is None or model is None:
+        return None
+    credential = ""
+    if key_ref is not None:
+        match = re.fullmatch(r"file:([A-Za-z0-9._-]{1,160}\.key)", key_ref)
+        if match is not None:
+            root = (
+                Path(secrets_dir).expanduser()
+                if secrets_dir is not None
+                else Path(os.environ.get("PURSERS_STATE_DIR", "~/.pursers")).expanduser()
+                / "board-butler"
+                / "secrets"
+            )
+            path = root / match.group(1)
+        else:
+            path = Path(key_ref)
+        try:
+            info = path.stat()
+        except OSError as exc:
+            raise ButlerConfigError(f"{task} credential reference is unavailable") from exc
+        if (
+            not path.is_absolute()
+            or not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size > 8_192
+        ):
+            raise ButlerConfigError(f"{task} credential reference is not a 0600 file")
+        try:
+            credential = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ButlerConfigError(f"{task} credential reference is unreadable") from exc
+    return ProviderRuntime(
+        endpoint=endpoint,
+        model=model,
+        credential=credential,
+        extra_headers=dict(getattr(config, f"{task}_extra_headers")),
+        key_header=getattr(config, f"{task}_key_header"),
+        key_prefix=getattr(config, f"{task}_key_prefix"),
+        validation_path=getattr(config, f"{task}_validation_path"),
+    )
 
 
 class SingletonLock:
@@ -488,12 +575,69 @@ def _validate_settings(value: Any, path: str) -> dict[str, Any]:
         selected = value[task]
         if not isinstance(selected, Mapping):
             raise ButlerConfigError(f"{path}.{task} must be an object")
-        _reject_unknown_keys(selected, ("model", "endpoint_ref", "key_ref"), f"{path}.{task}")
+        _reject_unknown_keys(
+            selected,
+            (
+                "model",
+                "endpoint_ref",
+                "key_ref",
+                "extra_headers",
+                "key_header",
+                "key_prefix",
+                "validation_path",
+            ),
+            f"{path}.{task}",
+        )
         result[task] = {
             name: _optional_reference(selected.get(name), f"{path}.{task}.{name}")
             for name in ("model", "endpoint_ref", "key_ref")
             if name in selected
         }
+        if "extra_headers" in selected:
+            headers = selected["extra_headers"]
+            if (
+                not isinstance(headers, Mapping)
+                or len(headers) > 16
+                or any(
+                    not isinstance(name, str)
+                    or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}", name)
+                    or re.search(r"authorization|api[-_]?key|token|secret|cookie", name, re.I)
+                    or not isinstance(header_value, str)
+                    or len(header_value) > 1_000
+                    or any(ord(character) < 0x20 for character in header_value)
+                    for name, header_value in headers.items()
+                )
+            ):
+                raise ButlerConfigError(
+                    f"{path}.{task}.extra_headers must contain bounded non-secret headers"
+                )
+            result[task]["extra_headers"] = dict(headers)
+        if "key_header" in selected:
+            header = selected["key_header"]
+            if not isinstance(header, str) or not re.fullmatch(
+                r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}", header
+            ):
+                raise ButlerConfigError(f"{path}.{task}.key_header is invalid")
+            result[task]["key_header"] = header
+        if "key_prefix" in selected:
+            prefix = selected["key_prefix"]
+            if (
+                not isinstance(prefix, str)
+                or len(prefix) > 80
+                or any(ord(character) < 0x20 for character in prefix)
+            ):
+                raise ButlerConfigError(f"{path}.{task}.key_prefix is invalid")
+            result[task]["key_prefix"] = prefix
+        if "validation_path" in selected:
+            validation_path = selected["validation_path"]
+            if (
+                not isinstance(validation_path, str)
+                or not validation_path
+                or len(validation_path) > 500
+                or any(ord(character) < 0x20 for character in validation_path)
+            ):
+                raise ButlerConfigError(f"{path}.{task}.validation_path is invalid")
+            result[task]["validation_path"] = validation_path
     return result
 
 
@@ -593,8 +737,24 @@ def resolve_config(
             "veto_count": DEFAULT_VETO_COUNT,
             "window_s": DEFAULT_VETO_WINDOW_S,
         },
-        "classification": {"model": None, "endpoint_ref": None, "key_ref": None},
-        "drafting": {"model": None, "endpoint_ref": None, "key_ref": None},
+        "classification": {
+            "model": None,
+            "endpoint_ref": None,
+            "key_ref": None,
+            "extra_headers": {},
+            "key_header": "Authorization",
+            "key_prefix": "Bearer",
+            "validation_path": "models",
+        },
+        "drafting": {
+            "model": None,
+            "endpoint_ref": None,
+            "key_ref": None,
+            "extra_headers": {},
+            "key_header": "Authorization",
+            "key_prefix": "Bearer",
+            "validation_path": "models",
+        },
     }
     sources = ["safe_defaults"]
     raw = document.get("board_butler")
@@ -679,9 +839,17 @@ def resolve_config(
         classification_model=merged["classification"]["model"],
         classification_endpoint_ref=merged["classification"]["endpoint_ref"],
         classification_key_ref=merged["classification"]["key_ref"],
+        classification_extra_headers=dict(merged["classification"]["extra_headers"]),
+        classification_key_header=merged["classification"]["key_header"],
+        classification_key_prefix=merged["classification"]["key_prefix"],
+        classification_validation_path=merged["classification"]["validation_path"],
         drafting_model=merged["drafting"]["model"],
         drafting_endpoint_ref=merged["drafting"]["endpoint_ref"],
         drafting_key_ref=merged["drafting"]["key_ref"],
+        drafting_extra_headers=dict(merged["drafting"]["extra_headers"]),
+        drafting_key_header=merged["drafting"]["key_header"],
+        drafting_key_prefix=merged["drafting"]["key_prefix"],
+        drafting_validation_path=merged["drafting"]["validation_path"],
         source_layers=tuple(sources),
     )
 
@@ -1557,6 +1725,12 @@ async def process_question(
             now,
             project_name=getattr(backend, "project_name", None),
         )
+        # Provider configuration is intentionally re-resolved on every question
+        # cycle, so a dashboard save takes effect without restarting the resident.
+        # Runtime objects stay local and are never serialized into findings.
+        secret_root = getattr(args, "provider_secrets_dir", None)
+        resolve_provider_runtime(config, "classification", secret_root)
+        resolve_provider_runtime(config, "drafting", secret_root)
     except ButlerConfigError as exc:
         safe_config = resolve_config(
             {}, args, state, now, project_name=getattr(backend, "project_name", None)
@@ -1659,6 +1833,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--integration-ref", default="origin/main")
     parser.add_argument("--pid-file", type=Path, required=True)
     parser.add_argument("--cursor-file", type=Path, required=True)
+    parser.add_argument(
+        "--provider-secrets-dir",
+        type=Path,
+        default=(
+            Path(os.environ.get("PURSERS_STATE_DIR", "~/.pursers")).expanduser()
+            / "board-butler"
+            / "secrets"
+        ),
+    )
     parser.add_argument("--drafts-per-hour", type=int, default=DEFAULT_DRAFTS_PER_HOUR)
     parser.add_argument("--drafts-per-ticket", type=int, default=DEFAULT_DRAFTS_PER_TICKET)
     parser.add_argument("--drafts-per-board", type=int, default=DEFAULT_DRAFTS_PER_BOARD)
@@ -1671,7 +1854,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     controls.add_argument("--veto-question")
     parser.add_argument("--control-reason", default="operator")
     args = parser.parse_args(argv)
-    for name in ("token_path", "repo", "pid_file", "cursor_file"):
+    for name in (
+        "token_path",
+        "repo",
+        "pid_file",
+        "cursor_file",
+        "provider_secrets_dir",
+    ):
         value = getattr(args, name)
         if not value.is_absolute():
             parser.error(f"--{name.replace('_', '-')} must be absolute")

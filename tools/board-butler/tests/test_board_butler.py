@@ -1147,6 +1147,10 @@ def test_active_window_and_task_model_references_are_preserved_exactly(
         "model": "Model/Classify-Exact",
         "endpoint_ref": "endpoint://classification",
         "key_ref": "secret-ref://classification",
+        "extra_headers": {},
+        "key_header": "Authorization",
+        "key_prefix": "Bearer",
+        "validation_path": "models",
     }
     assert reported["drafting"]["model"] == "Model/Draft-Exact"
 

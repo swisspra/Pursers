@@ -100,9 +100,14 @@ The class list is not a general permission switch. `scope_change`,
 `gate_waiver`, `release`, `membership`, and `registry` are permanently
 escalation-only; validation rejects attempts to set them to `auto`. An empty or
 disabled evidence floor is also rejected, as are self-review, merge-to-main,
-and inline API-key fields because none belong to the schema. Model, endpoint,
-and credential values are references only; the credential itself stays in the
-provider's secret store.
+and inline API-key fields because none belong to the schema. Model and endpoint
+are configuration; `key_ref` is an opaque `file:<id>.key` reference into the
+private 0600 provider secret directory, never a home path or credential value.
+Provider entries may also contain bounded
+non-secret `extra_headers`, `key_header`, `key_prefix`, and a relative
+`validation_path`. Fleet validates and saves these settings, then the resident
+re-resolves them and reads the referenced key at the start of every question
+cycle. No process restart or hand edit is required.
 
 The three draft ceilings are real queue boundaries. A hit produces a
 `butler_queued` finding with an `ESCALATE` verdict instead of dropping the
