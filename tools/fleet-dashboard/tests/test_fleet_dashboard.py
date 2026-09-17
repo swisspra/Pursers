@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Self
+from typing import Any, Self
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,6 +35,15 @@ dashboard = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = dashboard
 SPEC.loader.exec_module(dashboard)
 import warm_home  # noqa: E402
+
+BUTLER_PATH = MODULE_PATH.parents[1] / "board-butler" / "board_butler.py"
+BUTLER_SPEC = importlib.util.spec_from_file_location(
+    "fleet_dashboard_test_board_butler", BUTLER_PATH
+)
+assert BUTLER_SPEC and BUTLER_SPEC.loader
+board_butler = importlib.util.module_from_spec(BUTLER_SPEC)
+sys.modules[BUTLER_SPEC.name] = board_butler
+BUTLER_SPEC.loader.exec_module(board_butler)
 
 CENTRAL_SRC = MODULE_PATH.parents[2] / "packages" / "central" / "src" / "pursers_central"
 sys.path.insert(0, str(CENTRAL_SRC))
@@ -4267,6 +4276,68 @@ def test_butler_report_never_mixes_axes_or_retrospective_population() -> None:
         ]
     )
     assert repeated == [{"ticket_id": "TK-repeat", "question_count": 2}]
+
+
+def test_deployed_backfill_is_visible_and_state_omission_fails_closed() -> None:
+    identity = SimpleNamespace(
+        agent_id="AI-butler",
+        agent_name="board-butler-1",
+        principal_id="PR-butler",
+    )
+    state: dict[str, Any] = {
+        "coordinator_findings": {"value": json.dumps({"findings": []})}
+    }
+    for specification in board_butler.RETROSPECTIVE_EVALUATION_BACKFILL:
+        question_id = specification["question_id"]
+        document = board_butler.retrospective_evaluation_document(
+            specification,
+            identity,
+            datetime(2026, 9, 17, 13, 0, tzinfo=timezone.utc),
+        )
+        state[f"board_butler_evaluation.{question_id}"] = {
+            "value": json.dumps(document)
+        }
+
+    complete = dashboard.project_coordinator_findings({"state": state})
+    assert complete is not None
+    assert complete["butler_evaluation_complete"] is True
+    assert complete["butler_evaluation_truncated"] == 0
+    assert complete["multi_question_tickets_complete"] is True
+    assert complete["agreement_by_question_kind"] == [
+        {
+            "question_kind": "decision",
+            "axis": "routing_quality",
+            "population": "retrospective_operator",
+            "sample_count": 3,
+            "marks": {
+                "correct_escalation": 2,
+                "should_have_answered": 0,
+                "should_have_escalated": 1,
+            },
+            "status": "measured",
+            "agreement_percent": 66.7,
+            "first_marked_at": "2026-09-17T12:08:46.324109+00:00",
+            "last_marked_at": "2026-09-17T12:08:46.324109+00:00",
+        }
+    ]
+
+    incomplete = dashboard.project_coordinator_findings(
+        {"state": state, "omitted_counts": {"state": 7}}
+    )
+    assert incomplete is not None
+    assert incomplete["butler_evaluation_complete"] is False
+    assert incomplete["butler_evaluation_truncated"] == 7
+    assert incomplete["multi_question_tickets_complete"] is False
+    assert incomplete["agreement_by_question_kind"][0]["sample_count"] == 3
+    assert incomplete["agreement_by_question_kind"][0]["status"] == (
+        "incomplete_bounded_state"
+    )
+    assert incomplete["agreement_by_question_kind"][0]["agreement_percent"] is None
+    assert incomplete["agreement_by_ticket"][0]["agreement_percent"] is None
+    assert "Agreement unavailable: bounded state may omit evaluation records." in (
+        dashboard.HTML
+    )
+    assert "bounded state omitted ${esc(row.count)} state record(s)" in dashboard.HTML
 
 
 def test_findings_projection_and_ui_expose_precedent_and_one_click_marks() -> None:

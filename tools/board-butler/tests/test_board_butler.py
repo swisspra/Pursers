@@ -392,6 +392,81 @@ def test_retrospective_real_marks_stay_separate_and_use_routing_axis() -> None:
     ]
 
 
+def test_production_backfill_persists_real_marks_without_authored_text() -> None:
+    corpus = json.loads(BACKLOG_FIXTURE.read_text(encoding="utf-8"))
+
+    class Backend:
+        identity = Source().identity
+        values: dict[str, str] = {}
+        writes = 0
+
+        async def evaluation(self, question_id: str) -> Mapping[str, Any]:
+            value = self.values.get(question_id)
+            return {"state": {"value": value}} if value is not None else {}
+
+        async def write_evaluation(
+            self, question_id: str, value: str, expected: str | None
+        ) -> None:
+            current = self.values.get(question_id)
+            assert current == expected
+            self.values[question_id] = value
+            self.writes += 1
+
+    backend = Backend()
+    first = asyncio.run(
+        butler.backfill_retrospective_evaluations(
+            backend, NOW, board_id="pursers"
+        )
+    )
+    second = asyncio.run(
+        butler.backfill_retrospective_evaluations(
+            backend, NOW, board_id="pursers"
+        )
+    )
+
+    assert first == {"created": 3, "updated": 0, "unchanged": 0}
+    assert second == {"created": 0, "updated": 0, "unchanged": 3}
+    assert backend.writes == 3
+    documents = [json.loads(value) for value in backend.values.values()]
+    rows = [document["evaluation"] for document in documents]
+    assert len(rows) == 3
+    assert {row["question_id"] for row in rows} == {
+        "CQ-53524d65cdb51016",
+        "CQ-7bf548bf5e084198",
+        "CQ-08843e9944e1cf22",
+    }
+    encoded = json.dumps(documents)
+    assert all(item["message"] not in encoded for item in corpus["available_records"])
+    assert all(item["answer"] not in encoded for item in corpus["available_records"])
+    report = butler.agreement_by_question_kind(rows)
+    assert report[0]["sample_count"] == 3
+    assert report[0]["agreement_percent"] == 66.7
+
+    other_board = asyncio.run(
+        butler.backfill_retrospective_evaluations(
+            backend, NOW, board_id="another-board"
+        )
+    )
+    assert other_board == {"created": 0, "updated": 0, "unchanged": 0}
+    assert backend.writes == 3
+
+
+def test_production_backfill_rejects_conflicting_existing_mark() -> None:
+    specification = butler.RETROSPECTIVE_EVALUATION_BACKFILL[0]
+    document = butler.retrospective_evaluation_document(
+        specification, Source().identity, NOW
+    )
+    document["evaluation"]["mark"] = "wrong"
+
+    with pytest.raises(ValueError, match="conflicts with an existing mark"):
+        butler._merge_retrospective_evaluation(
+            document,
+            butler.retrospective_evaluation_document(
+                specification, Source().identity, NOW
+            ),
+        )
+
+
 def test_ticket_status_draft_cites_product_source(tmp_path: Path) -> None:
     source = Source()
     source.tickets["TK-123"] = {"ticket_id": "TK-123", "status": "closed"}

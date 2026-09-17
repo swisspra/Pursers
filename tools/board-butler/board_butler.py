@@ -2,10 +2,12 @@
 """Registry-wide coordinator findings refresher and shadow question drafter.
 
 The butler runs the real coordinator derivation for every active registry board
-on a bounded cycle and listens for coordinator questions.  It never answers a
-question.  The only ticket mutations are two explicitly configured, mechanically
-checkable safety actions: parking repeated ``no_live_candidates`` loops and
-recording refusal of an escalation target that cannot work.
+on a bounded cycle and listens for coordinator questions through the same
+journal/seat resource subscriptions used by the wait bridge. It never answers a
+question. Its Central writes are CAS-protected findings and identifier-only
+evaluation records; the only ticket mutations are two explicitly configured,
+mechanically checkable safety actions: parking repeated ``no_live_candidates``
+loops and recording refusal of an escalation target that cannot work.
 """
 
 from __future__ import annotations
@@ -67,6 +69,40 @@ ROUTING_MARK_VALUES = (
     "should_have_escalated",
 )
 MARK_VALUES = DRAFT_MARK_VALUES + ROUTING_MARK_VALUES
+RETROSPECTIVE_BACKFILL_BOARD_ID = "pursers"
+RETROSPECTIVE_EVALUATION_BACKFILL: tuple[dict[str, Any], ...] = (
+    {
+        "question_id": "CQ-53524d65cdb51016",
+        "ticket_id": "TK-02bf4d01d662",
+        "question_kind": "decision",
+        "draft_status": "produced",
+        "decline_reason": None,
+        "mark": "should_have_escalated",
+    },
+    {
+        "question_id": "CQ-7bf548bf5e084198",
+        "ticket_id": "TK-02bf4d01d662",
+        "question_kind": "decision",
+        "draft_status": "declined",
+        "decline_reason": "historical-replay",
+        "mark": "correct_escalation",
+    },
+    {
+        "question_id": "CQ-08843e9944e1cf22",
+        "ticket_id": "TK-02bf4d01d662",
+        "question_kind": "decision",
+        "draft_status": "declined",
+        "decline_reason": "historical-replay",
+        "mark": "correct_escalation",
+    },
+)
+RETROSPECTIVE_MARKER = {
+    "agent_id": "AI-3f94318ce493a803e96c3e61f12459caf5c44eff7490a1db94484d75e95ee93c",
+    "agent_name": "fable5-main",
+    "principal_id": "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70",
+}
+RETROSPECTIVE_MARKED_AT = "2026-09-17T12:08:46.324109+00:00"
+RETROSPECTIVE_MARK_SOURCE_QUESTION_ID = "CQ-d57827ee2d7e88ed"
 # Mirrored from coordinator.DEFAULT_ALWAYS_ASK_CATEGORIES.  The policy rules
 # below express these as gate/scope/release, membership, and registry hazards.
 COORDINATOR_ALWAYS_ASK_CATEGORIES = (
@@ -1614,6 +1650,104 @@ def _decode_evaluation(
     return parsed, value
 
 
+def retrospective_evaluation_document(
+    specification: Mapping[str, Any], identity: Any, now: datetime
+) -> dict[str, Any]:
+    """Build one authenticated historical mark without authored board text."""
+    row = {
+        "question_id": specification["question_id"],
+        "ticket_id": specification["ticket_id"],
+        "question_kind": specification["question_kind"],
+        "draft_status": specification["draft_status"],
+        "decline_reason": specification["decline_reason"],
+        "drafted_by": _public_identity(identity),
+        "drafted_at": now.isoformat(),
+        "mark": specification["mark"],
+        "mark_population": "retrospective_operator",
+        "marked_by": dict(RETROSPECTIVE_MARKER),
+        "marked_at": RETROSPECTIVE_MARKED_AT,
+        "mark_source_question_id": RETROSPECTIVE_MARK_SOURCE_QUESTION_ID,
+    }
+    return {"schema_version": 1, "evaluation": row}
+
+
+def _merge_retrospective_evaluation(
+    existing: Mapping[str, Any], expected: Mapping[str, Any]
+) -> tuple[dict[str, Any], bool]:
+    """Merge only a missing authenticated mark; reject conflicting history."""
+    current = existing.get("evaluation")
+    desired = expected["evaluation"]
+    if not isinstance(current, Mapping):
+        return dict(expected), True
+    for name in (
+        "question_id",
+        "ticket_id",
+        "question_kind",
+        "draft_status",
+        "decline_reason",
+    ):
+        if current.get(name) != desired.get(name):
+            raise ValueError(
+                f"retrospective evaluation conflicts on {name} for "
+                f"{desired['question_id']}"
+            )
+    mark = current.get("mark")
+    if mark is not None and any(
+        current.get(name) != desired.get(name)
+        for name in (
+            "mark",
+            "mark_population",
+            "marked_by",
+            "marked_at",
+            "mark_source_question_id",
+        )
+    ):
+        raise ValueError(
+            f"retrospective evaluation conflicts with an existing mark for "
+            f"{desired['question_id']}"
+        )
+    result = dict(existing)
+    merged = dict(current)
+    for name in (
+        "mark",
+        "mark_population",
+        "marked_by",
+        "marked_at",
+        "mark_source_question_id",
+    ):
+        merged[name] = desired[name]
+    result["schema_version"] = 1
+    result["evaluation"] = merged
+    return result, result != dict(existing)
+
+
+async def backfill_retrospective_evaluations(
+    backend: Any, now: datetime, *, board_id: str
+) -> dict[str, int]:
+    """Persist the bounded historical sample with CAS and idempotent retries."""
+    result = {"created": 0, "updated": 0, "unchanged": 0}
+    if board_id != RETROSPECTIVE_BACKFILL_BOARD_ID:
+        return result
+    for specification in RETROSPECTIVE_EVALUATION_BACKFILL:
+        question_id = str(specification["question_id"])
+        raw = await backend.evaluation(question_id)
+        existing, previous_value = _decode_evaluation(raw)
+        desired = retrospective_evaluation_document(
+            specification, backend.identity, now
+        )
+        merged, changed = _merge_retrospective_evaluation(existing, desired)
+        if not changed:
+            result["unchanged"] += 1
+            continue
+        await backend.write_evaluation(
+            question_id,
+            json.dumps(merged, sort_keys=True, separators=(",", ":")),
+            previous_value,
+        )
+        result["created" if previous_value is None else "updated"] += 1
+    return result
+
+
 def rate_limit_reason(
     state: Mapping[str, Any],
     board_id: str,
@@ -2179,7 +2313,7 @@ def plan_mechanical_actions(
 
 
 class CentralBackend:
-    """Central adapter for push questions and registry-wide real derivation."""
+    """Central adapter for push waits, real derivation, reads, and bounded CAS writes."""
 
     def __init__(self, args: argparse.Namespace, token: str) -> None:
         self.args = args
@@ -2211,6 +2345,12 @@ class CentralBackend:
             assert_independent_identity(self.identity, status.get("agents", []))
             self.latest_seq = max(0, int(status.get("latest_seq", 0) or 0))
             self.project_name = await self._project_name_from_registry()
+            if not self.args.dry_run and not (
+                self.args.kill_switch or self.args.veto_question
+            ):
+                await backfill_retrospective_evaluations(
+                    self, utc_now(), board_id=self.args.home_board
+                )
         except BaseException:
             await self._context.__aexit__(*sys.exc_info())
             self.client = None

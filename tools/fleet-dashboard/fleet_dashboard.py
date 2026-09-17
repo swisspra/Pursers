@@ -452,6 +452,8 @@ def butler_evaluation_state_key(question_id: str) -> str:
 
 def butler_agreement_report(
     evaluations: list[dict[str, Any]],
+    *,
+    complete: bool = True,
 ) -> list[dict[str, Any]]:
     """Report only explicit human marks; free text is never scored."""
     grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
@@ -480,7 +482,7 @@ def butler_agreement_report(
             mark: sum(row.get("mark") == mark for row in rows)
             for mark in values
         }
-        enough = len(rows) >= BUTLER_MIN_AGREEMENT_SAMPLES
+        enough = complete and len(rows) >= BUTLER_MIN_AGREEMENT_SAMPLES
         success_mark = (
             "send_as_is" if axis == "draft_quality" else "correct_escalation"
         )
@@ -491,7 +493,13 @@ def butler_agreement_report(
                 "population": population,
                 "sample_count": len(rows),
                 "marks": counts,
-                "status": "measured" if enough else "insufficient_samples",
+                "status": (
+                    "measured"
+                    if enough
+                    else "incomplete_bounded_state"
+                    if not complete
+                    else "insufficient_samples"
+                ),
                 "agreement_percent": (
                     round(100 * counts[success_mark] / len(rows), 1)
                     if enough
@@ -512,12 +520,14 @@ def butler_agreement_report(
 
 def butler_agreement_by_ticket(
     evaluations: list[dict[str, Any]],
+    *,
+    complete: bool = True,
 ) -> list[dict[str, Any]]:
     remapped = [
         {**row, "question_kind": str(row.get("ticket_id", "unknown"))}
         for row in evaluations
     ]
-    report = butler_agreement_report(remapped)
+    report = butler_agreement_report(remapped, complete=complete)
     for row in report:
         row["ticket_id"] = row.pop("question_kind")
     return report
@@ -2268,14 +2278,27 @@ def project_coordinator_findings(
         for row in evaluations
         if row.get("question_id") and row.get("ticket_id")
     ]
+    omitted_counts = snapshot.get("omitted_counts")
+    omitted_state = (
+        _nonnegative_int(omitted_counts.get("state"))
+        if isinstance(omitted_counts, Mapping)
+        else 0
+    )
+    evaluation_state_complete = omitted_state == 0
     return {
         "items": items,
         "truncated_count": reported_truncated + max(0, len(findings) - MAX_FINDINGS),
         "butler_evaluations": projected_evaluations,
-        "butler_evaluation_truncated": 0,
-        "agreement_by_question_kind": butler_agreement_report(evaluations),
-        "agreement_by_ticket": butler_agreement_by_ticket(evaluations),
+        "butler_evaluation_truncated": omitted_state,
+        "butler_evaluation_complete": evaluation_state_complete,
+        "agreement_by_question_kind": butler_agreement_report(
+            evaluations, complete=evaluation_state_complete
+        ),
+        "agreement_by_ticket": butler_agreement_by_ticket(
+            evaluations, complete=evaluation_state_complete
+        ),
         "multi_question_tickets": butler_multi_question_tickets(evaluations),
+        "multi_question_tickets_complete": evaluation_state_complete,
     }
 
 
@@ -7750,13 +7773,14 @@ function butlerEvaluation(row){return(row.board.coordinator_findings?.butler_eva
 function butlerAgreementRows(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[])for(const score of b.coordinator_findings?.agreement_by_question_kind||[])rows.push({central,board:b,score});return rows}
 function butlerTicketAgreementRows(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[])for(const score of b.coordinator_findings?.agreement_by_ticket||[])rows.push({central,board:b,score});return rows}
 function butlerRepeatedTicketRows(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[])for(const ticket of b.coordinator_findings?.multi_question_tickets||[])rows.push({central,board:b,ticket});return rows}
+function butlerEvaluationTruncationRows(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[]){const count=b.coordinator_findings?.butler_evaluation_truncated||0;if(count)rows.push({central,board:b,count})}return rows}
 function humanUrlHost(url){try{return new URL(url).host}catch(_error){return String(url)}}
 function butlerMarkButton(row,value,label){const f=row.f||{};return `<button type="button" data-butler-mark="${esc(value)}" data-central="${esc(row.central)}" data-board="${esc(row.board.board_id)}" data-ticket="${esc(f.ticket_id)}" data-question="${esc(f.question_id)}">${esc(label)}</button>`}
 function butlerHoldCard(row){const f=row.f||{},hold=f.hold||{},evaluation=butlerEvaluation(row),link=f.ticket_id?`<a class="id" href="${ticketHref(row.central,row.board.board_id,f.ticket_id)}">${esc(f.ticket_id)}</a>`:'',precedents=(f.precedents||[]).map(p=>`<a class="id" href="${ticketHref(row.central,row.board.board_id,p.ticket_id)}">${esc(p.question_id)} · ${esc(p.ticket_id)}</a>`).join(' · '),mark=evaluation?.mark,isDraft=evaluation?.draft_status==='produced',buttons=isDraft?[['send_as_is','Would send as is'],['needed_edits','Needed edits'],['wrong','Wrong'],['should_have_escalated','Should have escalated']]:[['correct_escalation','Correct escalation'],['should_have_answered','Should have answered']],marking=mark?`<p class="meta">Human mark: ${esc(mark.replaceAll('_',' '))}</p>`:`<div class="attention-actions">${buttons.map(([value,label])=>butlerMarkButton(row,value,label)).join('')}</div>`;return `<div class="finding-row"><span class="severity warn"></span><div><b>Waiting for you · board butler hold</b><p>${esc(f.text||'Evidence-backed draft')}</p><span class="meta">${esc(row.central)} · ${esc(row.board.label)} · ${esc(f.question_id)} · ${esc(f.verdict||'unknown')} · release ${esc(fmt(hold.release_at))}</span>${f.evidence?`<p class="meta">${esc(f.evidence)}</p>`:''}<p class="meta">Precedent: ${precedents||'No precedent found'}</p>${marking}<p class="meta">Veto with board_butler.py --veto-question ${esc(f.question_id)} --control-reason &lt;reason&gt;</p></div>${link}</div>`}
-function butlerScoreCard(row){const s=row.score||{},counts=s.marks||{},group=s.question_kind||s.ticket_id||'unknown',success=s.axis==='draft_quality'?'would send as is':'correct escalations',result=s.status==='measured'?`${esc(s.agreement_percent)}% ${success}`:`Too few samples (${esc(s.sample_count)}/${BUTLER_MIN_SAMPLES})`,details=s.axis==='draft_quality'?`send as is ${esc(counts.send_as_is||0)} · needed edits ${esc(counts.needed_edits||0)} · wrong ${esc(counts.wrong||0)}`:`correct escalation ${esc(counts.correct_escalation||0)} · should have answered ${esc(counts.should_have_answered||0)} · should have escalated ${esc(counts.should_have_escalated||0)}`;return `<div class="finding-row"><span class="severity"></span><div><b>Butler agreement · ${esc(group)} · ${esc(s.axis)}</b><p>${result}</p><span class="meta">${esc(row.central)} · ${esc(row.board.label)} · ${esc(s.population)} · ${details}</span></div></div>`}
+function butlerScoreCard(row){const s=row.score||{},counts=s.marks||{},group=s.question_kind||s.ticket_id||'unknown',success=s.axis==='draft_quality'?'would send as is':'correct escalations',result=s.status==='measured'?`${esc(s.agreement_percent)}% ${success}`:s.status==='incomplete_bounded_state'?'Agreement unavailable: bounded state may omit evaluation records.':`Too few samples (${esc(s.sample_count)}/${BUTLER_MIN_SAMPLES})`,details=s.axis==='draft_quality'?`send as is ${esc(counts.send_as_is||0)} · needed edits ${esc(counts.needed_edits||0)} · wrong ${esc(counts.wrong||0)}`:`correct escalation ${esc(counts.correct_escalation||0)} · should have answered ${esc(counts.should_have_answered||0)} · should have escalated ${esc(counts.should_have_escalated||0)}`;return `<div class="finding-row"><span class="severity"></span><div><b>Butler agreement · ${esc(group)} · ${esc(s.axis)}</b><p>${result}</p><span class="meta">${esc(row.central)} · ${esc(row.board.label)} · ${esc(s.population)} · ${details}</span></div></div>`}
 function butlerRepeatedTicketCard(row){const t=row.ticket||{};return `<div class="finding-row"><span class="severity"></span><div><b>Repeated questions · ${esc(t.ticket_id)}</b><p>${esc(t.question_count)} questions</p><span class="meta">${esc(row.central)} · ${esc(row.board.label)}</span></div><a class="id" href="${ticketHref(row.central,row.board.board_id,t.ticket_id)}">${esc(t.ticket_id)}</a></div>`}
 const BUTLER_MIN_SAMPLES=3;
-function renderWaitingForYou(){const humans=humanRequestRows(),holds=butlerHoldRows(),scores=butlerAgreementRows(),ticketScores=butlerTicketAgreementRows(),repeated=butlerRepeatedTicketRows(),count=humans.length+holds.length;return `<div class="section-title"><h3>Waiting for you</h3><span class="status">${count} pending</span></div><section class="attention-card">${humans.map(humanRequestCard).join('')}${holds.map(butlerHoldCard).join('')||(!humans.length?'<p class="empty">No tickets or held drafts are waiting for a human answer.</p>':'')}</section><div class="section-title"><h3>Butler agreement by question kind</h3><span class="status">human marks only</span></div><section class="attention-card">${scores.map(butlerScoreCard).join('')||'<p class="empty">No human marks yet. No question kind is trusted.</p>'}</section><div class="section-title"><h3>Butler agreement by ticket</h3><span class="status">human marks only</span></div><section class="attention-card">${ticketScores.map(butlerScoreCard).join('')||'<p class="empty">No marked tickets yet.</p>'}</section><div class="section-title"><h3>Tickets with repeated questions</h3></div><section class="attention-card">${repeated.map(butlerRepeatedTicketCard).join('')||'<p class="empty">No ticket has generated more than one recorded question.</p>'}</section>`}
+function renderWaitingForYou(){const humans=humanRequestRows(),holds=butlerHoldRows(),scores=butlerAgreementRows(),ticketScores=butlerTicketAgreementRows(),repeated=butlerRepeatedTicketRows(),truncated=butlerEvaluationTruncationRows(),count=humans.length+holds.length,truncationWarning=truncated.map(row=>`<p class="warning">Agreement unavailable for ${esc(row.board.label)}: bounded state omitted ${esc(row.count)} state record(s).</p>`).join('');return `<div class="section-title"><h3>Waiting for you</h3><span class="status">${count} pending</span></div><section class="attention-card">${humans.map(humanRequestCard).join('')}${holds.map(butlerHoldCard).join('')||(!humans.length?'<p class="empty">No tickets or held drafts are waiting for a human answer.</p>':'')}</section><div class="section-title"><h3>Butler agreement by question kind</h3><span class="status">human marks only</span></div><section class="attention-card">${truncationWarning}${scores.map(butlerScoreCard).join('')||(!truncated.length?'<p class="empty">No human marks yet. No question kind is trusted.</p>':'')}</section><div class="section-title"><h3>Butler agreement by ticket</h3><span class="status">human marks only</span></div><section class="attention-card">${ticketScores.map(butlerScoreCard).join('')||(!truncated.length?'<p class="empty">No marked tickets yet.</p>':'')}</section><div class="section-title"><h3>Tickets with repeated questions</h3></div><section class="attention-card">${repeated.map(butlerRepeatedTicketCard).join('')||(!truncated.length?'<p class="empty">No ticket has generated more than one recorded question.</p>':'')} ${truncationWarning}</section>`}
 function renderAttentionOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=numberCount((b.counts||{})[k]);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Online<b>${esc(s.online||0)}</b></span><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const surfaced=reconcileAttention().sort((a,b)=>(b.level==='critical')-(a.level==='critical')||(b.age||0)-(a.age||0)),attention=surfaced.slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section>${renderWaitingForYou()}<div class="section-title"><h3>Needs attention</h3><span class="status">${surfaced.length} surfaced</span></div><section class="attention-card">${attention.map(attentionRow).join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
 function renderAttentionBoardsHub(){const cards=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[]){const total=Object.values(b.counts||{}).reduce((sum,v)=>sum+numberCount(v),0),tr=b.snapshot_truncation,info=tr&&tr.total>tr.returned?`<span class="status">snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets</span>`:'';cards.push(`<article class="board-card" data-board-id="${esc(b.board_id)}" data-central="${esc(central)}"><div><p class="eyebrow">${esc(central)}</p><h3>${esc(b.label)}</h3><span class="meta">${esc(b.board_id)} · ${esc(total)} visible tickets</span> ${info}</div><div class="counts">${Object.entries(b.counts||{}).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))} <b>${esc(v)}</b></span>`).join('')}</div><div class="card-actions"><a class="primary-action" href="${boardHref(central,b.board_id)}">Workspace</a><a href="${boardHref(central,b.board_id,'flow')}">Flow</a><a href="${boardHref(central,b.board_id,'timeline')}">Timeline</a><a href="${boardHref(central,b.board_id,'changes')}">Changes</a><a href="${boardHref(central,b.board_id,'routes')}">Routes</a></div></article>`)}return `${pageHead('Boards','Board workspaces','Open one board, then move through tickets, findings, intake, flow, timeline, changes, and routes.')}<section class="boards-list">${cards.join('')||'<div class="skeleton"></div>'}</section>`}
 function humanEnumOptions(prop){const p=prop&&typeof prop==='object'?prop:{};const source=p.type==='array'&&p.items&&typeof p.items==='object'?p.items:p;const options=[];if(Array.isArray(source.enum)){for(const value of source.enum)options.push({value:String(value),title:String(value)})}else if(Array.isArray(source.oneOf)){for(const arm of source.oneOf){if(arm&&typeof arm==='object'&&'const' in arm)options.push({value:String(arm.const),title:String(arm.title??arm.const)});else if(arm&&typeof arm==='object'&&Array.isArray(arm.enum))for(const value of arm.enum)options.push({value:String(value),title:String(value)})}}return options}
