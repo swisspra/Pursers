@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import os
 import re
+import shlex
 import signal
 import stat
+import subprocess
 import threading
 import uuid
 from dataclasses import dataclass
@@ -382,6 +385,9 @@ class ButlerSettingsManager:
         now: Callable[[], datetime] | None = None,
         runtime_path: str | Path | None = None,
         kill_path: str | Path | None = None,
+        pid_path: str | Path | None = None,
+        expected_process_path: str | Path | None = None,
+        process_inspector: Callable[[int], bool] | None = None,
         process_probe: Callable[[int], bool] | None = None,
         signaler: Callable[[int, int], None] | None = None,
     ) -> None:
@@ -398,21 +404,86 @@ class ButlerSettingsManager:
             if kill_path
             else self.root.parent / "KILLED"
         )
-        self.process_probe = process_probe or self._process_alive
+        self.pid_path = (
+            Path(pid_path).expanduser().resolve()
+            if pid_path
+            else self.runtime_path.parent / "board-butler.pid"
+        )
+        self.expected_process_path = (
+            Path(expected_process_path).expanduser().resolve()
+            if expected_process_path
+            else Path(__file__).parents[1] / "board-butler" / "board_butler.py"
+        ).resolve()
+        if process_inspector is not None and process_probe is not None:
+            raise ValueError("provide only one process identity verifier")
+        # process_probe remains as a compatibility alias for focused tests. The
+        # product path always uses the lock + OS process identity verifier.
+        self.process_inspector = (
+            process_inspector or process_probe or self._verified_butler_process
+        )
         self.signaler = signaler or os.kill
         self._lock = threading.RLock()
 
-    @staticmethod
-    def _process_alive(pid: int) -> bool:
+    def _pid_lock_held_by(self, pid: int) -> bool:
+        """Require the resident's private singleton lock to name this PID."""
+        if not self._private_file(self.pid_path):
+            return False
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+            if self.pid_path.read_text(encoding="utf-8")[:64].strip() != str(pid):
+                return False
+            descriptor = os.open(
+                self.pid_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            )
+        except (OSError, UnicodeError):
             return False
-        except PermissionError:
-            return True
-        except OSError:
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
             return False
-        return True
+        finally:
+            os.close(descriptor)
+
+    def _verified_butler_process(self, pid: int) -> bool:
+        """Bind a runtime PID to the live, non-zombie Board Butler resident."""
+        if not self._pid_lock_held_by(pid):
+            return False
+        try:
+            result = subprocess.run(
+                ["/bin/ps", "-ww", "-p", str(pid), "-o", "state=", "-o", "command="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        line = result.stdout.strip()
+        if result.returncode != 0 or not line:
+            return False
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or fields[0].upper().startswith("Z"):
+            return False
+        try:
+            arguments = shlex.split(fields[1])
+        except ValueError:
+            return False
+        expected = self.expected_process_path
+        matches_entrypoint = False
+        for argument in arguments[:5]:
+            if not argument or argument.startswith("-"):
+                continue
+            try:
+                matches_entrypoint = Path(argument).expanduser().resolve() == expected
+            except (OSError, RuntimeError):
+                matches_entrypoint = False
+            if matches_entrypoint:
+                break
+        # Recheck the lock after reading process metadata. If the resident
+        # exited or the PID was reused during inspection, fail closed.
+        return matches_entrypoint and self._pid_lock_held_by(pid)
 
     @staticmethod
     def _private_file(path: Path) -> bool:
@@ -446,7 +517,7 @@ class ButlerSettingsManager:
             and not isinstance(pid, bool)
             and pid > 1
             and mode in {"shadow", "active"}
-            and self.process_probe(pid)
+            and self.process_inspector(pid)
         )
         if alive:
             state = f"running_{mode}"
@@ -595,7 +666,11 @@ class ButlerSettingsManager:
             except OSError:
                 pass
             raise
-        runtime = current["runtime"]
+        configured = bool(current["runtime"]["configured"])
+        # Re-read and re-verify immediately before signalling. This prevents a
+        # stale projection or a PID reused after the first page render from
+        # becoming a signal target.
+        runtime = self._runtime(configured)
         signal_sent = False
         if runtime["running"] and isinstance(runtime["pid"], int):
             try:

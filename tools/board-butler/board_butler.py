@@ -555,6 +555,7 @@ class SingletonLock:
     def __enter__(self) -> "SingletonLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+", encoding="utf-8")
+        os.chmod(self.path, 0o600)
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:

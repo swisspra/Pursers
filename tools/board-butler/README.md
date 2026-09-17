@@ -71,7 +71,9 @@ The template is not installed by the repository or by worker seats. Its
 `KeepAlive.SuccessfulExit=false` policy restarts an unexpected crash but does
 not loop after a clean fail-closed exit. The launcher publishes only PID, mode,
 start time, and last activity to the private mode-0600 `runtime.json`; Fleet
-also probes that PID before reporting a running state. A stale runtime file is
+also requires the private singleton pidfile to be locked by that PID and
+verifies `/bin/ps` identifies a live, non-zombie `board_butler.py` process
+before reporting a running state or sending `SIGTERM`. A stale runtime file is
 therefore shown as **Configured · not running**, never as running.
 
 The Settings page distinguishes **Not configured**, **Configured · not

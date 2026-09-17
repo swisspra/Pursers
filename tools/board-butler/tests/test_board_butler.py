@@ -5,6 +5,8 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+import os
+import stat
 import subprocess
 import sys
 import threading
@@ -168,6 +170,14 @@ def test_runtime_status_is_private_and_tracks_last_activity(tmp_path: Path) -> N
     assert stopped["running"] is False
     assert stopped["last_activity"] == "stopped"
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_singleton_pidfile_is_private(tmp_path: Path) -> None:
+    path = tmp_path / "board-butler.pid"
+
+    with butler.SingletonLock(path):
+        assert path.read_text(encoding="utf-8").strip() == str(os.getpid())
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_local_kill_marker_stops_before_token_or_board_access(tmp_path: Path) -> None:

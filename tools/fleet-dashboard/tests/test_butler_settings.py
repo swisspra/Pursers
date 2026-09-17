@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import json
+import os
 import re
 import signal
 import stat
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -192,28 +195,101 @@ def test_stale_runtime_pid_is_never_reported_running(tmp_path: Path) -> None:
     assert status["pid"] is None
 
 
-def test_indicator_turns_not_running_after_real_process_exits(tmp_path: Path) -> None:
+@contextlib.contextmanager
+def locked_helper_process(tmp_path: Path) -> Any:
+    script = tmp_path / "board_butler.py"
+    pid_path = tmp_path / "board-butler.pid"
+    script.write_text(
+        """import fcntl
+import os
+import sys
+import time
+
+with open(sys.argv[1], "a+", encoding="utf-8") as handle:
+    os.chmod(sys.argv[1], 0o600)
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\\n")
+    handle.flush()
+    time.sleep(30)
+""",
+        encoding="utf-8",
+    )
     process = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
+        [sys.executable, str(script), str(pid_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(200):
+            if pid_path.exists() and pid_path.read_text(encoding="utf-8").strip():
+                break
+            if process.poll() is not None:
+                pytest.fail("locked helper exited before publishing its PID")
+            time.sleep(0.01)
+        else:
+            pytest.fail("locked helper did not publish its PID")
+        yield process, script, pid_path
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=5)
+
+
+def test_indicator_binds_to_locked_expected_process_and_rejects_zombie(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime.json"
+    with locked_helper_process(tmp_path) as (process, script, pid_path):
+        write_runtime(runtime, mode="shadow", pid=process.pid)
+        manager = butler_settings.ButlerSettingsManager(
+            tmp_path / "secrets",
+            runtime_path=runtime,
+            pid_path=pid_path,
+            expected_process_path=script,
+        )
+        assert manager.view(configured_payload(), "sandbox")["runtime"]["state"] == (
+            "running_shadow"
+        )
+        process.terminate()
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        state = subprocess.run(
+            ["/bin/ps", "-p", str(process.pid), "-o", "state="],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert state.upper().startswith("Z")
+
+        status = manager.view(configured_payload(), "sandbox")["runtime"]
+        assert status["state"] == "configured_not_running"
+        assert status["running"] is False
+
+
+def test_live_unrelated_process_is_not_reported_or_signaled(tmp_path: Path) -> None:
+    process = subprocess.Popen(
+        ["/bin/sleep", "30"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     runtime = tmp_path / "runtime.json"
+    marker = tmp_path / "KILLED"
     write_runtime(runtime, mode="shadow", pid=process.pid)
     manager = butler_settings.ButlerSettingsManager(
-        tmp_path / "secrets", runtime_path=runtime
+        tmp_path / "secrets", runtime_path=runtime, kill_path=marker
     )
     try:
-        assert manager.view(configured_payload(), "sandbox")["runtime"]["state"] == (
-            "running_shadow"
-        )
+        status = manager.view(configured_payload(), "sandbox")["runtime"]
+        assert status["state"] == "configured_not_running"
+        assert status["running"] is False
+
+        result = manager.kill(configured_payload(), "sandbox")
+        assert result["signal_sent"] is False
+        assert process.poll() is None
     finally:
         process.terminate()
         process.wait(timeout=5)
-
-    status = manager.view(configured_payload(), "sandbox")["runtime"]
-    assert status["state"] == "configured_not_running"
-    assert status["running"] is False
 
 
 def test_runtime_projection_drops_unrecognized_text(tmp_path: Path) -> None:
@@ -267,6 +343,27 @@ def test_kill_switch_marks_then_signals_live_resident(tmp_path: Path) -> None:
     assert signals == [(4321, signal.SIGTERM)]
     assert stat.S_IMODE(marker.stat().st_mode) == 0o600
     assert json.loads(marker.read_text(encoding="utf-8"))["engaged"] is True
+
+
+def test_kill_switch_revalidates_process_identity_before_signal(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime.json"
+    marker = tmp_path / "KILLED"
+    write_runtime(runtime, mode="shadow")
+    inspections = iter((True, False, False))
+    signals: list[tuple[int, int]] = []
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "secrets",
+        runtime_path=runtime,
+        kill_path=marker,
+        process_inspector=lambda _pid: next(inspections),
+        signaler=lambda pid, selected: signals.append((pid, selected)),
+    )
+
+    result = manager.kill(configured_payload(), "sandbox")
+
+    assert result["kill_switch_engaged"] is True
+    assert result["signal_sent"] is False
+    assert signals == []
 
 
 @pytest.mark.parametrize(
