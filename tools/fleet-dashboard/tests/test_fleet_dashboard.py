@@ -808,6 +808,40 @@ def test_agent_projection_preserves_model_provider_and_counts_unknown_seats() ->
     assert result["pool_summary"]["unknown_model"] == 1
 
 
+def test_agent_projection_counts_zero_unknown_when_every_seat_is_stamped() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-stamped",
+                            "agent_name": "stamped",
+                            "agent_id": "AI-stamped",
+                            "last_activity_at": now.isoformat(),
+                            "capabilities": {
+                                "tier_max": 2,
+                                "host": "codex",
+                                "model": "Model/Exact-1.0",
+                                "provider": "Provider/Exact",
+                            },
+                        }
+                    ],
+                    "tickets": [],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    assert result["pool_summary"]["unknown_model"] == 0
+
+
 def test_agent_projection_preserves_distinct_ids_for_shared_principal() -> None:
     now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
     recent = (now - timedelta(seconds=20)).isoformat()
@@ -7064,7 +7098,19 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
             "agent_name": "a-available",
             "pool_status": "available",
             "boards": ["pursers"],
-            "seats": [],
+            "seats": [
+                {
+                    "board_id": "pursers",
+                    "project": "Pursers",
+                    "role": "reviewer",
+                    "capabilities": {
+                        "tier_max": 2,
+                        "host": "codex",
+                        "model": "Model/Exact-1.0",
+                        "provider": "Provider/Exact",
+                    },
+                }
+            ],
             "last_seen": "2030-01-01T11:58:00Z",
         },
         {
@@ -7081,6 +7127,7 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
                     "current_ticket_status": "claimed",
                     "lease_expires_at": "2030-01-01T12:08:00Z",
                     "last_seen": "2030-01-01T11:58:00Z",
+                    "capabilities": {"tier_max": 1, "host": "headless"},
                 }
             ],
             "last_seen": "2030-01-01T11:58:00Z",
@@ -7117,13 +7164,14 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
             source("function agentFilterOptions("),
             source("function agentCountStrip("),
             source("function agentFilterBar("),
+            source("function agentCapabilitySummary("),
             source("function liveAgentCard("),
                 source("function renderGuide("),
                 source("function inactiveAgentDrawer("),
                 source("function agentPoolScope("),
                 source("function renderAgentsHub("),
                 "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
-                f"let fleetData={{personal:{{agents:{json.dumps(agents)},pool_scope:{{covered_boards:['pursers'],excluded_boards:[{{board_id:'hidden-board',reason:'read unavailable'}}]}}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false,agentFilters={{role:'all',status:'all',board:'all',client:'all'}};",
+                f"let fleetData={{personal:{{agents:{json.dumps(agents)},pool_summary:{{unknown_model:1}},pool_scope:{{covered_boards:['pursers'],excluded_boards:[{{board_id:'hidden-board',reason:'read unavailable'}}]}}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false,agentFilters={{role:'all',status:'all',board:'all',client:'all'}};",
                 "const active=renderAgentsHub();agentFilters.status='stale';const staleOnly=renderAgentsHub();fleetData={personal:{agents:[fleetData.personal.agents[0]],pool_scope:{covered_boards:['pursers'],excluded_boards:[]}}};agentFilters.status='working';const filtered=renderAgentsHub();",
                 "console.log(JSON.stringify({active,staleOnly,filtered}));",
         ]
@@ -7150,6 +7198,9 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
     assert "2m ago" in active
     assert "No held ticket" in active
     assert "last activity 2m ago" in active
+    assert "tier 2 · client codex · model Model/Exact-1.0 · provider Provider/Exact" in active
+    assert "tier 1 · client headless · model unknown · provider unknown" in active
+    assert "Unknown model</span><b>1</b>" in active
     assert stale_only.count('<article class="agent-card') == 1
     assert "m-stale" in stale_only
     assert "z-busy" not in stale_only
@@ -9789,6 +9840,7 @@ def test_agents_hub_keeps_duplicate_names_distinct_and_exposes_inactive_drawer()
             source("function agentFilterOptions("),
             source("function agentCountStrip("),
             source("function agentFilterBar("),
+            source("function agentCapabilitySummary("),
             source("function liveAgentCard("),
             source("function renderGuide("),
             source("function inactiveAgentDrawer("),
@@ -9877,6 +9929,7 @@ def test_agents_hub_keeps_same_principal_seats_distinct_and_filters_only_stale()
             source("function agentFilterOptions("),
             source("function agentCountStrip("),
             source("function agentFilterBar("),
+            source("function agentCapabilitySummary("),
             source("function liveAgentCard("),
             source("function inactiveAgentDrawer("),
             source("function renderAgentsHub("),
@@ -9959,6 +10012,7 @@ def test_agents_hub_does_not_attach_unidentified_worker_to_duplicate_live_names(
             source("function agentFilterOptions("),
             source("function agentCountStrip("),
             source("function agentFilterBar("),
+            source("function agentCapabilitySummary("),
             source("function liveAgentCard("),
             source("function inactiveAgentDrawer("),
             source("function renderAgentsHub("),
@@ -10027,6 +10081,7 @@ def test_agents_hub_includes_unrepresented_managed_worker_as_offline() -> None:
             source("function agentFilterOptions("),
             source("function agentCountStrip("),
             source("function agentFilterBar("),
+            source("function agentCapabilitySummary("),
             source("function liveAgentCard("),
             source("function inactiveAgentDrawer("),
             source("function renderAgentsHub("),
