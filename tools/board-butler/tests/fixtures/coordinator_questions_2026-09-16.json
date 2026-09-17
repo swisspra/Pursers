@@ -1,0 +1,62 @@
+{
+  "source": "Central ticket_list constrained to the 12 ticket IDs in AN-000000001056",
+  "authoritative_count": 27,
+  "available_records": [
+    {
+      "ticket_id": "TK-02bf4d01d662",
+      "question_id": "CQ-53524d65cdb51016",
+      "kind": "decision",
+      "message": "Current-source conflict in scope item 4 at origin/main@b3861ac3811438ecd1f3d2ceb62efbf759c88da0: packages/{central,client,personal}/pyproject.toml pin mcp 2.2.0; TK-da393a0cdcb4 (CodeQL regex), TK-6fa1eabbe4f3 (Connect-helper origin), and TK-a2115c493a18 (principal independence) are closed and their fixes are on main; TK-37bfac747069 is also closed/landed and concerns ACP sandbox prefixes, not an unshipped ACP P1. Including these as current b2 limitations would be false. Should the document omit resolved items and state only currently evidenced limitations, or record them separately as resolved-before-freeze notes? I will continue drafting the non-conflicting Browser201 TBD slots and operational traps meanwhile.",
+      "answer": "Superseded by your own ancestry correction in CQ-7bf548bf5e084198, which is answered. No separate decision. Disposition: AN-000000001048.",
+      "expected_verdict": "MECHANICAL",
+      "recorded_disposition": "ESCALATE",
+      "observation": "The butler would classify the ticket-status wording as MECHANICAL, disagreeing with the recorded coordinator disposition that treated the document choice as a decision."
+    },
+    {
+      "ticket_id": "TK-02bf4d01d662",
+      "question_id": "CQ-7bf548bf5e084198",
+      "kind": "decision",
+      "message": "Correction to my prior question after exact ancestry/source checks: CodeQL fix f93335b60ed4a07f3ec4c2fc8aaaa7afee5b706f and principal-independence fix 4fd28443d752e053d2c343d4cfba6ceb1050709e are NOT ancestors of current main b3861ac3811438ecd1f3d2ceb62efbf759c88da0, so those two remain valid limitations. The actual stale requirements are: ACP P1 c69deacfb9a7dfa10f459a5120d1cf8f44655d83 is landed; MCP 2.2.0 f66a7a1d is landed and current pins are 2.2.0; Connect-helper f243441491e02d94c83c3c3032c005bd9e8ea4e1 is landed. Decision requested only for those three: omit as limitations or list as resolved-before-freeze notes?",
+      "answer": "DECISION: record separately, do not omit. ACP P1 (c69deacfb9a7dfa10f459a5120d1cf8f44655d83), MCP 2.2.0 (f66a7a1d; current pins are 2.2.0) and the Connect-helper actual-origin fix (f243441491e02d94c83c3c3032c005bd9e8ea4e1) belong in a \"Resolved before freeze\" section with their tracking ids, never in current limitations. Your ancestry correction is accepted: the CodeQL regex and principal-independence fixes were correctly kept as live limitations at b3861ac3811438ecd1f3d2ceb62efbf759c88da0; re-verify both against the frozen b2 base at freeze time and move whichever has landed. The document at f96d0fcc6de0b133b643d4adb75acda55addec03 already does this and mong1-reviewer-6 found no document defect in it. No rewrite required. Full disposition: AN-000000001048.",
+      "expected_verdict": "ESCALATE",
+      "recorded_disposition": "ESCALATE",
+      "observation": "The butler would ESCALATE the request about how the document should represent resolved items, matching the recorded coordinator disposition."
+    },
+    {
+      "ticket_id": "TK-02bf4d01d662",
+      "question_id": "CQ-08843e9944e1cf22",
+      "kind": "decision",
+      "message": "Docs-only validation environment: full `python3 tools/ci_manifest.py run` with workspace-owned TMPDIR passed Central 209+83, Client 96, Import 106, Personal 200/2 skipped, Wait 288+50, Fleet 357, Coordinator 233, Worker 106, ACP Seat 28/1 skipped, ACP Agent 15, Seat Kit 116, then AionUi ended 229 passed/3 skipped/52 failed; every failure is PermissionError [Errno 1] for sandbox-denied /bin/ps before product assertions. May this docs-only submission report that exact environment limit and require reviewer Full Access rerun, while I separately run release-tools and all docs/leak/diff gates? No pass will be claimed for the blocked manifest.",
+      "answer": "Yes. A sandboxed seat reports the exact environment limit and claims no pass; the Full Access rerun belongs to a Full Access seat. Now moot in practice: mong1-worker-6 produced an exit-0 full manifest at f96d0fcc6de0b133b643d4adb75acda55addec03. Note the separate ACP-seat gate: the blocking failure is a product defect now tracked as TK-1430a4b5d7f2, and AN-000000001048 carries a bounded waiver for candidates with no diff under tools/acp-seat/.",
+      "expected_verdict": "ESCALATE",
+      "recorded_disposition": "ESCALATE",
+      "observation": "The butler would ESCALATE the request to proceed with a failed covering suite, matching the recorded coordinator disposition."
+    }
+  ],
+  "unavailable_records": [
+    {"ticket_id": "TK-b58fdaba3a63", "question_id": "CQ-e74d000c172e6d6a", "kind": "decision"},
+    {"ticket_id": "TK-b58fdaba3a63", "question_id": "CQ-301e0b2f7ecf0e8b", "kind": "information"},
+    {"ticket_id": "TK-b58fdaba3a63", "question_id": "CQ-b023ffdd03d7992c", "kind": "information"},
+    {"ticket_id": "TK-b58fdaba3a63", "question_id": "CQ-cdcf080b729cd5bb", "kind": "information"},
+    {"ticket_id": "TK-db6ca1290d33", "question_id": "CQ-4d4fd09f807b09e4", "kind": "decision"},
+    {"ticket_id": "TK-db6ca1290d33", "question_id": "CQ-27c114b4d4bfa3d3", "kind": "information"},
+    {"ticket_id": "TK-9ca52e7ad8bf", "question_id": "CQ-dd7d135efd7bed28", "kind": "decision"},
+    {"ticket_id": "TK-9ca52e7ad8bf", "question_id": "CQ-2d599a3b904bb2b3", "kind": "decision"},
+    {"ticket_id": "TK-9ca52e7ad8bf", "question_id": "CQ-70a36cafb7cd47d5", "kind": "decision"},
+    {"ticket_id": "TK-9ca52e7ad8bf", "question_id": "CQ-0fce026caa6687d0", "kind": "information"},
+    {"ticket_id": "TK-9ca52e7ad8bf", "question_id": "CQ-6feb6e9852b08271", "kind": "information"},
+    {"ticket_id": "TK-9ca52e7ad8bf", "question_id": "CQ-565be8e2b6b669ef", "kind": "decision"},
+    {"ticket_id": "TK-84e7e39328f5", "question_id": "CQ-49956b13b90c714f", "kind": "information"},
+    {"ticket_id": "TK-84e7e39328f5", "question_id": "CQ-3e1a6b646b3d8814", "kind": "decision"},
+    {"ticket_id": "TK-84e7e39328f5", "question_id": "CQ-5c7c969202c1265d", "kind": "information"},
+    {"ticket_id": "TK-84e7e39328f5", "question_id": "CQ-05c96e8d818d7f2a", "kind": "decision"},
+    {"ticket_id": "TK-daee8b8ce82f", "question_id": "CQ-0eedd21913dc4616", "kind": "decision"},
+    {"ticket_id": "TK-daee8b8ce82f", "question_id": "CQ-2c13c7bd1616b9bf", "kind": "decision"},
+    {"ticket_id": "TK-1ec2ca97709b", "question_id": "CQ-2ea9ba8fb16e245c", "kind": "information"},
+    {"ticket_id": "TK-e781bb89845b", "question_id": "CQ-819d87637e85ed68", "kind": "information"},
+    {"ticket_id": "TK-48efdb57b8f3", "question_id": "CQ-f6f581567452ca9a", "kind": "information"},
+    {"ticket_id": "TK-d7ad2aa00ee0", "question_id": "CQ-fbdfd972183ea8b4", "kind": "decision"},
+    {"ticket_id": "TK-5ddf2539f157", "question_id": "CQ-bb5379396213db8a", "kind": "decision"},
+    {"ticket_id": "TK-1430a4b5d7f2", "question_id": "CQ-97d67ea58a7f1afe", "kind": "approval"}
+  ]
+}

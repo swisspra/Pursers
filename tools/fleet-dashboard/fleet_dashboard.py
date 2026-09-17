@@ -1963,16 +1963,41 @@ def project_coordinator_findings(
             if isinstance(ask_id, str)
             else None
         )
-        items.append(
-            {
-                "kind": kind,
-                "level": level,
-                "text": _clip(text, MAX_FINDING_CHARS),
-                "ticket_id": _clip(finding.get("ticket_id"), MAX_LABEL_CHARS) or None,
-                "ask_id": _clip(finding.get("ask_id"), 120) or None,
-                "draft": draft_preview,
+        raw_hold = finding.get("hold")
+        hold = None
+        if isinstance(raw_hold, dict) and raw_hold.get("status") in {
+            "shadow",
+            "pending",
+            "vetoed",
+        }:
+            hold = {
+                "status": raw_hold["status"],
+                "release_at": _clip(raw_hold.get("release_at"), 40) or None,
+                "vetoable_until": _clip(raw_hold.get("vetoable_until"), 40)
+                or None,
+                "veto_reason": _clip(raw_hold.get("veto_reason"), MAX_FINDING_CHARS)
+                or None,
             }
-        )
+        projected = {
+            "kind": kind,
+            "level": level,
+            "text": _clip(text, MAX_FINDING_CHARS),
+            "ticket_id": _clip(finding.get("ticket_id"), MAX_LABEL_CHARS) or None,
+            "ask_id": _clip(finding.get("ask_id"), 120) or None,
+            "draft": draft_preview,
+        }
+        for name, selected in (
+            ("question_id", _clip(finding.get("question_id"), 120) or None),
+            ("verdict", _clip(finding.get("verdict"), 32) or None),
+            (
+                "evidence",
+                _clip(finding.get("evidence"), MAX_FINDING_CHARS) or None,
+            ),
+            ("hold", hold),
+        ):
+            if selected is not None:
+                projected[name] = selected
+        items.append(projected)
     return {
         "items": items,
         "truncated_count": reported_truncated + max(0, len(findings) - MAX_FINDINGS),
@@ -7329,8 +7354,10 @@ function attentionCandidates(){const rows=[];for(const [central,d] of Object.ent
 function reconcileAttention(){const now=new Date(),before=loadAttentionState(),next={},visible=[];for(const item of attentionCandidates()){if(!item.key||next[item.key])continue;const old=before[item.key],same=old?.fingerprint===item.fingerprint;const row={fingerprint:item.fingerprint,first_seen:same&&old.first_seen?old.first_seen:now.toISOString(),last_seen:now.toISOString(),acknowledged:same&&old.acknowledged===true,snooze_until:same?old.snooze_until||null:null};next[item.key]=row;const snoozed=row.snooze_until&&new Date(row.snooze_until)>now;if(!row.acknowledged&&!snoozed)visible.push({...item,...row})}saveAttentionState(next).catch(()=>{});window.__fleetAttentionPanel={generated_at:now.toISOString(),items:visible.map(x=>({key:x.key,type:x.type,central:x.central,board_id:x.board.board_id,ticket_id:x.ticket_id||null,first_seen:x.first_seen,last_seen:x.last_seen}))};return visible}
 function attentionRow(x){const link=x.ticket_id?`<a class="id" href="${ticketHref(x.central,x.board.board_id,x.ticket_id)}">${esc(x.ticket_id)}</a>`:`<a href="${centralHref(x.central,'overhead')}">Inspect</a>`;return `<div class="finding-row"><span class="severity ${esc(x.level)}"></span><div><b>${esc(x.title)}</b><p>${esc(x.text)}</p><span class="meta">${esc(x.central)} · ${esc(x.board.label)} · first seen ${esc(fmt(x.first_seen))}</span><div class="attention-actions"><button type="button" data-attention-action="ack" data-attention-key="${esc(x.key)}">Acknowledge</button><button type="button" data-attention-action="snooze" data-attention-key="${esc(x.key)}">Snooze 24h</button></div></div>${link}</div>`}
 function humanRequestRows(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const h of b.human_requests||[]){rows.push({central,board:b,h})}}}return rows}
+function butlerHoldRows(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const f of b.coordinator_findings?.items||[]){if(f.kind==='would_answer'&&f.question_id&&['shadow','pending'].includes(f.hold?.status))rows.push({central,board:b,f})}}}return rows}
 function humanUrlHost(url){try{return new URL(url).host}catch(_error){return String(url)}}
-function renderWaitingForYou(){const rows=humanRequestRows();return `<div class="section-title"><h3>Waiting for you</h3><span class="status">${rows.length} pending</span></div><section class="attention-card">${rows.map(humanRequestCard).join('')||'<p class="empty">No tickets are waiting for a human answer.</p>'}</section>`}
+function butlerHoldCard(row){const f=row.f||{},hold=f.hold||{},link=f.ticket_id?`<a class="id" href="${ticketHref(row.central,row.board.board_id,f.ticket_id)}">${esc(f.ticket_id)}</a>`:'';return `<div class="finding-row"><span class="severity warn"></span><div><b>Waiting for you · board butler hold</b><p>${esc(f.text||'Evidence-backed draft')}</p><span class="meta">${esc(row.central)} · ${esc(row.board.label)} · ${esc(f.question_id)} · ${esc(f.verdict||'unknown')} · release ${esc(fmt(hold.release_at))}</span>${f.evidence?`<p class="meta">${esc(f.evidence)}</p>`:''}<p class="meta">Veto with board_butler.py --veto-question ${esc(f.question_id)} --control-reason &lt;reason&gt;</p></div>${link}</div>`}
+function renderWaitingForYou(){const humans=humanRequestRows(),holds=butlerHoldRows(),count=humans.length+holds.length;return `<div class="section-title"><h3>Waiting for you</h3><span class="status">${count} pending</span></div><section class="attention-card">${humans.map(humanRequestCard).join('')}${holds.map(butlerHoldCard).join('')||(!humans.length?'<p class="empty">No tickets or held drafts are waiting for a human answer.</p>':'')}</section>`}
 function renderAttentionOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=numberCount((b.counts||{})[k]);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Online<b>${esc(s.online||0)}</b></span><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const surfaced=reconcileAttention().sort((a,b)=>(b.level==='critical')-(a.level==='critical')||(b.age||0)-(a.age||0)),attention=surfaced.slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section>${renderWaitingForYou()}<div class="section-title"><h3>Needs attention</h3><span class="status">${surfaced.length} surfaced</span></div><section class="attention-card">${attention.map(attentionRow).join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
 function renderAttentionBoardsHub(){const cards=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[]){const total=Object.values(b.counts||{}).reduce((sum,v)=>sum+numberCount(v),0),tr=b.snapshot_truncation,info=tr&&tr.total>tr.returned?`<span class="status">snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets</span>`:'';cards.push(`<article class="board-card" data-board-id="${esc(b.board_id)}" data-central="${esc(central)}"><div><p class="eyebrow">${esc(central)}</p><h3>${esc(b.label)}</h3><span class="meta">${esc(b.board_id)} · ${esc(total)} visible tickets</span> ${info}</div><div class="counts">${Object.entries(b.counts||{}).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))} <b>${esc(v)}</b></span>`).join('')}</div><div class="card-actions"><a class="primary-action" href="${boardHref(central,b.board_id)}">Workspace</a><a href="${boardHref(central,b.board_id,'flow')}">Flow</a><a href="${boardHref(central,b.board_id,'timeline')}">Timeline</a><a href="${boardHref(central,b.board_id,'changes')}">Changes</a><a href="${boardHref(central,b.board_id,'routes')}">Routes</a></div></article>`)}return `${pageHead('Boards','Board workspaces','Open one board, then move through tickets, findings, intake, flow, timeline, changes, and routes.')}<section class="boards-list">${cards.join('')||'<div class="skeleton"></div>'}</section>`}
 function humanEnumOptions(prop){const p=prop&&typeof prop==='object'?prop:{};const source=p.type==='array'&&p.items&&typeof p.items==='object'?p.items:p;const options=[];if(Array.isArray(source.enum)){for(const value of source.enum)options.push({value:String(value),title:String(value)})}else if(Array.isArray(source.oneOf)){for(const arm of source.oneOf){if(arm&&typeof arm==='object'&&'const' in arm)options.push({value:String(arm.const),title:String(arm.title??arm.const)});else if(arm&&typeof arm==='object'&&Array.isArray(arm.enum))for(const value of arm.enum)options.push({value:String(value),title:String(value)})}}return options}
