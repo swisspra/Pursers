@@ -1,0 +1,6752 @@
+{
+  "schema_version": 1,
+  "candidate_commit": "afaf26ad317df0e305107fef7150fae71324b633",
+  "captured_at": "2026-09-17T06:18:01.645Z",
+  "rows": [
+    {
+      "id": "fleet-dashboard.state.bounded",
+      "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet-dashboard.state.edit-paused",
+      "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet-dashboard.state.empty-agents",
+      "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet-dashboard.state.empty-centrals",
+      "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet-dashboard.state.empty-workers",
+      "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet-dashboard.state.error-board",
+      "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet-dashboard.state.loading-board",
+      "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet-dashboard.state.offline",
+      "required_binding": "`[data-pursers-panel=\"connection\"][data-pursers-connection]` or `[data-pursers-health]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-connection",
+        "data-pursers-health"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-connection": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connected",
+            "reconnecting"
+          ]
+        },
+        "data-pursers-health": {
+          "occurrences": 2,
+          "routes": [
+            "#/",
+            "#/home"
+          ],
+          "sample_values": [
+            "connected"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet-dashboard.state.routes-unavailable",
+      "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet-dashboard.state.truncated-tickets",
+      "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet-dashboard.surface",
+      "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-surface",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-surface": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "fleet"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.active-ticket-rows",
+      "required_binding": "`[data-pursers-panel=\"tickets\"] [data-pursers-ticket][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-ticket",
+        "data-pursers-status"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-ticket": {
+          "occurrences": 18,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "TK-0d76c72150e1",
+            "TK-97bde4aaaec2",
+            "TK-c581f74ac96c",
+            "TK-891afe79aa99",
+            "TK-c3e4dbbd5dbb",
+            "TK-1771392453e4",
+            "TK-6f15dd177ee5",
+            "TK-db6ca1290d33",
+            "TK-9893df303b34",
+            "TK-e6660100174f",
+            "TK-e1cea022b42f"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.add-project-authorization-error",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.add-project-board",
+      "required_binding": "`[data-pursers-panel=\"boards\"] [data-pursers-board][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-status"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.add-project-clone-steps",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.add-project-idempotent-rerun",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.add-project-one-time-doors",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.add-project-partial-failure",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.add-project-policy",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.add-project-principals",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.add-project-registry",
+      "required_binding": "`[data-pursers-panel=\"boards\"] [data-pursers-board][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-status"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.agent-current-claims",
+      "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-agent",
+        "data-pursers-status",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-agent": {
+          "occurrences": 24,
+          "routes": [
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.agent-duplicate-names",
+      "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-agent",
+        "data-pursers-status",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-agent": {
+          "occurrences": 24,
+          "routes": [
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.agent-pool",
+      "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-agent",
+        "data-pursers-status",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-agent": {
+          "occurrences": 24,
+          "routes": [
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.agent-retired-stale-drawer",
+      "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-agent",
+        "data-pursers-status",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-agent": {
+          "occurrences": 24,
+          "routes": [
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.board-cards",
+      "required_binding": "`[data-pursers-panel=\"boards\"] [data-pursers-board][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-status"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.board-detail-activity",
+      "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
+      "attributes_required": [
+        "data-pursers-selected-board",
+        "data-pursers-panel"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-selected-board": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": []
+        },
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.board-detail-metadata",
+      "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
+      "attributes_required": [
+        "data-pursers-selected-board",
+        "data-pursers-panel"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-selected-board": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": []
+        },
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.board-detail-truncation",
+      "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
+      "attributes_required": [
+        "data-pursers-selected-board",
+        "data-pursers-panel"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-selected-board": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": []
+        },
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.central-availability-isolation",
+      "required_binding": "`[data-pursers-panel=\"connection\"][data-pursers-connection]` or `[data-pursers-health]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-connection",
+        "data-pursers-health"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-connection": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connected",
+            "reconnecting"
+          ]
+        },
+        "data-pursers-health": {
+          "occurrences": 2,
+          "routes": [
+            "#/",
+            "#/home"
+          ],
+          "sample_values": [
+            "connected"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.config-add-update-preview",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.config-bridge-versions",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.config-current-offers",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.config-discovery-import-conflicts",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.config-dispatch-policy-gaps-history",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.config-doctor",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.config-exact-diff-confirmation",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.config-registry-worktrees",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.config-seat-inventory",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.config-tier-skill-role-capabilities",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.coordinator-configuration",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.default-central-aliases",
+      "required_binding": "`[data-pursers-panel=\"connection\"][data-pursers-connection]` or `[data-pursers-health]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-connection",
+        "data-pursers-health"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-connection": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connected",
+            "reconnecting"
+          ]
+        },
+        "data-pursers-health": {
+          "occurrences": 2,
+          "routes": [
+            "#/",
+            "#/home"
+          ],
+          "sample_values": [
+            "connected"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.density",
+      "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-surface",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-surface": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "fleet"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.doors-connected-seats",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.doors-copy",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.doors-disabled",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.doors-error",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.doors-expiry",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.doors-key-id",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.doors-project-rows",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.doors-rotation-warning",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.doors-secret-free-output",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.doors-unconfigured",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.findings",
+      "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
+      "attributes_required": [
+        "data-pursers-selected-board",
+        "data-pursers-panel"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-selected-board": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": []
+        },
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.hub-agents",
+      "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-agent",
+        "data-pursers-status",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-agent": {
+          "occurrences": 24,
+          "routes": [
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.hub-boards",
+      "required_binding": "`[data-pursers-panel=\"boards\"] [data-pursers-board][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-board",
+        "data-pursers-status"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-board": {
+          "occurrences": 20,
+          "routes": [
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.hub-operations",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.hub-overview",
+      "required_binding": "`[data-pursers-panel=\"connection\"][data-pursers-connection]` or `[data-pursers-health]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-connection",
+        "data-pursers-health"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-connection": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connected",
+            "reconnecting"
+          ]
+        },
+        "data-pursers-health": {
+          "occurrences": 2,
+          "routes": [
+            "#/",
+            "#/home"
+          ],
+          "sample_values": [
+            "connected"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.intake",
+      "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
+      "attributes_required": [
+        "data-pursers-selected-board",
+        "data-pursers-panel"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-selected-board": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": []
+        },
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.keyboard-help",
+      "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-surface",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-surface": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "fleet"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.operations-disabled-controls",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.operations-job-progress",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.operations-job-result",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.operations-rollback-failure",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.operations-unavailable-services",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.pool-available",
+      "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-agent",
+        "data-pursers-status",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-agent": {
+          "occurrences": 24,
+          "routes": [
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.pool-busy",
+      "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-agent",
+        "data-pursers-status",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-agent": {
+          "occurrences": 24,
+          "routes": [
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.pool-online",
+      "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-agent",
+        "data-pursers-status",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-agent": {
+          "occurrences": 24,
+          "routes": [
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.pool-stale",
+      "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-agent",
+        "data-pursers-status",
+        "data-pursers-seat"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-agent": {
+          "occurrences": 24,
+          "routes": [
+            "#/agents",
+            "#/team"
+          ],
+          "sample_values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.protocol-overhead",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "fleet.refresh-pause-resume",
+      "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-surface",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-surface": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "fleet"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.release-central",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.release-ci",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.release-github",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.release-immutable-confirmation-plan",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.release-manifest",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.release-pypi",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.release-restart-checklist",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.release-tag",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.search-no-results",
+      "required_binding": "`[data-pursers-panel=\"search\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.search-results",
+      "required_binding": "`[data-pursers-panel=\"search\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.tab-changes",
+      "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
+      "attributes_required": [
+        "data-pursers-selected-board",
+        "data-pursers-panel"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-selected-board": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": []
+        },
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.tab-flow",
+      "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
+      "attributes_required": [
+        "data-pursers-selected-board",
+        "data-pursers-panel"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-selected-board": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": []
+        },
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.tab-routes",
+      "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
+      "attributes_required": [
+        "data-pursers-selected-board",
+        "data-pursers-panel"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-selected-board": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": []
+        },
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.tab-tickets",
+      "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
+      "attributes_required": [
+        "data-pursers-selected-board",
+        "data-pursers-panel"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-selected-board": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": []
+        },
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.tab-timeline",
+      "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
+      "attributes_required": [
+        "data-pursers-selected-board",
+        "data-pursers-panel"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-selected-board": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": []
+        },
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.theme",
+      "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-surface",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-surface": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "fleet"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.ticket-counts",
+      "required_binding": "`[data-pursers-panel=\"tickets\"] [data-pursers-ticket][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-ticket",
+        "data-pursers-status"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-ticket": {
+          "occurrences": 18,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "TK-0d76c72150e1",
+            "TK-97bde4aaaec2",
+            "TK-c581f74ac96c",
+            "TK-891afe79aa99",
+            "TK-c3e4dbbd5dbb",
+            "TK-1771392453e4",
+            "TK-6f15dd177ee5",
+            "TK-db6ca1290d33",
+            "TK-9893df303b34",
+            "TK-e6660100174f",
+            "TK-e1cea022b42f"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.unknown-route-recovery",
+      "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-surface",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-surface": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "fleet"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.updated-state",
+      "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
+      "attributes_required": [
+        "data-pursers-surface",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-surface": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "fleet"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "fleet.worker-management",
+      "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-seat",
+        "data-pursers-status"
+      ],
+      "outcome": "FAILURE",
+      "missing": [
+        "data-pursers-seat"
+      ],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-status": {
+          "occurrences": 62,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals"
+          ],
+          "sample_values": [
+            "unknown",
+            "ready",
+            "busy",
+            "available",
+            "open",
+            "claimed",
+            "submitted",
+            "Submitted_for_independent_review"
+          ]
+        }
+      },
+      "reason": "absent from every surveyed route: data-pursers-seat"
+    },
+    {
+      "id": "final.fleet-503-recovery",
+      "required_binding": "`[data-pursers-panel=\"connection\"][data-pursers-connection]` and `[data-pursers-health]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-connection",
+        "data-pursers-health"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-connection": {
+          "occurrences": 16,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connected",
+            "reconnecting"
+          ]
+        },
+        "data-pursers-health": {
+          "occurrences": 2,
+          "routes": [
+            "#/",
+            "#/home"
+          ],
+          "sample_values": [
+            "connected"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    },
+    {
+      "id": "final.o1-readiness-rollback",
+      "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
+      "attributes_required": [
+        "data-pursers-panel",
+        "data-pursers-state"
+      ],
+      "outcome": "SUCCESS",
+      "missing": [],
+      "evidence": {
+        "data-pursers-panel": {
+          "occurrences": 106,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats",
+            "boards",
+            "agents",
+            "tickets"
+          ]
+        },
+        "data-pursers-state": {
+          "occurrences": 122,
+          "routes": [
+            "#/",
+            "#/home",
+            "#/boards",
+            "#/projects",
+            "#/agents",
+            "#/team",
+            "#/work",
+            "#/approvals",
+            "#/activity",
+            "#/operations",
+            "#/config",
+            "#/seats",
+            "#/settings",
+            "#/central/default/config",
+            "#/central/default/workers",
+            "#/central/default/overhead"
+          ],
+          "sample_values": [
+            "ready",
+            "empty",
+            "error"
+          ]
+        }
+      },
+      "reason": "every attribute named in required_binding was read out of the rendered DOM of the running candidate"
+    }
+  ]
+}
