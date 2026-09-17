@@ -38,11 +38,6 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "tools/release_versions.toml"
 VERSION_FILES: dict[str, tuple[str, ...]] = {
     "product": (
-        "README.md",
-        "docs-local/architecture-th.html",
-        "docs-local/manual-en.html",
-        "docs-local/manual-th.html",
-        "docs-local/whats-new.html",
         "packages/personal/pyproject.toml",
         "packages/personal/src/pursers_personal/__init__.py",
         "packages/personal/tests/test_apps_contract.py",
@@ -52,18 +47,12 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "tools/seat-kit/README.md",
     ),
     "central": (
-        "docs-local/architecture-th.html",
-        "docs-local/manual-en.html",
-        "docs-local/manual-th.html",
         "packages/central/pyproject.toml",
         "packages/personal/pyproject.toml",
         "packages/personal/tests/test_apps_contract.py",
         "packages/pursers/pyproject.toml",
     ),
     "client": (
-        "docs-local/architecture-th.html",
-        "docs-local/manual-en.html",
-        "docs-local/manual-th.html",
         "packages/central/pyproject.toml",
         "packages/client/pyproject.toml",
         "packages/personal/pyproject.toml",
@@ -75,9 +64,6 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "tools/wait-bridge/tests/test_seat_admin.py",
     ),
     "import": (
-        "docs-local/architecture-th.html",
-        "docs-local/manual-en.html",
-        "docs-local/manual-th.html",
         "packages/import/PERSONAL-IMPORT.md",
         "packages/import/personal_import.py",
         "packages/import/pyproject.toml",
@@ -85,9 +71,6 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "packages/pursers/pyproject.toml",
     ),
     "wait_bridge": (
-        "docs-local/architecture-th.html",
-        "docs-local/manual-en.html",
-        "docs-local/manual-th.html",
         "tools/fleet-dashboard/tests/test_fleet_dashboard.py",
         "tools/fleet-dashboard/tests/test_seat_config.py",
         "tools/seat-kit/README.md",
@@ -95,6 +78,21 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "tools/wait-bridge/pyproject.toml",
     ),
 }
+
+# These documents describe one installable release cohort. Every package key in the
+# manifest belongs to each document; deriving the keys at runtime means a newly added
+# component cannot silently retain a stale version here.
+COHORT_VERSION_FILES = (
+    "README.md",
+    "docs-local/architecture-th.html",
+    "docs-local/manual-en.html",
+    "docs-local/manual-th.html",
+    "docs-local/whats-new.html",
+)
+
+WHATS_NEW_HISTORY_HEADING = re.compile(
+    r"(?m)^\s*<h3>\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)? · \d{4}-\d{2}-\d{2}</h3>\s*$"
+)
 
 LOCKED_SOURCE_PACKAGES = {
     "pursers-central": ("packages/central/src", "pursers_central"),
@@ -167,21 +165,23 @@ def _replace_versions(
 ) -> dict[Path, str]:
     planned: dict[Path, str] = {}
     values = {"product": (current.product, target.product)}
+    if current.packages.keys() != target.packages.keys():
+        raise ReleaseTrainError("release package key set changed during a bump")
     values.update(
-        {
-            key: (current.packages[key], target.packages[key])
-            for key in VERSION_FILES
-            if key != "product"
-        }
+        (key, (old, target.packages[key]))
+        for key, old in current.packages.items()
     )
     by_path: dict[str, list[str]] = {}
     for key, paths in VERSION_FILES.items():
         for path in paths:
             by_path.setdefault(path, []).append(key)
+    for relative in COHORT_VERSION_FILES:
+        by_path[relative] = list(values)
     for relative, keys in by_path.items():
         path = root / relative
         original = path.read_text(encoding="utf-8")
-        updated = original
+        editable, history = _version_reference_regions(relative, original)
+        updated = editable
         replacements: dict[str, str] = {}
         for key in keys:
             old, new = values[key]
@@ -193,9 +193,40 @@ def _replace_versions(
                     )
         for old, new in replacements.items():
             updated = updated.replace(old, new)
+        updated += history
         if updated != original:
             planned[path] = updated
     return planned
+
+
+def _version_reference_regions(relative: str, text: str) -> tuple[str, str]:
+    """Return the current-reference region and protected release history."""
+    if relative != "docs-local/whats-new.html":
+        return text, ""
+    match = WHATS_NEW_HISTORY_HEADING.search(text)
+    if match is None:
+        raise ReleaseTrainError(
+            "docs-local/whats-new.html: release history boundary is missing"
+        )
+    return text[: match.start()], text[match.start() :]
+
+
+def _cohort_version_errors(root: Path, versions: ReleaseVersions) -> list[str]:
+    values = {"product": versions.product, **versions.packages}
+    errors: list[str] = []
+    for relative in COHORT_VERSION_FILES:
+        try:
+            current, _history = _version_reference_regions(
+                relative,
+                (root / relative).read_text(encoding="utf-8"),
+            )
+        except ReleaseTrainError as exc:
+            errors.append(str(exc))
+            continue
+        for key, expected in values.items():
+            if expected not in current:
+                errors.append(f"{relative}: missing {key} version {expected}")
+    return errors
 
 
 def _release_summary(versions: ReleaseVersions) -> str:
@@ -376,6 +407,7 @@ def check(root: Path, versions: ReleaseVersions) -> list[str]:
         for relative in paths:
             if expected not in (root / relative).read_text(encoding="utf-8"):
                 errors.append(f"{relative}: missing {key} version {expected}")
+    errors.extend(_cohort_version_errors(root, versions))
     bridge_source = root / "tools/wait-bridge/pursers_wait_server.py"
     bridge_module = ast.parse(bridge_source.read_text(encoding="utf-8"))
     source_version = next(

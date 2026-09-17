@@ -20,6 +20,7 @@ def _fixture_repository(tmp_path: Path) -> Path:
         "tools/release_versions.toml",
         "tools/regenerate_component_lock.py",
         "packages/personal/src/pursers_personal/resources/component-lock.json",
+        *release_train.COHORT_VERSION_FILES,
         *(
             path
             for paths in release_train.VERSION_FILES.values()
@@ -68,6 +69,93 @@ def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
     ]
     assert "## [5.0.0a27] - " in planned[root / "CHANGELOG.md"]
     assert "5.0.0a27" not in (root / "packages/pursers/pyproject.toml").read_text()
+
+
+def test_component_only_bump_rewrites_and_checks_every_cohort_document(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_repository(tmp_path)
+    current = load_versions(root / "tools/release_versions.toml")
+    target = release_train.bumped_versions(
+        current,
+        ("central=0.1.0a31",),
+        None,
+    )
+
+    before = release_train.check(root, target)
+    assert {
+        f"{relative}: missing central version 0.1.0a31"
+        for relative in release_train.COHORT_VERSION_FILES
+    } <= set(before)
+
+    planned = release_train.plan_bump(root, current, target)
+    for relative in release_train.COHORT_VERSION_FILES:
+        path = root / relative
+        assert "0.1.0a31" in planned[path]
+        assert current.product in planned[path]
+    for path, content in planned.items():
+        path.write_text(content, encoding="utf-8")
+
+    after = release_train.check(root, target)
+    assert not {
+        error
+        for error in after
+        if any(
+            error.startswith(f"{relative}:")
+            for relative in release_train.COHORT_VERSION_FILES
+        )
+    }
+
+
+def test_component_only_bump_preserves_whats_new_release_history(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_repository(tmp_path)
+    current = load_versions(root / "tools/release_versions.toml")
+    target = release_train.bumped_versions(
+        current,
+        ("central=0.1.0a31",),
+        None,
+    )
+    path = root / "docs-local/whats-new.html"
+    original_current, original_history = release_train._version_reference_regions(
+        "docs-local/whats-new.html",
+        path.read_text(encoding="utf-8"),
+    )
+
+    planned = release_train.plan_bump(root, current, target)[path]
+    planned_current, planned_history = release_train._version_reference_regions(
+        "docs-local/whats-new.html",
+        planned,
+    )
+
+    assert "0.1.0a30" in original_current
+    assert "0.1.0a31" in planned_current
+    assert "0.1.0a30" not in planned_current
+    assert planned_history == original_history
+    assert "<h3>5.0.0b1 · 2026-09-11</h3>" in planned_history
+
+
+def test_wait_bridge_only_bump_uses_manifest_derived_cohort_keys(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_repository(tmp_path)
+    current = load_versions(root / "tools/release_versions.toml")
+    target = release_train.bumped_versions(
+        current,
+        ("wait_bridge=0.1.0a17",),
+        None,
+    )
+
+    planned = release_train.plan_bump(root, current, target)
+
+    for relative in release_train.COHORT_VERSION_FILES:
+        current_region, _history = release_train._version_reference_regions(
+            relative,
+            planned[root / relative],
+        )
+        assert "0.1.0a17" in current_region
+        assert "0.1.0a16" not in current_region
 
 
 def test_next_patch_alpha_advances_every_component() -> None:
