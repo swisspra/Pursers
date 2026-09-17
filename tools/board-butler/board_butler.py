@@ -265,6 +265,8 @@ class EffectiveConfig:
     classification_key_header: str
     classification_key_prefix: str
     classification_validation_path: str
+    classification_draft_path: str
+    classification_draft_protocol: str
     drafting_model: str | None
     drafting_endpoint_ref: str | None
     drafting_key_ref: str | None
@@ -272,6 +274,8 @@ class EffectiveConfig:
     drafting_key_header: str
     drafting_key_prefix: str
     drafting_validation_path: str
+    drafting_draft_path: str
+    drafting_draft_protocol: str
     source_layers: tuple[str, ...]
 
     def as_finding(self) -> dict[str, Any]:
@@ -304,6 +308,8 @@ class EffectiveConfig:
                 "key_header": self.classification_key_header,
                 "key_prefix": self.classification_key_prefix,
                 "validation_path": self.classification_validation_path,
+                "draft_path": self.classification_draft_path,
+                "draft_protocol": self.classification_draft_protocol,
             },
             "drafting": {
                 "model": self.drafting_model,
@@ -313,6 +319,8 @@ class EffectiveConfig:
                 "key_header": self.drafting_key_header,
                 "key_prefix": self.drafting_key_prefix,
                 "validation_path": self.drafting_validation_path,
+                "draft_path": self.drafting_draft_path,
+                "draft_protocol": self.drafting_draft_protocol,
             },
             "source_layers": list(self.source_layers),
             "precedence": list(BOARD_BUTLER_CONFIG_SCHEMA["precedence"]),
@@ -330,6 +338,8 @@ class ProviderRuntime:
     key_header: str = "Authorization"
     key_prefix: str = "Bearer"
     validation_path: str = "models"
+    draft_path: str = "draft"
+    draft_protocol: str = "pursers_json_v1"
 
     def request_headers(self) -> dict[str, str]:
         headers = dict(self.extra_headers)
@@ -393,21 +403,16 @@ def resolve_provider_runtime(
         key_header=getattr(config, f"{task}_key_header"),
         key_prefix=getattr(config, f"{task}_key_prefix"),
         validation_path=getattr(config, f"{task}_validation_path"),
+        draft_path=getattr(config, f"{task}_draft_path"),
+        draft_protocol=getattr(config, f"{task}_draft_protocol"),
     )
 
 
 def _provider_draft_text(document: Any) -> str | None:
     if not isinstance(document, Mapping):
         return None
-    choices = document.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
-        message = choices[0].get("message")
-        if isinstance(message, Mapping) and isinstance(message.get("content"), str):
-            return message["content"]
-        if isinstance(choices[0].get("text"), str):
-            return choices[0]["text"]
-    output_text = document.get("output_text")
-    return output_text if isinstance(output_text, str) else None
+    draft = document.get("draft")
+    return draft if isinstance(draft, str) else None
 
 
 async def draft_with_provider(
@@ -416,36 +421,21 @@ async def draft_with_provider(
     finding: Mapping[str, Any],
 ) -> str:
     """Create one bounded shadow draft without exposing provider credentials."""
+    if runtime.draft_protocol != "pursers_json_v1":
+        raise ValueError("provider draft protocol is unsupported")
     request_body = json.dumps(
         {
+            "protocol": runtime.draft_protocol,
             "model": runtime.model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Draft one concise coordinator-facing answer in shadow mode. "
-                        "Preserve the supplied verdict and evidence; never claim that "
-                        "an action was taken. Return plain text only."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "question": str(question.get("message", "")),
-                            "question_kind": str(question.get("kind", "information")),
-                            "verdict": finding.get("verdict"),
-                            "policy_rule": finding.get("policy_rule"),
-                            "evidence": finding.get("evidence"),
-                            "fallback_draft": finding.get("message"),
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                },
-            ],
-            "max_tokens": 256,
-            "temperature": 0,
+            "input": {
+                "question": str(question.get("message", "")),
+                "question_kind": str(question.get("kind", "information")),
+                "verdict": finding.get("verdict"),
+                "policy_rule": finding.get("policy_rule"),
+                "evidence": finding.get("evidence"),
+                "fallback_draft": finding.get("message"),
+            },
+            "max_output_chars": MAX_PROVIDER_DRAFT_CHARS,
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -458,7 +448,7 @@ async def draft_with_provider(
         }
         raw = urllib.request.Request(
             urllib.parse.urljoin(
-                runtime.endpoint.rstrip("/") + "/", "chat/completions"
+                runtime.endpoint.rstrip("/") + "/", runtime.draft_path.lstrip("/")
             ),
             data=request_body,
             headers=headers,
@@ -686,6 +676,8 @@ def _validate_settings(value: Any, path: str) -> dict[str, Any]:
                 "key_header",
                 "key_prefix",
                 "validation_path",
+                "draft_path",
+                "draft_protocol",
             ),
             f"{path}.{task}",
         )
@@ -729,16 +721,32 @@ def _validate_settings(value: Any, path: str) -> dict[str, Any]:
             ):
                 raise ButlerConfigError(f"{path}.{task}.key_prefix is invalid")
             result[task]["key_prefix"] = prefix
-        if "validation_path" in selected:
-            validation_path = selected["validation_path"]
+        for field_name in ("validation_path", "draft_path"):
+            if field_name not in selected:
+                continue
+            relative_path = selected[field_name]
+            parsed_path = (
+                urllib.parse.urlsplit(relative_path)
+                if isinstance(relative_path, str)
+                else None
+            )
             if (
-                not isinstance(validation_path, str)
-                or not validation_path
-                or len(validation_path) > 500
-                or any(ord(character) < 0x20 for character in validation_path)
+                not isinstance(relative_path, str)
+                or not relative_path
+                or len(relative_path) > 500
+                or any(ord(character) < 0x20 for character in relative_path)
+                or parsed_path is None
+                or parsed_path.scheme
+                or parsed_path.netloc
+                or parsed_path.query
+                or parsed_path.fragment
             ):
-                raise ButlerConfigError(f"{path}.{task}.validation_path is invalid")
-            result[task]["validation_path"] = validation_path
+                raise ButlerConfigError(f"{path}.{task}.{field_name} is invalid")
+            result[task][field_name] = relative_path
+        if "draft_protocol" in selected:
+            if selected["draft_protocol"] != "pursers_json_v1":
+                raise ButlerConfigError(f"{path}.{task}.draft_protocol is invalid")
+            result[task]["draft_protocol"] = selected["draft_protocol"]
     return result
 
 
@@ -846,6 +854,8 @@ def resolve_config(
             "key_header": "Authorization",
             "key_prefix": "Bearer",
             "validation_path": "models",
+            "draft_path": "draft",
+            "draft_protocol": "pursers_json_v1",
         },
         "drafting": {
             "model": None,
@@ -855,6 +865,8 @@ def resolve_config(
             "key_header": "Authorization",
             "key_prefix": "Bearer",
             "validation_path": "models",
+            "draft_path": "draft",
+            "draft_protocol": "pursers_json_v1",
         },
     }
     sources = ["safe_defaults"]
@@ -944,6 +956,8 @@ def resolve_config(
         classification_key_header=merged["classification"]["key_header"],
         classification_key_prefix=merged["classification"]["key_prefix"],
         classification_validation_path=merged["classification"]["validation_path"],
+        classification_draft_path=merged["classification"]["draft_path"],
+        classification_draft_protocol=merged["classification"]["draft_protocol"],
         drafting_model=merged["drafting"]["model"],
         drafting_endpoint_ref=merged["drafting"]["endpoint_ref"],
         drafting_key_ref=merged["drafting"]["key_ref"],
@@ -951,6 +965,8 @@ def resolve_config(
         drafting_key_header=merged["drafting"]["key_header"],
         drafting_key_prefix=merged["drafting"]["key_prefix"],
         drafting_validation_path=merged["drafting"]["validation_path"],
+        drafting_draft_path=merged["drafting"]["draft_path"],
+        drafting_draft_protocol=merged["drafting"]["draft_protocol"],
         source_layers=tuple(sources),
     )
 

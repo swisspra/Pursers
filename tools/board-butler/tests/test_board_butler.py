@@ -97,9 +97,7 @@ def provider_server(content: str) -> Any:
                     "body": json.loads(self.rfile.read(length)),
                 }
             )
-            payload = json.dumps(
-                {"choices": [{"message": {"content": content}}]}
-            ).encode("utf-8")
+            payload = json.dumps({"draft": content}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -843,6 +841,8 @@ def test_process_question_uses_reloaded_provider_without_exposing_key(
                 "endpoint_ref": self.endpoint,
                 "key_ref": "file:butler.key",
                 "extra_headers": {"X-Butler-Test": "cycle"},
+                "draft_path": "generate",
+                "draft_protocol": "pursers_json_v1",
             }
             return {
                 "board_butler": {
@@ -895,9 +895,11 @@ def test_process_question_uses_reloaded_provider_without_exposing_key(
     assert first["message"] == "first provider draft"
     assert second["message"] == "second provider draft"
     assert len(first_requests) == len(second_requests) == 1
-    assert first_requests[0]["path"] == second_requests[0]["path"] == "/v1/chat/completions"
+    assert first_requests[0]["path"] == second_requests[0]["path"] == "/v1/generate"
     assert first_requests[0]["body"]["model"] == "model-first"
     assert second_requests[0]["body"]["model"] == "model-second"
+    assert first_requests[0]["body"]["protocol"] == "pursers_json_v1"
+    assert first_requests[0]["body"]["input"]["question"] == "Anything?"
     assert len(unsafe_requests) == 1
     assert unsafe_requests[0]["body"]["model"] == "model-unsafe"
     assert first_requests[0]["headers"]["Authorization"] == f"Bearer {secret}"
@@ -1350,6 +1352,8 @@ def test_active_window_and_task_model_references_are_preserved_exactly(
         "key_header": "Authorization",
         "key_prefix": "Bearer",
         "validation_path": "models",
+        "draft_path": "draft",
+        "draft_protocol": "pursers_json_v1",
     }
     assert reported["drafting"]["model"] == "Model/Draft-Exact"
 

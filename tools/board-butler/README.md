@@ -105,18 +105,21 @@ are configuration; `key_ref` is an opaque `file:<id>.key` reference into the
 private 0600 provider secret directory, never a home path or credential value.
 Provider entries may also contain bounded
 non-secret `extra_headers`, `key_header`, `key_prefix`, and a relative
-`validation_path`. Fleet validates and saves these settings, then the resident
+`validation_path`. The relative `draft_path` and explicit
+`draft_protocol=pursers_json_v1` select the provider-neutral draft contract.
+Fleet validates and saves these settings, then the resident
 re-resolves them and reads the referenced key at the start of every question
 cycle. No process restart or hand edit is required.
 
 When the drafting provider is configured, the resident sends one bounded
-OpenAI-compatible chat-completions request to the configured endpoint for each
-question that clears the local rate limits. The request uses the exact selected
-model, optional headers, and credential read from `key_ref`; none of those secret
-bytes enter the prompt. Deterministic policy and evidence still set the verdict,
-and the provider supplies only the shadow draft text. A provider failure or a
-response that contains the credential fails closed to a fixed, key-free
-escalation message.
+`pursers_json_v1` request to the configured relative draft path for each question
+that clears the local rate limits. The request contains `protocol`, `model`, a
+bounded `input` object, and `max_output_chars`; the response is a JSON object with
+a string `draft`. The request uses the exact selected model, optional headers,
+and credential read from `key_ref`; none of those secret bytes enter the input.
+Deterministic policy and evidence still set the verdict, and the provider supplies
+only the shadow draft text. A provider failure or a response that contains the
+credential fails closed to a fixed, key-free escalation message.
 
 The three draft ceilings are real queue boundaries. A hit produces a
 `butler_queued` finding with an `ESCALATE` verdict instead of dropping the

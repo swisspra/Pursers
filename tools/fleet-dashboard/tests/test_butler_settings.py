@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import re
@@ -10,9 +11,10 @@ import threading
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 
@@ -63,6 +65,8 @@ def provider_request(**overrides: Any) -> dict[str, Any]:
         "key_header": "Authorization",
         "key_prefix": "Bearer",
         "validation_path": "models",
+        "draft_path": "draft",
+        "draft_protocol": "pursers_json_v1",
         "expected_sha256": "a" * 64,
     }
     request.update(overrides)
@@ -201,6 +205,8 @@ def test_save_writes_0600_key_and_restart_resolves_new_provider(tmp_path: Path) 
     assert effective.drafting_endpoint_ref == view["endpoint"]
     assert effective.drafting_model == view["model"]
     assert effective.drafting_key_ref == view["key_location"]
+    assert effective.drafting_draft_path == "draft"
+    assert effective.drafting_draft_protocol == "pursers_json_v1"
     runtime = board_butler.resolve_provider_runtime(
         effective, "drafting", tmp_path / "private-keys"
     )
@@ -210,6 +216,129 @@ def test_save_writes_0600_key_and_restart_resolves_new_provider(tmp_path: Path) 
     assert runtime.request_headers()["Authorization"] == f"Bearer {secret}"
     assert secret not in repr(runtime)
     assert secret not in json.dumps(effective.as_finding())
+
+
+def test_save_then_next_cycle_uses_custom_non_vendor_draft_contract(
+    tmp_path: Path,
+) -> None:
+    secret = "custom-provider-secret-6471"
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests.append({"method": "GET", "path": self.path})
+            self._reply({"models": [{"name": "vendor-model"}]})
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            requests.append(
+                {
+                    "method": "POST",
+                    "path": self.path,
+                    "authorization": self.headers.get("Authorization"),
+                    "tenant": self.headers.get("X-Tenant"),
+                    "body": json.loads(self.rfile.read(length)),
+                }
+            )
+            self._reply({"draft": "custom provider shadow draft"})
+
+        def _reply(self, document: dict[str, Any]) -> None:
+            payload = json.dumps(document).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    saved: dict[str, Any] = {}
+    secrets_dir = tmp_path / "secrets"
+    endpoint = f"http://127.0.0.1:{server.server_port}/vendor/v2"
+    try:
+        manager = butler_settings.ButlerSettingsManager(secrets_dir)
+        result = manager.save(
+            {"config": coordinator_config(), "expected_sha256": "a" * 64},
+            provider_request(
+                endpoint=endpoint,
+                model="vendor-model",
+                api_key=secret,
+                validation_path="validate",
+                draft_path="generate",
+                extra_headers={"X-Tenant": "sandbox"},
+            ),
+            "sandbox",
+            lambda value, _expected: saved.update(config=value)
+            or {"config": value, "expected_sha256": "b" * 64},
+        )
+
+        class Backend:
+            project_name = "Pursers"
+            written: dict[str, Any] | None = None
+
+            async def findings(self) -> Mapping[str, Any]:
+                return {}
+
+            async def coordinator_config(self) -> Mapping[str, Any]:
+                return saved["config"]
+
+            async def write_findings(
+                self, value: str, _expected: str | None
+            ) -> None:
+                self.written = json.loads(value)
+
+        backend = Backend()
+        finding = asyncio.run(
+            board_butler.process_question(
+                backend,
+                {
+                    "board_id": "sandbox",
+                    "ticket_id": "TK-provider",
+                    "question_id": "CQ-provider",
+                    "kind": "information",
+                    "message": "What should the coordinator answer?",
+                },
+                SimpleNamespace(
+                    drafts_per_hour=5,
+                    drafts_per_ticket=2,
+                    drafts_per_board=20,
+                    home_board="sandbox",
+                    project="Pursers",
+                    provider_secrets_dir=secrets_dir,
+                    dry_run=False,
+                    repo=REPO_ROOT,
+                    integration_ref="origin/main",
+                ),
+                datetime(2026, 9, 17, tzinfo=timezone.utc),
+            )
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert result["saved"] is True
+    assert [row["path"] for row in requests] == [
+        "/vendor/v2/validate",
+        "/vendor/v2/generate",
+    ]
+    draft_request = requests[1]
+    assert draft_request["authorization"] == f"Bearer {secret}"
+    assert draft_request["tenant"] == "sandbox"
+    assert draft_request["body"]["protocol"] == "pursers_json_v1"
+    assert draft_request["body"]["model"] == "vendor-model"
+    assert draft_request["body"]["input"]["question"] == (
+        "What should the coordinator answer?"
+    )
+    assert finding["message"] == "custom provider shadow draft"
+    assert finding["draft_source"] == "configured_provider"
+    assert secret not in json.dumps(saved["config"])
+    assert secret not in json.dumps(backend.written)
+    assert secret not in json.dumps(finding)
 
 
 @pytest.mark.parametrize(
@@ -351,6 +480,7 @@ def test_http_api_never_returns_key_or_persists_it_to_board_or_repo(
         ("key_header", "X-sentinelleak6471"),
         ("key_prefix", "Bearer-sentinelleak6471"),
         ("validation_path", "models/sentinelleak6471"),
+        ("draft_path", "generate/sentinelleak6471"),
     ],
 )
 def test_http_rejects_key_duplicated_into_readable_settings_before_side_effects(
@@ -514,6 +644,8 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
     assert 'data-pursers-field="api-key" type="password"' in html
     assert 'autocomplete="new-password"' in html
     assert 'data-pursers-action="save-butler"' in html
+    assert 'data-pursers-field="draft-path"' in html
+    assert 'data-pursers-field="draft-protocol"' in html
     assert "body.saved===false" in html
     assert "form.elements.api_key.value=''" in html
     assert "Saved changes apply on the butler's next question cycle." in html

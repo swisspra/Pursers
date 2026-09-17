@@ -24,6 +24,8 @@ MAX_MODEL_CHARS = 200
 MAX_HEADER_COUNT = 16
 MAX_HEADER_VALUE_CHARS = 1_000
 DEFAULT_VALIDATION_PATH = "models"
+DEFAULT_DRAFT_PATH = "draft"
+DRAFT_PROTOCOL = "pursers_json_v1"
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 _SECRET_HEADER = re.compile(r"(?:authorization|api[-_]?key|token|secret|cookie)", re.I)
 _MANAGED_KEY_REFERENCE = re.compile(r"^file:([A-Za-z0-9._-]{1,160}\.key)$")
@@ -112,6 +114,8 @@ def validate_request(value: Any) -> dict[str, Any]:
         "key_header",
         "key_prefix",
         "validation_path",
+        "draft_path",
+        "draft_protocol",
         "expected_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != expected:
@@ -126,6 +130,20 @@ def validate_request(value: Any) -> dict[str, Any]:
     parsed_path = urlsplit(validation_path)
     if parsed_path.scheme or parsed_path.netloc or parsed_path.query or parsed_path.fragment:
         raise ButlerSettingsError("validation_path must be a relative URL path")
+    draft_path = (
+        _text(value["draft_path"], "draft_path", 500, allow_empty=True)
+        or DEFAULT_DRAFT_PATH
+    )
+    parsed_draft_path = urlsplit(draft_path)
+    if (
+        parsed_draft_path.scheme
+        or parsed_draft_path.netloc
+        or parsed_draft_path.query
+        or parsed_draft_path.fragment
+    ):
+        raise ButlerSettingsError("draft_path must be a relative URL path")
+    if value["draft_protocol"] != DRAFT_PROTOCOL:
+        raise ButlerSettingsError("draft_protocol is invalid")
     api_key = value["api_key"]
     if not isinstance(api_key, str) or len(api_key.encode("utf-8")) > MAX_KEY_BYTES:
         raise ButlerSettingsError("api_key is invalid")
@@ -152,6 +170,8 @@ def validate_request(value: Any) -> dict[str, Any]:
         "key_header": key_header,
         "key_prefix": key_prefix,
         "validation_path": validation_path,
+        "draft_path": draft_path,
+        "draft_protocol": DRAFT_PROTOCOL,
         "expected_sha256": expected_sha256,
     }
 
@@ -168,6 +188,8 @@ def reject_readable_credential(settings: Mapping[str, Any], api_key: str) -> Non
             "key_header",
             "key_prefix",
             "validation_path",
+            "draft_path",
+            "draft_protocol",
         )
     ]
     for name, value in dict(settings["extra_headers"]).items():
@@ -210,6 +232,8 @@ def validate_board_butler_document(value: Any) -> dict[str, Any]:
         "key_header",
         "key_prefix",
         "validation_path",
+        "draft_path",
+        "draft_protocol",
     }
 
     def provider(candidate: Any, path: str) -> None:
@@ -233,6 +257,10 @@ def validate_board_butler_document(value: Any) -> dict[str, Any]:
             _text(candidate["key_prefix"], f"{path}.key_prefix", 80, allow_empty=True)
         if "validation_path" in candidate:
             _text(candidate["validation_path"], f"{path}.validation_path", 500)
+        if "draft_path" in candidate:
+            _text(candidate["draft_path"], f"{path}.draft_path", 500)
+        if "draft_protocol" in candidate and candidate["draft_protocol"] != DRAFT_PROTOCOL:
+            raise ButlerSettingsError(f"{path}.draft_protocol is invalid")
 
     def settings(candidate: Any, path: str) -> None:
         if not isinstance(candidate, Mapping) or not set(candidate) <= setting_keys:
@@ -424,6 +452,8 @@ class ButlerSettingsManager:
             "key_header": provider.get("key_header") or "Authorization",
             "key_prefix": provider.get("key_prefix") or "Bearer",
             "validation_path": provider.get("validation_path") or DEFAULT_VALIDATION_PATH,
+            "draft_path": provider.get("draft_path") or DEFAULT_DRAFT_PATH,
+            "draft_protocol": provider.get("draft_protocol") or DRAFT_PROTOCOL,
             "key_present": key_path is not None,
             "key_location": key_ref if key_path is not None else None,
             "expected_sha256": config_payload.get("expected_sha256"),
@@ -503,6 +533,8 @@ class ButlerSettingsManager:
                 "key_header": clean["key_header"],
                 "key_prefix": clean["key_prefix"],
                 "validation_path": clean["validation_path"],
+                "draft_path": clean["draft_path"],
+                "draft_protocol": clean["draft_protocol"],
             }
             global_settings["classification"] = copy.deepcopy(provider)
             global_settings["drafting"] = copy.deepcopy(provider)
@@ -531,6 +563,8 @@ class ButlerSettingsManager:
                 "key_header": clean["key_header"],
                 "key_prefix": clean["key_prefix"],
                 "validation_path": clean["validation_path"],
+                "draft_path": clean["draft_path"],
+                "draft_protocol": clean["draft_protocol"],
                 "key_present": key_ref is not None,
                 "key_location": key_ref,
                 "expected_sha256": saved.get("expected_sha256"),
