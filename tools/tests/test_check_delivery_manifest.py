@@ -44,7 +44,9 @@ def test_red_fixture_proves_unregistered_artifact_and_b1_version_fail() -> None:
     assert any("self-described version '5.0.0b1'" in item for item in failures)
 
 
-@pytest.mark.parametrize("kind", ["distribution", "page", "tool"])
+@pytest.mark.parametrize(
+    "kind", ["distribution", "page", "tool", "console-script"]
+)
 def test_unregistered_artifact_fails(tmp_path: Path, kind: str) -> None:
     root = _base_repository(tmp_path)
     if kind == "distribution":
@@ -58,17 +60,61 @@ def test_unregistered_artifact_fails(tmp_path: Path, kind: str) -> None:
         artifact = root / "website/new.html"
         artifact.parent.mkdir(parents=True)
         artifact.write_text("<!doctype html><title>new</title>\n", encoding="utf-8")
-    else:
+    elif kind == "tool":
         artifact = root / "tools/new_tool.py"
         artifact.parent.mkdir(parents=True, exist_ok=True)
         artifact.write_text(
             "def run() -> None:\n    pass\n",
             encoding="utf-8",
         )
+    else:
+        artifact = root / "tools/example/audit_export.py"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text(
+            "def main() -> None:\n    pass\n",
+            encoding="utf-8",
+        )
+        (artifact.parent / "pyproject.toml").write_text(
+            """[project]
+name = "example-tools"
+version = "1.0.0"
+
+[project.scripts]
+pursers-audit-export = "audit_export:main"
+""",
+            encoding="utf-8",
+        )
 
     failures = check_delivery_manifest.validate(root)
 
     assert any("unregistered artifact:" in failure for failure in failures)
+    if kind == "console-script":
+        assert any(
+            "python-console-script:example-tools:pursers-audit-export" in failure
+            and "tools/example/audit_export.py" in failure
+            for failure in failures
+        )
+
+
+def test_console_script_target_must_resolve_to_source(tmp_path: Path) -> None:
+    root = _base_repository(tmp_path)
+    project = root / "tools/example/pyproject.toml"
+    project.parent.mkdir(parents=True)
+    project.write_text(
+        """[project]
+name = "example-tools"
+version = "1.0.0"
+
+[project.scripts]
+pursers-missing = "missing_module:main"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError, match="cannot resolve project.scripts.pursers-missing"
+    ):
+        check_delivery_manifest.validate(root)
 
 
 def test_stale_delivery_channel_fails(tmp_path: Path) -> None:

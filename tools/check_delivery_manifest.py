@@ -34,6 +34,7 @@ class Artifact:
     artifact_id: str
     kind: str
     source: str
+    entry_point: str | None = None
 
 
 def _relative(path: Path, root: Path) -> str:
@@ -49,9 +50,15 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
     root = root.resolve()
     found: dict[str, Artifact] = {}
 
-    def add(artifact_id: str, kind: str, path: Path) -> None:
+    def add(
+        artifact_id: str,
+        kind: str,
+        path: Path,
+        *,
+        entry_point: str | None = None,
+    ) -> None:
         relative = _relative(path, root)
-        artifact = Artifact(artifact_id, kind, relative)
+        artifact = Artifact(artifact_id, kind, relative, entry_point)
         previous = found.get(artifact_id)
         if previous is not None and previous != artifact:
             raise ValueError(
@@ -73,6 +80,54 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
         name = project.get("name") if isinstance(project, dict) else None
         if isinstance(name, str) and name:
             add(f"python-distribution:{name}", "python-distribution", path)
+
+            scripts = project.get("scripts")
+            if scripts is None:
+                continue
+            if not isinstance(scripts, dict):
+                raise ValueError(
+                    f"{_relative(path, root)}: project.scripts must be a table"
+                )
+            for script_name, target in sorted(scripts.items()):
+                if not isinstance(script_name, str) or not script_name:
+                    raise ValueError(
+                        f"{_relative(path, root)}: project.scripts has an invalid name"
+                    )
+                if not isinstance(target, str) or ":" not in target:
+                    raise ValueError(
+                        f"{_relative(path, root)}: project.scripts.{script_name} "
+                        "must name module:callable"
+                    )
+                module, callable_name = target.split(":", 1)
+                if not module or not callable_name:
+                    raise ValueError(
+                        f"{_relative(path, root)}: project.scripts.{script_name} "
+                        "must name module:callable"
+                    )
+                module_path = Path(*module.split("."))
+                candidates = (
+                    path.parent / f"{module_path}.py",
+                    path.parent / module_path / "__init__.py",
+                    path.parent / "src" / f"{module_path}.py",
+                    path.parent / "src" / module_path / "__init__.py",
+                    path.parent / f"{module_path.name}.py",
+                )
+                sources = sorted(
+                    {candidate for candidate in candidates if candidate.is_file()}
+                )
+                if len(sources) != 1:
+                    rendered = [_relative(candidate, root) for candidate in sources]
+                    raise ValueError(
+                        f"{_relative(path, root)}: cannot resolve project.scripts."
+                        f"{script_name} target {target!r} to exactly one source; "
+                        f"found {rendered!r}"
+                    )
+                add(
+                    f"python-console-script:{name}:{script_name}",
+                    "python-console-script",
+                    sources[0],
+                    entry_point=target,
+                )
 
     for path in sorted((root / "tools").rglob("package.json")):
         if _ignored(path, root):
@@ -209,6 +264,14 @@ def validate(root: Path, manifest_path: Path = MANIFEST) -> list[str]:
                 failures.append(
                     f"{artifact_id}: source {row.get('source')!r} != "
                     f"{artifact.source!r}"
+                )
+            if (
+                artifact.entry_point is not None
+                and row.get("entry_point") != artifact.entry_point
+            ):
+                failures.append(
+                    f"{artifact_id}: entry_point {row.get('entry_point')!r} != "
+                    f"{artifact.entry_point!r}"
                 )
         state = row.get("state")
         if state == "exempt":

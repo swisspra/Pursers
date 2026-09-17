@@ -72,6 +72,64 @@ state = "exempt"
 reason = "Declared and tested, but absent from release_versions.toml and every publish workflow; PyPI returned 404 in TK-5f4211667ac2 fix1 at 11f1bdcc669630da6f103e70384211bc08f3b89c."
 
 [[artifacts]]
+id = "python-console-script:pursers-central:pursers-central"
+kind = "python-console-script"
+source = "packages/central/src/pursers_central/pursers_central_runtime.py"
+entry_point = "pursers_central.pursers_central_runtime:main"
+state = "delivered"
+channel = "pursers-central console command installed by the PyPI wheel"
+evidence = ["packages/central/pyproject.toml", ".github/workflows/publish-pypi.yml"]
+evidence_contains = ["pursers-central", "packages/central"]
+
+[[artifacts]]
+id = "python-console-script:pursers-personal-import:pursers-personal-import"
+kind = "python-console-script"
+source = "packages/import/personal_import.py"
+entry_point = "pursers_personal_import.personal_import:main"
+state = "delivered"
+channel = "pursers-personal-import console command installed by the PyPI wheel"
+evidence = ["packages/import/pyproject.toml", ".github/workflows/publish-pypi.yml"]
+evidence_contains = ["pursers-personal-import", "packages/import"]
+
+[[artifacts]]
+id = "python-console-script:pursers-personal:pursers-personal"
+kind = "python-console-script"
+source = "packages/personal/src/pursers_personal/cli.py"
+entry_point = "pursers_personal.cli:main"
+state = "delivered"
+channel = "pursers-personal console command installed by the PyPI wheel"
+evidence = ["packages/personal/pyproject.toml", ".github/workflows/publish-pypi.yml"]
+evidence_contains = ["pursers-personal", "packages/personal"]
+
+[[artifacts]]
+id = "python-console-script:pursers-acp:pursers-acp"
+kind = "python-console-script"
+source = "tools/acp-agent/src/pursers_acp/agent.py"
+entry_point = "pursers_acp.agent:main"
+state = "exempt"
+reason = "The pursers-acp command belongs to an unpublished distribution that has no checked-in publish or installation channel."
+
+[[artifacts]]
+id = "python-console-script:pursers-wait-bridge:pursers-wait-bridge"
+kind = "python-console-script"
+source = "tools/wait-bridge/pursers_wait_server.py"
+entry_point = "pursers_wait_server:main"
+state = "delivered"
+channel = "pursers-wait-bridge console command installed by the PyPI wheel"
+evidence = ["tools/wait-bridge/pyproject.toml", ".github/workflows/publish-pypi.yml"]
+evidence_contains = ["pursers-wait-bridge", "tools/wait-bridge"]
+
+[[artifacts]]
+id = "python-console-script:pursers-wait-bridge:pursers-door"
+kind = "python-console-script"
+source = "tools/wait-bridge/door_admin.py"
+entry_point = "door_admin:main"
+state = "delivered"
+channel = "pursers-door console command installed by the pursers-wait-bridge PyPI wheel"
+evidence = ["tools/wait-bridge/pyproject.toml", ".github/workflows/publish-pypi.yml"]
+evidence_contains = ["pursers-door", "tools/wait-bridge"]
+
+[[artifacts]]
 id = "node-application:pursers-dashboard-ui"
 kind = "node-application"
 source = "tools/dashboard-ui/package.json"
@@ -221,9 +279,9 @@ id = "operator-tool:tools/check_delivery_manifest.py"
 kind = "operator-tool"
 source = "tools/check_delivery_manifest.py"
 state = "delivered"
-channel = "mandatory CI gate"
-evidence = [".github/workflows/ci.yml"]
-evidence_contains = ["tools/check_delivery_manifest.py"]
+channel = "mandatory repository-current test in the release-tools CI suite"
+evidence = [".github/workflows/ci.yml", "tools/ci_manifest.py"]
+evidence_contains = ["python tools/ci_manifest.py run", "tools/tests"]
 
 [[artifacts]]
 id = "operator-tool:tools/ci_manifest.py"
