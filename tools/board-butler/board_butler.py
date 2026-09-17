@@ -1437,7 +1437,10 @@ def mechanical_action_finding(
         f"{action.ticket_id} because {action.reason}."
     )
     return {
-        "kind": "butler_action",
+        # Reuse the existing durable-hold projection consumed by Fleet's
+        # Waiting for you surface; action_id/action_class distinguish actions
+        # from coordinator-question drafts without changing Fleet assets.
+        "kind": "would_answer",
         "level": "warn",
         "board_id": action.board_id,
         "ticket_id": action.ticket_id,
@@ -1457,7 +1460,7 @@ def mechanical_action_finding(
         "mode": "active-hold",
         "observed_at": now.isoformat(),
         "hold": {
-            "status": "held",
+            "status": "pending",
             "drafted_at": now.isoformat(),
             "release_at": release_at.isoformat(),
             "vetoable_until": release_at.isoformat(),
@@ -1471,7 +1474,7 @@ def mechanical_hold_status(finding: Mapping[str, Any], now: datetime) -> str:
     if not isinstance(hold, Mapping):
         return "invalid"
     status = str(hold.get("status", "invalid"))
-    if status != "held":
+    if status not in {"held", "pending"}:
         return status
     release_at = parse_time(hold.get("release_at"))
     return "ready" if release_at is not None and release_at <= now else "held"
@@ -1838,7 +1841,7 @@ class CentralBackend:
                     item
                     for item in state.get("findings", [])
                     if isinstance(item, Mapping)
-                    and item.get("kind") == "butler_action"
+                    and item.get("kind") in {"would_answer", "butler_action"}
                     and item.get("action_id") == action_id
                 ),
                 None,
@@ -1892,7 +1895,7 @@ class CentralBackend:
                 (
                     item
                     for item in rows
-                    if item.get("kind") == "butler_action"
+                    if item.get("kind") in {"would_answer", "butler_action"}
                     and item.get("action_id") == action_id
                 ),
                 None,
@@ -1900,7 +1903,7 @@ class CentralBackend:
             if selected is None:
                 raise RuntimeError(f"durable action hold disappeared: {action_id}")
             hold = dict(selected.get("hold", {}))
-            if hold.get("status") != "held":
+            if hold.get("status") not in {"held", "pending"}:
                 raise RuntimeError(f"action hold is no longer executable: {action_id}")
             hold["status"] = "executed"
             hold["executed_at"] = now.isoformat()

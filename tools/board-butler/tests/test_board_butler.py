@@ -1476,11 +1476,11 @@ def test_mechanical_action_registers_durable_vetoable_hold() -> None:
     )
     finding = butler.mechanical_action_finding(action, NOW, 60)
 
-    assert finding["kind"] == "butler_action"
+    assert finding["kind"] == "would_answer"
     assert finding["action_class"] == "park_no_live_candidates"
     assert finding["question_id"].startswith("BA-")
     assert finding["hold"] == {
-        "status": "held",
+        "status": "pending",
         "drafted_at": NOW.isoformat(),
         "release_at": (NOW + butler.timedelta(seconds=60)).isoformat(),
         "vetoable_until": (NOW + butler.timedelta(seconds=60)).isoformat(),
