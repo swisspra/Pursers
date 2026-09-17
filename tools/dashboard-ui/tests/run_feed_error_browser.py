@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import functools
 import http.server
+import json
 import os
 import shutil
 import subprocess
@@ -38,17 +39,16 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        environment = os.environ.copy()
-        environment["PURSERS_DASHBOARD_TEST_URL"] = (
-            f"http://127.0.0.1:{server.server_port}/tests/feed-error-host.html"
+        dashboard_url = f"http://127.0.0.1:{server.server_port}/tests/feed-error-host.html"
+        browser_script = script.read_text(encoding="utf-8").replace(
+            json.dumps("__PURSERS_DASHBOARD_TEST_URL__"), json.dumps(dashboard_url), 1
         )
         completed = subprocess.run(
             [str(ego_browser), "nodejs"],
-            input=script.read_text(encoding="utf-8"),
+            input=browser_script,
             text=True,
             capture_output=True,
             timeout=args.timeout,
-            env=environment,
             check=False,
         )
     finally:

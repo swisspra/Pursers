@@ -2,8 +2,11 @@ const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 
-const dashboardUrl = process.env.PURSERS_DASHBOARD_TEST_URL;
-assert(dashboardUrl, "PURSERS_DASHBOARD_TEST_URL is required");
+const dashboardUrl = "__PURSERS_DASHBOARD_TEST_URL__";
+assert(
+  dashboardUrl && dashboardUrl !== "__PURSERS_DASHBOARD_TEST_URL__",
+  "PURSERS_DASHBOARD_TEST_URL is required",
+);
 
 const task = await taskSpace("TK-e1cea022b42f Personal feed_error browser acceptance");
 const page = task.page("p1");
