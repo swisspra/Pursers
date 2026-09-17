@@ -150,6 +150,28 @@ def validate_request(value: Any) -> dict[str, Any]:
     }
 
 
+def reject_readable_credential(settings: Mapping[str, Any], api_key: str) -> None:
+    """Reject a credential duplicated into any persisted or readable setting."""
+    if not api_key:
+        return
+    readable = [
+        str(settings[name])
+        for name in (
+            "endpoint",
+            "model",
+            "key_header",
+            "key_prefix",
+            "validation_path",
+        )
+    ]
+    for name, value in dict(settings["extra_headers"]).items():
+        readable.extend((str(name), str(value)))
+    if any(api_key in value for value in readable):
+        raise ButlerSettingsError(
+            "credential must not appear in persisted or readable settings"
+        )
+
+
 def validate_board_butler_document(value: Any) -> dict[str, Any]:
     """Validate the documented Board Butler envelope before a dashboard write."""
     required = {"schema_version", "global"}
@@ -432,6 +454,7 @@ class ButlerSettingsManager:
         if not isinstance(config, Mapping):
             raise ButlerSettingsError("coordinator config is unavailable")
         api_key = clean["api_key"] or self._read_key(current.get("key_location"))
+        reject_readable_credential(clean, api_key)
         validation = validate_provider(clean, api_key, opener=self.opener)
         if validation.outcome != "reachable":
             return {
