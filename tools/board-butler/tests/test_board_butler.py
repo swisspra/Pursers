@@ -1348,15 +1348,175 @@ def test_findings_merge_refuses_to_displace_a_full_critical_set() -> None:
         )
 
 
-def test_module_has_no_question_answer_or_ticket_mutation_path() -> None:
+def test_module_has_no_question_answer_claim_submit_or_assign_path() -> None:
     source = MODULE_PATH.read_text(encoding="utf-8")
     forbidden = (
         "ticket_question_" + "answer",
         "ticket_" + "submit",
         "ticket_" + "claim",
-        "ticket_" + "update",
-        "ticket_" + "annotate",
+        "ticket_" + "assign",
     )
     assert all(name not in source for name in forbidden)
+    assert "ticket_update(action.ticket_id, parked=True)" in source
+    assert source.count("ticket_annotate(") == 2
     assert "board_catchup" not in source
     assert "ticket_list" not in source
+
+
+def test_mechanical_plan_parks_only_after_threshold_without_live_worker() -> None:
+    snapshot = {
+        "agents": [
+            {
+                "agent_id": "AI-viewer",
+                "agent_name": "fleet-dashboard-viewer",
+                "role": "worker",
+                "lifecycle_status": "active",
+                "last_activity_at": NOW.isoformat(),
+                "capabilities_explicit": True,
+                "capabilities": {"can_work": False},
+            }
+        ]
+    }
+    ticket = {
+        "ticket_id": "TK-loop",
+        "status": "open",
+        "parked": False,
+        "dispatch_history": [
+            {
+                "state": "broadcast",
+                "kind": "work",
+                "reason": "no_live_candidates",
+                "cycle": cycle,
+            }
+            for cycle in range(3)
+        ],
+        "annotations": [],
+    }
+
+    actions = butler.plan_mechanical_actions(
+        "fullplatts",
+        snapshot,
+        {"findings": []},
+        {"TK-loop": ticket},
+        NOW,
+        no_live_candidates_cycles=3,
+    )
+
+    assert [(action.kind, action.ticket_id, action.observed_cycles) for action in actions] == [
+        ("park_no_live_candidates", "TK-loop", 3)
+    ]
+    snapshot["agents"].append(
+        {
+            "agent_id": "AI-worker",
+            "agent_name": "worker-1",
+            "role": "worker",
+            "lifecycle_status": "active",
+            "last_activity_at": NOW.isoformat(),
+            "capabilities_explicit": True,
+            "capabilities": {"can_work": True},
+        }
+    )
+    assert butler.plan_mechanical_actions(
+        "fullplatts",
+        snapshot,
+        {"findings": []},
+        {"TK-loop": ticket},
+        NOW,
+        no_live_candidates_cycles=3,
+    ) == []
+
+
+def test_mechanical_plan_refuses_incapable_target_and_names_identity() -> None:
+    snapshot = {
+        "agents": [
+            {
+                "agent_id": "AI-viewer",
+                "agent_name": "fleet-dashboard-viewer",
+                "role": "worker",
+                "lifecycle_status": "active",
+                "last_activity_at": NOW.isoformat(),
+                "capabilities_explicit": True,
+                "capabilities": {"can_work": False},
+            }
+        ]
+    }
+    actions = butler.plan_mechanical_actions(
+        "fullplatts",
+        snapshot,
+        {
+            "findings": [
+                {
+                    "kind": "starved",
+                    "ticket_id": "TK-loop",
+                    "would_assign_to_agent_id": "AI-viewer",
+                    "would_assign_to_agent_name": "fleet-dashboard-viewer",
+                }
+            ]
+        },
+        {"TK-loop": {"status": "open", "annotations": []}},
+        NOW,
+        no_live_candidates_cycles=3,
+    )
+
+    assert len(actions) == 1
+    assert actions[0].kind == "refuse_incapable_target"
+    assert actions[0].identity_name == "fleet-dashboard-viewer"
+    assert actions[0].reason == "capabilities.can_work is not true"
+
+
+def test_registry_refresh_runs_real_derivation_for_two_active_boards_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = args(tmp_path, dry_run=True)
+    options.refresh_seconds = 60
+    options.act_on_board = []
+    options.no_live_candidates_cycles = 3
+    backend = butler.CentralBackend(options, "opaque")
+    calls: list[argparse.Namespace] = []
+
+    class Reader:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "Reader":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    projects = [
+        SimpleNamespace(board_id="pursers"),
+        SimpleNamespace(board_id="fullplatts"),
+    ]
+
+    async def read_cycle(_reader: Reader, _home: str) -> tuple[Any, Any, Any]:
+        return projects, {"pursers": {}, "fullplatts": {}}, {
+            "pursers": {}, "fullplatts": {}
+        }
+
+    def parse_args(_argv: list[str]) -> argparse.Namespace:
+        return argparse.Namespace()
+
+    async def run(parsed: argparse.Namespace) -> None:
+        calls.append(parsed)
+
+    monkeypatch.setattr(
+        backend,
+        "_coordinator_api",
+        lambda: {
+            "RawReader": Reader,
+            "read_cycle": read_cycle,
+            "parse_args": parse_args,
+            "run": run,
+        },
+    )
+    first = asyncio.run(backend.refresh_registry_findings(NOW))
+    second = asyncio.run(
+        backend.refresh_registry_findings(NOW + butler.timedelta(seconds=60))
+    )
+
+    assert first["active_boards"] == second["active_boards"] == [
+        "fullplatts", "pursers"
+    ]
+    assert first["refreshed_at"] != second["refreshed_at"]
+    assert len(calls) == 2
