@@ -153,6 +153,100 @@ pursers-audit-export = "audit_export:main"
     )
 
 
+def test_web_surface_outside_conventional_roots_cannot_be_smuggled(
+    tmp_path: Path,
+) -> None:
+    root = _base_repository(tmp_path)
+    page = root / "services/ops-console/status.html"
+    page.parent.mkdir(parents=True)
+    page.write_text("<!doctype html><title>Operations</title>\n", encoding="utf-8")
+
+    failures = check_delivery_manifest.validate(root)
+
+    assert any(
+        "unregistered artifact: web-surface:services/ops-console/status.html "
+        "(services/ops-console/status.html)" in failure
+        for failure in failures
+    )
+
+
+def test_operator_tool_outside_conventional_roots_cannot_be_smuggled(
+    tmp_path: Path,
+) -> None:
+    root = _base_repository(tmp_path)
+    tool = root / "services/ops-console/reconcile.py"
+    tool.parent.mkdir(parents=True)
+    tool.write_text(
+        "def main() -> None:\n"
+        "    pass\n\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n",
+        encoding="utf-8",
+    )
+    tool.chmod(0o755)
+
+    failures = check_delivery_manifest.validate(root)
+
+    assert any(
+        "unregistered artifact: operator-tool:services/ops-console/reconcile.py "
+        "(services/ops-console/reconcile.py)" in failure
+        for failure in failures
+    )
+
+
+def test_shell_operator_tool_outside_conventional_roots_cannot_be_smuggled(
+    tmp_path: Path,
+) -> None:
+    root = _base_repository(tmp_path)
+    tool = root / "services/ops-console/reconcile.sh"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+
+    failures = check_delivery_manifest.validate(root)
+
+    assert any(
+        "unregistered artifact: operator-tool:services/ops-console/reconcile.sh "
+        "(services/ops-console/reconcile.sh)" in failure
+        for failure in failures
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "body", "artifact_id"),
+    [
+        (
+            "package.json",
+            '{"name": "ops-console"}\n',
+            "node-application:ops-console",
+        ),
+        (
+            "aion-extension.json",
+            '{"name": "ops-console-extension"}\n',
+            "host-extension:ops-console-extension",
+        ),
+    ],
+)
+def test_application_metadata_outside_conventional_roots_cannot_be_smuggled(
+    tmp_path: Path,
+    filename: str,
+    body: str,
+    artifact_id: str,
+) -> None:
+    root = _base_repository(tmp_path)
+    metadata = root / "services/ops-console" / filename
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(body, encoding="utf-8")
+
+    failures = check_delivery_manifest.validate(root)
+
+    assert any(
+        f"unregistered artifact: {artifact_id} "
+        f"(services/ops-console/{filename})" in failure
+        for failure in failures
+    )
+
+
 @pytest.mark.parametrize("ignored_root", ["build", "tests", "vendor"])
 def test_generated_test_and_vendor_project_trees_stay_ignored(
     tmp_path: Path, ignored_root: str

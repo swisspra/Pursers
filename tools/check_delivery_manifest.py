@@ -27,6 +27,12 @@ IGNORED_PARTS = {
     "tests",
     "vendor",
 }
+NON_PRODUCT_CONTENT_ROOTS = {
+    ".superdesign",
+    "docs",
+    "docs-local",
+    "planning",
+}
 
 
 @dataclass(frozen=True)
@@ -127,8 +133,12 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
                     entry_point=target,
                 )
 
-    for path in sorted((root / "tools").rglob("package.json")):
-        if _ignored(path, root):
+    for path in sorted(root.rglob("package.json")):
+        relative_parts = path.relative_to(root).parts
+        if (
+            _ignored(path, root)
+            or relative_parts[0] in NON_PRODUCT_CONTENT_ROOTS
+        ):
             continue
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
@@ -138,27 +148,50 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
         if isinstance(name, str) and name:
             add(f"node-application:{name}", "node-application", path)
 
-    for path in sorted(root.glob("tools/*/aion-extension.json")):
+    for path in sorted(root.rglob("aion-extension.json")):
+        relative_parts = path.relative_to(root).parts
+        if (
+            _ignored(path, root)
+            or relative_parts[0] in NON_PRODUCT_CONTENT_ROOTS
+        ):
+            continue
         document = json.loads(path.read_text(encoding="utf-8"))
         name = document.get("name")
         if isinstance(name, str) and name:
             add(f"host-extension:{name}", "host-extension", path)
 
-    web_paths = set(root.glob("website/**/*.html"))
-    web_paths.update(root.glob("tools/*/webui/*.html"))
-    web_paths.update(root.glob("tools/*/dashboard-entry.html"))
-    web_paths.update(root.glob("packages/*/src/*/resources/*.html"))
-    for path in sorted(web_paths):
-        if path.is_file():
-            relative = _relative(path, root)
-            add(f"web-surface:{relative}", "web-surface", path)
+    for path in sorted(root.rglob("*.html")):
+        relative_parts = path.relative_to(root).parts
+        if (
+            _ignored(path, root)
+            or relative_parts[0] in NON_PRODUCT_CONTENT_ROOTS
+        ):
+            continue
+        relative = _relative(path, root)
+        add(f"web-surface:{relative}", "web-surface", path)
 
     tools_root = root / "tools"
-    for path in sorted(tools_root.rglob("*.py")):
-        if _ignored(path, root) or "src" in path.relative_to(tools_root).parts:
+    operator_paths = set(root.rglob("*.py"))
+    operator_paths.update(root.rglob("*.sh"))
+    for path in sorted(operator_paths):
+        relative_parts = path.relative_to(root).parts
+        if (
+            _ignored(path, root)
+            or relative_parts[0] in NON_PRODUCT_CONTENT_ROOTS
+            or relative_parts[0] == "packages"
+            or "src" in relative_parts
+        ):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        if path.parent != tools_root and "__main__" not in text:
+        is_executable = bool(path.stat().st_mode & 0o111)
+        if path.suffix == ".py":
+            if (
+                path.parent != tools_root
+                and "__main__" not in text
+                and not is_executable
+            ):
+                continue
+        elif not is_executable and not text.startswith("#!"):
             continue
         relative = _relative(path, root)
         add(f"operator-tool:{relative}", "operator-tool", path)

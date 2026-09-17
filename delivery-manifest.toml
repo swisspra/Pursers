@@ -230,6 +230,15 @@ evidence = ["tools/aionui-extension/README.md"]
 evidence_contains = ["tools/aionui-extension/build.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/board-butler/authorize_active.py"
+kind = "operator-tool"
+source = "tools/board-butler/authorize_active.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["tools/board-butler/README.md"]
+evidence_contains = ["tools/board-butler/authorize_active.py"]
+
+[[artifacts]]
 id = "operator-tool:tools/board-butler/board_butler.py"
 kind = "operator-tool"
 source = "tools/board-butler/board_butler.py"
@@ -237,6 +246,15 @@ state = "delivered"
 channel = "documented source command"
 evidence = ["tools/board-butler/README.md"]
 evidence_contains = ["tools/board-butler/board_butler.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/board-butler/launch.sh"
+kind = "operator-tool"
+source = "tools/board-butler/launch.sh"
+state = "delivered"
+channel = "documented source command"
+evidence = ["tools/board-butler/README.md"]
+evidence_contains = ["tools/board-butler/launch.sh"]
 
 [[artifacts]]
 id = "operator-tool:tools/board_move/board_move.py"
