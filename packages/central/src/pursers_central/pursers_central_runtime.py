@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import uvicorn
 
@@ -17,6 +17,13 @@ from .runtime_health import create_streamable_http_app
 def _env(name: str, default: str | None = None) -> str | None:
     value = os.environ.get(name)
     return value if value not in (None, "") else default
+
+
+def _env_hosts(name: str) -> tuple[str, ...]:
+    value = _env(name)
+    if value is None:
+        return ()
+    return tuple(host.strip() for host in value.split(",") if host.strip())
 
 
 def _acquire_data_lock(
@@ -43,6 +50,28 @@ def main() -> None:
         choices=("critical", "error", "warning", "info", "debug", "trace"),
         default=_env("ONBOARD_CENTRAL_LOG_LEVEL", "info"),
     )
+    parser.add_argument(
+        "--tls-certfile",
+        type=Path,
+        default=_env("ONBOARD_CENTRAL_TLS_CERTFILE"),
+        help="TLS certificate supplied by the operator (requires --tls-keyfile)",
+    )
+    parser.add_argument(
+        "--tls-keyfile",
+        type=Path,
+        default=_env("ONBOARD_CENTRAL_TLS_KEYFILE"),
+        help="TLS private key supplied by the operator (requires --tls-certfile)",
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=None,
+        metavar="HOST",
+        help=(
+            "additional bare Host name; repeat the flag or set the comma-separated "
+            "ONBOARD_CENTRAL_ALLOWED_HOSTS value"
+        ),
+    )
     parser.add_argument("--advance-generation", metavar="BOARD_ID")
     parser.add_argument("--expect-generation-sha256", metavar="HEX")
     args = parser.parse_args()
@@ -56,6 +85,14 @@ def main() -> None:
         parser.error(
             "--advance-generation and --expect-generation-sha256 must be supplied together"
         )
+    if bool(args.tls_certfile) != bool(args.tls_keyfile):
+        parser.error(
+            "--tls-certfile and --tls-keyfile (or their ONBOARD_CENTRAL_* "
+            "environment variables) must be supplied together"
+        )
+    allowed_hosts = tuple(
+        args.allowed_host or _env_hosts("ONBOARD_CENTRAL_ALLOWED_HOSTS")
+    )
 
     os.environ["CENTRAL_AUTH_MODE"] = "jwt"
     os.environ["STORE_BACKEND"] = "sqlite"
@@ -82,23 +119,44 @@ def main() -> None:
     lock = _acquire_data_lock(parser, args.data_dir)
     try:
         mcp, service = central.build_server(args.host, args.port, args.data_dir)
-        app = create_streamable_http_app(mcp, service, host=args.host)
-        bind_url = f"http://{args.host}:{args.port}/mcp"
-        health_url = f"http://{args.host}:{args.port}/healthz"
+        try:
+            app = create_streamable_http_app(
+                mcp,
+                service,
+                host=args.host,
+                allowed_hosts=allowed_hosts,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        scheme = "https" if args.tls_certfile else "http"
+        bind_url = f"{scheme}://{args.host}:{args.port}/mcp"
+        health_url = f"{scheme}://{args.host}:{args.port}/healthz"
         print(
             "Pursers Central starting: "
             f"bind={bind_url} data_dir={args.data_dir} health={health_url}",
             file=sys.stderr,
             flush=True,
         )
-        uvicorn.run(
-            app,
-            host=args.host,
-            port=args.port,
-            log_level=args.log_level,
-            server_header=False,
-            access_log=False,
-        )
+        if args.tls_certfile:
+            uvicorn.run(
+                app,
+                host=args.host,
+                port=args.port,
+                log_level=args.log_level,
+                server_header=False,
+                access_log=False,
+                ssl_certfile=str(args.tls_certfile),
+                ssl_keyfile=str(args.tls_keyfile),
+            )
+        else:
+            uvicorn.run(
+                app,
+                host=args.host,
+                port=args.port,
+                log_level=args.log_level,
+                server_header=False,
+                access_log=False,
+            )
     finally:
         lock.__exit__(*sys.exc_info())
 
