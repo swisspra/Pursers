@@ -15,3 +15,13 @@ script, and update the exact-view-lock test in
 `packages/personal/tests/test_apps_contract.py`.
 
 The `package-lock.json` is authoritative — always `npm ci`, never `npm install`.
+
+Real-browser feed-error acceptance (requires a Full Access Ego Lite seat):
+
+    python3 tests/run_feed_error_browser.py --ego-browser /PATH/TO/ego-browser
+
+The check loads the built dashboard, sends product-shaped `tool-result` payloads
+through the MCP Apps host transport, and asserts the exact sanitized
+`feed_error` in both the DOM and Chromium accessibility tree. It also verifies
+the stable contract selectors, keyboard focus, and absence of a raw sibling
+error value from both surfaces.

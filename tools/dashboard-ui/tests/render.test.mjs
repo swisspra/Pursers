@@ -131,7 +131,7 @@ function transpile(typeScript) {
 function loadRenderers() {
   const names = [
     "element", "emptyState", "pill", "shortTicketId", "agentField",
-    "toneForStatus", "leaseText", "leaseBadge", "renderAgents",
+    "toneForStatus", "leaseText", "leaseBadge", "setTextIfChanged", "renderConnection", "feedErrorNotice", "renderAgents",
     "fleetValue", "tableHeading", "fleetTable", "renderFleet",
     "formatTime", "copyButton", "renderLinks",
   ];
@@ -144,7 +144,7 @@ function loadRenderers() {
     },
   };
   const typeScript = `${names.map(functionSource).join("\n")}\n`
-    + "globalThis.renderers = {renderAgents, renderFleet, renderLinks};";
+    + "globalThis.renderers = {renderConnection, feedErrorNotice, renderAgents, renderFleet, renderLinks};";
   const javaScript = transpile(typeScript);
   const sandbox = {
     document,
@@ -282,7 +282,37 @@ test("selector contract boots with explicit loading and empty selection values",
     'data-pursers-panel="tickets"',
     'data-pursers-panel="agents"',
     'data-pursers-panel="seats"',
+    'data-pursers-panel="activity-feed"',
+    'data-pursers-source="board-event-feed"',
   ]) assert.ok(ENTRY.includes(literal), `missing ${literal}`);
+  assert.match(ENTRY, /id="connection-banner"[^>]+role="status"[^>]+aria-live="polite"[^>]+tabindex="0"/);
+});
+
+
+test("sanitized feed errors remain exact, accessible, and exclude unsanitized detail", () => {
+  const { renderConnection, feedErrorNotice, elements } = loadRenderers();
+  const unsanitized = "Permission denied (RawTransportDetail)";
+  const permissionDenied = {
+    data_mode: "stale",
+    stale: true,
+    feed_error: "Permission denied",
+    raw_error: unsanitized,
+  };
+  renderConnection(permissionDenied);
+
+  const banner = elements.get("connection-banner");
+  assert.equal(elements.get("connection-detail").textContent, permissionDenied.feed_error);
+  assert.equal(banner.getAttribute("data-pursers-state"), "error");
+  assert.equal(banner.getAttribute("data-pursers-connection"), "error");
+  assert.equal(banner.textContent.includes(unsanitized), false);
+
+  const activityError = "Local feed unavailable";
+  const notice = feedErrorNotice(activityError);
+  assert.equal(notice.textContent, activityError);
+  assert.equal(notice.textContent.includes(unsanitized), false);
+  assert.equal(notice.getAttribute("role"), "alert");
+  assert.equal(notice.getAttribute("tabindex"), "0");
+  assert.equal(notice.getAttribute("data-pursers-state"), "error");
 });
 
 
