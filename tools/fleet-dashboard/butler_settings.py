@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import copy
+import fcntl
 import json
 import os
 import re
+import shlex
+import signal
 import stat
+import subprocess
 import threading
 import uuid
 from dataclasses import dataclass
@@ -379,11 +383,178 @@ class ButlerSettingsManager:
         *,
         opener: Callable[..., Any] = urlopen,
         now: Callable[[], datetime] | None = None,
+        runtime_path: str | Path | None = None,
+        kill_path: str | Path | None = None,
+        pid_path: str | Path | None = None,
+        expected_process_path: str | Path | None = None,
+        process_inspector: Callable[[int], bool] | None = None,
+        process_probe: Callable[[int], bool] | None = None,
+        signaler: Callable[[int, int], None] | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.opener = opener
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self.runtime_path = (
+            Path(runtime_path).expanduser().resolve()
+            if runtime_path
+            else self.root.parent / "runtime.json"
+        )
+        self.kill_path = (
+            Path(kill_path).expanduser().resolve()
+            if kill_path
+            else self.root.parent / "KILLED"
+        )
+        self.pid_path = (
+            Path(pid_path).expanduser().resolve()
+            if pid_path
+            else self.runtime_path.parent / "board-butler.pid"
+        )
+        self.expected_process_path = (
+            Path(expected_process_path).expanduser().resolve()
+            if expected_process_path
+            else Path(__file__).parents[1] / "board-butler" / "board_butler.py"
+        ).resolve()
+        if process_inspector is not None and process_probe is not None:
+            raise ValueError("provide only one process identity verifier")
+        # process_probe remains as a compatibility alias for focused tests. The
+        # product path always uses the lock + OS process identity verifier.
+        self.process_inspector = (
+            process_inspector or process_probe or self._verified_butler_process
+        )
+        self.signaler = signaler or os.kill
         self._lock = threading.RLock()
+
+    def _pid_lock_held_by(self, pid: int) -> bool:
+        """Require the resident's private singleton lock to name this PID."""
+        if not self._private_file(self.pid_path):
+            return False
+        try:
+            if self.pid_path.read_text(encoding="utf-8")[:64].strip() != str(pid):
+                return False
+            descriptor = os.open(
+                self.pid_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            )
+        except (OSError, UnicodeError):
+            return False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(descriptor)
+
+    def _verified_butler_process(self, pid: int) -> bool:
+        """Bind a runtime PID to the live, non-zombie Board Butler resident."""
+        if not self._pid_lock_held_by(pid):
+            return False
+        try:
+            result = subprocess.run(
+                ["/bin/ps", "-ww", "-p", str(pid), "-o", "state=", "-o", "command="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        line = result.stdout.strip()
+        if result.returncode != 0 or not line:
+            return False
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or fields[0].upper().startswith("Z"):
+            return False
+        try:
+            arguments = shlex.split(fields[1])
+        except ValueError:
+            return False
+        expected = self.expected_process_path
+        matches_entrypoint = False
+        for argument in arguments[:5]:
+            if not argument or argument.startswith("-"):
+                continue
+            try:
+                matches_entrypoint = Path(argument).expanduser().resolve() == expected
+            except (OSError, RuntimeError):
+                matches_entrypoint = False
+            if matches_entrypoint:
+                break
+        # Recheck the lock after reading process metadata. If the resident
+        # exited or the PID was reused during inspection, fail closed.
+        return matches_entrypoint and self._pid_lock_held_by(pid)
+
+    @staticmethod
+    def _private_file(path: Path) -> bool:
+        try:
+            info = path.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISREG(info.st_mode)
+            and not path.is_symlink()
+            and info.st_uid == os.geteuid()
+            and stat.S_IMODE(info.st_mode) == 0o600
+        )
+
+    def _runtime(self, configured: bool) -> dict[str, Any]:
+        document: Mapping[str, Any] = {}
+        if self._private_file(self.runtime_path):
+            try:
+                candidate = json.loads(
+                    self.runtime_path.read_text(encoding="utf-8")[:16_384]
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                candidate = {}
+            if isinstance(candidate, Mapping):
+                document = candidate
+        pid = document.get("pid")
+        mode = document.get("mode")
+        alive = bool(
+            document.get("running") is True
+            and isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and pid > 1
+            and mode in {"shadow", "active"}
+            and self.process_inspector(pid)
+        )
+        if alive:
+            state = f"running_{mode}"
+        elif configured:
+            state = "configured_not_running"
+        else:
+            state = "not_configured"
+        last_activity = document.get("last_activity")
+        if last_activity not in {
+            "startup",
+            "registry_refresh",
+            "question_processed",
+            "stopped",
+        }:
+            last_activity = None
+
+        def timestamp(name: str) -> str | None:
+            value = document.get(name)
+            if not isinstance(value, str) or len(value) > 64:
+                return None
+            try:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return value
+
+        return {
+            "state": state,
+            "configured": configured,
+            "running": alive,
+            "mode": mode if alive else None,
+            "pid": pid if alive else None,
+            "started_at": timestamp("started_at"),
+            "last_activity_at": timestamp("last_activity_at"),
+            "last_activity": last_activity,
+            "kill_switch_engaged": self._private_file(self.kill_path),
+        }
 
     @staticmethod
     def _global(config: Any) -> dict[str, Any]:
@@ -438,6 +609,7 @@ class ButlerSettingsManager:
         key_ref = provider.get("key_ref")
         key_path = self._managed_reference(key_ref)
         mode = "off" if global_settings.get("kill_switch", True) else "shadow"
+        configured = bool(provider.get("endpoint_ref") and provider.get("model"))
         return {
             "schema_version": 1,
             "central": central,
@@ -457,6 +629,61 @@ class ButlerSettingsManager:
             "key_present": key_path is not None,
             "key_location": key_ref if key_path is not None else None,
             "expected_sha256": config_payload.get("expected_sha256"),
+            "runtime": self._runtime(configured),
+        }
+
+    def kill(self, config_payload: Mapping[str, Any], central: str) -> dict[str, Any]:
+        """Engage the local fail-closed stop and signal a live resident once."""
+        current = self.view(config_payload, central)
+        self.kill_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.kill_path.parent, 0o700)
+        marker = json.dumps(
+            {
+                "schema_version": 1,
+                "engaged": True,
+                "at": self.now().astimezone(timezone.utc).isoformat(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        descriptor = os.open(
+            self.kill_path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_TRUNC
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(marker)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        configured = bool(current["runtime"]["configured"])
+        # Re-read and re-verify immediately before signalling. This prevents a
+        # stale projection or a PID reused after the first page render from
+        # becoming a signal target.
+        runtime = self._runtime(configured)
+        signal_sent = False
+        if runtime["running"] and isinstance(runtime["pid"], int):
+            try:
+                self.signaler(runtime["pid"], signal.SIGTERM)
+                signal_sent = True
+            except ProcessLookupError:
+                pass
+        return {
+            "schema_version": 1,
+            "central": central,
+            "kill_switch_engaged": True,
+            "signal_sent": signal_sent,
+            "runtime": self._runtime(bool(runtime["configured"])),
         }
 
     def _write_key(self, central: str, value: str) -> Path:
@@ -572,4 +799,5 @@ class ButlerSettingsManager:
                 "reload": "next_cycle",
                 "validated_at": timestamp.astimezone(timezone.utc).isoformat(),
                 "validation": validation.as_dict(),
+                "runtime": self._runtime(True),
             }

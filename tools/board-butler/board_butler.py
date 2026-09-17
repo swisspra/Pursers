@@ -23,6 +23,7 @@ import runpy
 import stat
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 from contextlib import aclosing
@@ -49,6 +50,8 @@ DEFAULT_VETO_WINDOW_S = 3_600
 DEFAULT_REFRESH_SECONDS = 60
 DEFAULT_NO_LIVE_CANDIDATES_CYCLES = 3
 DEFAULT_ACTION_HOLD_SECONDS = 60
+ACTIVE_AUTHORIZATION_SCHEMA_VERSION = 1
+ACTIVE_AUTHORIZATION_KEYS = {"schema_version", "mode", "authorized"}
 MECHANICAL_ACTION_CLASSES = (
     "park_no_live_candidates",
     "refuse_incapable_target",
@@ -552,6 +555,7 @@ class SingletonLock:
     def __enter__(self) -> "SingletonLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+", encoding="utf-8")
+        os.chmod(self.path, 0o600)
         try:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -572,6 +576,99 @@ class SingletonLock:
         finally:
             self._handle.close()
             self._handle = None
+
+
+def _private_regular_file(path: Path) -> bool:
+    """Return whether path is an owned, non-symlink, mode-0600 regular file."""
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(info.st_mode)
+        and not path.is_symlink()
+        and info.st_uid == os.geteuid()
+        and stat.S_IMODE(info.st_mode) == 0o600
+    )
+
+
+def validate_active_authorization(path: Path) -> None:
+    """Require the separate operator-created authorization for active mode."""
+    if not _private_regular_file(path):
+        raise ValueError("active authorization must be an owned mode-0600 regular file")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("active authorization is unreadable") from exc
+    if (
+        not isinstance(document, Mapping)
+        or set(document) != ACTIVE_AUTHORIZATION_KEYS
+        or document.get("schema_version") != ACTIVE_AUTHORIZATION_SCHEMA_VERSION
+        or document.get("mode") != "active"
+        or document.get("authorized") is not True
+    ):
+        raise ValueError("active authorization is invalid")
+
+
+def local_kill_engaged(path: Path | None) -> bool:
+    return path is not None and _private_regular_file(path)
+
+
+class RuntimeStatus:
+    """Publish a secret-free local heartbeat for the loopback dashboard."""
+
+    def __init__(self, path: Path | None, mode: str) -> None:
+        self.path = path
+        self.mode = mode
+        self.started_at = utc_now()
+        self.last_activity_at = self.started_at
+        self.last_activity = "startup"
+
+    def _write(self, *, running: bool) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.path.parent, 0o700)
+        document = {
+            "schema_version": 1,
+            "pid": os.getpid(),
+            "mode": self.mode,
+            "running": running,
+            "started_at": self.started_at.isoformat(),
+            "last_activity_at": self.last_activity_at.isoformat(),
+            "last_activity": self.last_activity,
+        }
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", dir=self.path.parent
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(document, handle, sort_keys=True, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            Path(temporary).unlink(missing_ok=True)
+            raise
+
+    def __enter__(self) -> "RuntimeStatus":
+        self._write(running=True)
+        return self
+
+    def mark(self, activity: str, at: datetime | None = None) -> None:
+        self.last_activity_at = at or utc_now()
+        self.last_activity = activity
+        self._write(running=True)
+
+    def __exit__(self, *_args: Any) -> None:
+        self.last_activity_at = utc_now()
+        self.last_activity = "stopped"
+        self._write(running=False)
 
 
 def utc_now() -> datetime:
@@ -2746,7 +2843,11 @@ class CentralBackend:
                 reader, self.args.home_board
             )
         active_boards = {project.board_id for project in projects}
-        configured = set(self.args.act_on_board)
+        configured = (
+            set(self.args.act_on_board)
+            if getattr(self.args, "runtime_mode", "shadow") == "active"
+            else set()
+        )
         acting_boards = configured & active_boards
         actions: list[MechanicalAction] = []
         if not self.args.dry_run:
@@ -3007,50 +3108,59 @@ async def run(
 
     # Resident startup deliberately locks before token reads and board access.
     with SingletonLock(args.pid_file):
+        if local_kill_engaged(getattr(args, "local_kill_file", None)):
+            print("board-butler: local kill switch is engaged", file=sys.stderr)
+            return
         token = _read_token(args.token_path)
-        async with backend_factory(args, token) as backend:
-            cursor = load_cursor(args.cursor_file)
-            if cursor is None:
-                cursor = backend.latest_seq
-            refresh = getattr(backend, "refresh_registry_findings", None)
-            next_refresh = 0.0
-            while True:
-                monotonic_now = asyncio.get_running_loop().time()
-                if refresh is not None and monotonic_now >= next_refresh:
-                    observation = await refresh(utc_now())
-                    print(
-                        "board-butler: refresh "
-                        + json.dumps(observation, sort_keys=True),
-                        file=sys.stderr,
-                    )
-                    next_refresh = (
-                        asyncio.get_running_loop().time() + args.refresh_seconds
-                    )
-                timeout = (
-                    float(args.wait_timeout)
-                    if args.once
-                    else (
-                        max(
-                            0.1,
-                            next_refresh - asyncio.get_running_loop().time(),
+        with RuntimeStatus(
+            getattr(args, "runtime_status_file", None),
+            getattr(args, "runtime_mode", "shadow"),
+        ) as runtime:
+            async with backend_factory(args, token) as backend:
+                cursor = load_cursor(args.cursor_file)
+                if cursor is None:
+                    cursor = backend.latest_seq
+                refresh = getattr(backend, "refresh_registry_findings", None)
+                next_refresh = 0.0
+                while True:
+                    monotonic_now = asyncio.get_running_loop().time()
+                    if refresh is not None and monotonic_now >= next_refresh:
+                        observation = await refresh(utc_now())
+                        runtime.mark("registry_refresh")
+                        print(
+                            "board-butler: refresh "
+                            + json.dumps(observation, sort_keys=True),
+                            file=sys.stderr,
                         )
-                        if refresh is not None
-                        else None
+                        next_refresh = (
+                            asyncio.get_running_loop().time() + args.refresh_seconds
+                        )
+                    timeout = (
+                        float(args.wait_timeout)
+                        if args.once
+                        else (
+                            max(
+                                0.1,
+                                next_refresh - asyncio.get_running_loop().time(),
+                            )
+                            if refresh is not None
+                            else None
+                        )
                     )
-                )
-                cursor, question = await backend.wait_for_question(cursor, timeout)
-                if question is not None:
-                    await process_question(backend, question, args, utc_now())
-                # Printing a proposed draft is not durable processing. Keep
-                # dry-run questions replayable by leaving the cursor alone.
-                if not args.dry_run:
-                    save_cursor(args.cursor_file, cursor)
-                if args.once:
-                    return
-                if question is None:
-                    if refresh is not None:
-                        continue
-                    raise RuntimeError("board butler push subscription ended")
+                    cursor, question = await backend.wait_for_question(cursor, timeout)
+                    if question is not None:
+                        await process_question(backend, question, args, utc_now())
+                        runtime.mark("question_processed")
+                    # Printing a proposed draft is not durable processing. Keep
+                    # dry-run questions replayable by leaving the cursor alone.
+                    if not args.dry_run:
+                        save_cursor(args.cursor_file, cursor)
+                    if args.once:
+                        return
+                    if question is None:
+                        if refresh is not None:
+                            continue
+                        raise RuntimeError("board butler push subscription ended")
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -3063,6 +3173,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--integration-ref", default="origin/main")
     parser.add_argument("--pid-file", type=Path, required=True)
     parser.add_argument("--cursor-file", type=Path, required=True)
+    parser.add_argument("--runtime-status-file", type=Path)
+    parser.add_argument("--local-kill-file", type=Path)
+    parser.add_argument(
+        "--runtime-mode",
+        choices=("shadow", "active"),
+        default="shadow",
+        help="local service mode; active additionally requires an authorization file",
+    )
+    parser.add_argument("--active-authorization-file", type=Path)
     parser.add_argument(
         "--provider-secrets-dir",
         type=Path,
@@ -3130,6 +3249,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         value = getattr(args, name)
         if not value.is_absolute():
             parser.error(f"--{name.replace('_', '-')} must be absolute")
+    for name in (
+        "runtime_status_file",
+        "local_kill_file",
+        "active_authorization_file",
+    ):
+        value = getattr(args, name)
+        if value is not None and not value.is_absolute():
+            parser.error(f"--{name.replace('_', '-')} must be absolute")
     if not args.repo.is_dir():
         parser.error("--repo must name an existing directory")
     if not 1 <= args.drafts_per_hour <= 100:
@@ -3150,6 +3277,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         args.active_action = list(MECHANICAL_ACTION_CLASSES)
     if any(not value.strip() for value in args.act_on_board):
         parser.error("--act-on-board values must be non-empty")
+    if args.runtime_mode == "shadow" and args.act_on_board:
+        parser.error("--act-on-board requires --runtime-mode active")
+    if args.runtime_mode == "shadow" and args.active_authorization_file is not None:
+        parser.error("--active-authorization-file requires --runtime-mode active")
+    if args.runtime_mode == "active":
+        if args.dry_run:
+            parser.error("active runtime mode cannot be combined with --dry-run")
+        if not args.act_on_board:
+            parser.error("active runtime mode requires at least one --act-on-board")
+        if args.active_authorization_file is None:
+            parser.error("active runtime mode requires --active-authorization-file")
+        try:
+            validate_active_authorization(args.active_authorization_file)
+        except ValueError as exc:
+            parser.error(str(exc))
     if (args.kill_switch or args.veto_question) and args.dry_run:
         parser.error("control actions cannot be combined with --dry-run")
     if args.veto_question and not args.control_reason.strip():

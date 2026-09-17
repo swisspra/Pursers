@@ -8918,6 +8918,7 @@ def make_handler(
                 "/api/config/ops",
                 "/api/config/registry/clone",
                 "/api/butler",
+                "/api/butler/kill",
                 "/api/dispatch",
                 "/api/agents/retire",
                 "/api/agents/retire-inert",
@@ -9068,6 +9069,14 @@ def make_handler(
                                 expected,
                                 central=central,
                             ),
+                        )
+                    )
+                elif route == "/api/butler/kill":
+                    if request != {}:
+                        raise ValueError("request must be an empty object")
+                    body = _json_bytes(
+                        butlers.kill(
+                            cache_call("get_config", central=central), label
                         )
                     )
                 elif route == "/api/dispatch":
