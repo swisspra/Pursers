@@ -96,6 +96,31 @@ def _comparison_path(path: Path) -> Path:
     return path.resolve(strict=False)
 
 
+def _self_environment_use_state(
+    comparison_path: Path,
+) -> tuple[bool | None, str]:
+    """Inspect this process without relying on ``ps`` preserving its environment."""
+    try:
+        cwd = Path.cwd()
+    except OSError as exc:
+        return None, f"cannot inspect current process cwd: {exc}"
+
+    for name in ("TMPDIR", "TMP", "TEMP", "TEMPDIR", "PYTEST_DEBUG_TEMPROOT"):
+        raw_value = os.environ.get(name)
+        if raw_value is None:
+            continue
+        value = Path(raw_value)
+        if not value.is_absolute():
+            value = cwd / value
+        try:
+            comparison_value = _comparison_path(value)
+        except OSError as exc:
+            return None, f"cannot normalize current process {name}: {exc}"
+        if _paths_overlap(comparison_path, comparison_value):
+            return True, f"current process {name} overlaps this root"
+    return False, "current process temp environment is unrelated"
+
+
 def _ps_environment_path_is_unambiguous(path: Path) -> bool:
     """Whether a path can be recognized losslessly in whitespace-delimited ps output."""
     raw = os.fspath(path)
@@ -208,6 +233,10 @@ def process_use_state(
         comparison_path = _comparison_path(path)
     except OSError as exc:
         return None, f"cannot normalize candidate for environment comparison: {exc}"
+
+    self_active, self_reason = _self_environment_use_state(comparison_path)
+    if self_active is None or self_active:
+        return self_active, self_reason
 
     for line in process_list.stdout.splitlines():
         stripped = line.lstrip()

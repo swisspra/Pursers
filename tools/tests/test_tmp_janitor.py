@@ -16,6 +16,15 @@ sys.path.insert(0, str(TOOLS))
 import tmp_janitor  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def isolate_current_process_temp_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the pytest temp base from pinning every candidate below it."""
+    for name in ("TMPDIR", "TMP", "TEMP", "TEMPDIR", "PYTEST_DEBUG_TEMPROOT"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def completed(returncode: int = 0, stdout: str = "", stderr: str = "") -> SimpleNamespace:
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
@@ -303,6 +312,47 @@ def test_relative_temp_environment_from_process_probe_fails_closed(
     assert "in-use state unknown" in result.reason
     assert "live pid 123 has a relative temp environment" in result.reason
     assert "cannot be proven" in result.reason
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_delete_refuses_current_process_temp_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    relative: bool,
+) -> None:
+    candidate = tmp_path / "seat-cache"
+    candidate.mkdir()
+    make_old(candidate)
+    for name in ("TMPDIR", "TMP", "TEMP", "TEMPDIR", "PYTEST_DEBUG_TEMPROOT"):
+        monkeypatch.delenv(name, raising=False)
+    if relative:
+        monkeypatch.chdir(candidate.parent)
+        monkeypatch.setenv("TMPDIR", candidate.name)
+    else:
+        monkeypatch.setenv("TMPDIR", str(candidate))
+
+    def self_environment_runner(
+        command: list[str], **_kwargs: object
+    ) -> SimpleNamespace:
+        if Path(command[0]).name == "lsof":
+            return completed(returncode=1)
+        if command[0] == "/bin/ps":
+            return completed(stdout=f"{os.getpid()} runner TMPDIR=ignored\n")
+        raise AssertionError(command)
+
+    assert tmp_janitor.run(
+        [candidate],
+        older_than_seconds=3_600,
+        delete=True,
+        runner=self_environment_runner,
+    ) == 0
+
+    assert candidate.is_dir()
+    output = capsys.readouterr().out
+    assert f"SKIP {candidate}" in output
+    assert "current process TMPDIR overlaps this root" in output
+    assert "reclaimed_bytes=0 candidates=0" in output
 
 
 def test_delete_refuses_ambiguous_live_temp_environment(
