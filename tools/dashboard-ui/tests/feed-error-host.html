@@ -5,7 +5,7 @@
     <title>Personal feed error browser test host</title>
   </head>
   <body>
-    <iframe id="app-frame" title="Personal dashboard under test" src="../dashboard.html"></iframe>
+    <iframe id="app-frame" title="Personal dashboard under test"></iframe>
     <script>
       const emptySnapshot = {
         contract_version: 2,
@@ -95,6 +95,7 @@
           params: result(snapshot),
         }, "*");
       };
+      frame.src = "../dashboard.html";
     </script>
   </body>
 </html>
