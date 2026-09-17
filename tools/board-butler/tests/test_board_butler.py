@@ -84,6 +84,18 @@ def args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
         ("Register this new board in the project registry", "information", "ESCALATE", "membership-or-registry"),
         ("Is abcdef1 an ancestor of origin/main?", "information", "MECHANICAL", "git-ancestry"),
         ("Is abcdef1 an ancestor of origin/main?", "decision", "MECHANICAL", "git-ancestry"),
+        (
+            "Is abcdef1 merged into main, and may I merge it now?",
+            "decision",
+            "ESCALATE",
+            "production-code-authority",
+        ),
+        (
+            "Is abcdef1 contained in origin/main, and should I change production code to land it?",
+            "decision",
+            "ESCALATE",
+            "production-code-authority",
+        ),
         ("What is the status of TK-123?", "information", "MECHANICAL", "ticket-status"),
         ("May we waive the gate because abcdef1 is merged?", "information", "ESCALATE", "gate-waiver"),
         (
@@ -206,6 +218,32 @@ def test_missing_mechanical_evidence_fails_closed_to_unknown(tmp_path: Path) -> 
     assert finding["verdict"] == "UNKNOWN"
     assert "incomplete" in finding["message"]
     assert "evidence_error=ValueError" in finding["evidence"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Is abcdef1 merged into main, and may I merge it now?",
+        "Is abcdef1 contained in origin/main, and should I change production code to land it?",
+    ],
+)
+def test_authority_bearing_decision_short_circuits_ancestry_evaluator(
+    tmp_path: Path, message: str
+) -> None:
+    finding = asyncio.run(
+        butler.make_finding(
+            question(message, kind="decision"),
+            Source(),
+            tmp_path,
+            "origin/main",
+            NOW,
+        )
+    )
+
+    assert finding["verdict"] == "ESCALATE"
+    assert finding["policy_rule"] == "production-code-authority"
+    assert finding["evidence"].startswith("source=policy_table:production-code-authority")
+    assert "git merge-base" not in finding["evidence"]
 
 
 def test_real_tk_1ec_submission_escalates_when_covering_aionui_suite_failed() -> None:

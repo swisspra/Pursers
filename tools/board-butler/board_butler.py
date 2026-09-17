@@ -106,6 +106,15 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         "coverage_blindness",
     ),
     PolicyRule(
+        "production-code-authority",
+        Outcome.ESCALATE,
+        re.compile(
+            r"\b(?:may|can|could|should|please|authorize|approve)\b.{0,100}"
+            r"\b(?:merge|land|change|modify|edit|patch|write|deploy|ship)\w*\b",
+            re.I | re.S,
+        ),
+    ),
+    PolicyRule(
         "git-ancestry",
         Outcome.MECHANICAL,
         re.compile(r"\b(?:ancestor|descendant|merged|contained in|reachable from)\b.{0,120}\b(?:main|origin/main|[0-9a-f]{7,40})\b|\b[0-9a-f]{7,40}\b.{0,120}\b(?:ancestor|descendant|merged|contained in|reachable from)\b", re.I),
