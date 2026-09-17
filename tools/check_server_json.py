@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
+import tempfile
+import tomllib
+import zipfile
+from email.parser import Parser
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -14,16 +20,19 @@ except ImportError:  # Direct execution.
 
 
 SERVER_NAME = "io.github.swisspra/pursers"
+CENTRAL_PACKAGE_NAME = "pursers-central"
 SCHEMA_URL = (
     "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json"
 )
 PACKAGE_VERSION_KEYS = {
-    "pursers-central": "central",
+    CENTRAL_PACKAGE_NAME: "central",
 }
 MARKER_READMES = (
     "packages/pursers/README.md",
     "packages/central/README.md",
 )
+CENTRAL_PROJECT = "packages/central"
+CENTRAL_PYPROJECT = f"{CENTRAL_PROJECT}/pyproject.toml"
 CENTRAL_ENVIRONMENT = {
     "CENTRAL_ADMISSION",
     "CENTRAL_AUTH_MODE",
@@ -56,6 +65,92 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(document, dict):
         raise ValueError(f"{path}: server metadata must be a JSON object")
     return document
+
+
+def _load_toml(path: Path) -> dict[str, Any]:
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"{path}: cannot read project metadata: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ValueError(f"{path}: project metadata must be a TOML table")
+    return document
+
+
+def _ownership_marker() -> str:
+    return f"<!-- mcp-name: {SERVER_NAME} -->"
+
+
+def check_central_wheel_archive(wheel: Path) -> list[str]:
+    failures: list[str] = []
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            metadata_members = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA")
+            ]
+            if len(metadata_members) != 1:
+                return [
+                    f"{wheel}: expected exactly one .dist-info/METADATA, "
+                    f"found {len(metadata_members)}"
+                ]
+            metadata = archive.read(metadata_members[0]).decode("utf-8")
+    except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+        return [f"{wheel}: cannot inspect wheel metadata: {exc}"]
+
+    package_name = Parser().parsestr(metadata).get("Name")
+    if package_name != CENTRAL_PACKAGE_NAME:
+        failures.append(
+            f"{wheel}: METADATA Name {package_name!r} does not match "
+            f"server.json identifier {CENTRAL_PACKAGE_NAME!r}"
+        )
+
+    marker = _ownership_marker()
+    count = metadata.count(marker)
+    if count != 1:
+        failures.append(
+            f"{wheel}: expected exactly one ownership marker {marker!r} "
+            f"in wheel METADATA, found {count}"
+        )
+    return failures
+
+
+def build_and_check_central_wheel(repository: Path) -> list[str]:
+    uv = shutil.which("uv")
+    if uv is None:
+        return ["pursers-central wheel: uv is required to build the artifact"]
+
+    with tempfile.TemporaryDirectory(prefix="pursers-central-wheel-") as temporary:
+        destination = Path(temporary)
+        command = [
+            uv,
+            "build",
+            "--wheel",
+            "--out-dir",
+            str(destination),
+            str(repository / CENTRAL_PROJECT),
+        ]
+        result = subprocess.run(
+            command,
+            cwd=repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            return [
+                "pursers-central wheel: build failed with exit code "
+                f"{result.returncode}: {detail}"
+            ]
+        wheels = sorted(destination.glob("pursers_central-*.whl"))
+        if len(wheels) != 1:
+            return [
+                "pursers-central wheel: expected exactly one built artifact, "
+                f"found {len(wheels)}"
+            ]
+        return check_central_wheel_archive(wheels[0])
 
 
 def check(repository: Path) -> list[str]:
@@ -103,7 +198,7 @@ def check(repository: Path) -> list[str]:
                 f"does not match {release_key} {expected!r}"
             )
 
-    central_matches = by_identifier.get("pursers-central", [])
+    central_matches = by_identifier.get(CENTRAL_PACKAGE_NAME, [])
     if len(central_matches) == 1:
         central = central_matches[0]
         if central.get("registryType") != "pypi":
@@ -156,7 +251,7 @@ def check(repository: Path) -> list[str]:
                     f"equal {sorted(REQUIRED_CENTRAL_ENVIRONMENT)!r}"
                 )
 
-    marker = f"<!-- mcp-name: {SERVER_NAME} -->"
+    marker = _ownership_marker()
     for relative in MARKER_READMES:
         path = repository / relative
         try:
@@ -168,6 +263,15 @@ def check(repository: Path) -> list[str]:
             failures.append(
                 f"{relative}: expected exactly one ownership marker {marker!r}"
             )
+
+    project_metadata = _load_toml(repository / CENTRAL_PYPROJECT)
+    project = project_metadata.get("project")
+    readme = project.get("readme") if isinstance(project, dict) else None
+    if readme != "README.md":
+        failures.append(
+            f"{CENTRAL_PYPROJECT}: project.readme must equal 'README.md' so the "
+            "ownership marker is published in pursers-central metadata"
+        )
 
     return failures
 
@@ -191,11 +295,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         print(f"FAIL {exc}")
         return 1
+    if not failures:
+        failures.extend(build_and_check_central_wheel(args.repository.resolve()))
     if failures:
         for failure in failures:
             print(f"FAIL {failure}")
         return 1
-    print("PASS server.json versions and ownership markers match release_versions.toml")
+    print(
+        "PASS server.json versions, ownership markers, and pursers-central wheel "
+        "metadata match release_versions.toml"
+    )
     return 0
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import zipfile
 from pathlib import Path
 
 from tools import check_server_json
@@ -14,6 +15,7 @@ def _fixture_repository(tmp_path: Path) -> Path:
     for relative in (
         "server.json",
         "tools/release_versions.toml",
+        check_server_json.CENTRAL_PYPROJECT,
         *check_server_json.MARKER_READMES,
     ):
         source = ROOT / relative
@@ -59,6 +61,47 @@ def test_check_rejects_missing_or_mismatched_markers(tmp_path: Path) -> None:
     failures = check_server_json.check(root)
 
     assert any("packages/central/README.md" in failure for failure in failures)
+
+
+def test_check_rejects_unpublished_central_readme(tmp_path: Path) -> None:
+    root = _fixture_repository(tmp_path)
+    pyproject = root / check_server_json.CENTRAL_PYPROJECT
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace('readme = "README.md"\n', ""),
+        encoding="utf-8",
+    )
+
+    failures = check_server_json.check(root)
+
+    assert any(
+        "project.readme must equal 'README.md'" in failure for failure in failures
+    )
+
+
+def test_central_wheel_publishes_exactly_one_marker() -> None:
+    assert check_server_json.build_and_check_central_wheel(ROOT) == []
+
+
+def test_wheel_check_rejects_wrong_name_missing_and_duplicate_markers(
+    tmp_path: Path,
+) -> None:
+    marker = f"<!-- mcp-name: {check_server_json.SERVER_NAME} -->"
+    results: dict[int, list[str]] = {}
+    for count in (0, 2):
+        wheel = tmp_path / f"pursers_central-{count}-py3-none-any.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr(
+                f"pursers_central_{count}.dist-info/METADATA",
+                "Metadata-Version: 2.4\nName: wrong-central\n\n"
+                + "\n".join([marker] * count),
+            )
+        results[count] = check_server_json.check_central_wheel_archive(wheel)
+
+    assert "does not match server.json identifier 'pursers-central'" in "\n".join(
+        results[0]
+    )
+    assert "found 0" in "\n".join(results[0])
+    assert "found 2" in "\n".join(results[2])
 
 
 def test_check_rejects_transport_and_environment_drift(tmp_path: Path) -> None:
