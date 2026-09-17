@@ -7890,7 +7890,44 @@ def test_board_butler_hold_is_projected_for_waiting_for_you() -> None:
 def test_waiting_for_you_surface_includes_durable_butler_holds() -> None:
     assert "function butlerHoldRows()" in dashboard.HTML
     assert "Waiting for you · board butler hold" in dashboard.HTML
+    assert "f.kind==='butler_action'&&f.hold?.status==='held'" in dashboard.HTML
     assert "--veto-question" in dashboard.HTML
+
+
+def test_mechanical_butler_hold_is_projected_until_veto_window_ends() -> None:
+    result = dashboard.project_coordinator_findings(
+        {
+            "state": {
+                "coordinator_findings": {
+                    "value": json.dumps(
+                        {
+                            "findings": [
+                                {
+                                    "kind": "butler_action",
+                                    "level": "warn",
+                                    "ticket_id": "TK-loop",
+                                    "question_id": "BA-hold",
+                                    "verdict": "MECHANICAL",
+                                    "message": "Board butler intends to park TK-loop.",
+                                    "evidence": "source=Central board_snapshot+ticket_get",
+                                    "hold": {
+                                        "status": "held",
+                                        "release_at": "2030-01-01T01:00:00+00:00",
+                                        "vetoable_until": "2030-01-01T01:00:00+00:00",
+                                        "veto_reason": None,
+                                    },
+                                }
+                            ]
+                        }
+                    )
+                }
+            }
+        }
+    )
+
+    assert result is not None
+    assert result["items"][0]["kind"] == "butler_action"
+    assert result["items"][0]["hold"]["status"] == "held"
 
 
 def test_coordinator_findings_stale_after_fifteen_minutes() -> None:

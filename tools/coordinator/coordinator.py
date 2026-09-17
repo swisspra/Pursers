@@ -39,7 +39,7 @@ MAX_INTAKE_FINDING_CHARS = 4_000
 MAX_INTAKE_EVIDENCE_CHARS = 3_500
 MAX_STATE_CHARS = 5_000
 BUTLER_FINDING_KINDS = frozenset(
-    {"would_answer", "butler_queued", "butler_config_invalid"}
+    {"would_answer", "butler_queued", "butler_config_invalid", "butler_action"}
 )
 MAX_PRIVACY_COMMITS_PER_CYCLE = 1_000
 COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{7,64})(?![0-9a-fA-F])")

@@ -51,6 +51,9 @@ python3 tools/board-butler/board_butler.py \
   --cursor-file /PATH/TO/state/board-butler.cursor.json \
   --refresh-seconds 60 \
   --act-on-board pursers \
+  --active-action park_no_live_candidates \
+  --active-action refuse_incapable_target \
+  --action-hold-seconds 60 \
   --no-live-candidates-cycles 3 \
   --once --dry-run
 ```
@@ -61,6 +64,16 @@ registry is reported as ignored. Findings are still refreshed for every active
 registry board regardless of the acting set. After a mechanical action, the
 same cycle runs the real derivation again, so a newly parked ticket cannot
 remain reported as starved until a later event.
+
+The two operator-approved action classes form the default configured class set;
+repeat `--active-action` to narrow that set. Every intended action is first
+written durably to `coordinator_findings` with a release time and is shown in
+Fleet's **Waiting for you** surface. It cannot execute before
+`--action-hold-seconds` elapses, and `--veto-question BA-... --control-reason
+<reason>` changes the durable hold to `vetoed`. For a non-home board, run the
+control command with that board as `--home-board`. Adding another autonomous
+class requires adding it to the configured class set; decision questions do not
+become autonomous merely because the process is active.
 
 Without `--once`, the process waits in the journal/seat push stream for a
 coordinator-question cue, with a bounded timeout used to run the next registry

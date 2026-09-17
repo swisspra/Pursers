@@ -1464,6 +1464,50 @@ def test_mechanical_plan_refuses_incapable_target_and_names_identity() -> None:
     assert actions[0].reason == "capabilities.can_work is not true"
 
 
+def test_mechanical_action_registers_durable_vetoable_hold() -> None:
+    action = butler.MechanicalAction(
+        "park_no_live_candidates",
+        "fullplatts",
+        "TK-loop",
+        None,
+        None,
+        26,
+        "repeated no_live_candidates cycles and no live can_work=true seat",
+    )
+    finding = butler.mechanical_action_finding(action, NOW, 60)
+
+    assert finding["kind"] == "butler_action"
+    assert finding["action_class"] == "park_no_live_candidates"
+    assert finding["question_id"].startswith("BA-")
+    assert finding["hold"] == {
+        "status": "held",
+        "drafted_at": NOW.isoformat(),
+        "release_at": (NOW + butler.timedelta(seconds=60)).isoformat(),
+        "vetoable_until": (NOW + butler.timedelta(seconds=60)).isoformat(),
+        "veto_reason": None,
+    }
+    state = butler.veto_question(
+        {"findings": [finding]}, finding["question_id"], "operator veto", NOW
+    )
+    assert state["findings"][0]["hold"]["status"] == "vetoed"
+    assert butler.mechanical_hold_status(finding, NOW) == "held"
+    assert butler.mechanical_hold_status(
+        finding, NOW + butler.timedelta(seconds=60)
+    ) == "ready"
+    assert butler.mechanical_hold_status(state["findings"][0], NOW) == "vetoed"
+
+
+def test_mechanical_action_id_is_stable_across_reoffer_counts() -> None:
+    first = butler.MechanicalAction(
+        "park_no_live_candidates", "fullplatts", "TK-loop", None, None, 3, "reason"
+    )
+    later = butler.MechanicalAction(
+        "park_no_live_candidates", "fullplatts", "TK-loop", None, None, 26, "reason"
+    )
+
+    assert butler.mechanical_action_id(first) == butler.mechanical_action_id(later)
+
+
 def test_registry_refresh_runs_real_derivation_for_two_active_boards_twice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

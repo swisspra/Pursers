@@ -42,6 +42,11 @@ DEFAULT_VETO_COUNT = 3
 DEFAULT_VETO_WINDOW_S = 3_600
 DEFAULT_REFRESH_SECONDS = 60
 DEFAULT_NO_LIVE_CANDIDATES_CYCLES = 3
+DEFAULT_ACTION_HOLD_SECONDS = 60
+MECHANICAL_ACTION_CLASSES = (
+    "park_no_live_candidates",
+    "refuse_incapable_target",
+)
 MAX_FINDINGS = 50
 MAX_STATE_CHARS = 4_800
 QUESTION_EVENT = "coordinator_question_asked"
@@ -1098,7 +1103,13 @@ def merge_finding(
         for item in state.get("findings", [])
         if isinstance(item, Mapping)
         and not (
-            item.get("kind") in {"would_answer", "butler_queued", "butler_config_invalid"}
+            item.get("kind")
+            in {
+                "would_answer",
+                "butler_queued",
+                "butler_config_invalid",
+                "butler_action",
+            }
             and item.get("question_id") == finding.get("question_id")
         )
     ]
@@ -1398,6 +1409,74 @@ def _annotation_has_marker(ticket: Mapping[str, Any], marker: str) -> bool:
     )
 
 
+def mechanical_action_id(action: MechanicalAction) -> str:
+    material = json.dumps(
+        [
+            action.board_id,
+            action.ticket_id,
+            action.kind,
+            action.identity_id or action.identity_name,
+        ],
+        separators=(",", ":"),
+    )
+    return "BA-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+
+
+def mechanical_action_finding(
+    action: MechanicalAction, now: datetime, hold_seconds: int
+) -> dict[str, Any]:
+    action_id = mechanical_action_id(action)
+    release_at = now + timedelta(seconds=hold_seconds)
+    identity = action.identity_name or action.identity_id
+    message = (
+        f"Board butler intends to park {action.ticket_id} after "
+        f"{action.observed_cycles} no_live_candidates cycles because the board "
+        "has no live can_work=true seat."
+        if action.kind == "park_no_live_candidates"
+        else f"Board butler intends to refuse escalation target {identity} for "
+        f"{action.ticket_id} because {action.reason}."
+    )
+    return {
+        "kind": "butler_action",
+        "level": "warn",
+        "board_id": action.board_id,
+        "ticket_id": action.ticket_id,
+        "question_id": action_id,
+        "action_id": action_id,
+        "action_class": action.kind,
+        "verdict": Outcome.MECHANICAL.value,
+        "message": message,
+        "evidence": (
+            "source=Central board_snapshot+ticket_get; "
+            f"reason={action.reason}"
+        ),
+        "next_action": (
+            "Veto during the hold window or allow the configured mechanical "
+            "action to execute."
+        ),
+        "mode": "active-hold",
+        "observed_at": now.isoformat(),
+        "hold": {
+            "status": "held",
+            "drafted_at": now.isoformat(),
+            "release_at": release_at.isoformat(),
+            "vetoable_until": release_at.isoformat(),
+            "veto_reason": None,
+        },
+    }
+
+
+def mechanical_hold_status(finding: Mapping[str, Any], now: datetime) -> str:
+    hold = finding.get("hold")
+    if not isinstance(hold, Mapping):
+        return "invalid"
+    status = str(hold.get("status", "invalid"))
+    if status != "held":
+        return status
+    release_at = parse_time(hold.get("release_at"))
+    return "ready" if release_at is not None and release_at <= now else "held"
+
+
 def plan_mechanical_actions(
     board_id: str,
     snapshot: Mapping[str, Any],
@@ -1436,9 +1515,8 @@ def plan_mechanical_actions(
             continue
         ticket = full_tickets.get(ticket_id, {})
         marker_key = (ticket_id, target_id or target_name)
-        if marker_key in seen_refusals or _annotation_has_marker(
-            ticket, f"{REFUSAL_ANNOTATION_MARKER}:{target_id or target_name}"
-        ):
+        marker = f"{REFUSAL_ANNOTATION_MARKER}:{target_id or target_name}"
+        if marker_key in seen_refusals:
             continue
         seen_refusals.add(marker_key)
         reason = (
@@ -1455,13 +1533,18 @@ def plan_mechanical_actions(
                 target_id or None,
                 None,
                 reason,
+                not _annotation_has_marker(ticket, marker),
             )
         )
 
     if any(_capable_live_worker(agent, now) for agent in agents):
         return actions
     for ticket_id, ticket in sorted(full_tickets.items()):
-        if ticket.get("status") != "open" or ticket.get("parked") is True:
+        if ticket.get("status") != "open":
+            continue
+        if ticket.get("parked") is True and not _annotation_has_marker(
+            ticket, PARK_ANNOTATION_MARKER
+        ):
             continue
         cycles = _no_live_candidate_cycle_count(ticket)
         if cycles < no_live_candidates_cycles:
@@ -1701,12 +1784,13 @@ class CentralBackend:
                     f"{REFUSAL_ANNOTATION_MARKER}:"
                     f"{action.identity_id or action.identity_name or 'unknown'}"
                 )
-                await client.ticket_annotate(
-                    action.ticket_id,
-                    f"{marker} — refused escalation target {identity}: "
-                    f"{action.reason}; no assignment was performed.",
-                    kind="decision",
-                )
+                if action.annotation_required:
+                    await client.ticket_annotate(
+                        action.ticket_id,
+                        f"{marker} — refused escalation target {identity}: "
+                        f"{action.reason}; no assignment was performed.",
+                        kind="decision",
+                    )
                 return
             if action.kind != "park_no_live_candidates":
                 raise ValueError(f"unsupported board-butler action: {action.kind}")
@@ -1720,6 +1804,122 @@ class CentralBackend:
                     kind="decision",
                 )
             await client.ticket_update(action.ticket_id, parked=True)
+
+    async def _mechanical_hold_status(
+        self, action: MechanicalAction, now: datetime
+    ) -> str:
+        """Register a durable hold or return its current execution status."""
+        from pursers_client import BoardClient
+
+        action_id = mechanical_action_id(action)
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            action.board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities={
+                "can_work": False,
+                "can_review": False,
+                "tier_max": 0,
+                "max_parallel": 1,
+            },
+            allow_takeover=True,
+        ) as client:
+            try:
+                raw = await client.board_state_get(STATE_KEY)
+            except Exception as exc:
+                if "state key not found" not in str(exc).lower():
+                    raise
+                raw = {}
+            state, previous_value = _decode_state(raw)
+            existing = next(
+                (
+                    item
+                    for item in state.get("findings", [])
+                    if isinstance(item, Mapping)
+                    and item.get("kind") == "butler_action"
+                    and item.get("action_id") == action_id
+                ),
+                None,
+            )
+            if existing is None:
+                finding = mechanical_action_finding(
+                    action, now, self.args.action_hold_seconds
+                )
+                merged = merge_finding(state, finding, now)
+                expected = (
+                    hashlib.sha256(previous_value.encode("utf-8")).hexdigest()
+                    if previous_value is not None
+                    else None
+                )
+                await client.board_state_update(
+                    STATE_KEY,
+                    json.dumps(merged, sort_keys=True, separators=(",", ":")),
+                    expected_sha256=expected,
+                )
+                return "registered"
+            return mechanical_hold_status(existing, now)
+
+    async def _mark_mechanical_hold_executed(
+        self, action: MechanicalAction, now: datetime
+    ) -> None:
+        from pursers_client import BoardClient
+
+        action_id = mechanical_action_id(action)
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            action.board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities={
+                "can_work": False,
+                "can_review": False,
+                "tier_max": 0,
+                "max_parallel": 1,
+            },
+            allow_takeover=True,
+        ) as client:
+            raw = await client.board_state_get(STATE_KEY)
+            state, previous_value = _decode_state(raw)
+            rows = [
+                dict(item)
+                for item in state.get("findings", [])
+                if isinstance(item, Mapping)
+            ]
+            selected = next(
+                (
+                    item
+                    for item in rows
+                    if item.get("kind") == "butler_action"
+                    and item.get("action_id") == action_id
+                ),
+                None,
+            )
+            if selected is None:
+                raise RuntimeError(f"durable action hold disappeared: {action_id}")
+            hold = dict(selected.get("hold", {}))
+            if hold.get("status") != "held":
+                raise RuntimeError(f"action hold is no longer executable: {action_id}")
+            hold["status"] = "executed"
+            hold["executed_at"] = now.isoformat()
+            selected["hold"] = hold
+            state["findings"] = rows
+            state["generated_at"] = now.isoformat()
+            encoded = json.dumps(
+                _bound_control_state(state, preserve_question_id=action_id),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected = (
+                hashlib.sha256(previous_value.encode("utf-8")).hexdigest()
+                if previous_value is not None
+                else None
+            )
+            await client.board_state_update(
+                STATE_KEY, encoded, expected_sha256=expected
+            )
 
     async def refresh_registry_findings(self, now: datetime) -> dict[str, Any]:
         """Act only on opted-in boards, then run coordinator's real derivation."""
@@ -1760,8 +1960,13 @@ class CentralBackend:
                     ),
                 )
                 for action in board_actions:
-                    await self._execute_mechanical_action(action)
-                actions.extend(board_actions)
+                    if action.kind not in self.args.active_action:
+                        continue
+                    hold_status = await self._mechanical_hold_status(action, now)
+                    if hold_status == "ready":
+                        await self._execute_mechanical_action(action)
+                        await self._mark_mechanical_hold_executed(action, now)
+                        actions.append(action)
 
         coordinator_args = coordinator["parse_args"](
             [
@@ -2002,6 +2207,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_NO_LIVE_CANDIDATES_CYCLES,
     )
+    parser.add_argument(
+        "--active-action",
+        action="append",
+        choices=MECHANICAL_ACTION_CLASSES,
+        help=(
+            "enabled autonomous action class; repeat to configure the acting "
+            "set (defaults to the two operator-approved mechanical classes)"
+        ),
+    )
+    parser.add_argument(
+        "--action-hold-seconds",
+        type=int,
+        default=DEFAULT_ACTION_HOLD_SECONDS,
+        help="veto window before an enabled mechanical action can execute",
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     controls = parser.add_mutually_exclusive_group()
@@ -2027,6 +2247,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--refresh-seconds must be between 10 and 60")
     if not 1 <= args.no_live_candidates_cycles <= 50:
         parser.error("--no-live-candidates-cycles must be between 1 and 50")
+    if not 1 <= args.action_hold_seconds <= 86_400:
+        parser.error("--action-hold-seconds must be between 1 and 86400")
+    if args.active_action is None:
+        args.active_action = list(MECHANICAL_ACTION_CLASSES)
     if any(not value.strip() for value in args.act_on_board):
         parser.error("--act-on-board values must be non-empty")
     if (args.kill_switch or args.veto_question) and args.dry_run:
