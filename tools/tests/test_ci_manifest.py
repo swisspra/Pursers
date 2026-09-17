@@ -6,6 +6,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,12 +14,17 @@ TOOLS = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = TOOLS.parent
 sys.path.insert(0, str(TOOLS))
 
+import ci_manifest  # noqa: E402
 from ci_manifest import (  # noqa: E402
     SUITES,
     Suite,
+    changed_paths_since,
     covering_suites,
+    inspect_integration_files,
     parse_collected_count,
+    print_seat_digest_report,
     pytest_target,
+    run_seat_suites,
     suite_environment,
     validate_integration_files,
     validate_manifest,
@@ -47,8 +53,73 @@ def test_integration_files_manifest_rejects_a_stale_entry(tmp_path: Path) -> Non
     validate_integration_files(tmp_path, Path("INTEGRATION_FILES.sha256"))
     manifest.write_text(f"{'0' * 64}  tracked.txt\n", encoding="utf-8")
 
+    state = inspect_integration_files(tmp_path, Path("INTEGRATION_FILES.sha256"))
+    assert state.valid is False
+    assert state.stale_files == ("tracked.txt",)
+
     with pytest.raises(ValueError, match=r"stale_files=\['tracked.txt'\]"):
         validate_integration_files(tmp_path, Path("INTEGRATION_FILES.sha256"))
+
+
+def test_seat_digest_report_lists_changed_manifest_paths(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("current\n", encoding="utf-8")
+    manifest = tmp_path / "tools/aionui-extension/INTEGRATION_FILES.sha256"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        "48aa6cae8c70abdb28631d22b316e6d9f9d0768ec2911de7090e248b2afe6ca1"
+        "  tracked.txt\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "fixture",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    tracked.write_text("changed\n", encoding="utf-8")
+
+    assert changed_paths_since(tmp_path, "HEAD") == ("tracked.txt",)
+    print_seat_digest_report(tmp_path, "HEAD")
+
+    output = capsys.readouterr().out
+    assert "SEAT SUITE REPORT (NOT A RELEASE/CI GATE)" in output
+    assert "integration_digest_status=stale" in output
+    assert "integration_digest_stale_files=['tracked.txt']" in output
+    assert "integration_base_ref=HEAD" in output
+    assert "integration_listed_files_changed=['tracked.txt']" in output
+    assert "release_gate_command=python3 tools/ci_manifest.py run" in output
+
+
+def test_seat_suite_report_runs_every_suite_and_keeps_digest_test_separate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suites = (
+        Suite("release-tools", "tools/tests"),
+        Suite("next", "packages/next/tests"),
+    )
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        return SimpleNamespace(returncode=1 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(ci_manifest.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match="release-tools .* exit=1"):
+        run_seat_suites(tmp_path, suites=suites)
+
+    assert len(calls) == 2
+    assert calls[0][-2:] == [
+        "-k", "not test_integration_files_manifest_matches_the_tree"
+    ]
+    assert "-k" not in calls[1]
 
 
 def test_central_suite_covers_board_move_regression() -> None:
