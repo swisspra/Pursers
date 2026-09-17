@@ -8,10 +8,11 @@ The target set is the 77 ticket IDs whose remote branches begin with `codex/`, `
 
 Verdicts are conservative: `LANDED ELSEWHERE` requires an identified main carrier, patch equivalence, or content identity; `SUPERSEDED` requires a named replacement; `STRANDED` requires approved content absent from main with no located replacement. Everything else is `UNKNOWN`.
 
-Exact audit command:
+Exact audit command shape, with machine-local credential, CA, cache, and output
+locations replaced by required repository-safe placeholders:
 
 ```sh
-TMPDIR=$HOME/.cache/mong1-worker-6/TK-45deda68383f/tmp python3 tools/branch_audit.py --central-url https://127.0.0.1:8766/mcp --token-file $HOME/.codex-mong1/pursers/secrets/worker-3.jwt --ca-file $HOME/Desktop/Claude/Claude-tech-default/onboard-cutover/.private-arm/tls/ca.pem --board pursers --json-out $HOME/.cache/mong1-worker-6/TK-45deda68383f/branch-audit.json
+TMPDIR=/PATH/TO/SEAT_CACHE/TK-45deda68383f/tmp python3 tools/branch_audit.py --central-url https://127.0.0.1:8766/mcp --token-file /PATH/TO/WORKER_TOKEN --ca-file /PATH/TO/CA.pem --board pursers --json-out /PATH/TO/BRANCH_AUDIT.json
 ```
 
 Literal summary output:
@@ -47,10 +48,13 @@ DATE                       STATUS       TICKET             BRANCH
 2026-09-06T00:08:17+07:00  canceled     TK-c2667af0de29    codex/TK-c2667af0de29
 2026-09-06T01:58:28+07:00  closed       TK-b53f73288142    goose/TK-b53f73288142
 
-JSON: $HOME/.cache/mong1-worker-6/TK-45deda68383f/branch-audit.json
+JSON: /PATH/TO/BRANCH_AUDIT.json
 ```
 
-All command output above is literal except that the final private JSON path is normalized to `$HOME` to comply with the repository's no-home-path rule. The document contains no credentials.
+The non-sensitive tool output above is literal. The final private JSON location is
+the sole redaction and uses the same `/PATH/TO/BRANCH_AUDIT.json` placeholder as
+the command. The document contains no credential, personal, home, or host-specific
+path.
 
 ## Checklist
 
