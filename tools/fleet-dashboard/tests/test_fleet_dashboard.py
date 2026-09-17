@@ -9773,6 +9773,13 @@ def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
     assert clean("secret= \t") == "secret= \t[REDACTED]"
     # Lines without a sensitive keyword are untouched.
     assert clean("plain = value") == "plain = value"
+    assert clean("https://operator:s3cret@example.test/path") == (
+        "https://operator:[REDACTED:URL_PASSWORD]@example.test/path"
+    )
+    jwt = ".".join(("eyJ" + "abcdefgh", "ijklmnop", "qrstuvwx"))
+    assert clean(jwt) == "[REDACTED JWT]"
+    assert clean("Bearer abcdefgh") == "Bearer [REDACTED]"
+    assert clean("release_status=healthy") == "release_status=healthy"
     # Multi-line input redacts per line.
     assert clean("alpha=1\nmy bearer: x\nbeta=2") == (
         "alpha=1\nmy bearer: [REDACTED]\nbeta=2"
@@ -9788,6 +9795,24 @@ def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
         assert clean(f"token:{ending}plain=x") == (
             f"token:[REDACTED]{ending}plain=x"
         )
+
+
+@pytest.mark.parametrize(
+    "adversarial",
+    [
+        "https://u:" + "p-" * 12_000,
+        "eyJ-" * 12_000,
+    ],
+    ids=["url-password-missing-at", "jwt-missing-segments"],
+)
+def test_clean_text_redaction_has_linear_budget(adversarial: str) -> None:
+    """Failed matches with many word boundaries must not cause quadratic retries."""
+    started = time.monotonic()
+    result = dashboard.SeatConfigManager._clean_text(adversarial)
+    elapsed = time.monotonic() - started
+
+    assert result == adversarial
+    assert elapsed < 0.2
 
 
 def _deployment_runbook_blocks() -> list[str]:

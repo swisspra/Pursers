@@ -195,6 +195,13 @@ def _default_butler_secrets_dir() -> Path:
 
 BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 CENTRAL_LABEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+URL_SCHEME_START_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\u0130\u0131\u017f\u212a"
+)
+URL_SCHEME_CHARS = URL_SCHEME_START_CHARS | frozenset("0123456789+.-")
+JWT_SEGMENT_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+)
 DASHBOARD_AGENT_NAME_RE = re.compile(
     r"^fleet-dashboard-session-[a-z0-9][a-z0-9-]{0,39}$"
 )
@@ -5865,18 +5872,144 @@ class SeatConfigManager:
         return "".join(redacted)
 
     @staticmethod
+    def _redact_url_passwords(value: str) -> str:
+        """Redact URL credentials with one forward pass over *value*."""
+        redacted: list[str] = []
+        emit_from = 0
+        cursor = 0
+        size = len(value)
+        while cursor < size:
+            if (
+                value[cursor] not in URL_SCHEME_START_CHARS
+                or (
+                    cursor > 0
+                    and (value[cursor - 1].isalnum() or value[cursor - 1] == "_")
+                )
+            ):
+                cursor += 1
+                continue
+
+            scheme_end = cursor + 1
+            while scheme_end < size and value[scheme_end] in URL_SCHEME_CHARS:
+                scheme_end += 1
+            if not value.startswith("://", scheme_end):
+                cursor = scheme_end
+                continue
+
+            username_start = scheme_end + 3
+            username_end = username_start
+            while (
+                username_end < size
+                and value[username_end] not in ":/@"
+                and not value[username_end].isspace()
+            ):
+                username_end += 1
+            if (
+                username_end == username_start
+                or username_end >= size
+                or value[username_end] != ":"
+            ):
+                cursor = username_end + 1
+                continue
+
+            password_start = username_end + 1
+            password_end = password_start
+            while (
+                password_end < size
+                and value[password_end] not in "/@"
+                and not value[password_end].isspace()
+            ):
+                password_end += 1
+            if (
+                password_end == password_start
+                or password_end >= size
+                or value[password_end] != "@"
+            ):
+                cursor = password_end + 1
+                continue
+
+            redacted.extend(
+                (
+                    value[emit_from:password_start],
+                    "[REDACTED:URL_PASSWORD]@",
+                )
+            )
+            emit_from = password_end + 1
+            cursor = emit_from
+        redacted.append(value[emit_from:])
+        return "".join(redacted)
+
+    @staticmethod
+    def _redact_jwts(value: str) -> str:
+        """Redact three-segment JWTs without retrying overlapping prefixes."""
+
+        def boundary(index: int) -> bool:
+            before = index > 0 and (
+                value[index - 1].isalnum() or value[index - 1] == "_"
+            )
+            after = index < size and (value[index].isalnum() or value[index] == "_")
+            return before != after
+
+        redacted: list[str] = []
+        emit_from = 0
+        cursor = 0
+        size = len(value)
+        while cursor < size:
+            if (
+                not value.startswith("eyJ", cursor)
+                or (
+                    cursor > 0
+                    and (value[cursor - 1].isalnum() or value[cursor - 1] == "_")
+                )
+            ):
+                cursor += 1
+                continue
+
+            first_start = cursor + 3
+            first_end = first_start
+            while first_end < size and value[first_end] in JWT_SEGMENT_CHARS:
+                first_end += 1
+            if (
+                first_end - first_start < 8
+                or first_end >= size
+                or value[first_end] != "."
+            ):
+                cursor = first_end + 1
+                continue
+
+            second_start = first_end + 1
+            second_end = second_start
+            while second_end < size and value[second_end] in JWT_SEGMENT_CHARS:
+                second_end += 1
+            if (
+                second_end - second_start < 8
+                or second_end >= size
+                or value[second_end] != "."
+            ):
+                cursor = second_end + 1
+                continue
+
+            third_start = second_end + 1
+            third_end = third_start
+            while third_end < size and value[third_end] in JWT_SEGMENT_CHARS:
+                third_end += 1
+            match_end = third_end
+            while match_end - third_start >= 8 and not boundary(match_end):
+                match_end -= 1
+            if match_end - third_start < 8:
+                cursor = third_end + 1
+                continue
+
+            redacted.extend((value[emit_from:cursor], "[REDACTED JWT]"))
+            emit_from = match_end
+            cursor = match_end
+        redacted.append(value[emit_from:])
+        return "".join(redacted)
+
+    @staticmethod
     def _clean_text(value: str) -> str:
-        value = re.sub(
-            r"\b([a-z][a-z0-9+.-]*://[^:\s/@]+):[^@\s/]+@",
-            r"\1:[REDACTED:URL_PASSWORD]@",
-            value,
-            flags=re.IGNORECASE,
-        )
-        value = re.sub(
-            r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
-            "[REDACTED JWT]",
-            value,
-        )
+        value = SeatConfigManager._redact_url_passwords(value)
+        value = SeatConfigManager._redact_jwts(value)
         value = re.sub(
             r"\bBearer[ \t]+[A-Za-z0-9._~+/=-]{8,}",
             "Bearer [REDACTED]",
