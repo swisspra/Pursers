@@ -1,4 +1,4 @@
-# On Board Personal Preview 5.0.0a1
+# On Board Personal Preview 5.0.0b2
 
 On Board Personal is a local board for one owner and multiple explicitly named
 agent clients. MCP Apps is the primary read-only UI; agent chat retains ticket,

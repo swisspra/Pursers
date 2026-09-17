@@ -1,0 +1,494 @@
+schema_version = 1
+inventory_sources = [
+  "origin/main@75b65ab5d1b4cfecf6b4bfeb77d2ef62ff5e1cd8",
+  "TK-fa014fd4bd88@515092d9327616c20f75f1d126fb64f4d2bf9314",
+  "TK-5f4211667ac2@11f1bdcc669630da6f103e70384211bc08f3b89c",
+]
+pending_inventory_source = "TK-8fab92aad829 had no remote branch when this manifest was prepared; its operator-verified fleet-launcher, TLS-server, and merge-gate findings are explicit external exemptions below."
+
+# `delivered` means the named channel is backed by checked-in evidence.
+# `exempt` is intentionally loud: it is the complete visible backlog of artifacts
+# that exist but do not yet have a repository-owned delivery path.
+
+[[artifacts]]
+id = "python-distribution:pursers"
+kind = "python-distribution"
+source = "packages/pursers/pyproject.toml"
+state = "delivered"
+channel = "PyPI trusted-publishing workflow"
+evidence = [".github/workflows/publish-pypi.yml"]
+evidence_contains = ["packages/pursers"]
+
+[[artifacts]]
+id = "python-distribution:pursers-central"
+kind = "python-distribution"
+source = "packages/central/pyproject.toml"
+state = "delivered"
+channel = "PyPI trusted-publishing workflow"
+evidence = [".github/workflows/publish-pypi.yml"]
+evidence_contains = ["packages/central"]
+
+[[artifacts]]
+id = "python-distribution:pursers-client"
+kind = "python-distribution"
+source = "packages/client/pyproject.toml"
+state = "delivered"
+channel = "PyPI trusted-publishing workflow"
+evidence = [".github/workflows/publish-pypi.yml"]
+evidence_contains = ["packages/client"]
+
+[[artifacts]]
+id = "python-distribution:pursers-personal"
+kind = "python-distribution"
+source = "packages/personal/pyproject.toml"
+state = "delivered"
+channel = "PyPI trusted-publishing workflow"
+evidence = [".github/workflows/publish-pypi.yml"]
+evidence_contains = ["packages/personal"]
+
+[[artifacts]]
+id = "python-distribution:pursers-personal-import"
+kind = "python-distribution"
+source = "packages/import/pyproject.toml"
+state = "delivered"
+channel = "PyPI trusted-publishing workflow"
+evidence = [".github/workflows/publish-pypi.yml"]
+evidence_contains = ["packages/import"]
+
+[[artifacts]]
+id = "python-distribution:pursers-wait-bridge"
+kind = "python-distribution"
+source = "tools/wait-bridge/pyproject.toml"
+state = "delivered"
+channel = "PyPI trusted-publishing workflow"
+evidence = [".github/workflows/publish-pypi.yml"]
+evidence_contains = ["tools/wait-bridge"]
+
+[[artifacts]]
+id = "python-distribution:pursers-acp"
+kind = "python-distribution"
+source = "tools/acp-agent/pyproject.toml"
+state = "exempt"
+reason = "Declared and tested, but absent from release_versions.toml and every publish workflow; PyPI returned 404 in TK-5f4211667ac2 fix1 at 11f1bdcc669630da6f103e70384211bc08f3b89c."
+
+[[artifacts]]
+id = "node-application:pursers-dashboard-ui"
+kind = "node-application"
+source = "tools/dashboard-ui/package.json"
+state = "delivered"
+channel = "built into the pursers-personal wheel"
+evidence = ["tools/dashboard-ui/README.md", "packages/personal/pyproject.toml"]
+evidence_contains = ["packages/personal/src/pursers_personal/resources/dashboard.html", "resources/*"]
+
+[[artifacts]]
+id = "host-extension:pursers"
+kind = "host-extension"
+source = "tools/aionui-extension/aion-extension.json"
+state = "exempt"
+reason = "The deterministic extension ZIP has no checked-in release or installation channel; the GitHub release workflow uploads wheels only."
+
+[[artifacts]]
+id = "web-surface:packages/personal/src/pursers_personal/resources/dashboard.html"
+kind = "web-surface"
+source = "packages/personal/src/pursers_personal/resources/dashboard.html"
+state = "delivered"
+channel = "pursers-personal package data in the PyPI wheel"
+evidence = ["packages/personal/pyproject.toml", ".github/workflows/publish-pypi.yml"]
+evidence_contains = ["resources/*", "packages/personal"]
+
+[[artifacts]]
+id = "web-surface:tools/dashboard-ui/dashboard-entry.html"
+kind = "web-surface"
+source = "tools/dashboard-ui/dashboard-entry.html"
+state = "delivered"
+channel = "dashboard build copied into pursers-personal package data"
+evidence = ["tools/dashboard-ui/README.md", "tools/dashboard-ui/package.json"]
+evidence_contains = ["dashboard-entry.html", "packages/personal/src/pursers_personal/resources/dashboard.html"]
+
+[[artifacts]]
+id = "web-surface:tools/aionui-extension/webui/index.html"
+kind = "web-surface"
+source = "tools/aionui-extension/webui/index.html"
+state = "exempt"
+reason = "This surface is inside the undelivered AionUi extension ZIP and therefore has no independent user delivery channel."
+
+[[artifacts]]
+id = "web-surface:website/index.html"
+kind = "web-surface"
+source = "website/index.html"
+state = "exempt"
+reason = "website/deploy/pages.yml is explicitly draft-only and no checked-in workflow deploys website/, so the public site cannot update from this repository."
+
+[[artifacts]]
+id = "web-surface:fleet-dashboard"
+kind = "web-surface"
+source = "tools/fleet-dashboard/fleet_dashboard.py"
+state = "exempt"
+reason = "The dashboard has no repository-owned install or restart channel; the running launcher and service definition remain operator-local."
+
+[[artifacts]]
+id = "release-artifact:aionui-extension-zip"
+kind = "release-artifact"
+source = "tools/aionui-extension/build.py"
+state = "exempt"
+reason = "The release workflow does not build or upload pursers-aionui-0.1.0.zip, as recorded by the release-artifact audit."
+
+[[artifacts]]
+id = "release-artifact:home-runtime-wheelhouse"
+kind = "release-artifact"
+source = "tools/build_home_runtime_wheelhouse.py"
+state = "exempt"
+reason = "The release workflow does not build or upload the Home runtime wheelhouse archive and manifest."
+
+# Source-invoked operator tools have a delivery channel only when a checked-in
+# operator/developer runbook names the command. Undocumented tools are explicit
+# exemptions, never silently treated as delivered because they are on main.
+
+[[artifacts]]
+id = "operator-tool:tools/acp-seat/pursers_acp_seat.py"
+kind = "operator-tool"
+source = "tools/acp-seat/pursers_acp_seat.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["tools/acp-seat/README.md"]
+evidence_contains = ["tools/acp-seat/pursers_acp_seat.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/ado-connector/connector.py"
+kind = "operator-tool"
+source = "tools/ado-connector/connector.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["tools/ado-connector/README.md"]
+evidence_contains = ["tools/ado-connector/connector.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/aionui-extension/build.py"
+kind = "operator-tool"
+source = "tools/aionui-extension/build.py"
+state = "delivered"
+channel = "documented deterministic build command"
+evidence = ["tools/aionui-extension/README.md"]
+evidence_contains = ["tools/aionui-extension/build.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/board-butler/board_butler.py"
+kind = "operator-tool"
+source = "tools/board-butler/board_butler.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["tools/board-butler/README.md"]
+evidence_contains = ["tools/board-butler/board_butler.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/board_move/board_move.py"
+kind = "operator-tool"
+source = "tools/board_move/board_move.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["tools/board_move/README.md"]
+evidence_contains = ["tools/board_move/board_move.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/branch_audit.py"
+kind = "operator-tool"
+source = "tools/branch_audit.py"
+state = "delivered"
+channel = "documented branch-audit runbook"
+evidence = ["docs/operations/branch-pruning.md"]
+evidence_contains = ["tools/branch_audit.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/build_home_runtime_wheelhouse.py"
+kind = "operator-tool"
+source = "tools/build_home_runtime_wheelhouse.py"
+state = "delivered"
+channel = "documented release-train command"
+evidence = ["docs/release-train.md"]
+evidence_contains = ["tools/build_home_runtime_wheelhouse.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/central_scaffold.py"
+kind = "operator-tool"
+source = "tools/central_scaffold.py"
+state = "delivered"
+channel = "documented O1 readiness command"
+evidence = ["docs/operations/o1-readiness.md"]
+evidence_contains = ["tools/central_scaffold.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/check_delivery_manifest.py"
+kind = "operator-tool"
+source = "tools/check_delivery_manifest.py"
+state = "delivered"
+channel = "mandatory CI gate"
+evidence = [".github/workflows/ci.yml"]
+evidence_contains = ["tools/check_delivery_manifest.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/ci_manifest.py"
+kind = "operator-tool"
+source = "tools/ci_manifest.py"
+state = "delivered"
+channel = "mandatory CI gate and contributor workflow"
+evidence = [".github/workflows/ci.yml", "CONTRIBUTING.md"]
+evidence_contains = ["tools/ci_manifest.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/coordinator/coordinator.py"
+kind = "operator-tool"
+source = "tools/coordinator/coordinator.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["tools/coordinator/README.md"]
+evidence_contains = ["tools/coordinator/coordinator.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/coordinator/simulate.py"
+kind = "operator-tool"
+source = "tools/coordinator/simulate.py"
+state = "exempt"
+reason = "Simulation helper has no packaged entry point or checked-in operator runbook that delivers it to an operator."
+
+[[artifacts]]
+id = "operator-tool:tools/fleet-dashboard/fleet_dashboard.py"
+kind = "operator-tool"
+source = "tools/fleet-dashboard/fleet_dashboard.py"
+state = "exempt"
+reason = "Documented source exists, but the installed launcher and service channel are operator-local and absent from the repository."
+
+[[artifacts]]
+id = "operator-tool:tools/fleet-dashboard/seat_config.py"
+kind = "operator-tool"
+source = "tools/fleet-dashboard/seat_config.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["tools/fleet-dashboard/README.md"]
+evidence_contains = ["seat_config.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/home_acceptance_handoff.py"
+kind = "operator-tool"
+source = "tools/home_acceptance_handoff.py"
+state = "delivered"
+channel = "documented acceptance handoff command"
+evidence = ["docs/design-home/acceptance-sandbox-handoff.md"]
+evidence_contains = ["tools/home_acceptance_handoff.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/leak_scan.py"
+kind = "operator-tool"
+source = "tools/leak_scan.py"
+state = "delivered"
+channel = "mandatory CI gate"
+evidence = [".github/workflows/ci.yml"]
+evidence_contains = ["tools/leak_scan.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/o1_cutover.py"
+kind = "operator-tool"
+source = "tools/o1_cutover.py"
+state = "delivered"
+channel = "documented O1 cutover runbook"
+evidence = ["docs/release/next-train-ship-plan.md"]
+evidence_contains = ["tools/o1_cutover.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/prune_branches.py"
+kind = "operator-tool"
+source = "tools/prune_branches.py"
+state = "delivered"
+channel = "documented branch-pruning runbook"
+evidence = ["docs/operations/branch-pruning.md"]
+evidence_contains = ["tools/prune_branches.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/regenerate_component_lock.py"
+kind = "operator-tool"
+source = "tools/regenerate_component_lock.py"
+state = "delivered"
+channel = "documented release-train command"
+evidence = ["docs/release/next-train-ship-plan.md"]
+evidence_contains = ["tools/regenerate_component_lock.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/release_notes.py"
+kind = "operator-tool"
+source = "tools/release_notes.py"
+state = "delivered"
+channel = "GitHub release workflow"
+evidence = [".github/workflows/release.yml"]
+evidence_contains = ["tools/release_notes.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/release_publish.py"
+kind = "operator-tool"
+source = "tools/release_publish.py"
+state = "delivered"
+channel = "GitHub release workflow"
+evidence = [".github/workflows/release.yml"]
+evidence_contains = ["tools/release_publish.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/release_train.py"
+kind = "operator-tool"
+source = "tools/release_train.py"
+state = "delivered"
+channel = "mandatory CI release-version gate"
+evidence = [".github/workflows/ci.yml"]
+evidence_contains = ["tools/release_train.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/release_versions.py"
+kind = "operator-tool"
+source = "tools/release_versions.py"
+state = "delivered"
+channel = "documented release support module"
+evidence = ["docs/release/next-train-ship-plan.md"]
+evidence_contains = ["tools/release_versions.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/seat-kit/seat_new.py"
+kind = "operator-tool"
+source = "tools/seat-kit/seat_new.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["tools/seat-kit/README.md"]
+evidence_contains = ["tools/seat-kit/seat_new.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/verify_publish_wheels.py"
+kind = "operator-tool"
+source = "tools/verify_publish_wheels.py"
+state = "delivered"
+channel = "PyPI trusted-publishing workflow"
+evidence = [".github/workflows/publish-pypi.yml"]
+evidence_contains = ["tools/verify_publish_wheels.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/wait-bridge/door_admin.py"
+kind = "operator-tool"
+source = "tools/wait-bridge/door_admin.py"
+state = "delivered"
+channel = "pursers-door console entry point in PyPI wheel"
+evidence = ["tools/wait-bridge/pyproject.toml"]
+evidence_contains = ["pursers-door", "door_admin:main"]
+
+[[artifacts]]
+id = "operator-tool:tools/wait-bridge/pursers_wait_server.py"
+kind = "operator-tool"
+source = "tools/wait-bridge/pursers_wait_server.py"
+state = "delivered"
+channel = "pursers-wait-bridge console entry point in PyPI wheel"
+evidence = ["tools/wait-bridge/pyproject.toml"]
+evidence_contains = ["pursers-wait-bridge", "pursers_wait_server:main"]
+
+[[artifacts]]
+id = "operator-tool:tools/wait-bridge/registry_admin.py"
+kind = "operator-tool"
+source = "tools/wait-bridge/registry_admin.py"
+state = "delivered"
+channel = "documented installed-module command"
+evidence = ["tools/wait-bridge/README.md", "tools/wait-bridge/pyproject.toml"]
+evidence_contains = ["registry_admin.py", "registry_admin"]
+
+[[artifacts]]
+id = "operator-tool:tools/wait-bridge/registry_doctor.py"
+kind = "operator-tool"
+source = "tools/wait-bridge/registry_doctor.py"
+state = "delivered"
+channel = "documented installed module"
+evidence = ["tools/wait-bridge/README.md", "tools/wait-bridge/pyproject.toml"]
+evidence_contains = ["registry_doctor.py", "registry_doctor"]
+
+[[artifacts]]
+id = "operator-tool:tools/wait-bridge/seat_admin.py"
+kind = "operator-tool"
+source = "tools/wait-bridge/seat_admin.py"
+state = "delivered"
+channel = "documented installed-module command"
+evidence = ["tools/wait-bridge/README.md", "tools/wait-bridge/pyproject.toml"]
+evidence_contains = ["seat_admin.py", "seat_admin"]
+
+[[artifacts]]
+id = "operator-tool:tools/wait-bridge/seat_lifecycle.py"
+kind = "operator-tool"
+source = "tools/wait-bridge/seat_lifecycle.py"
+state = "delivered"
+channel = "module bundled in the published wait-bridge wheel"
+evidence = ["tools/wait-bridge/pyproject.toml"]
+evidence_contains = ["seat_lifecycle"]
+
+[[artifacts]]
+id = "operator-tool:tools/wait-bridge/seed_project_registry.py"
+kind = "operator-tool"
+source = "tools/wait-bridge/seed_project_registry.py"
+state = "delivered"
+channel = "documented installed-module command"
+evidence = ["tools/wait-bridge/README.md", "tools/wait-bridge/pyproject.toml"]
+evidence_contains = ["seed_project_registry.py", "seed_project_registry"]
+
+[[artifacts]]
+id = "operator-tool:tools/wait-bridge/team_lifecycle.py"
+kind = "operator-tool"
+source = "tools/wait-bridge/team_lifecycle.py"
+state = "delivered"
+channel = "module bundled in the published wait-bridge wheel"
+evidence = ["tools/wait-bridge/pyproject.toml"]
+evidence_contains = ["team_lifecycle"]
+
+[[artifacts]]
+id = "operator-tool:tools/wait-bridge/ticket_lifecycle.py"
+kind = "operator-tool"
+source = "tools/wait-bridge/ticket_lifecycle.py"
+state = "delivered"
+channel = "module bundled in the published wait-bridge wheel"
+evidence = ["tools/wait-bridge/pyproject.toml"]
+evidence_contains = ["ticket_lifecycle"]
+
+[[artifacts]]
+id = "operator-tool:tools/worker-runtime/pursers_worker.py"
+kind = "operator-tool"
+source = "tools/worker-runtime/pursers_worker.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["tools/worker-runtime/README.md"]
+evidence_contains = ["tools/worker-runtime/pursers_worker.py"]
+
+[[artifacts]]
+id = "external:fleet-dashboard-launcher"
+kind = "external-dependency"
+source = "external"
+state = "exempt"
+reason = "The installed fleet launcher and launchd definition live outside the repository, so merged dashboard changes cannot be delivered automatically."
+
+[[artifacts]]
+id = "external:legacy-tls-server"
+kind = "external-dependency"
+source = "external"
+state = "exempt"
+reason = "The predecessor TLS server is operator-local and absent from the repository; current packaged Central intentionally serves loopback HTTP."
+
+[[artifacts]]
+id = "external:merge-gate-regenerator"
+kind = "external-dependency"
+source = "external"
+state = "exempt"
+reason = "The operator-side merge-gate regeneration wrapper is not tracked, so CI cannot inspect or deliver the exact invoked wrapper."
+
+[[version_surfaces]]
+path = "README.md"
+version_key = "product"
+prefix = "main: <code>"
+
+[[version_surfaces]]
+path = "website/index.html"
+version_key = "product"
+prefix = "Beta v"
+reject_other_product_versions = true
+
+[[version_surfaces]]
+path = "packages/personal/README.md"
+version_key = "product"
+prefix = "# On Board Personal Preview "
+reject_other_product_versions = true

@@ -127,6 +127,7 @@ jobs:
           set -euo pipefail
           uv run --isolated --project packages/central python -c \
             'import importlib.metadata as m; import pursers_central.central; print("isolated-central-import=pass client=" + m.version("pursers-client"))'
+          python tools/check_delivery_manifest.py
           python tools/release_train.py check
           python tools/ci_manifest.py check
           python tools/ci_manifest.py collect --output .ci/collection-counts.json
