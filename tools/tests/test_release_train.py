@@ -76,22 +76,23 @@ def test_component_only_bump_rewrites_and_checks_every_cohort_document(
 ) -> None:
     root = _fixture_repository(tmp_path)
     current = load_versions(root / "tools/release_versions.toml")
+    next_central = release_train._alpha_next(current.packages["central"])
     target = release_train.bumped_versions(
         current,
-        ("central=0.1.0a31",),
+        (f"central={next_central}",),
         None,
     )
 
     before = release_train.check(root, target)
     assert {
-        f"{relative}: missing bound central version 0.1.0a31"
+        f"{relative}: missing bound central version {next_central}"
         for relative in release_train.COHORT_VERSION_FILES
     } <= set(before)
 
     planned = release_train.plan_bump(root, current, target)
     for relative in release_train.COHORT_VERSION_FILES:
         path = root / relative
-        assert "0.1.0a31" in planned[path]
+        assert next_central in planned[path]
         assert current.product in planned[path]
     for path, content in planned.items():
         path.write_text(content, encoding="utf-8")
@@ -146,9 +147,11 @@ def test_component_only_bump_preserves_whats_new_release_history(
 ) -> None:
     root = _fixture_repository(tmp_path)
     current = load_versions(root / "tools/release_versions.toml")
+    current_central = current.packages["central"]
+    next_central = release_train._alpha_next(current_central)
     target = release_train.bumped_versions(
         current,
-        ("central=0.1.0a31",),
+        (f"central={next_central}",),
         None,
     )
     path = root / "docs-local/whats-new.html"
@@ -163,11 +166,11 @@ def test_component_only_bump_preserves_whats_new_release_history(
         planned,
     )
 
-    assert "0.1.0a30" in original_current
-    assert "0.1.0a31" in planned_current
-    assert "0.1.0a30" not in planned_current
+    assert current_central in original_current
+    assert next_central in planned_current
+    assert current_central not in planned_current
     assert planned_history == original_history
-    assert "<h3>5.0.0b1 · 2026-09-11</h3>" in planned_history
+    assert current.product in planned_history
 
 
 def test_wait_bridge_only_bump_uses_manifest_derived_cohort_keys(
@@ -175,9 +178,11 @@ def test_wait_bridge_only_bump_uses_manifest_derived_cohort_keys(
 ) -> None:
     root = _fixture_repository(tmp_path)
     current = load_versions(root / "tools/release_versions.toml")
+    current_wait_bridge = current.packages["wait_bridge"]
+    next_wait_bridge = release_train._alpha_next(current_wait_bridge)
     target = release_train.bumped_versions(
         current,
-        ("wait_bridge=0.1.0a17",),
+        (f"wait_bridge={next_wait_bridge}",),
         None,
     )
 
@@ -188,8 +193,8 @@ def test_wait_bridge_only_bump_uses_manifest_derived_cohort_keys(
             relative,
             planned[root / relative],
         )
-        assert "0.1.0a17" in current_region
-        assert "0.1.0a16" not in current_region
+        assert next_wait_bridge in current_region
+        assert current_wait_bridge not in current_region
 
 
 def test_next_patch_alpha_advances_every_component() -> None:
