@@ -1249,7 +1249,10 @@ def record_draft_evaluation(
     status = (
         "produced"
         if finding.get("kind") == "would_answer"
-        and finding.get("verdict") == Outcome.MECHANICAL.value
+        and (
+            finding.get("verdict") == Outcome.MECHANICAL.value
+            or finding.get("draft_source") == "configured_provider"
+        )
         else "declined"
     )
     row = {

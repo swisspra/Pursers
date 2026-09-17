@@ -45,7 +45,7 @@ class Source:
             principal_id="PR-butler",
         )
         self.evaluation_writes = 0
-        self.evaluation_value: str | None = None
+        self.evaluation_values: dict[str, str] = {}
 
     async def ticket_get(self, ticket_id: str) -> Mapping[str, Any]:
         return {"ticket": self.tickets[ticket_id]}
@@ -56,16 +56,17 @@ class Source:
     async def answered_questions(self) -> list[dict[str, Any]]:
         return self.answered
 
-    async def evaluation(self, _question_id: str) -> Mapping[str, Any]:
-        if self.evaluation_value is None:
+    async def evaluation(self, question_id: str) -> Mapping[str, Any]:
+        value = self.evaluation_values.get(question_id)
+        if value is None:
             return {}
-        return {"state": {"value": self.evaluation_value}}
+        return {"state": {"value": value}}
 
     async def write_evaluation(
-        self, _question_id: str, value: str, _expected: str | None
+        self, question_id: str, value: str, _expected: str | None
     ) -> None:
         self.evaluation_writes += 1
-        self.evaluation_value = value
+        self.evaluation_values[question_id] = value
 
 
 def question(message: str, *, kind: str = "information") -> dict[str, str]:
@@ -955,7 +956,7 @@ def test_duplicate_question_is_idempotent_and_does_not_write(tmp_path: Path) -> 
             self.writes += 1
 
     backend = Backend()
-    backend.evaluation_value = json.dumps(
+    backend.evaluation_values["CQ-source"] = json.dumps(
         {
             "schema_version": 1,
             "evaluation": {

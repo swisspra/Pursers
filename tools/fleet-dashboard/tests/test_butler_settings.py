@@ -278,7 +278,13 @@ def test_save_then_next_cycle_uses_custom_non_vendor_draft_contract(
 
         class Backend:
             project_name = "Pursers"
+            identity = SimpleNamespace(
+                agent_id="AI-butler",
+                agent_name="board-butler-test",
+                principal_id="PR-butler",
+            )
             written: dict[str, Any] | None = None
+            evaluation_written: dict[str, Any] | None = None
 
             async def findings(self) -> Mapping[str, Any]:
                 return {}
@@ -286,10 +292,21 @@ def test_save_then_next_cycle_uses_custom_non_vendor_draft_contract(
             async def coordinator_config(self) -> Mapping[str, Any]:
                 return saved["config"]
 
+            async def evaluation(self, _question_id: str) -> Mapping[str, Any]:
+                return {}
+
             async def write_findings(
                 self, value: str, _expected: str | None
             ) -> None:
                 self.written = json.loads(value)
+
+            async def write_evaluation(
+                self,
+                _question_id: str,
+                value: str,
+                _expected: str | None,
+            ) -> None:
+                self.evaluation_written = json.loads(value)
 
         backend = Backend()
         finding = asyncio.run(
@@ -336,8 +353,13 @@ def test_save_then_next_cycle_uses_custom_non_vendor_draft_contract(
     )
     assert finding["message"] == "custom provider shadow draft"
     assert finding["draft_source"] == "configured_provider"
+    assert backend.evaluation_written is not None
+    assert backend.evaluation_written["evaluation"]["question_id"] == "CQ-provider"
+    assert backend.evaluation_written["evaluation"]["ticket_id"] == "TK-provider"
+    assert backend.evaluation_written["evaluation"]["draft_status"] == "produced"
     assert secret not in json.dumps(saved["config"])
     assert secret not in json.dumps(backend.written)
+    assert secret not in json.dumps(backend.evaluation_written)
     assert secret not in json.dumps(finding)
 
 
