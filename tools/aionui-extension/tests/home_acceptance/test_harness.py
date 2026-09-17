@@ -1776,6 +1776,76 @@ def test_marker_only_suite_receipts_do_not_replace_independent_execution(
         )
 
 
+def test_candidate_diff_check_resolves_pull_request_head_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    def git(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=repository,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    git("init")
+    git("config", "user.name", "Harness Test")
+    git("config", "user.email", "harness@example.invalid")
+    (repository / "root.txt").write_text("root\n", encoding="utf-8")
+    git("add", "root.txt")
+    git("commit", "-m", "root")
+    git("branch", "stale-base")
+
+    (repository / "existing.txt").write_text("existing whitespace  \n", encoding="utf-8")
+    git("add", "existing.txt")
+    git("commit", "-m", "existing base change")
+    (repository / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+    git("add", "candidate.txt")
+    git("commit", "-m", "candidate")
+    candidate_commit = git("rev-parse", "HEAD").stdout.strip()
+
+    git("switch", "stale-base")
+    git("merge", "--no-ff", candidate_commit, "-m", "synthetic pull request merge")
+    merge_commit = git("rev-parse", "HEAD").stdout.strip()
+    naive = subprocess.run(
+        ["git", "diff", "--check", f"{merge_commit}^", merge_commit],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert naive.returncode != 0
+    assert "existing.txt" in naive.stdout
+
+    event = tmp_path / "event.json"
+    event.write_text(
+        json.dumps({"pull_request": {"head": {"sha": candidate_commit}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setenv("GITHUB_SHA", merge_commit)
+    with patch.object(harness_module, "REPOSITORY_ROOT", repository):
+        harness_module._execute_required_suite(
+            "candidate-diff-check", "git diff --check", merge_commit
+        )
+        monkeypatch.delenv("GITHUB_EVENT_PATH")
+        harness_module._execute_required_suite(
+            "candidate-diff-check", "git diff --check", merge_commit
+        )
+
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        with pytest.raises(
+            AcceptanceError, match="independent suite execution failed"
+        ):
+            harness_module._execute_required_suite(
+                "candidate-diff-check", "git diff --check", merge_commit
+            )
+
+
 def test_nonexistent_candidate_commit_is_rejected(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
