@@ -429,7 +429,7 @@ arguments, or an attestation from a separately launched Personal process fails.
   owns installation, authenticated API calls, browser capture, nonce generation,
   HMAC verification, and the final verdict.
 - Rebuild and rederive all candidate values from the independently approved
-  final SHA; do not reuse the working `0.1.0`, 26-entry inventory, or source
+  final SHA; do not reuse the working `0.1.0`, 27-entry inventory, or source
   digest if the final tree differs.
 - Verify the actual signed AionUi bundle and the live bundled-AionCore listener;
   a downloaded standalone binary or unsigned replacement does not satisfy the
