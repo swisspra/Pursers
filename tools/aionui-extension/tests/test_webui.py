@@ -140,6 +140,13 @@ def test_beta_blocking_semantics_are_exposed_without_raw_json() -> None:
         'data-result-count="0"',
         'data-cursor="0"',
         'data-raw-json-count="0"',
+        'data-navigation-current="false"',
+        'data-worker-count="0"',
+        'data-reviewer-count="0"',
+        'data-unique-identity-count="0"',
+        'data-running-count="0"',
+        'data-last-pause-requested="false"',
+        'data-last-stop-requested="false"',
     ):
         assert marker in html
     for marker in (
@@ -152,6 +159,12 @@ def test_beta_blocking_semantics_are_exposed_without_raw_json() -> None:
         "dataset.reviewIndependent",
         "dataset.resultActor",
         "dataset.statusTransition",
+        "dataset.seatAction",
+        "'last-pause-requested'",
+        "'last-stop-requested'",
+        "'stale-offer-count'",
+        "'duplicate-identity-count'",
+        "'orphan-registration-count'",
         "'/pursers/tickets/claim'",
     ):
         assert marker in script

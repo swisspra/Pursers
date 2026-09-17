@@ -89,6 +89,9 @@ const state = {
   seatConfirmation: '',
   registrationErrorCount: 0,
   latestCursor: 0,
+  latestTickets: [],
+  latestMembers: [],
+  mcpRegistrationCount: 0,
 };
 
 const ERROR_COPY = {
@@ -266,8 +269,44 @@ function setSemantic(target, name, value) {
 }
 
 function syncConnectionSemantics() {
+  const identities = state.latestMembers
+    .map((member) => member.agent_id || member.name || '')
+    .filter(Boolean);
+  const duplicateIdentityCount = identities.length - new Set(identities).size;
+  const now = Date.now();
+  const staleOfferCount = state.latestTickets.filter((ticket) => {
+    const offer = ticketOffer(ticket);
+    if (!offer || ticket.status === 'claimed') return false;
+    const raw = offer.expires_at || offer.offer_expires_at || '';
+    const expiry = typeof raw === 'number' ? raw * 1000 : Date.parse(raw);
+    return offer.state === 'expired' || Number.isFinite(expiry) && expiry <= now;
+  }).length;
   setSemantic(connectionCard, 'connection-count', state.connection ? 1 : 0);
   setSemantic(connectionCard, 'registration-error-count', state.registrationErrorCount);
+  setSemantic(connectionCard, 'stale-offer-count', staleOfferCount);
+  setSemantic(connectionCard, 'duplicate-identity-count', duplicateIdentityCount);
+  setSemantic(
+    connectionCard,
+    'orphan-registration-count',
+    Math.max(0, state.mcpRegistrationCount - (state.connection ? 1 : 0)),
+  );
+}
+
+function syncRosterSemantics(members = []) {
+  const identities = members
+    .map((member) => member.agent_id || member.name || '')
+    .filter(Boolean);
+  const running = members.filter(memberIsRunning);
+  setSemantic(rosterList, 'worker-count', members.filter((member) => member.role === 'worker').length);
+  setSemantic(rosterList, 'reviewer-count', members.filter((member) => member.role === 'reviewer').length);
+  setSemantic(rosterList, 'unique-identity-count', new Set(identities).size);
+  setSemantic(rosterList, 'running-count', running.length);
+  setSemantic(rosterList, 'stop-disabled', running.length === 0);
+}
+
+function memberIsRunning(member) {
+  return ['active', 'available', 'busy', 'idle', 'paused', 'running', 'working']
+    .includes(String(member.status || member.lifecycle_status || '').toLowerCase());
 }
 
 function syncResultSemantics(results = [], tickets = []) {
@@ -415,6 +454,7 @@ async function submitDoor(operation, button) {
   }
   showConnection(result.status);
   if (!(await importMcpDefinition(result))) {
+    state.mcpRegistrationCount = 0;
     state.registrationErrorCount = 1;
     syncConnectionSemantics();
     setMessage(connectionMessage, 'Project connected, but AionUi MCP registration needs attention. Select Recover registration after restoring host access.', 'error');
@@ -424,6 +464,7 @@ async function submitDoor(operation, button) {
   }
   const outcome = result.outcome === 'rotated' ? 'Connection replaced' : 'Project connected';
   state.registrationErrorCount = 0;
+  state.mcpRegistrationCount = 1;
   syncConnectionSemantics();
   setMessage(connectionMessage, `${outcome}. AionUi registration is ready.`, 'success');
   showGlobal(outcome, 'The saved status is redacted. Next, prepare distinct Team seats and preview the plan.', 'info');
@@ -482,9 +523,11 @@ async function recoverConnection() {
   showConnection(result.status);
   if (await importMcpDefinition(result)) {
     state.registrationErrorCount = 0;
+    state.mcpRegistrationCount = 1;
     syncConnectionSemantics();
     setMessage(connectionMessage, 'Registration recovered without replaying the door.', 'success');
   } else {
+    state.mcpRegistrationCount = 0;
     state.registrationErrorCount = 1;
     syncConnectionSemantics();
     setMessage(connectionMessage, 'The saved project is available, but AionUi still rejected MCP registration.', 'error');
@@ -836,6 +879,7 @@ async function applyTeam() {
 function makeRosterRow(member) {
   const row = document.createElement('article');
   row.className = 'roster-row';
+  row.dataset.running = String(memberIsRunning(member));
   const name = document.createElement('strong');
   name.textContent = member.name || 'Unnamed teammate';
   const status = document.createElement('span');
@@ -848,12 +892,15 @@ function makeRosterRow(member) {
     const pause = document.createElement('button');
     pause.type = 'button';
     pause.className = 'button button-secondary';
+    pause.dataset.seatAction = 'pause';
     pause.textContent = 'Pause safely';
     pause.addEventListener('click', () => pauseSeat(member.slot_id, pause));
     const stop = document.createElement('button');
     stop.type = 'button';
     stop.className = 'button button-danger-quiet';
+    stop.dataset.seatAction = 'stop';
     stop.textContent = 'Stop';
+    stop.disabled = !memberIsRunning(member);
     stop.addEventListener('click', () => openStop(member));
     actions.append(pause, stop);
   }
@@ -866,6 +913,9 @@ async function loadTeamStatus() {
   if (!response?.ok || !result.ok) {
     state.teamAvailable = false;
     state.teamReady = false;
+    state.latestMembers = [];
+    syncRosterSemantics();
+    syncConnectionSemantics();
     rosterList.replaceChildren();
     rosterEmpty.hidden = false;
     setPill($('#team-pill'), 'Context unavailable', 'warning');
@@ -875,6 +925,9 @@ async function loadTeamStatus() {
   }
   state.teamAvailable = true;
   const members = Array.isArray(result.members) ? result.members : [];
+  state.latestMembers = members;
+  syncRosterSemantics(members);
+  syncConnectionSemantics();
   state.teamReady = members.some((member) => member.role === 'teammate');
   rosterList.replaceChildren(...members.map(makeRosterRow));
   rosterEmpty.hidden = members.length > 0;
@@ -1020,6 +1073,7 @@ async function pauseSeat(slotId, button) {
     : messageFor(result, 'Pause request failed. Nothing changed.');
   showGlobal(response?.ok && result.ok ? 'Pause requested' : 'Pause needs attention', text, response?.ok && result.ok ? 'info' : 'error');
   await loadTeamStatus();
+  setSemantic(rosterList, 'last-pause-requested', Boolean(response?.ok && result.ok));
 }
 
 function openStop(member) {
@@ -1044,6 +1098,7 @@ async function stopSeat() {
     : messageFor(result, 'Stop request failed. Nothing changed.');
   showGlobal(response?.ok && result.ok ? 'Stop requested' : 'Stop needs attention', text, response?.ok && result.ok ? 'warning' : 'error');
   await loadTeamStatus();
+  setSemantic(rosterList, 'last-stop-requested', Boolean(response?.ok && result.ok));
 }
 
 function splitTicketList(value) {
@@ -1173,6 +1228,8 @@ function claimFailure(result) {
 async function loadTickets() {
   const { response, result } = await api('/pursers/tickets');
   if (!response?.ok || !result.ok) {
+    state.latestTickets = [];
+    syncConnectionSemantics();
     ticketList.replaceChildren();
     ticketEmpty.hidden = false;
     setPill($('#ticket-pill'), 'Needs attention', 'warning');
@@ -1180,6 +1237,8 @@ async function loadTickets() {
     return;
   }
   const tickets = Array.isArray(result.tickets) ? result.tickets : [];
+  state.latestTickets = tickets;
+  syncConnectionSemantics();
   state.latestCursor = Number.isInteger(result.latest_seq) ? result.latest_seq : state.latestCursor;
   ticketList.replaceChildren(...tickets.map(makeTicketRow));
   ticketEmpty.hidden = tickets.length > 0;
@@ -1341,6 +1400,7 @@ $('#refresh-results').addEventListener('click', loadResults);
 resultState.addEventListener('change', loadResults);
 $('#refresh-all').addEventListener('click', refreshAll);
 $('#open-quickstart').addEventListener('click', () => {
+  $('#helper').dataset.navigationCurrent = 'true';
   setSemantic(submissionList, 'raw-json-count', $$('[data-raw-json]').length);
   window.setTimeout(() => $('#connect-helper').focus(), 0);
 });

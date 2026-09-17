@@ -274,7 +274,9 @@ function createTeamAdapter(deps = {}) {
   async function roster() {
     const result = await call(['members'], {});
     if (!result.ok) return result;
-    const members = Array.isArray(result.data.members) ? result.data.members : [];
+    const members = Array.isArray(result.data)
+      ? result.data
+      : (Array.isArray(result.data.members) ? result.data.members : []);
     return { ok: true, members };
   }
 

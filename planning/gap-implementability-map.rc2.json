@@ -146,7 +146,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -218,7 +218,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -351,7 +351,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -418,7 +418,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -888,7 +888,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -940,7 +940,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],

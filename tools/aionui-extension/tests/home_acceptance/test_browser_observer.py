@@ -14,6 +14,7 @@ import hmac
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -915,16 +916,51 @@ def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     assert "url.origin === window.location.origin" in script
     assert "selectJson(envelope, spec.pointer)" in script
     assert "spec.kind === 'click_response_json'" in script
-    assert "new URL(state.helper.baseUrl)" in script
+    assert "document.querySelector('#helper-url')" in script
+    assert "helperIsLoopback" in script
+    assert "spec.property === 'nonempty'" in script
+    assert "DOM.resolveNode" in script
+    assert "Runtime.callFunctionOn" in script
+    assert "transitionResult.exceptionDetails" in script
+    assert "browser transition failed" in script
+    assert "main page world unavailable" in script
     assert "parsed.origin === helperOrigin" in script
     assert "init.credentials === 'omit'" in script
     assert "new Headers(init.headers).get('x-pursers-home-token')" in script
-    assert "requestToken === helperToken" in script
+    assert "requestToken.length >= 32" in script
     assert "response capture did not match exactly once" in script
     assert "window.fetch = state.original" in script
     assert "window.clearTimeout(state.timer)" in script
     assert "}, 30000)" in script
     assert "spec.kind === 'click'" in script
+
+
+def test_transition_backend_preserves_browser_failure_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = tmp_path / "ego-browser"
+    backend.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    backend.chmod(0o700)
+    monkeypatch.setattr(
+        observer_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 1, stdout="", stderr=(
+                "Error: browser transition failed: Error: action selector absent: "
+                "[data-seat-action=\\\"pause\\\"]\n"
+                "ego's nodejs process exited with code 1.\n"
+            ),
+        ),
+    )
+    with pytest.raises(observer_module.ObserverError, match="action selector absent"):
+        observer_module._run_transition_backend(
+            {
+                "backend": {"kind": "ego-browser", "command": [str(backend)], "task_space": 27},
+                "store": tmp_path / "store",
+            },
+            "http://127.0.0.1:18921/home",
+            _transition_spec()["recipe"],
+        )
 
 
 @pytest.mark.parametrize("mode", ["success", "wrong_origin", "duplicate"])
@@ -993,7 +1029,12 @@ const recoveryBody = JSON.stringify({
 const wrongOrigin = `http://127.0.0.2:${helperAddress.port}`
 const mainGlobal = {
   URL, Headers, Response, setTimeout, clearTimeout, fetch: originalFetch,
-  location: { href: pageUrl }
+  location: { href: pageUrl },
+  document: {
+    querySelector(selector) {
+      return selector === '#helper-url' ? { value: helperOrigin } : null
+    }
+  }
 }
 mainGlobal.window = mainGlobal
 const mainContext = vm.createContext(mainGlobal)
@@ -1064,6 +1105,17 @@ function cliLog(value) { emitted.push(value) }
 async function cdp(method, params = {}) {
   if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } }
   if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 }
+  if (method === 'DOM.getDocument') return { root: { nodeId: 42 } }
+  if (method === 'DOM.resolveNode') return { object: { objectId: 'main-document' } }
+  if (method === 'Runtime.callFunctionOn') {
+    if (params.objectId !== 'main-document') throw new Error('unexpected object id')
+    try {
+      const expression = '(' + params.functionDeclaration + ').call(document)'
+      return { result: { value: await vm.runInContext(expression, mainContext) } }
+    } catch (error) {
+      return { exceptionDetails: { text: String(error) } }
+    }
+  }
   if (method !== 'Runtime.evaluate') throw new Error('unexpected CDP method: ' + method)
   const context = params.contextId === 7 ? isolatedContext : mainContext
   try {
@@ -1515,6 +1567,149 @@ def test_prepare_expands_every_authoritative_observation_once(
     }
 
 
+def _copy_installed_extension(tmp_path: Path) -> Path:
+    installed = tmp_path / "installed-extension"
+    contexts = installed / "contexts"
+    contexts.mkdir(parents=True)
+    source = runner_module.REPOSITORY_ROOT / "tools/aionui-extension"
+    shutil.copyfile(source / "aion-extension.json", installed / "aion-extension.json")
+    shutil.copyfile(source / "contexts/worker.md", contexts / "worker.md")
+    shutil.copyfile(source / "contexts/reviewer.md", contexts / "reviewer.md")
+    return installed / "aion-extension.json"
+
+
+def _prepare_aionui_typed_test_plan(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> tuple[Path, dict[str, object], dict[str, object]]:
+    observer_dir, surfaces = _write_surface_observer(tmp_path)
+    manifest = _write_complete_observation_manifest(tmp_path, surfaces)
+    evidence = tmp_path / "evidence-plan"
+    assert runner_module.main([
+        "runner.py", "prepare", "--observer", str(observer_dir),
+        "--manifest", str(manifest), "--evidence", str(evidence),
+    ]) == 0
+    capsys.readouterr()
+    typed_dir = tmp_path / "verifier-typed"
+    bridge_command = tmp_path / "pursers-wait-bridge"
+    bridge_command.write_text(
+        "#!/usr/bin/env python3\nprint('0.1.0a16')\n", encoding="utf-8"
+    )
+    bridge_command.chmod(0o700)
+    bridge_wheel = tmp_path / "pursers_wait_bridge-0.1.0a16-py3-none-any.whl"
+    bridge_wheel.write_bytes(b"exact candidate bridge wheel fixture")
+    bridge_wheel.chmod(0o600)
+    assert runner_module.main([
+        "runner.py", "prepare-aionui-typed",
+        "--observer", str(observer_dir),
+        "--evidence", str(evidence),
+        "--dir", str(typed_dir),
+        "--installed-manifest", str(_copy_installed_extension(tmp_path)),
+        "--bridge-command", str(bridge_command),
+        "--bridge-wheel", str(bridge_wheel),
+    ]) == 0
+    result = json.loads(capsys.readouterr().out)
+    plan = json.loads((evidence / "aionui-typed-plan.json").read_text())
+    return evidence, result, plan
+
+
+def test_prepare_aionui_typed_wires_all_21_rows_and_24_records(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    evidence, result, plan = _prepare_aionui_typed_test_plan(tmp_path, capsys)
+    assert result == {
+        "adapters": {
+            "aionui_assistant_binding_v1": 4,
+            "trusted_browser_state_v1": 20,
+        },
+        "plan": str(evidence / "aionui-typed-plan.json"),
+        "records": 24,
+        "rows": 21,
+    }
+    assert len(plan["records"]) == len(plan["commands"]) == 24
+    assert len({row["record_id"] for row in plan["records"]}) == 24
+    assert len({row["observation_id"] for row in plan["records"]}) == 21
+    trust_path = Path(plan["trust"])
+    trust = json.loads(trust_path.read_text())
+    assert trust_path.stat().st_mode & 0o077 == 0
+    assert set(trust["state_sources"]) == {
+        row["conjunct"]["source_id"] for row in plan["records"]
+    }
+    for row in plan["records"]:
+        source = trust["state_sources"][row["conjunct"]["source_id"]]
+        assert source["bridge_provenance"]["version"] == "0.1.0a16"
+        assert len(source["bridge_provenance"]["wheel_sha256"]) == 64
+        assert len(source["bridge_provenance"]["command_sha256"]) == 64
+        assert source["recipe"] == {
+            "before": row["recorder"]["before"],
+            "actions": row["recorder"]["action"],
+            "after": row["recorder"]["after"],
+            "settle_milliseconds": source["recipe"]["settle_milliseconds"],
+        }
+        typed_evidence._browser_selectors(source["recipe"]["before"], "before")
+        typed_evidence._browser_actions(source["recipe"]["actions"])
+        typed_evidence._browser_selectors(source["recipe"]["after"], "after")
+        expected_paths = {
+            item["path"]
+            for item in (*source["recipe"]["before"], *source["recipe"]["after"])
+        }
+        for action in source["recipe"]["actions"]:
+            expected_paths.update(typed_evidence._browser_action_result_paths(action))
+        assert set(source["select_allowlist"]) == expected_paths
+        phase_paths = {
+            "before": {item["path"] for item in source["recipe"]["before"]},
+            "action": set().union(*(
+                typed_evidence._browser_action_result_paths(action)
+                for action in source["recipe"]["actions"]
+            )),
+            "after": {item["path"] for item in source["recipe"]["after"]},
+        }
+        assert all(
+            assertion["path"] in phase_paths[assertion["phase"]]
+            for assertion in row["conjunct"]["assertions"]
+        )
+    records = {row["record_id"]: row for row in plan["records"]}
+    join_form = records["extension.join-form-1"]
+    assert join_form["conjunct"]["assertions"][1]["path"] == "/door_field_count"
+    for observation_id in (
+        "extension.reviewer-preset-claude",
+        "extension.reviewer-preset-codex",
+        "extension.worker-preset-claude",
+        "extension.worker-preset-codex",
+    ):
+        assertions = records[f"{observation_id}-1"]["conjunct"]["assertions"]
+        assert assertions[0]["value"] == "sandbox-home-acceptance"
+        assert assertions[-1]["value"] == "sandbox-home-acceptance"
+
+
+def test_record_aionui_typed_executes_the_planned_external_recorder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    evidence, _result, plan = _prepare_aionui_typed_test_plan(tmp_path, capsys)
+    command = plan["commands"][0]
+    expected = plan["records"][0]
+
+    def run_recorder(arguments: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert Path(arguments[0]) == Path(plan["recorder"])
+        request_path = Path(arguments[arguments.index("--request") + 1])
+        output_path = Path(arguments[arguments.index("--output") + 1])
+        request = json.loads(request_path.read_text())
+        assert request["context"]["observation_id"] == expected["observation_id"]
+        assert request["context"]["issued_at"].endswith("Z")
+        assert request["recorder"] == expected["recorder"]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text("{}", encoding="utf-8")
+        output_path.chmod(0o600)
+        return subprocess.CompletedProcess(arguments, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", run_recorder)
+    assert runner_module.main(command[1:]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["record_id"] == expected["record_id"]
+    assert (evidence / expected["reference"]["evidence"]).is_file()
+
+
 def test_prepare_refuses_missing_typed_evidence_contract(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1807,9 +2002,17 @@ def test_transition_observer_reads_typed_semantic_attributes() -> None:
         "attribute:data-connection-count",
         "attribute:data-raw-json-count",
     ]
+    provided = observer_module._validate_transition_selectors([
+        {"path": "/door_supplied", "selector": "#door", "property": "nonempty"},
+    ], "before")
+    assert provided[0]["property"] == "nonempty"
     with pytest.raises(observer_module.ObserverError, match="selector is invalid"):
         observer_module._validate_transition_selectors([
             {"path": "/secret", "selector": "body", "property": "attribute:value"},
+        ], "after")
+    with pytest.raises(observer_module.ObserverError, match="selector is invalid"):
+        observer_module._validate_transition_selectors([
+            {"path": "/bad", "selector": "body", "property": {}},
         ], "after")
 
 

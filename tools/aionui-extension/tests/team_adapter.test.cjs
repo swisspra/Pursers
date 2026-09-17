@@ -339,6 +339,22 @@ test('status passes through the live roster shape with counts', async () => {
   assert.ok(commands(host.calls).includes('task list'));
 });
 
+test('status accepts the AionCore 0.2.2 members array envelope', async () => {
+  const teammate = {
+    slot_id: 'slot-a', name: 'pursers-demo-goose-1', role: 'teammate', status: 'idle',
+    assistant_id: 'bare:600c6601', model: 'default',
+  };
+  const adapter = createTeamAdapter({
+    runCli: async () => envelope([LEAD, teammate]),
+  });
+
+  const reported = await adapter.status();
+
+  assert.equal(reported.ok, true);
+  assert.deepEqual(reported.counts, { members: 2, lead: 1, teammate: 1 });
+  assert.deepEqual(reported.members, [LEAD, teammate]);
+});
+
 test('kickoff and lead brief carry role, tier, folder and invariants verbatim', () => {
   const spec = makeSpec();
   const kickoff = buildSeatKickoff(spec, spec.seats[1]);
