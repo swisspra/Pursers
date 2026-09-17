@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.mark.parametrize("existing", [False, True])
 def test_beta_release_is_prerelease_and_never_latest(existing: bool) -> None:
-    assert github_release_flags("v5.0.0b1", existing=existing) == (
+    assert github_release_flags("v5.0.0b2", existing=existing) == (
         "--prerelease",
         "--latest=false",
     )
@@ -40,7 +40,7 @@ def test_stable_create_and_edit_preserve_stable_latest_behavior() -> None:
 
 @pytest.mark.parametrize(
     "tag",
-    ["5.0.0b1", "v5.0.0-beta.1", "v5.0.0b2", "vnot-a-version"],
+    ["5.0.0b2", "v5.0.0-beta.2", "v5.0.0b1", "vnot-a-version"],
 )
 def test_release_tag_must_be_canonical_and_match_manifest(tag: str) -> None:
     with pytest.raises(ValueError):
@@ -49,19 +49,19 @@ def test_release_tag_must_be_canonical_and_match_manifest(tag: str) -> None:
 
 def test_six_wheel_cohort_matches_manifest_versions() -> None:
     assert set(expected_wheel_filenames()) == {
-        "pursers-5.0.0b1-py3-none-any.whl",
-        "pursers_central-0.1.0a30-py3-none-any.whl",
-        "pursers_client-0.1.0a23-py3-none-any.whl",
-        "pursers_personal-5.0.0b1-py3-none-any.whl",
+        "pursers-5.0.0b2-py3-none-any.whl",
+        "pursers_central-0.1.0a31-py3-none-any.whl",
+        "pursers_client-0.1.0a24-py3-none-any.whl",
+        "pursers_personal-5.0.0b2-py3-none-any.whl",
         "pursers_personal_import-5.0.0a3-py3-none-any.whl",
-        "pursers_wait_bridge-0.1.0a16-py3-none-any.whl",
+        "pursers_wait_bridge-0.1.0a17-py3-none-any.whl",
     }
 
 
 @pytest.mark.parametrize("mode", ["create", "edit"])
 def test_release_publish_cli_emits_prerelease_flags_for_both_paths(mode: str) -> None:
     result = subprocess.run(
-        [sys.executable, "tools/release_publish.py", "v5.0.0b1", mode],
+        [sys.executable, "tools/release_publish.py", "v5.0.0b2", mode],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -106,8 +106,8 @@ def test_checkout_verifier_rejects_same_name_branch_tag_collision(
     _git(repository, "add", "tracked.txt")
     _git(repository, "commit", "-qm", "tag commit")
     tag_commit = _git(repository, "rev-parse", "HEAD")
-    _git(repository, "tag", "v5.0.0b1")
-    _git(repository, "switch", "-qc", "v5.0.0b1")
+    _git(repository, "tag", "v5.0.0b2")
+    _git(repository, "switch", "-qc", "v5.0.0b2")
     tracked.write_text("branch commit\n", encoding="utf-8")
     _git(repository, "commit", "-qam", "same-name branch commit")
 
@@ -115,7 +115,7 @@ def test_checkout_verifier_rejects_same_name_branch_tag_collision(
         [
             sys.executable,
             str(ROOT / "tools/release_publish.py"),
-            "v5.0.0b1",
+            "v5.0.0b2",
             "verify-checkout",
             "--repository",
             str(repository),
@@ -126,12 +126,12 @@ def test_checkout_verifier_rejects_same_name_branch_tag_collision(
     assert rejected.returncode != 0
     assert "release checkout mismatch" in rejected.stderr
 
-    _git(repository, "checkout", "-q", "--detach", "refs/tags/v5.0.0b1")
+    _git(repository, "checkout", "-q", "--detach", "refs/tags/v5.0.0b2")
     accepted = subprocess.run(
         [
             sys.executable,
             str(ROOT / "tools/release_publish.py"),
-            "v5.0.0b1",
+            "v5.0.0b2",
             "verify-checkout",
             "--repository",
             str(repository),
@@ -153,7 +153,7 @@ def test_existing_release_asset_must_match_rebuilt_bytes(tmp_path: Path) -> None
     command = [
         sys.executable,
         str(ROOT / "tools/release_publish.py"),
-        "v5.0.0b1",
+        "v5.0.0b2",
         "verify-asset",
         "--local",
         str(local),
@@ -291,7 +291,7 @@ def test_current_beta_whats_new_versions_match_release_manifest() -> None:
     current_release = document.split('<section id="unreleased">', 1)[1].split(
         '<h3>5.0.0a24', 1
     )[0]
-    for expected in ("0.1.0a30", "0.1.0a23", "0.1.0a16", "2026-09-11"):
+    for expected in ("0.1.0a31", "0.1.0a24", "0.1.0a17", "2026-09-17"):
         assert expected in current_release
-    for stale in ("0.1.0a29", "0.1.0a22", "0.1.0a15", "2026-09-08"):
+    for stale in ("0.1.0a30", "0.1.0a23", "0.1.0a16", "2026-09-11"):
         assert stale not in current_release

@@ -65,11 +65,11 @@ gh release download v5.0.0b2 \
 shasum -a 256 -c SHA256SUMS.txt
 python -m pip install \
   ./pursers-5.0.0b2-py3-none-any.whl \
-  ./pursers_central-0.1.0a30-py3-none-any.whl \
-  ./pursers_client-0.1.0a23-py3-none-any.whl \
+  ./pursers_central-0.1.0a31-py3-none-any.whl \
+  ./pursers_client-0.1.0a24-py3-none-any.whl \
   ./pursers_personal-5.0.0b2-py3-none-any.whl \
   ./pursers_personal_import-5.0.0a3-py3-none-any.whl \
-  ./pursers_wait_bridge-0.1.0a16-py3-none-any.whl
+  ./pursers_wait_bridge-0.1.0a17-py3-none-any.whl
 pursers-personal setup --project "$PWD" --apply
 ```
 
