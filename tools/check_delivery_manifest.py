@@ -172,15 +172,20 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
 
     tools_root = root / "tools"
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
         relative_parts = path.relative_to(root).parts
         if (
             _ignored(path, root)
             or relative_parts[0] in NON_PRODUCT_CONTENT_ROOTS
-            or relative_parts[0] == "packages"
-            or "src" in relative_parts
         ):
+            continue
+        if path.is_symlink() and not path.exists():
+            raise ValueError(
+                f"{_relative(path, root)}: dangling symlink cannot be "
+                "classified; repair or remove its target"
+            )
+        if not path.is_file():
+            continue
+        if relative_parts[0] == "packages" or "src" in relative_parts:
             continue
         is_executable = bool(path.stat().st_mode & 0o111)
         with path.open("rb") as stream:

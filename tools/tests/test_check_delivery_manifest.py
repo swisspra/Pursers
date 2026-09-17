@@ -263,6 +263,24 @@ prefix = "main: <code>"
     )
 
 
+def test_dangling_symlinked_operator_tool_fails_closed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _base_repository(tmp_path)
+    tool = root / "services/ops-console/reconcile"
+    tool.parent.mkdir(parents=True)
+    tool.symlink_to("../../tools/removed_operator.py")
+
+    assert tool.is_symlink()
+    assert not tool.exists()
+    assert check_delivery_manifest.main(["--repository", str(root)]) == 1
+    assert (
+        "delivery manifest error: services/ops-console/reconcile: dangling "
+        "symlink cannot be classified; repair or remove its target"
+        in capsys.readouterr().out
+    )
+
+
 @pytest.mark.parametrize(
     ("filename", "body", "artifact_id"),
     [
