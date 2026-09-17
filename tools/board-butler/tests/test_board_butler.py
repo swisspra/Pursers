@@ -15,6 +15,12 @@ import pytest
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "board_butler.py"
 REPOSITORY_ROOT = MODULE_PATH.parents[2]
+BACKLOG_FIXTURE = (
+    MODULE_PATH.parent
+    / "tests"
+    / "fixtures"
+    / "coordinator_questions_2026-09-16.json"
+)
 SPEC = importlib.util.spec_from_file_location("board_butler", MODULE_PATH)
 assert SPEC and SPEC.loader
 butler = importlib.util.module_from_spec(SPEC)
@@ -134,6 +140,37 @@ def test_every_policy_rule_has_a_readable_name_and_pattern() -> None:
         "membership-roles",
         "board-registry",
     )
+
+
+def test_authoritative_backlog_replay_is_truthfully_partial() -> None:
+    corpus = json.loads(BACKLOG_FIXTURE.read_text(encoding="utf-8"))
+    available = corpus["available_records"]
+    unavailable = corpus["unavailable_records"]
+    all_ids = [row["question_id"] for row in available + unavailable]
+
+    assert corpus["authoritative_count"] == 27
+    assert len(available) == 3
+    assert len(unavailable) == 24
+    assert len(all_ids) == len(set(all_ids)) == 27
+    assert all("message" not in row and "answer" not in row for row in unavailable)
+
+    verdicts = {
+        row["question_id"]: butler.classify_question(
+            row["message"], row["kind"]
+        ).outcome.value
+        for row in available
+    }
+    assert verdicts == {
+        row["question_id"]: row["expected_verdict"] for row in available
+    }
+    assert list(verdicts.values()).count("MECHANICAL") == 1
+    assert list(verdicts.values()).count("ESCALATE") == 2
+    assert list(verdicts.values()).count("UNKNOWN") == 0
+    assert {
+        row["question_id"]
+        for row in available
+        if row["expected_verdict"] != row["recorded_disposition"]
+    } == {"CQ-53524d65cdb51016"}
 
 
 def test_ticket_status_draft_cites_product_source(tmp_path: Path) -> None:

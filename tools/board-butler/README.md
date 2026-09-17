@@ -63,3 +63,20 @@ Run the suite with:
 ```sh
 python3 -m pytest -q tools/board-butler/tests
 ```
+
+## 2026-09-16 backlog replay
+
+The authoritative correction `AN-000000001056` identifies 27 coordinator
+questions, not 29. The worker-visible Central response returned the exact
+question text, kind, and recorded answer for three records on
+`TK-02bf4d01d662`; the other 24 ticket projections omitted their question
+records. The committed fixture therefore replays those three records and names
+all 24 unavailable ticket/question pairs without inventing messages or answers,
+as the correction explicitly permits for a truthfully partial corpus.
+
+The available replay classifies one question as `MECHANICAL`, two as
+`ESCALATE`, and none as `UNKNOWN`. It disagrees with the recorded disposition
+for `CQ-53524d65cdb51016`: ticket-status phrasing wins the current policy match
+even though the question ultimately asked the coordinator to decide how
+resolved items should appear in the document. That disagreement is retained as
+a finding rather than hidden.
