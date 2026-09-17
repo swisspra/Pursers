@@ -212,6 +212,22 @@ def test_shell_operator_tool_outside_conventional_roots_cannot_be_smuggled(
     )
 
 
+def test_extensionless_operator_tool_cannot_be_smuggled(tmp_path: Path) -> None:
+    root = _base_repository(tmp_path)
+    tool = root / "services/ops-console/reconcile"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+
+    failures = check_delivery_manifest.validate(root)
+
+    assert any(
+        "unregistered artifact: operator-tool:services/ops-console/reconcile "
+        "(services/ops-console/reconcile)" in failure
+        for failure in failures
+    )
+
+
 @pytest.mark.parametrize(
     ("filename", "body", "artifact_id"),
     [

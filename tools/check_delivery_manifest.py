@@ -171,9 +171,9 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
         add(f"web-surface:{relative}", "web-surface", path)
 
     tools_root = root / "tools"
-    operator_paths = set(root.rglob("*.py"))
-    operator_paths.update(root.rglob("*.sh"))
-    for path in sorted(operator_paths):
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
         relative_parts = path.relative_to(root).parts
         if (
             _ignored(path, root)
@@ -182,16 +182,18 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
             or "src" in relative_parts
         ):
             continue
-        text = path.read_text(encoding="utf-8", errors="replace")
         is_executable = bool(path.stat().st_mode & 0o111)
+        with path.open("rb") as stream:
+            has_shebang = stream.read(2) == b"#!"
         if path.suffix == ".py":
+            text = path.read_text(encoding="utf-8", errors="replace")
             if (
                 path.parent != tools_root
                 and "__main__" not in text
                 and not is_executable
             ):
                 continue
-        elif not is_executable and not text.startswith("#!"):
+        elif not is_executable and not has_shebang:
             continue
         relative = _relative(path, root)
         add(f"operator-tool:{relative}", "operator-tool", path)
