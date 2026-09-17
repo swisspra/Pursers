@@ -5873,59 +5873,75 @@ class SeatConfigManager:
 
     @staticmethod
     def _redact_url_passwords(value: str) -> str:
-        """Redact URL credentials with one forward pass over *value*."""
+        """Redact URL credentials without rescanning failed candidate prefixes."""
         redacted: list[str] = []
         emit_from = 0
         cursor = 0
+        username_probe = 0
+        password_probe = 0
         size = len(value)
         while cursor < size:
-            if (
-                value[cursor] not in URL_SCHEME_START_CHARS
-                or (
-                    cursor > 0
-                    and (value[cursor - 1].isalnum() or value[cursor - 1] == "_")
-                )
-            ):
+            if value[cursor] not in URL_SCHEME_CHARS:
                 cursor += 1
                 continue
 
-            scheme_end = cursor + 1
-            while scheme_end < size and value[scheme_end] in URL_SCHEME_CHARS:
-                scheme_end += 1
-            if not value.startswith("://", scheme_end):
-                cursor = scheme_end
+            # Consume each maximal scheme-character run once. A run can contain
+            # several regex word boundaries (for example ``bad-http``), but the
+            # regex can only use the first eligible start: every later start has
+            # the same greedy scheme end.
+            scheme_start: int | None = None
+            while cursor < size and value[cursor] in URL_SCHEME_CHARS:
+                if (
+                    scheme_start is None
+                    and value[cursor] in URL_SCHEME_START_CHARS
+                    and (
+                        cursor == 0
+                        or not (
+                            value[cursor - 1].isalnum()
+                            or value[cursor - 1] == "_"
+                        )
+                    )
+                ):
+                    scheme_start = cursor
+                cursor += 1
+            scheme_end = cursor
+            if scheme_start is None or not value.startswith("://", scheme_end):
                 continue
 
             username_start = scheme_end + 3
-            username_end = username_start
+            username_probe = max(username_probe, username_start)
             while (
-                username_end < size
-                and value[username_end] not in ":/@"
-                and not value[username_end].isspace()
+                username_probe < size
+                and value[username_probe] not in ":/@"
+                and not value[username_probe].isspace()
             ):
-                username_end += 1
+                username_probe += 1
+            username_end = username_probe
             if (
                 username_end == username_start
                 or username_end >= size
                 or value[username_end] != ":"
             ):
-                cursor = username_end + 1
                 continue
 
             password_start = username_end + 1
-            password_end = password_start
+            password_probe = max(password_probe, password_start)
             while (
-                password_end < size
-                and value[password_end] not in "/@"
-                and not value[password_end].isspace()
+                password_probe < size
+                and value[password_probe] not in "/@"
+                and not value[password_probe].isspace()
             ):
-                password_end += 1
+                password_probe += 1
+            password_end = password_probe
             if (
                 password_end == password_start
                 or password_end >= size
                 or value[password_end] != "@"
             ):
-                cursor = password_end + 1
+                continue
+
+            # re.sub ignores matches starting inside the preceding match.
+            if scheme_start < emit_from:
                 continue
 
             redacted.extend(
@@ -5935,13 +5951,12 @@ class SeatConfigManager:
                 )
             )
             emit_from = password_end + 1
-            cursor = emit_from
         redacted.append(value[emit_from:])
         return "".join(redacted)
 
     @staticmethod
     def _redact_jwts(value: str) -> str:
-        """Redact three-segment JWTs without retrying overlapping prefixes."""
+        """Redact JWTs with monotonic segment probes for overlapping starts."""
 
         def boundary(index: int) -> bool:
             before = index > 0 and (
@@ -5953,6 +5968,11 @@ class SeatConfigManager:
         redacted: list[str] = []
         emit_from = 0
         cursor = 0
+        first_probe = 0
+        second_probe = 0
+        third_probe = 0
+        third_boundaries: list[int] = []
+        first_boundary = 0
         size = len(value)
         while cursor < size:
             if (
@@ -5966,43 +5986,60 @@ class SeatConfigManager:
                 continue
 
             first_start = cursor + 3
-            first_end = first_start
-            while first_end < size and value[first_end] in JWT_SEGMENT_CHARS:
-                first_end += 1
+            first_probe = max(first_probe, first_start)
+            while first_probe < size and value[first_probe] in JWT_SEGMENT_CHARS:
+                first_probe += 1
+            first_end = first_probe
             if (
                 first_end - first_start < 8
                 or first_end >= size
                 or value[first_end] != "."
             ):
-                cursor = first_end + 1
+                cursor += 1
                 continue
 
             second_start = first_end + 1
-            second_end = second_start
-            while second_end < size and value[second_end] in JWT_SEGMENT_CHARS:
-                second_end += 1
+            second_probe = max(second_probe, second_start)
+            while second_probe < size and value[second_probe] in JWT_SEGMENT_CHARS:
+                second_probe += 1
+            second_end = second_probe
             if (
                 second_end - second_start < 8
                 or second_end >= size
                 or value[second_end] != "."
             ):
-                cursor = second_end + 1
+                cursor += 1
                 continue
 
             third_start = second_end + 1
-            third_end = third_start
-            while third_end < size and value[third_end] in JWT_SEGMENT_CHARS:
-                third_end += 1
-            match_end = third_end
-            while match_end - third_start >= 8 and not boundary(match_end):
-                match_end -= 1
-            if match_end - third_start < 8:
-                cursor = third_end + 1
-                continue
+            third_probe = max(third_probe, third_start)
+            while third_probe < size and value[third_probe] in JWT_SEGMENT_CHARS:
+                third_probe += 1
+                if boundary(third_probe):
+                    third_boundaries.append(third_probe)
+            if boundary(third_probe) and (
+                not third_boundaries or third_boundaries[-1] != third_probe
+            ):
+                third_boundaries.append(third_probe)
 
-            redacted.extend((value[emit_from:cursor], "[REDACTED JWT]"))
-            emit_from = match_end
-            cursor = match_end
+            minimum_end = third_start + 8
+            while (
+                first_boundary < len(third_boundaries)
+                and third_boundaries[first_boundary] < minimum_end
+            ):
+                first_boundary += 1
+            if (
+                first_boundary >= len(third_boundaries)
+                or third_boundaries[-1] < minimum_end
+            ):
+                cursor += 1
+                continue
+            match_end = third_boundaries[-1]
+
+            if cursor >= emit_from:
+                redacted.extend((value[emit_from:cursor], "[REDACTED JWT]"))
+                emit_from = match_end
+            cursor += 1
         redacted.append(value[emit_from:])
         return "".join(redacted)
 
