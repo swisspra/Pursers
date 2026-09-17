@@ -33,6 +33,32 @@ spec.loader.exec_module(seat)
 FAKE = ACP_ROOT / "tests" / "fake_acp_agent.py"
 
 
+def test_acp_usage_accepts_only_explicit_complete_counters() -> None:
+    assert seat._model_usage_from_result(
+        {
+            "stopReason": "end_turn",
+            "usage": {
+                "turns": 2,
+                "reported_turns": 2,
+                "input_tokens": 40,
+                "output_tokens": 9,
+                "prompt_text": "ignored",
+                "completion_text": "ignored",
+            },
+        }
+    ) == {
+        "schema_version": 1,
+        "turns": 2,
+        "reported_turns": 2,
+        "input_tokens": 40,
+        "output_tokens": 9,
+    }
+    assert seat._model_usage_from_result({"stopReason": "end_turn"}) is None
+    assert seat._model_usage_from_result(
+        {"usage": {"turns": 1, "input_tokens": 40, "output_tokens": None}}
+    ) is None
+
+
 class FakeBoard:
     def __init__(self, ticket: dict[str, object]) -> None:
         self.ticket = ticket

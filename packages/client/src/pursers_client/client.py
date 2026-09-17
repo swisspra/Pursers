@@ -683,6 +683,7 @@ class BoardClient:
         skills_required: list[str] | None = None,
         exclude_agents: list[str] | None = None,
         prefer_agents: list[str] | None = None,
+        model_usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -704,6 +705,7 @@ class BoardClient:
             "skills_required": skills_required,
             "exclude_agents": exclude_agents,
             "prefer_agents": prefer_agents,
+            "model_usage": model_usage,
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
         result = await self._call("ticket_create", arguments)
@@ -896,6 +898,7 @@ class BoardClient:
         notes: str | None = None,
         stay_active: bool = True,
         repository: Path | str | None = None,
+        model_usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected_agent_name = self.agent_name if agent_name is None else agent_name
         arguments: dict[str, Any] = {
@@ -931,6 +934,7 @@ class BoardClient:
             "files_changed": files_changed,
             "notes": notes,
             "submission_preflight": submission_preflight,
+            "model_usage": model_usage,
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
         result = await self._call("ticket_submit", arguments)
@@ -970,6 +974,7 @@ class BoardClient:
         *,
         review_notes: str | None = None,
         fix_instructions: str | None = None,
+        model_usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._watched_uris.add(f"board://{self.board_id}/ticket/{ticket_id}")
         arguments: dict[str, Any] = {
@@ -981,6 +986,8 @@ class BoardClient:
             arguments["review_notes"] = review_notes
         if fix_instructions is not None:
             arguments["fix_instructions"] = fix_instructions
+        if model_usage is not None:
+            arguments["model_usage"] = model_usage
         result = await self._call("ticket_review", arguments)
         self._remember_event(result)
         return result

@@ -58,6 +58,13 @@ commit before submitting. The last board mutation of a successful ticket is
 agent failure, or invalid evidence
 creates a checkpoint and safely unclaims the ticket.
 
+ACP v1 does not standardize token usage. The `acp` host therefore records null
+usage by omission unless the prompt result supplies the explicit numeric
+extension `usage.{turns,reported_turns,input_tokens,output_tokens}`. The seat
+accepts only complete non-negative counters and forwards them with the existing
+ticket submission; it never estimates from text length and never stores prompt
+or completion content.
+
 The production runtime is macOS-only because it fails closed unless
 `sandbox-exec` is available. Its OS profile denies network access and writes
 outside the ticket clone and temporary directory. Every run receives a scratch

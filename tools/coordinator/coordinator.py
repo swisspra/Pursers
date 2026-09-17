@@ -3186,6 +3186,13 @@ async def create_intake_ticket(
             target_url=draft.target_url,
             unassigned=True,
             coordinator_op_key=draft.op_key,
+            model_usage={
+                "schema_version": 1,
+                "turns": 0,
+                "reported_turns": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            },
         )
 
     try:

@@ -22,7 +22,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -118,6 +118,41 @@ class Config:
     roles: tuple[str, ...] = ()
     wait_timeout_s: int = DEFAULT_WAIT_TIMEOUT_S
     wait_host_profile: str = "headless"
+
+
+@dataclass
+class ModelUsage:
+    """Aggregate only provider counters; never retain request or response text."""
+
+    turns: int = 0
+    reported_turns: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    def add(self, value: Any) -> None:
+        self.turns += 1
+        if not isinstance(value, Mapping):
+            return
+        input_tokens = value.get("input_tokens", value.get("prompt_tokens"))
+        output_tokens = value.get("output_tokens", value.get("completion_tokens"))
+        if any(
+            isinstance(item, bool) or not isinstance(item, int) or item < 0
+            for item in (input_tokens, output_tokens)
+        ):
+            return
+        self.reported_turns += 1
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+
+    def as_record(self) -> dict[str, int | None]:
+        complete = self.reported_turns == self.turns
+        return {
+            "schema_version": 1,
+            "turns": self.turns,
+            "reported_turns": self.reported_turns,
+            "input_tokens": self.input_tokens if complete else None,
+            "output_tokens": self.output_tokens if complete else None,
+        }
 
 
 def _private_file(path: Path, label: str) -> Path:
@@ -771,6 +806,7 @@ class BoardAPI(Protocol):
         *,
         review_notes: str,
         fix_instructions: str | None,
+        model_usage: dict[str, Any] | None = None,
     ) -> None: ...
     async def ticket_list(self, board_id: str, **kwargs: Any) -> list[dict[str, Any]]: ...
     async def boards(self) -> list[str]: ...
@@ -941,6 +977,7 @@ class PursersBoardAPI:
             notes=arguments.get("notes"),
             stay_active=True,
             repository=repository,
+            model_usage=arguments.get("model_usage"),
         )
         if result.get("error"):
             raise RuntimeError(str(result["error"]))
@@ -1036,6 +1073,7 @@ class PursersBoardAPI:
         *,
         review_notes: str,
         fix_instructions: str | None,
+        model_usage: dict[str, Any] | None = None,
     ) -> None:
         result = await (await self._view(board_id))._call(
             "ticket_review",
@@ -1049,6 +1087,7 @@ class PursersBoardAPI:
                     if fix_instructions is not None
                     else {}
                 ),
+                **({"model_usage": model_usage} if model_usage is not None else {}),
             },
         )
         if result.get("error"):
@@ -1090,7 +1129,10 @@ class OpenAICompatible:
                 raw, timeout=self.config.command_timeout_s
             ) as response:
                 result = json.load(response)
-            return result["choices"][0]["message"]
+            message = dict(result["choices"][0]["message"])
+            if "usage" in result:
+                message["_pursers_model_usage"] = result["usage"]
+            return message
 
         return await asyncio.to_thread(request)
 
@@ -1605,6 +1647,7 @@ class Worker:
         board_id: str,
         ticket_id: str,
         ticket: dict[str, Any],
+        model_usage: dict[str, Any] | None = None,
     ) -> tuple[str, bool]:
         if name == "read_file":
             path = _jailed(work_dir, _text(args.get("path"), "path"))
@@ -1678,6 +1721,8 @@ class Worker:
                     work_dir, _text(args.get("notes"), "submit_work.notes")
                 )
             safe_args = self.log.scrub(args)
+            if model_usage is not None:
+                safe_args["model_usage"] = model_usage
             try:
                 await self.board.submit(
                     board_id, ticket_id, safe_args, repository=work_dir
@@ -1755,6 +1800,7 @@ class Worker:
     ) -> str:
         ticket_id = str(ticket["ticket_id"])
         messages = self.messages(board_id, ticket, work_dir, branch)
+        usage = ModelUsage()
         renewal = asyncio.create_task(self._renew(board_id, ticket_id))
         try:
             for _ in range(self.config.max_iterations):
@@ -1762,6 +1808,7 @@ class Worker:
                     await self._release(board_id, ticket_id, "graceful shutdown")
                     return "released"
                 message = await self.llm.complete(messages, TOOLS)
+                usage.add(message.pop("_pursers_model_usage", None))
                 messages.append({"role": "assistant", **message})
                 calls = message.get("tool_calls") or []
                 if not calls:
@@ -1777,6 +1824,7 @@ class Worker:
                             board_id,
                             ticket_id,
                             ticket,
+                            usage.as_record(),
                         )
                     except Exception as exc:
                         output, done = f"error: {type(exc).__name__}: {exc}", False
@@ -2276,11 +2324,13 @@ class Reviewer:
             return outcome
 
         messages = self.messages(board_id, ticket, work_dir, branch)
+        usage = ModelUsage()
         try:
             for _ in range(self.config.max_iterations):
                 if self.stop.is_set():
                     return finished("stopped")
                 message = await self.llm.complete(messages, REVIEWER_TOOLS)
+                usage.add(message.pop("_pursers_model_usage", None))
                 messages.append({"role": "assistant", **message})
                 calls = message.get("tool_calls") or []
                 if not calls:
@@ -2355,6 +2405,7 @@ class Reviewer:
                         verdict.verdict,
                         review_notes=verdict.review_notes,
                         fix_instructions=verdict.fix_instructions,
+                        model_usage=usage.as_record(),
                     )
                     self.log.write(
                         "review_submitted",
