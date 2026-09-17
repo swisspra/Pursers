@@ -150,6 +150,199 @@ Required workflow changes (not made by this audit):
 
 No repository or ticket decision was found that deliberately excludes these verified artifact families. Docs describe b1 as six wheels plus `SHA256SUMS.txt`, while AionUi/Home remain local build procedures. This is therefore an omission, not an intentional exclusion.
 
+## Landed but unshipped distributions
+
+The original audit (the 79-row audit in the ticket record) was scoped to
+tickets and branches and therefore could not have found code that had landed on
+`main` but was omitted from the release system. The current checklist documents
+77 ticket IDs plus separate artifact analysis; neither target set inventories
+declared distributions. This section adds that missing, structurally different
+check.
+
+Audit date: 2026-09-17. Distribution baseline: `origin/main` at
+`26db4502855dd347a9ca3f37bb6d8351b480e9e1`.
+
+### Method
+
+The sweep enumerated every tracked `pyproject.toml` with a `[project].name`,
+including its declared version, `[project.scripts]`, and
+`[project.entry-points]` values:
+
+```sh
+python3 - <<'PY'
+from pathlib import Path
+import tomllib
+
+for path in sorted(Path('.').rglob('pyproject.toml')):
+    if '.git' in path.parts:
+        continue
+    project = tomllib.loads(path.read_text()).get('project', {})
+    if project.get('name'):
+        print(path, project['name'], project.get('version'),
+              project.get('scripts', {}), project.get('entry-points', {}))
+PY
+```
+
+For each result, fixed-string searches checked the version manifest and every
+GitHub Actions workflow. The manifest's own coverage function independently
+reported which required suites cover each project file. A separate search of
+`package.json`, `setup.py`, and `setup.cfg` found no additional public
+distribution or user-installable entry point: `pursers-dashboard-ui` is private
+and has no `bin`, and `packages/import/setup.py` is the build shim for the
+already-counted `pursers-personal-import` project.
+
+```sh
+rg -n 'pursers-acp|acp-agent|pursers_acp|pursers-wait-bridge|wait_bridge' \
+  tools/release_versions.toml .github/workflows tools/release_train.py \
+  tools/release_versions.py tools/verify_publish_wheels.py
+python3 - <<'PY'
+from pathlib import Path
+import tomllib
+from tools.ci_manifest import covering_suites
+
+for path in sorted(Path('.').rglob('pyproject.toml')):
+    if '.git' in path.parts:
+        continue
+    project = tomllib.loads(path.read_text()).get('project', {})
+    if project.get('name'):
+        relative = path.as_posix()
+        print(project['name'], covering_suites([relative])[relative])
+PY
+find . -name package.json -not -path './.git/*' -print
+find . -type f \( -name setup.py -o -name setup.cfg \) \
+  -not -path './.git/*' -print
+```
+
+Finally, the public PyPI JSON endpoint was queried for every declared Python
+distribution. HTTP 200 means the project exists on PyPI; HTTP 404 means it does
+not. This establishes project presence, not whether the checkout's exact version
+has been uploaded.
+
+```sh
+for name in pursers pursers-central pursers-client pursers-personal \
+  pursers-personal-import pursers-wait-bridge pursers-acp; do
+  code=$(curl --silent --show-error --location --output /dev/null \
+    --write-out '%{http_code}' "https://pypi.org/pypi/$name/json")
+  printf '%s\t%s\n' "$name" "$code"
+done
+```
+
+### Distribution results
+
+"Built" means at least one checked-in GitHub Actions workflow builds that
+project. "Tested" means `tools.ci_manifest.covering_suites()` returns a suite for
+the project's `pyproject.toml`; this deliberately does not infer coverage from a
+green workflow.
+
+| Distribution | Declared version | In `release_versions.toml` | Built by a workflow | On PyPI | Tested in `ci_manifest` | Evidence |
+|---|---:|---|---|---|---|---|
+| `pursers` | `5.0.0b2` | Yes | Yes | Yes (HTTP 200) | No | Built by CI, `publish-pypi.yml`, and `release.yml`; the manifest reports no suite covering `packages/pursers/pyproject.toml`. |
+| `pursers-central` | `0.1.0a31` | Yes | Yes | Yes (HTTP 200) | Yes | `central` (and the package is built in all three release/build workflows). |
+| `pursers-client` | `0.1.0a24` | Yes | Yes | Yes (HTTP 200) | Yes | `client` and `aionui-extension`. |
+| `pursers-personal` | `5.0.0b2` | Yes | Yes | Yes (HTTP 200) | Yes | `personal` and `aionui-extension`. |
+| `pursers-personal-import` | `5.0.0a3` | Yes | Yes | Yes (HTTP 200) | Yes | `import`. |
+| `pursers-wait-bridge` | `0.1.0a17` | Yes | Yes | Yes (HTTP 200) | Yes | `wait-bridge` and `release-tools`; it has its own Trusted Publishing job. |
+| `pursers-acp` | `0.1.0` | **No** | **No** | **No (HTTP 404)** | Yes | `acp-agent` and `release-tools`; no release/version/build match exists outside ACP's own source and tests. |
+
+There is exactly **one** landed-but-unshipped distribution:
+`pursers-acp`. No other declared Python distribution is in the same state.
+`pursers` has a separate test-coverage gap, but it is versioned, built, and
+published, so it is not an unshipped distribution.
+
+The source re-check also corrects two preliminary claims. There are 16 tracked
+files under `tools/acp-agent/` and `tools/acp-seat/`, not 17. The declared tests
+do collect as 32 ACP-seat tests plus 15 ACP-agent tests, but the ACP package is
+not release-synchronized: its dependency pins remain
+`pursers-client==0.1.0a23`, `pursers-personal==5.0.0a26`, and
+`pursers-wait-bridge==0.1.0a16`, while this baseline declares `0.1.0a24`,
+`5.0.0b2`, and `0.1.0a17`, respectively. The code is maintained and tested;
+the installable release contract is stale.
+
+### Installable entry-point results
+
+No `[project.entry-points]` tables were declared. All user-installable entry
+points came from `[project.scripts]`:
+
+| Command | Owning distribution | Owner in release manifest | Owner built by workflow | Owner on PyPI | Owner tested in `ci_manifest` |
+|---|---|---|---|---|---|
+| `pursers-central` | `pursers-central` | Yes | Yes | Yes | Yes |
+| `pursers-personal-import` | `pursers-personal-import` | Yes | Yes | Yes | Yes |
+| `pursers-personal` | `pursers-personal` | Yes | Yes | Yes | Yes |
+| `pursers-wait-bridge` | `pursers-wait-bridge` | Yes | Yes | Yes | Yes |
+| `pursers-door` | `pursers-wait-bridge` | Yes | Yes | Yes | Yes |
+| `pursers-acp` | `pursers-acp` | **No** | **No** | **No** | Yes |
+
+Thus exactly **one** plausibly installable command is also landed but
+unshipped: `pursers-acp`, from the distribution of the same name.
+
+### What shipping `pursers-acp` would require
+
+These are the concrete edits, in dependency order. This audit deliberately
+makes none of them and selects no release version.
+
+1. The release-train operator chooses the ACP version and adds an `acp` package
+   key to `tools/release_versions.toml`. `tools/release_versions.py` must add the
+   same key to `PACKAGE_KEYS` and map it to `pursers-acp` in
+   `WHEEL_DISTRIBUTIONS`, so exact wheel names and tag assets include it.
+2. `tools/release_train.py` must recognize `tools/acp-agent/pyproject.toml` as
+   `pursers-acp`, add the ACP version consumers to `VERSION_FILES`, and validate
+   ACP's exact dependencies on client, Personal, and wait-bridge. The synchronized
+   consumers include the pyproject version, `IMPLEMENTATION_VERSION` in
+   `src/pursers_acp/agent.py`, the version and `uvx` pins in
+   `pursers/agent.json`, and the registry assertions in
+   `tests/test_registry.py`. Its release-train tests must cover all new mappings
+   and reject stale pins.
+3. The selected train updates those ACP version consumers and replaces ACP's
+   stale dependency pins with the client, Personal, and wait-bridge versions
+   selected in the same release manifest.
+4. `.github/workflows/ci.yml` adds the ACP pyproject to the cache key, builds its
+   wheel, installs it in the isolated-wheel smoke test, and checks its
+   distribution metadata and `pursers-acp` entry point. The existing
+   `acp-agent` and `acp-seat` suites remain required by `ci_manifest.py`.
+5. `.github/workflows/publish-pypi.yml` builds
+   `tools/acp-agent`, passes the wheel through
+   `tools/verify_publish_wheels.py`, and publishes it from a PyPI Trusted
+   Publishing environment authorized for the new project. Because the JSON
+   endpoint is currently 404, the operator must first configure the PyPI project
+   or pending trusted publisher; the workflow must not assume it already exists.
+6. `.github/workflows/release.yml` builds a seventh wheel and includes it in the
+   exact `expected_wheel_filenames()` cohort and `SHA256SUMS.txt`. Tests and
+   release documentation that currently assert "six wheels" must be updated to
+   the new cohort. ACP's registry descriptor should be submitted upstream only
+   after its pinned PyPI artifact exists and passes an isolated `uvx` smoke test.
+7. Do not treat `tools/aionui-extension/INTEGRATION_FILES.sha256` as a package
+   or release-shipping inventory. Its declared contract is the exact cumulative
+   changed-path set from frozen base
+   `0c83cd8da4e8ac04ee2dd564559f57718335cdef`, excluding the manifest itself.
+   At this audit's baseline, the exact ACP subset is only
+   `tools/acp-seat/README.md`, `tools/acp-seat/pursers_acp_seat.py`, and
+   `tools/acp-seat/tests/test_pursers_acp_seat.py`; it is not all 16 tracked ACP
+   paths. The release-train edits above are expected to newly change only the
+   ACP-agent consumers `pyproject.toml`, `src/pursers_acp/agent.py`,
+   `pursers/agent.json`, and `tests/test_registry.py`. Immediately before the
+   operator regenerates the manifest, derive the candidate's exact ACP subset
+   with `git diff --name-only 0c83cd8da4e8ac04ee2dd564559f57718335cdef..<candidate> -- tools/acp-agent tools/acp-seat`;
+   include those actual cumulative paths and no untouched ACP files. Regenerate
+   the checksum manifest last. This host-integration provenance gate is separate
+   from adding `pursers-acp` to release versions, workflow builds, the wheel
+   cohort, and PyPI Trusted Publishing.
+
+The Personal component lock is not a precedent for adding ACP. Its declared
+scope is only the embedded `pursers-central` and `pursers-client` wheels plus the
+dashboard view; even `pursers-wait-bridge` is not a locked component.
+`tools/regenerate_component_lock.py` therefore needs no ACP entry unless the
+product separately decides to embed ACP inside Personal. The existing lock must
+still remain byte-consistent after release-train changes.
+
+The resulting change would be gated by: release-manifest parsing and exact
+version/dependency checks; release-train tests and `release_train.py check`;
+ACP's 47 focused tests; complete `ci_manifest.py` check/collect/run/verify;
+integration-manifest validation; pinned-generator wheel verification; isolated
+wheel import/metadata/entry-point smoke tests; exact release wheel-cohort and
+checksum checks; tracked-file leak scan; `git diff --check`; the normal CI and
+CodeQL workflows; PyPI Trusted Publishing; and a post-publish install/`uvx`
+smoke test. Tagging, publishing, and version selection remain operator actions.
+
 ## Observations
 
 - Stranded count: **6** of 77.
