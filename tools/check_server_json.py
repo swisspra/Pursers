@@ -36,12 +36,16 @@ CENTRAL_ENVIRONMENT = {
     "CENTRAL_REQUEST_STATE_KEY_FILE",
     "PURSERS_LEGACY_TOOLS",
     "STORE_BACKEND",
+    "ONBOARD_CENTRAL_DATA_DIR",
+    "ONBOARD_CENTRAL_HOST",
+    "ONBOARD_CENTRAL_LOG_LEVEL",
+    "ONBOARD_CENTRAL_PORT",
 }
 REQUIRED_CENTRAL_ENVIRONMENT = {
     "CENTRAL_JWKS_PATH",
-    "CENTRAL_JWT_AUDIENCE",
     "CENTRAL_JWT_ISSUER",
 }
+CENTRAL_TRANSPORT_URL = "http://127.0.0.1:8766/mcp"
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -113,9 +117,10 @@ def check(repository: Path) -> list[str]:
                     "server.json: pursers-central transport must be streamable-http"
                 )
             url = transport.get("url")
-            if not isinstance(url, str) or not url.startswith("https://"):
+            if url != CENTRAL_TRANSPORT_URL:
                 failures.append(
-                    "server.json: pursers-central transport URL must use https"
+                    "server.json: pursers-central transport URL must equal "
+                    f"{CENTRAL_TRANSPORT_URL}"
                 )
 
         environment = central.get("environmentVariables")

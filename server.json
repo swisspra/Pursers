@@ -25,9 +25,38 @@
       ],
       "transport": {
         "type": "streamable-http",
-        "url": "https://127.0.0.1:8766/mcp"
+        "url": "http://127.0.0.1:8766/mcp"
       },
       "environmentVariables": [
+        {
+          "name": "ONBOARD_CENTRAL_HOST",
+          "description": "Loopback bind host used by the packaged runtime",
+          "default": "127.0.0.1",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "ONBOARD_CENTRAL_PORT",
+          "description": "Loopback bind port used by the packaged runtime",
+          "default": "8766",
+          "format": "number",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "ONBOARD_CENTRAL_DATA_DIR",
+          "description": "Private Central data directory; --data-dir/--data-root is the equivalent CLI input",
+          "format": "filepath",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "ONBOARD_CENTRAL_LOG_LEVEL",
+          "description": "Packaged runtime log level",
+          "default": "info",
+          "isRequired": false,
+          "isSecret": false
+        },
         {
           "name": "CENTRAL_ADMISSION",
           "description": "Central admission policy; Pursers supports invite-only admission",
@@ -51,8 +80,8 @@
         },
         {
           "name": "CENTRAL_JWT_AUDIENCE",
-          "description": "Exact HTTPS MCP resource URL in the audience and resource claims",
-          "isRequired": true,
+          "description": "MCP resource URL in audience and resource claims; defaults to the loopback bind URL",
+          "isRequired": false,
           "isSecret": false
         },
         {

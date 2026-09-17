@@ -66,7 +66,7 @@ def test_check_rejects_transport_and_environment_drift(tmp_path: Path) -> None:
     path = root / "server.json"
     document = json.loads(path.read_text(encoding="utf-8"))
     central = document["packages"][0]
-    central["transport"] = {"type": "sse", "url": "http://127.0.0.1:8766/mcp"}
+    central["transport"] = {"type": "sse", "url": "http://127.0.0.1:9999/mcp"}
     central["environmentVariables"] = central["environmentVariables"][:-1]
     path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
 
@@ -74,5 +74,21 @@ def test_check_rejects_transport_and_environment_drift(tmp_path: Path) -> None:
 
     rendered = "\n".join(failures)
     assert "transport must be streamable-http" in rendered
-    assert "transport URL must use https" in rendered
+    assert "transport URL must equal http://127.0.0.1:8766/mcp" in rendered
     assert "environment names must equal" in rendered
+
+
+def test_check_rejects_https_transport_for_http_packaged_runtime(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_repository(tmp_path)
+    path = root / "server.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["packages"][0]["transport"]["url"] = (
+        "https://127.0.0.1:8766/mcp"
+    )
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    failures = check_server_json.check(root)
+
+    assert any("transport URL must equal" in failure for failure in failures)
