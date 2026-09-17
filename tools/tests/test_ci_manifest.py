@@ -24,6 +24,7 @@ from ci_manifest import (  # noqa: E402
     parse_collected_count,
     print_seat_digest_report,
     pytest_target,
+    require_free_space,
     run_seat_suites,
     suite_environment,
     validate_integration_files,
@@ -34,6 +35,26 @@ from ci_manifest import (  # noqa: E402
 
 def test_manifest_covers_every_test_directory() -> None:
     validate_manifest(REPOSITORY_ROOT)
+
+
+def test_low_space_guard_fires_below_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        ci_manifest.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=10_000, used=9_001, free=999),
+    )
+
+    with pytest.raises(RuntimeError, match=r"LOW DISK SPACE.*free_bytes=999"):
+        require_free_space(tmp_path, minimum_free_bytes=1_000)
+
+    monkeypatch.setattr(
+        ci_manifest.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=10_000, used=9_000, free=1_000),
+    )
+    require_free_space(tmp_path, minimum_free_bytes=1_000)
 
 
 def test_integration_files_manifest_matches_the_tree() -> None:

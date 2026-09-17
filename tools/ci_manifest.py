@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -98,6 +99,26 @@ INTEGRATION_FILES_MANIFEST = Path(
     "tools/aionui-extension/INTEGRATION_FILES.sha256"
 )
 SHA256_MANIFEST_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
+# One observed abandoned seat root exceeded 7.7 GB. Keep enough headroom for a
+# similarly sized run plus normal filesystem churn.
+DEFAULT_MIN_FREE_BYTES = 10 * 1024 * 1024 * 1024
+MIN_FREE_BYTES_ENV = "PURSERS_CI_MIN_FREE_BYTES"
+
+
+def require_free_space(
+    path: Path,
+    minimum_free_bytes: int = DEFAULT_MIN_FREE_BYTES,
+) -> None:
+    """Stop before test execution when the checkout volume is too full."""
+    if minimum_free_bytes < 0:
+        raise ValueError(f"{MIN_FREE_BYTES_ENV} must not be negative")
+    free = shutil.disk_usage(path).free
+    if free < minimum_free_bytes:
+        raise RuntimeError(
+            "LOW DISK SPACE: refusing to start the CI manifest; "
+            f"free_bytes={free}, required_bytes={minimum_free_bytes}. "
+            "Reclaim abandoned temp roots, then rerun."
+        )
 
 
 def covering_suites(
@@ -437,6 +458,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = repository_root()
     try:
+        configured_minimum = int(
+            os.environ.get(MIN_FREE_BYTES_ENV, str(DEFAULT_MIN_FREE_BYTES))
+        )
+        require_free_space(root, configured_minimum)
         validate_manifest(root)
         if args.command != "seat-suite-report":
             validate_integration_files(root)
