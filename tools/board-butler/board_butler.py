@@ -1618,13 +1618,19 @@ async def run(
     *,
     backend_factory: Any = CentralBackend,
 ) -> None:
-    # The lock deliberately precedes token reads and backend construction.
+    # One-shot controls must remain available while the resident owns the
+    # singleton lock. Their coordinator_findings write is CAS-protected by the
+    # backend, so they cannot create a second resident or race silently.
+    if args.kill_switch or args.veto_question:
+        token = _read_token(args.token_path)
+        async with backend_factory(args, token) as backend:
+            await apply_control_action(backend, args, utc_now())
+        return
+
+    # Resident startup deliberately locks before token reads and board access.
     with SingletonLock(args.pid_file):
         token = _read_token(args.token_path)
         async with backend_factory(args, token) as backend:
-            if args.kill_switch or args.veto_question:
-                await apply_control_action(backend, args, utc_now())
-                return
             cursor = load_cursor(args.cursor_file)
             if cursor is None:
                 cursor = backend.latest_seq
@@ -1694,6 +1700,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         asyncio.run(run(args))
     except AlreadyRunning as exc:
         print(f"board-butler: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     except KeyboardInterrupt:
         pass
 

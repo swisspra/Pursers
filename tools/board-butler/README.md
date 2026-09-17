@@ -17,11 +17,14 @@ The butler compares the submitted cumulative file list with the quoted suite
 results. A non-passing suite escalates only when it covers the diff; an
 unrelated blocked suite does not turn a docs-only submission into an escalation.
 
-The runner acquires an exclusive pidfile lock before reading credentials or
-opening Central. It joins as a coordinator with `can_work=false` and
-`can_review=false`, then refuses to run if another working or reviewing seat
-shares its principal. Deploy it with its own credential and state paths; do not
-reuse a worker or reviewer token.
+The resident runner acquires an exclusive pidfile lock before reading
+credentials or opening Central. One-shot kill-switch and veto commands bypass
+that resident lock so they remain operable during normal service; their durable
+`coordinator_findings` mutation is still compare-and-swap protected. A second
+resident remains lock-rejected and exits nonzero. The runner joins as a
+coordinator with `can_work=false` and `can_review=false`, then refuses to run if
+another working or reviewing seat shares its principal. Deploy it with its own
+credential and state paths; do not reuse a worker or reviewer token.
 
 One-cycle shadow validation:
 

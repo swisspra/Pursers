@@ -832,6 +832,81 @@ def test_control_action_persists_kill_switch_without_waiting(tmp_path: Path) -> 
     }
 
 
+@pytest.mark.parametrize("control", ["kill-switch", "veto-question"])
+def test_control_command_runs_while_resident_lock_is_held(
+    tmp_path: Path, control: str
+) -> None:
+    options = args(tmp_path)
+    options.control_reason = "operator incident"
+    initial: dict[str, Any] = {"findings": []}
+    if control == "kill-switch":
+        options.kill_switch = True
+    else:
+        options.veto_question = "CQ-held"
+        initial["findings"] = [
+            {
+                "kind": "would_answer",
+                "question_id": "CQ-held",
+                "hold": {"status": "held"},
+            }
+        ]
+
+    class Backend:
+        written: dict[str, Any] | None = None
+
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "Backend":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {"state": {"value": json.dumps(initial)}}
+
+        async def write_findings(self, value: str, _expected: str | None) -> None:
+            self.written = json.loads(value)
+
+    backend = Backend()
+    with butler.SingletonLock(options.pid_file):
+        asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
+
+    assert backend.written is not None
+    assert backend.written["effective_mode"] == "shadow"
+    if control == "kill-switch":
+        assert backend.written["board_butler"]["kill_switch"]["engaged"] is True
+    else:
+        assert backend.written["board_butler"]["last_veto"] == {
+            "question_id": "CQ-held",
+            "reason": "operator incident",
+            "at": backend.written["generated_at"],
+        }
+        assert backend.written["findings"][0]["hold"]["status"] == "vetoed"
+
+
+def test_cli_resident_lock_failure_exits_nonzero(tmp_path: Path) -> None:
+    options = args(tmp_path)
+    argv = [
+        "--token-path",
+        str(options.token_path),
+        "--repo",
+        str(options.repo),
+        "--pid-file",
+        str(options.pid_file),
+        "--cursor-file",
+        str(options.cursor_file),
+        "--once",
+    ]
+
+    with butler.SingletonLock(options.pid_file):
+        with pytest.raises(SystemExit) as raised:
+            butler.main(argv)
+
+    assert raised.value.code == 1
+
+
 def test_cursor_is_not_committed_before_finding_write(tmp_path: Path) -> None:
     options = args(tmp_path)
 
