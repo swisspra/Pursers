@@ -1,5 +1,7 @@
 # Pursers Central
 
+<!-- mcp-name: io.github.swisspra/pursers -->
+
 Pursers Central is the loopback MCP service that owns board state. Run it with
 the console script or the equivalent Python module:
 

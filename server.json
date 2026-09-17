@@ -1,0 +1,119 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.swisspra/pursers",
+  "title": "Pursers",
+  "description": "Coordinate AI-agent work on a local-first, owner-controlled MCP board",
+  "repository": {
+    "url": "https://github.com/swisspra/Pursers",
+    "source": "github"
+  },
+  "version": "5.0.0b2",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "pursers-central",
+      "version": "0.1.0a31",
+      "runtimeHint": "uvx",
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--data-root",
+          "description": "Private directory for the Central SQLite store and request-state keys",
+          "format": "filepath",
+          "isRequired": true
+        }
+      ],
+      "transport": {
+        "type": "streamable-http",
+        "url": "https://127.0.0.1:8766/mcp"
+      },
+      "environmentVariables": [
+        {
+          "name": "CENTRAL_ADMISSION",
+          "description": "Central admission policy; Pursers supports invite-only admission",
+          "value": "invite",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "CENTRAL_AUTH_MODE",
+          "description": "Central authentication mode; Pursers supports JWT authentication",
+          "value": "jwt",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "CENTRAL_JWKS_PATH",
+          "description": "Path to the issuer public JWKS used to verify seat credentials",
+          "format": "filepath",
+          "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "CENTRAL_JWT_AUDIENCE",
+          "description": "Exact HTTPS MCP resource URL in the audience and resource claims",
+          "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "CENTRAL_JWT_CLOCK_SKEW",
+          "description": "Allowed JWT clock skew in seconds",
+          "default": "30",
+          "format": "number",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "CENTRAL_JWT_ISSUER",
+          "description": "Exact issuer URL in every accepted seat credential",
+          "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "CENTRAL_PRINCIPAL_STREAM_CAP",
+          "description": "Maximum concurrent event streams accepted per principal",
+          "default": "32",
+          "format": "number",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "CENTRAL_REAPER_INTERVAL_S",
+          "description": "Interval in seconds between expired-lease reaper sweeps",
+          "default": "30.0",
+          "format": "number",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "CENTRAL_REQUEST_STATE_KEY_FILE",
+          "description": "Optional restart-safe request-state keyring path",
+          "format": "filepath",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "PURSERS_LEGACY_TOOLS",
+          "description": "Set to 1 only when deprecated coordination tools must be exposed",
+          "default": "0",
+          "format": "boolean",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "STORE_BACKEND",
+          "description": "Central storage backend; Pursers supports SQLite",
+          "value": "sqlite",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "versionSource": "tools/release_versions.toml",
+      "releaseNote": "At the beta.3 candidate, copy the b3 product and central versions from tools/release_versions.toml; tools/check_server_json.py fails until both fields match."
+    }
+  }
+}
