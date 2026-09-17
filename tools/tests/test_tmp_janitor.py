@@ -232,6 +232,91 @@ def test_live_temp_environment_refuses_dormant_directory() -> None:
     assert f"live pid {holder.pid}" in result.reason
 
 
+def test_delete_refuses_ambiguous_live_temp_environment(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    candidate = tmp_path / "seat cache"
+    candidate.mkdir()
+    make_old(candidate)
+
+    def live_environment_runner(
+        command: list[str], **_kwargs: object
+    ) -> SimpleNamespace:
+        if Path(command[0]).name == "lsof":
+            return completed(returncode=1)
+        if command[0] == "/bin/ps":
+            return completed(stdout=f"123 runner TMPDIR={candidate}\n")
+        raise AssertionError(command)
+
+    assert tmp_janitor.run(
+        [candidate],
+        older_than_seconds=3_600,
+        delete=True,
+        runner=live_environment_runner,
+    ) == 0
+
+    assert candidate.is_dir()
+    output = capsys.readouterr().out
+    assert f"SKIP {candidate}" in output
+    assert "ambiguous in process environment output" in output
+    assert "reclaimed_bytes=0 candidates=0" in output
+
+
+def test_temp_environment_comparison_normalizes_lexical_aliases(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "seat-cache"
+    candidate.mkdir()
+    make_old(candidate)
+    lexical_alias = candidate.parent / "alias-parent" / ".." / candidate.name
+
+    def live_environment_runner(
+        command: list[str], **_kwargs: object
+    ) -> SimpleNamespace:
+        if Path(command[0]).name == "lsof":
+            return completed(returncode=1)
+        if command[0] == "/bin/ps":
+            return completed(stdout=f"123 runner TMPDIR={lexical_alias}\n")
+        raise AssertionError(command)
+
+    result = tmp_janitor.inspect_candidate(
+        candidate,
+        older_than_seconds=3_600,
+        runner=live_environment_runner,
+    )
+
+    assert result.selected is False
+    assert "live pid 123" in result.reason
+
+
+def test_temp_environment_comparison_resolves_whitespace_symlink_alias(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "seat-cache"
+    candidate.mkdir()
+    make_old(candidate)
+    alias = tmp_path / "seat alias"
+    alias.symlink_to(candidate, target_is_directory=True)
+
+    def live_environment_runner(
+        command: list[str], **_kwargs: object
+    ) -> SimpleNamespace:
+        if Path(command[0]).name == "lsof":
+            return completed(returncode=1)
+        if command[0] == "/bin/ps":
+            return completed(stdout=f"123 runner TMPDIR={alias} PATH=/bin\n")
+        raise AssertionError(command)
+
+    result = tmp_janitor.inspect_candidate(
+        candidate,
+        older_than_seconds=3_600,
+        runner=live_environment_runner,
+    )
+
+    assert result.selected is False
+    assert "live pid 123" in result.reason
+
+
 def test_exited_owner_pid_does_not_pin_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

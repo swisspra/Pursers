@@ -23,8 +23,9 @@ from typing import Callable, Sequence
 OWNER_FILE = ".pursers-tmp-owner-pid"
 LSOF_EXECUTABLE = shutil.which("lsof") or "/usr/sbin/lsof"
 TEMP_ENV_PATTERN = re.compile(
-    r"(?:^|\s)(?:TMPDIR|TMP|TEMP|TEMPDIR|PYTEST_DEBUG_TEMPROOT)=([^\s]+)"
+    r"(?:^|\s)(?:TMPDIR|TMP|TEMP|TEMPDIR|PYTEST_DEBUG_TEMPROOT)="
 )
+ENV_ASSIGNMENT_PATTERN = re.compile(r"\s+[A-Za-z_][A-Za-z0-9_]*=")
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,29 @@ def _paths_overlap(first: Path, second: Path) -> bool:
         return False
 
 
+def _comparison_path(path: Path) -> Path:
+    """Canonicalize aliases for comparison without changing the deletion path."""
+    return path.resolve(strict=False)
+
+
+def _ps_environment_path_is_unambiguous(path: Path) -> bool:
+    """Whether a path can be recognized losslessly in whitespace-delimited ps output."""
+    raw = os.fspath(path)
+    return "\\" not in raw and not any(character.isspace() for character in raw)
+
+
+def _temp_environment_values(command: str) -> list[str]:
+    """Extract temp values through the next environment assignment or line end."""
+    values = []
+    for match in TEMP_ENV_PATTERN.finditer(command):
+        next_assignment = ENV_ASSIGNMENT_PATTERN.search(command, match.end())
+        end = next_assignment.start() if next_assignment else len(command)
+        value = command[match.end() : end].rstrip()
+        if value:
+            values.append(value)
+    return values
+
+
 def _owner_file_state(path: Path) -> tuple[bool | None, str]:
     marker = path / OWNER_FILE
     if not marker.exists():
@@ -146,6 +170,9 @@ def process_use_state(
     runner: RunCommand = subprocess.run,
 ) -> tuple[bool | None, str]:
     """Return True for active, False for inspected-and-idle, None for unknown."""
+    if not _ps_environment_path_is_unambiguous(path):
+        return None, "candidate path is ambiguous in process environment output"
+
     marker_active, marker_reason = _owner_file_state(path)
     if marker_active is None or marker_active:
         return marker_active, marker_reason
@@ -177,15 +204,28 @@ def process_use_state(
     if process_list.returncode != 0 or process_list.stderr.strip():
         return None, "process environment inspection failed"
 
+    try:
+        comparison_path = _comparison_path(path)
+    except OSError as exc:
+        return None, f"cannot normalize candidate for environment comparison: {exc}"
+
     for line in process_list.stdout.splitlines():
         stripped = line.lstrip()
         pid_text, separator, command = stripped.partition(" ")
         if not separator or not pid_text.isdigit() or int(pid_text) == os.getpid():
             continue
-        for raw_value in TEMP_ENV_PATTERN.findall(command):
+        for raw_value in _temp_environment_values(command):
             value = Path(raw_value)
-            if value.is_absolute() and _paths_overlap(path, value):
+            if not value.is_absolute():
+                continue
+            try:
+                comparison_value = _comparison_path(value)
+            except OSError:
+                return None, f"cannot normalize temp environment for live pid {pid_text}"
+            if _paths_overlap(comparison_path, comparison_value):
                 return True, f"live pid {pid_text} has a temp environment under this root"
+            if any(character.isspace() for character in raw_value):
+                return None, f"live pid {pid_text} has an ambiguous temp environment"
 
     return False, marker_reason
 
