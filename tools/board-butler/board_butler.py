@@ -1480,6 +1480,67 @@ def mechanical_hold_status(finding: Mapping[str, Any], now: datetime) -> str:
     return "ready" if release_at is not None and release_at <= now else "held"
 
 
+def reconcile_mechanical_holds(
+    state: Mapping[str, Any], active_action_ids: set[str], now: datetime
+) -> tuple[dict[str, Any], list[str]]:
+    """Withdraw pending action holds whose board-state predicate disappeared."""
+    result = dict(state)
+    findings = [
+        dict(item) for item in state.get("findings", []) if isinstance(item, Mapping)
+    ]
+    withdrawn: list[str] = []
+    for finding in findings:
+        action_id = str(finding.get("action_id") or "")
+        if (
+            not action_id
+            or finding.get("action_class") not in MECHANICAL_ACTION_CLASSES
+            or action_id in active_action_ids
+        ):
+            continue
+        hold = dict(finding.get("hold", {}))
+        if hold.get("status") not in {"held", "pending"}:
+            continue
+        hold.update(
+            {
+                "status": "withdrawn",
+                "withdrawn_at": now.isoformat(),
+                "withdrawal_reason": "board-state predicate no longer holds",
+            }
+        )
+        finding["hold"] = hold
+        withdrawn.append(action_id)
+    if withdrawn:
+        result["findings"] = findings
+        result["generated_at"] = now.isoformat()
+    return result, withdrawn
+
+
+def ensure_mechanical_hold(
+    state: Mapping[str, Any],
+    action: MechanicalAction,
+    now: datetime,
+    hold_seconds: int,
+) -> tuple[dict[str, Any], str]:
+    """Register a new hold episode, or report the current episode's status."""
+    action_id = mechanical_action_id(action)
+    existing = next(
+        (
+            item
+            for item in state.get("findings", [])
+            if isinstance(item, Mapping)
+            and item.get("kind") in {"would_answer", "butler_action"}
+            and item.get("action_id") == action_id
+        ),
+        None,
+    )
+    hold = existing.get("hold", {}) if isinstance(existing, Mapping) else {}
+    status = hold.get("status") if isinstance(hold, Mapping) else None
+    if existing is None or status == "withdrawn":
+        finding = mechanical_action_finding(action, now, hold_seconds)
+        return merge_finding(state, finding, now), "registered"
+    return dict(state), mechanical_hold_status(existing, now)
+
+
 def plan_mechanical_actions(
     board_id: str,
     snapshot: Mapping[str, Any],
@@ -1814,7 +1875,6 @@ class CentralBackend:
         """Register a durable hold or return its current execution status."""
         from pursers_client import BoardClient
 
-        action_id = mechanical_action_id(action)
         async with BoardClient(
             self.args.url,
             self.token,
@@ -1836,21 +1896,10 @@ class CentralBackend:
                     raise
                 raw = {}
             state, previous_value = _decode_state(raw)
-            existing = next(
-                (
-                    item
-                    for item in state.get("findings", [])
-                    if isinstance(item, Mapping)
-                    and item.get("kind") in {"would_answer", "butler_action"}
-                    and item.get("action_id") == action_id
-                ),
-                None,
+            merged, status = ensure_mechanical_hold(
+                state, action, now, self.args.action_hold_seconds
             )
-            if existing is None:
-                finding = mechanical_action_finding(
-                    action, now, self.args.action_hold_seconds
-                )
-                merged = merge_finding(state, finding, now)
+            if status == "registered":
                 expected = (
                     hashlib.sha256(previous_value.encode("utf-8")).hexdigest()
                     if previous_value is not None
@@ -1862,7 +1911,54 @@ class CentralBackend:
                     expected_sha256=expected,
                 )
                 return "registered"
-            return mechanical_hold_status(existing, now)
+            return status
+
+    async def _reconcile_mechanical_holds(
+        self, board_id: str, active_action_ids: set[str], now: datetime
+    ) -> list[str]:
+        """Persist withdrawal when an intended action is no longer provable."""
+        from pursers_client import BoardClient
+
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities={
+                "can_work": False,
+                "can_review": False,
+                "tier_max": 0,
+                "max_parallel": 1,
+            },
+            allow_takeover=True,
+        ) as client:
+            try:
+                raw = await client.board_state_get(STATE_KEY)
+            except Exception as exc:
+                if "state key not found" not in str(exc).lower():
+                    raise
+                raw = {}
+            state, previous_value = _decode_state(raw)
+            reconciled, withdrawn = reconcile_mechanical_holds(
+                state, active_action_ids, now
+            )
+            if not withdrawn:
+                return []
+            encoded = json.dumps(
+                _bound_control_state(reconciled),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected = (
+                hashlib.sha256(previous_value.encode("utf-8")).hexdigest()
+                if previous_value is not None
+                else None
+            )
+            await client.board_state_update(
+                STATE_KEY, encoded, expected_sha256=expected
+            )
+            return withdrawn
 
     async def _mark_mechanical_hold_executed(
         self, action: MechanicalAction, now: datetime
@@ -1962,9 +2058,17 @@ class CentralBackend:
                         self.args.no_live_candidates_cycles
                     ),
                 )
-                for action in board_actions:
-                    if action.kind not in self.args.active_action:
-                        continue
+                enabled_actions = [
+                    action
+                    for action in board_actions
+                    if action.kind in self.args.active_action
+                ]
+                await self._reconcile_mechanical_holds(
+                    board_id,
+                    {mechanical_action_id(action) for action in enabled_actions},
+                    now,
+                )
+                for action in enabled_actions:
                     hold_status = await self._mechanical_hold_status(action, now)
                     if hold_status == "ready":
                         await self._execute_mechanical_action(action)

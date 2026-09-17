@@ -1508,6 +1508,82 @@ def test_mechanical_action_id_is_stable_across_reoffer_counts() -> None:
     assert butler.mechanical_action_id(first) == butler.mechanical_action_id(later)
 
 
+@pytest.mark.parametrize(
+    "action",
+    [
+        butler.MechanicalAction(
+            "park_no_live_candidates",
+            "fullplatts",
+            "TK-loop",
+            None,
+            None,
+            3,
+            "repeated no_live_candidates cycles and no live can_work=true seat",
+        ),
+        butler.MechanicalAction(
+            "refuse_incapable_target",
+            "fullplatts",
+            "TK-loop",
+            "fleet-dashboard-viewer",
+            "AI-viewer",
+            None,
+            "capabilities.can_work is not true",
+        ),
+    ],
+    ids=["park_no_live_candidates", "refuse_incapable_target"],
+)
+def test_mechanical_hold_predicate_disappears_then_gets_fresh_window(
+    action: butler.MechanicalAction,
+) -> None:
+    first_state, first_status = butler.ensure_mechanical_hold({}, action, NOW, 60)
+    action_id = butler.mechanical_action_id(action)
+
+    assert first_status == "registered"
+    withdrawn_state, withdrawn = butler.reconcile_mechanical_holds(
+        first_state, set(), NOW + butler.timedelta(seconds=10)
+    )
+    old_finding = withdrawn_state["findings"][0]
+    assert withdrawn == [action_id]
+    assert old_finding["hold"]["status"] == "withdrawn"
+    assert old_finding["hold"]["withdrawn_at"] == (
+        NOW + butler.timedelta(seconds=10)
+    ).isoformat()
+
+    reappeared_at = NOW + butler.timedelta(seconds=120)
+    renewed_state, renewed_status = butler.ensure_mechanical_hold(
+        withdrawn_state, action, reappeared_at, 60
+    )
+    renewed_finding = renewed_state["findings"][0]
+    assert renewed_status == "registered"
+    assert renewed_finding["hold"]["status"] == "pending"
+    assert renewed_finding["hold"]["drafted_at"] == reappeared_at.isoformat()
+    assert renewed_finding["hold"]["release_at"] == (
+        reappeared_at + butler.timedelta(seconds=60)
+    ).isoformat()
+    assert butler.mechanical_hold_status(renewed_finding, reappeared_at) == "held"
+
+
+def test_mechanical_hold_reconciliation_preserves_veto_fail_closed() -> None:
+    action = butler.MechanicalAction(
+        "park_no_live_candidates", "fullplatts", "TK-loop", None, None, 3, "reason"
+    )
+    state, _status = butler.ensure_mechanical_hold({}, action, NOW, 60)
+    vetoed = butler.veto_question(
+        state, butler.mechanical_action_id(action), "operator veto", NOW
+    )
+
+    reconciled, withdrawn = butler.reconcile_mechanical_holds(
+        vetoed, set(), NOW + butler.timedelta(seconds=10)
+    )
+    reappeared, status = butler.ensure_mechanical_hold(
+        reconciled, action, NOW + butler.timedelta(seconds=120), 60
+    )
+
+    assert withdrawn == []
+    assert status == "vetoed"
+    assert reappeared["findings"][0]["hold"]["status"] == "vetoed"
+
+
 def test_registry_refresh_runs_real_derivation_for_two_active_boards_twice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
