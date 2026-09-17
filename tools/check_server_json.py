@@ -46,15 +46,22 @@ CENTRAL_ENVIRONMENT = {
     "PURSERS_LEGACY_TOOLS",
     "STORE_BACKEND",
     "ONBOARD_CENTRAL_DATA_DIR",
+    "ONBOARD_CENTRAL_ALLOWED_HOSTS",
     "ONBOARD_CENTRAL_HOST",
     "ONBOARD_CENTRAL_LOG_LEVEL",
     "ONBOARD_CENTRAL_PORT",
+    "ONBOARD_CENTRAL_TLS_CERTFILE",
+    "ONBOARD_CENTRAL_TLS_KEYFILE",
 }
 REQUIRED_CENTRAL_ENVIRONMENT = {
     "CENTRAL_JWKS_PATH",
     "CENTRAL_JWT_ISSUER",
 }
 CENTRAL_TRANSPORT_URL = "http://127.0.0.1:8766/mcp"
+LEGACY_TOOLS_ENVIRONMENT = {
+    "default": "0",
+    "format": "string",
+}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -250,6 +257,24 @@ def check(repository: Path) -> list[str]:
                     "server.json: required pursers-central environment names must "
                     f"equal {sorted(REQUIRED_CENTRAL_ENVIRONMENT)!r}"
                 )
+            legacy = next(
+                (
+                    item
+                    for item in environment
+                    if isinstance(item, dict)
+                    and item.get("name") == "PURSERS_LEGACY_TOOLS"
+                ),
+                None,
+            )
+            if legacy is not None:
+                actual = {
+                    key: legacy.get(key) for key in LEGACY_TOOLS_ENVIRONMENT
+                }
+                if actual != LEGACY_TOOLS_ENVIRONMENT:
+                    failures.append(
+                        "server.json: PURSERS_LEGACY_TOOLS must be a string with "
+                        "default '0'; Central enables it only for the exact string '1'"
+                    )
 
     marker = _ownership_marker()
     for relative in MARKER_READMES:

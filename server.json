@@ -58,6 +58,26 @@
           "isSecret": false
         },
         {
+          "name": "ONBOARD_CENTRAL_ALLOWED_HOSTS",
+          "description": "Optional comma-separated bare Host names accepted in addition to the bind host",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "ONBOARD_CENTRAL_TLS_CERTFILE",
+          "description": "Optional TLS certificate path; requires ONBOARD_CENTRAL_TLS_KEYFILE",
+          "format": "filepath",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "ONBOARD_CENTRAL_TLS_KEYFILE",
+          "description": "Optional TLS private-key path; requires ONBOARD_CENTRAL_TLS_CERTFILE",
+          "format": "filepath",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
           "name": "CENTRAL_ADMISSION",
           "description": "Central admission policy; Pursers supports invite-only admission",
           "value": "invite",
@@ -123,9 +143,9 @@
         },
         {
           "name": "PURSERS_LEGACY_TOOLS",
-          "description": "Set to 1 only when deprecated coordination tools must be exposed",
+          "description": "String flag: use 1 to expose deprecated coordination tools; use 0 to keep them hidden",
           "default": "0",
-          "format": "boolean",
+          "format": "string",
           "isRequired": false,
           "isSecret": false
         },

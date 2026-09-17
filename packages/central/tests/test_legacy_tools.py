@@ -190,6 +190,22 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn(dep, tool_names)
                 self.assertTrue(REMOVED_TOOLS.isdisjoint(tool_names))
 
+    async def test_registry_string_value_matches_runtime_contract(self) -> None:
+        """The registry's string value 1 enables tools; boolean text does not."""
+        with patch.dict(os.environ, {"PURSERS_LEGACY_TOOLS": "true"}):
+            async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
+                modern_names = {
+                    tool.name for tool in (await client.list_tools()).tools
+                }
+        with patch.dict(os.environ, {"PURSERS_LEGACY_TOOLS": "1"}):
+            async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
+                legacy_names = {
+                    tool.name for tool in (await client.list_tools()).tools
+                }
+
+        self.assertTrue(central.DEPRECATED_TOOLS.isdisjoint(modern_names))
+        self.assertTrue(central.DEPRECATED_TOOLS.issubset(legacy_names))
+
     async def test_never_joined_request_metadata_cannot_enable_legacy_tools(
         self,
     ) -> None:

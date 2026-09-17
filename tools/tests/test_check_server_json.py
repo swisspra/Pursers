@@ -121,6 +121,25 @@ def test_check_rejects_transport_and_environment_drift(tmp_path: Path) -> None:
     assert "environment names must equal" in rendered
 
 
+def test_check_rejects_boolean_legacy_tools_input(tmp_path: Path) -> None:
+    root = _fixture_repository(tmp_path)
+    path = root / "server.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    environment = document["packages"][0]["environmentVariables"]
+    legacy = next(
+        item for item in environment if item["name"] == "PURSERS_LEGACY_TOOLS"
+    )
+    legacy["format"] = "boolean"
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    failures = check_server_json.check(root)
+
+    assert any(
+        "PURSERS_LEGACY_TOOLS must be a string" in failure
+        for failure in failures
+    )
+
+
 def test_check_rejects_https_transport_for_http_packaged_runtime(
     tmp_path: Path,
 ) -> None:
