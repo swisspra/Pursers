@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pursers.board-butler</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/PATH/TO/Pursers/tools/board-butler/launch.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PURSERS_BUTLER_PYTHON</key>
+    <string>/PATH/TO/python3</string>
+    <key>PURSERS_BUTLER_REPO</key>
+    <string>/PATH/TO/Pursers</string>
+    <key>PURSERS_BUTLER_URL</key>
+    <string>https://central.example.invalid/mcp</string>
+    <key>PURSERS_BUTLER_TOKEN_PATH</key>
+    <string>/PATH/TO/private/board-butler.jwt</string>
+    <key>PURSERS_BUTLER_STATE_DIR</key>
+    <string>/PATH/TO/private/board-butler-state</string>
+    <key>PURSERS_BUTLER_HOME_BOARD</key>
+    <string>pursers</string>
+    <key>PURSERS_BUTLER_RUNTIME_MODE</key>
+    <string>shadow</string>
+    <key>PURSERS_BUTLER_ACTIVE_AUTHORIZATION_FILE</key>
+    <string>/PATH/TO/private/board-butler-state/active-authorized.json</string>
+    <key>PURSERS_BUTLER_ACTIVE_BOARD</key>
+    <string>pursers</string>
+    <key>PYTHONPATH</key>
+    <string>/PATH/TO/Pursers/packages/client/src</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/PATH/TO/private/logs/board-butler.log</string>
+  <key>StandardErrorPath</key>
+  <string>/PATH/TO/private/logs/board-butler.log</string>
+</dict>
+</plist>

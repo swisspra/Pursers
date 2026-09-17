@@ -6,6 +6,7 @@ import copy
 import json
 import os
 import re
+import signal
 import stat
 import threading
 import uuid
@@ -379,11 +380,110 @@ class ButlerSettingsManager:
         *,
         opener: Callable[..., Any] = urlopen,
         now: Callable[[], datetime] | None = None,
+        runtime_path: str | Path | None = None,
+        kill_path: str | Path | None = None,
+        process_probe: Callable[[int], bool] | None = None,
+        signaler: Callable[[int, int], None] | None = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.opener = opener
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self.runtime_path = (
+            Path(runtime_path).expanduser().resolve()
+            if runtime_path
+            else self.root.parent / "runtime.json"
+        )
+        self.kill_path = (
+            Path(kill_path).expanduser().resolve()
+            if kill_path
+            else self.root.parent / "KILLED"
+        )
+        self.process_probe = process_probe or self._process_alive
+        self.signaler = signaler or os.kill
         self._lock = threading.RLock()
+
+    @staticmethod
+    def _process_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    @staticmethod
+    def _private_file(path: Path) -> bool:
+        try:
+            info = path.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISREG(info.st_mode)
+            and not path.is_symlink()
+            and info.st_uid == os.geteuid()
+            and stat.S_IMODE(info.st_mode) == 0o600
+        )
+
+    def _runtime(self, configured: bool) -> dict[str, Any]:
+        document: Mapping[str, Any] = {}
+        if self._private_file(self.runtime_path):
+            try:
+                candidate = json.loads(
+                    self.runtime_path.read_text(encoding="utf-8")[:16_384]
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                candidate = {}
+            if isinstance(candidate, Mapping):
+                document = candidate
+        pid = document.get("pid")
+        mode = document.get("mode")
+        alive = bool(
+            document.get("running") is True
+            and isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and pid > 1
+            and mode in {"shadow", "active"}
+            and self.process_probe(pid)
+        )
+        if alive:
+            state = f"running_{mode}"
+        elif configured:
+            state = "configured_not_running"
+        else:
+            state = "not_configured"
+        last_activity = document.get("last_activity")
+        if last_activity not in {
+            "startup",
+            "registry_refresh",
+            "question_processed",
+            "stopped",
+        }:
+            last_activity = None
+
+        def timestamp(name: str) -> str | None:
+            value = document.get(name)
+            if not isinstance(value, str) or len(value) > 64:
+                return None
+            try:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return value
+
+        return {
+            "state": state,
+            "configured": configured,
+            "running": alive,
+            "mode": mode if alive else None,
+            "pid": pid if alive else None,
+            "started_at": timestamp("started_at"),
+            "last_activity_at": timestamp("last_activity_at"),
+            "last_activity": last_activity,
+            "kill_switch_engaged": self._private_file(self.kill_path),
+        }
 
     @staticmethod
     def _global(config: Any) -> dict[str, Any]:
@@ -438,6 +538,7 @@ class ButlerSettingsManager:
         key_ref = provider.get("key_ref")
         key_path = self._managed_reference(key_ref)
         mode = "off" if global_settings.get("kill_switch", True) else "shadow"
+        configured = bool(provider.get("endpoint_ref") and provider.get("model"))
         return {
             "schema_version": 1,
             "central": central,
@@ -457,6 +558,57 @@ class ButlerSettingsManager:
             "key_present": key_path is not None,
             "key_location": key_ref if key_path is not None else None,
             "expected_sha256": config_payload.get("expected_sha256"),
+            "runtime": self._runtime(configured),
+        }
+
+    def kill(self, config_payload: Mapping[str, Any], central: str) -> dict[str, Any]:
+        """Engage the local fail-closed stop and signal a live resident once."""
+        current = self.view(config_payload, central)
+        self.kill_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.kill_path.parent, 0o700)
+        marker = json.dumps(
+            {
+                "schema_version": 1,
+                "engaged": True,
+                "at": self.now().astimezone(timezone.utc).isoformat(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        descriptor = os.open(
+            self.kill_path,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_TRUNC
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(marker)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        runtime = current["runtime"]
+        signal_sent = False
+        if runtime["running"] and isinstance(runtime["pid"], int):
+            try:
+                self.signaler(runtime["pid"], signal.SIGTERM)
+                signal_sent = True
+            except ProcessLookupError:
+                pass
+        return {
+            "schema_version": 1,
+            "central": central,
+            "kill_switch_engaged": True,
+            "signal_sent": signal_sent,
+            "runtime": self._runtime(bool(runtime["configured"])),
         }
 
     def _write_key(self, central: str, value: str) -> Path:
@@ -572,4 +724,5 @@ class ButlerSettingsManager:
                 "reload": "next_cycle",
                 "validated_at": timestamp.astimezone(timezone.utc).isoformat(),
                 "validation": validation.as_dict(),
+                "runtime": self._runtime(True),
             }

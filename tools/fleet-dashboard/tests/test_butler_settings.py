@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import json
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -102,6 +103,170 @@ def coordinator_config() -> dict[str, Any]:
         "updated_at": "2026-09-17T00:00:00+00:00",
         "updated_by": "fleet-dashboard-session-test",
     }
+
+
+def configured_payload() -> dict[str, Any]:
+    config = coordinator_config()
+    config["board_butler"] = {
+        "schema_version": 1,
+        "global": {
+            "drafting": {
+                "endpoint_ref": "https://provider.example.invalid/v1",
+                "model": "Model/Exact-1",
+            }
+        },
+        "projects": {},
+        "boards": {},
+    }
+    return {"config": config, "expected_sha256": "a" * 64}
+
+
+def write_runtime(path: Path, *, mode: str, pid: int = 4321) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": pid,
+                "mode": mode,
+                "running": True,
+                "started_at": "2026-09-17T00:00:00+00:00",
+                "last_activity_at": "2026-09-17T00:01:00+00:00",
+                "last_activity": "registry_refresh",
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+
+@pytest.mark.parametrize(
+    ("configured", "runtime_mode", "alive", "expected"),
+    [
+        (False, None, False, "not_configured"),
+        (True, None, False, "configured_not_running"),
+        (True, "shadow", True, "running_shadow"),
+        (True, "active", True, "running_active"),
+    ],
+)
+def test_runtime_indicator_distinguishes_four_states(
+    tmp_path: Path,
+    configured: bool,
+    runtime_mode: str | None,
+    alive: bool,
+    expected: str,
+) -> None:
+    runtime = tmp_path / "runtime.json"
+    if runtime_mode is not None:
+        write_runtime(runtime, mode=runtime_mode)
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "secrets",
+        runtime_path=runtime,
+        process_probe=lambda pid: alive and pid == 4321,
+    )
+    payload = configured_payload() if configured else {
+        "config": coordinator_config(),
+        "expected_sha256": "a" * 64,
+    }
+
+    status = manager.view(payload, "sandbox")["runtime"]
+
+    assert status["state"] == expected
+    assert status["running"] is expected.startswith("running_")
+    if status["running"]:
+        assert status["last_activity"] == "registry_refresh"
+
+
+def test_stale_runtime_pid_is_never_reported_running(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime.json"
+    write_runtime(runtime, mode="shadow", pid=999_999)
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "secrets",
+        runtime_path=runtime,
+        process_probe=lambda _pid: False,
+    )
+
+    status = manager.view(configured_payload(), "sandbox")["runtime"]
+
+    assert status["state"] == "configured_not_running"
+    assert status["running"] is False
+    assert status["pid"] is None
+
+
+def test_indicator_turns_not_running_after_real_process_exits(tmp_path: Path) -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    runtime = tmp_path / "runtime.json"
+    write_runtime(runtime, mode="shadow", pid=process.pid)
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "secrets", runtime_path=runtime
+    )
+    try:
+        assert manager.view(configured_payload(), "sandbox")["runtime"]["state"] == (
+            "running_shadow"
+        )
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+    status = manager.view(configured_payload(), "sandbox")["runtime"]
+    assert status["state"] == "configured_not_running"
+    assert status["running"] is False
+
+
+def test_runtime_projection_drops_unrecognized_text(tmp_path: Path) -> None:
+    secret = "sentinel-runtime-secret-3197"
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "pid": 4321,
+                "mode": "shadow",
+                "running": True,
+                "started_at": secret,
+                "last_activity_at": secret,
+                "last_activity": secret,
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime.chmod(0o600)
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "secrets",
+        runtime_path=runtime,
+        process_probe=lambda _pid: True,
+    )
+
+    projected = manager.view(configured_payload(), "sandbox")
+
+    assert projected["runtime"]["state"] == "running_shadow"
+    assert secret not in json.dumps(projected)
+
+
+def test_kill_switch_marks_then_signals_live_resident(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime.json"
+    marker = tmp_path / "KILLED"
+    write_runtime(runtime, mode="shadow")
+    signals: list[tuple[int, int]] = []
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "secrets",
+        runtime_path=runtime,
+        kill_path=marker,
+        process_probe=lambda pid: pid == 4321,
+        signaler=lambda pid, selected: signals.append((pid, selected)),
+        now=lambda: datetime(2026, 9, 17, tzinfo=timezone.utc),
+    )
+
+    result = manager.kill(configured_payload(), "sandbox")
+
+    assert result["kill_switch_engaged"] is True
+    assert result["signal_sent"] is True
+    assert signals == [(4321, signal.SIGTERM)]
+    assert stat.S_IMODE(marker.stat().st_mode) == 0o600
+    assert json.loads(marker.read_text(encoding="utf-8"))["engaged"] is True
 
 
 @pytest.mark.parametrize(
@@ -466,6 +631,14 @@ def test_http_api_never_returns_key_or_persists_it_to_board_or_repo(
         fetched_raw = urllib.request.urlopen(
             base + "/api/butler?central=default"
         ).read()
+        kill_raw = urllib.request.urlopen(
+            urllib.request.Request(
+                base + "/api/butler/kill?central=default",
+                data=b"{}",
+                method="POST",
+                headers={"Content-Type": "application/json", "Origin": base},
+            )
+        ).read()
     finally:
         server.shutdown()
         server.server_close()
@@ -474,6 +647,9 @@ def test_http_api_never_returns_key_or_persists_it_to_board_or_repo(
     captured = capsys.readouterr()
     assert secret.encode() not in saved_raw
     assert secret.encode() not in fetched_raw
+    assert secret.encode() not in kill_raw
+    assert json.loads(kill_raw)["kill_switch_engaged"] is True
+    assert stat.S_IMODE((tmp_path / "KILLED").stat().st_mode) == 0o600
     assert secret not in json.dumps(cache.config)
     assert secret not in captured.out
     assert secret not in captured.err
@@ -671,6 +847,12 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
     assert "body.saved===false" in html
     assert "form.elements.api_key.value=''" in html
     assert "Saved changes apply on the butler's next question cycle." in html
+    assert "Not configured" in html
+    assert "Configured · not running" in html
+    assert "Running · shadow" in html
+    assert "Running · active" in html
+    assert 'data-pursers-action="kill-butler"' in html
+    assert "/api/butler/kill" in html
 
     scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
     assert scripts

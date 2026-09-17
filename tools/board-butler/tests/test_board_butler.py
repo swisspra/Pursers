@@ -106,6 +106,86 @@ def args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
     )
 
 
+def cli_args(tmp_path: Path) -> list[str]:
+    return [
+        "--token-path",
+        str(tmp_path / "token.jwt"),
+        "--repo",
+        str(REPOSITORY_ROOT),
+        "--pid-file",
+        str(tmp_path / "butler.pid"),
+        "--cursor-file",
+        str(tmp_path / "cursor.json"),
+    ]
+
+
+def test_active_mode_requires_separate_private_authorization(
+    tmp_path: Path,
+) -> None:
+    authorization = tmp_path / "active.json"
+    base = [
+        *cli_args(tmp_path),
+        "--runtime-mode",
+        "active",
+        "--act-on-board",
+        "pursers",
+    ]
+    with pytest.raises(SystemExit):
+        butler.parse_args(base)
+
+    authorization.write_text(
+        json.dumps({"schema_version": 1, "mode": "active", "authorized": True}),
+        encoding="utf-8",
+    )
+    authorization.chmod(0o600)
+    parsed = butler.parse_args(
+        [*base, "--active-authorization-file", str(authorization)]
+    )
+
+    assert parsed.runtime_mode == "active"
+    assert parsed.act_on_board == ["pursers"]
+
+    authorization.chmod(0o644)
+    with pytest.raises(SystemExit):
+        butler.parse_args(
+            [*base, "--active-authorization-file", str(authorization)]
+        )
+
+
+def test_runtime_status_is_private_and_tracks_last_activity(tmp_path: Path) -> None:
+    path = tmp_path / "runtime.json"
+
+    with butler.RuntimeStatus(path, "shadow") as status:
+        started = json.loads(path.read_text(encoding="utf-8"))
+        assert started["running"] is True
+        assert started["mode"] == "shadow"
+        status.mark("question_processed", NOW)
+        marked = json.loads(path.read_text(encoding="utf-8"))
+        assert marked["last_activity"] == "question_processed"
+        assert marked["last_activity_at"] == NOW.isoformat()
+
+    stopped = json.loads(path.read_text(encoding="utf-8"))
+    assert stopped["running"] is False
+    assert stopped["last_activity"] == "stopped"
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_local_kill_marker_stops_before_token_or_board_access(tmp_path: Path) -> None:
+    options = args(tmp_path)
+    marker = tmp_path / "KILLED"
+    marker.write_text('{"engaged":true}', encoding="utf-8")
+    marker.chmod(0o600)
+    options.local_kill_file = marker
+    options.token_path.unlink()
+
+    asyncio.run(
+        butler.run(
+            options,
+            backend_factory=lambda *_args: pytest.fail("board access was attempted"),
+        )
+    )
+
+
 @contextlib.contextmanager
 def provider_server(content: str) -> Any:
     requests: list[dict[str, Any]] = []

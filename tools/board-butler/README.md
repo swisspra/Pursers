@@ -50,13 +50,58 @@ python3 tools/board-butler/board_butler.py \
   --pid-file /PATH/TO/state/board-butler.pid \
   --cursor-file /PATH/TO/state/board-butler.cursor.json \
   --refresh-seconds 60 \
-  --act-on-board pursers \
-  --active-action park_no_live_candidates \
-  --active-action refuse_incapable_target \
-  --action-hold-seconds 60 \
-  --no-live-candidates-cycles 3 \
   --once --dry-run
 ```
+
+## Fleet service start, status, and emergency stop
+
+The repo-owned fleet entry is `tools/board-butler/launch.sh`. It defaults to
+`shadow` and the checked-in
+`com.pursers.board-butler.plist.template` pins that mode explicitly. Replace
+every `/PATH/TO/...` placeholder in a private staged copy, validate it, then the
+operator turns it on with:
+
+```sh
+plutil -lint /PATH/TO/private/com.pursers.board-butler.plist
+chmod 600 /PATH/TO/private/com.pursers.board-butler.plist
+launchctl bootstrap "gui/$(id -u)" /PATH/TO/private/com.pursers.board-butler.plist
+```
+
+The template is not installed by the repository or by worker seats. Its
+`KeepAlive.SuccessfulExit=false` policy restarts an unexpected crash but does
+not loop after a clean fail-closed exit. The launcher publishes only PID, mode,
+start time, and last activity to the private mode-0600 `runtime.json`; Fleet
+also probes that PID before reporting a running state. A stale runtime file is
+therefore shown as **Configured · not running**, never as running.
+
+The Settings page distinguishes **Not configured**, **Configured · not
+running**, **Running · shadow**, and **Running · active**, and shows the last
+observed activity. **Stop butler now** creates the private local `KILLED`
+marker before sending `SIGTERM`. A board write already accepted by Central
+remains atomic; an interrupted question leaves its cursor unadvanced and is
+replayed. The launchd restart sees the marker, exits successfully before
+reading the token, and remains stopped. The operator deliberately resumes
+shadow mode by removing that marker and running:
+
+```sh
+launchctl kickstart "gui/$(id -u)/com.pursers.board-butler"
+```
+
+Active mode cannot be reached through the dashboard config or by changing the
+mode field alone. First create the separate owned mode-0600 authorization:
+
+```sh
+python3 tools/board-butler/authorize_active.py \
+  --output /PATH/TO/private/board-butler-state/active-authorized.json \
+  --confirm ENABLE-BOARD-BUTLER-ACTIVE
+```
+
+Then the operator stages a plist whose `PURSERS_BUTLER_RUNTIME_MODE` is
+`active`, reviews the separately declared active board, and reloads the job.
+The resident refuses active mode unless the authorization file is valid and at
+least one `--act-on-board` is present. Active mode enables only the two
+mechanical ticket actions described above; coordinator-question answers remain
+shadow drafts.
 
 Repeat `--act-on-board` to opt in additional active registry boards. The acting
 set is empty by default, and a configured board that is not active in the
@@ -177,11 +222,12 @@ at `auto_demote.veto_count` the future active-mode eligibility demotes to
 shadow and reports the reason. Active windows accept IANA timezones and
 weekday names (`mon` through `sun`), including overnight windows.
 
-This deliverable remains shadow-only even if configuration requests `active`:
-`effective_mode` is always reported as `shadow`, and there is still no sending
-method. `future_active_state` reports whether a later active-mode implementation
-would be eligible, outside its window, killed, or auto-demoted. This preserves
-the operator's knobs without silently enabling the separate active-mode scope.
+Question answering remains shadow-only even if configuration requests
+`active`: `effective_mode` in a draft is always `shadow`, and there is no
+sending method. The separately authorized runtime active mode governs only the
+two mechanical actions. `future_active_state` still reports whether a future
+answer-sending implementation would be eligible, outside its window, killed,
+or auto-demoted.
 
 Question handling is replay-safe. The durable cursor advances only after the
 finding write succeeds, and a repeated question ID reuses its existing finding
