@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "pursers-acp"
 version = "0.1.0"
 description = "A small ACP board assistant for Pursers Personal"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
