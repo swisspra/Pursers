@@ -882,6 +882,48 @@ def test_busy_status_respects_dispatch_activity_window(
     }
 
 
+def test_agent_projection_exposes_role_tier_and_client_from_board_data() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Pursers",
+                "board_id": "pursers",
+                "activity_window_seconds": 540,
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-verifier",
+                            "agent_name": "verifier-3",
+                            "agent_id": "AI-verifier",
+                            "agent_platform": "AionUi",
+                            "role": "verifier",
+                            "membership_role": "member",
+                            "capabilities": {
+                                "tier_max": 2,
+                                "host": "codex",
+                                "can_work": True,
+                            },
+                            "last_activity_at": now.isoformat(),
+                            "status": "idle",
+                        }
+                    ],
+                    "tickets": [],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    seat = result["agents"][0]["seats"][0]
+    assert seat["role"] == "verifier"
+    assert seat["tier"] == 2
+    assert seat["client"] == "AionUi"
+    assert seat["capabilities"]["host"] == "codex"
+
+
 def test_agent_projection_marks_busy_when_claim_is_outside_ticket_window() -> None:
     now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
     result = dashboard.aggregate_fleet(
@@ -2813,7 +2855,7 @@ def test_fleet_selector_contract_replays_board_and_route_panel_states() -> None:
     program = "\n".join(
         [
             "class Element {",
-            "  constructor({hidden=false,mode='ready',dataset={}}={}){this.hidden=hidden;this.mode=mode;this.dataset=dataset;this.attrs={}}",
+            "  constructor({hidden=false,mode='ready',dataset={},statusText=''}={}){this.hidden=hidden;this.mode=mode;this.dataset=dataset;this.statusText=statusText;this.attrs={}}",
             "  setAttribute(name,value){this.attrs[name]=String(value)}",
             "  getAttribute(name){return this.attrs[name]??null}",
             "  querySelector(selector){",
@@ -2821,22 +2863,24 @@ def test_fleet_selector_contract_replays_board_and_route_panel_states() -> None:
             "    if(selector==='.skeleton,[aria-busy=\"true\"]')return this.mode==='loading'?{}:null;",
             "    if(selector==='.empty-guidance,.empty')return this.mode==='empty'?{}:null;",
             "    if(selector==='[data-pursers-board],[data-pursers-ticket],[data-pursers-agent],[data-pursers-seat]')return null;",
+            "    if(selector==='.agent-state.status,.agent-card-state .status')return this.statusText?{textContent:this.statusText}:null;",
             "    if(selector==='.signal-dot.bad')return null;",
             "    return null;",
             "  }",
             "}",
-            "const nodes={main:new Element(),marker:new Element(),banner:new Element({hidden:true}),host:new Element(),config:new Element({hidden:true,mode:'empty'}),workers:new Element({hidden:true,mode:'empty'}),detail:new Element({hidden:true,mode:'empty'}),search:new Element({hidden:true,mode:'empty'}),board:new Element({dataset:{boardId:'board-one'}})};",
+            "const nodes={main:new Element(),marker:new Element(),banner:new Element({hidden:true}),host:new Element(),config:new Element({hidden:true,mode:'empty'}),workers:new Element({hidden:true,mode:'empty'}),detail:new Element({hidden:true,mode:'empty'}),search:new Element({hidden:true,mode:'empty'}),board:new Element({dataset:{boardId:'board-one'}}),agent:new Element({dataset:{agentIdentity:'agent-one'},statusText:'Available / พร้อม'})};",
             "nodes.marker.setAttribute('data-board-id','board-one');",
+            "nodes.agent.setAttribute('data-pursers-status','available');",
             "let current={kind:'projects'};",
             "let fleetData={fleet:{boards:[{board_id:'board-one',status:'ready'}]}};",
             "const route=()=>current,navKind=()=>current.kind;",
             "const selectorMap={main:nodes.main,'#board-id':nodes.marker,'#connection-banner':nodes.banner,'#central-sections':nodes.host,'#config-view':nodes.config,'#workers-view':nodes.workers,'#detail-view':nodes.detail,'#search-results':nodes.search};",
-            "const document={querySelector(selector){if(selector==='.error')return [nodes.config,nodes.workers].some(node=>!node.hidden&&node.mode==='error')?{}:null;if(selector==='.skeleton')return [nodes.config,nodes.workers].some(node=>!node.hidden&&node.mode==='loading')?{}:null;return selectorMap[selector]||null},querySelectorAll(selector){return selector==='.board-card[data-board-id]'?[nodes.board]:[]}};",
+            "const document={querySelector(selector){if(selector==='.error')return [nodes.config,nodes.workers].some(node=>!node.hidden&&node.mode==='error')?{}:null;if(selector==='.skeleton')return [nodes.config,nodes.workers].some(node=>!node.hidden&&node.mode==='loading')?{}:null;return selectorMap[selector]||null},querySelectorAll(selector){if(selector==='.board-card[data-board-id]')return[nodes.board];if(selector==='.agent-card[data-agent-identity]')return[nodes.agent];return[]}};",
             "const window={addEventListener(){}};",
             "class MutationObserver{observe(){}}",
             "const setTimeout=callback=>callback();",
             warm_home.SELECTOR_CONTRACT_SCRIPT,
-            "const initial={config:nodes.config.attrs['data-pursers-state'],workers:nodes.workers.attrs['data-pursers-state'],board:nodes.board.attrs['data-pursers-status']};",
+            "const initial={config:nodes.config.attrs['data-pursers-state'],workers:nodes.workers.attrs['data-pursers-state'],board:nodes.board.attrs['data-pursers-status'],agent:nodes.agent.attrs['data-pursers-status']};",
             "current={kind:'config'};nodes.config.hidden=false;nodes.config.mode='loading';pursersRoutePanelLoading();const configLoading=nodes.config.attrs['data-pursers-state'];",
             "nodes.config.mode='ready';applyFleetSelectorContract();const configReady=nodes.config.attrs['data-pursers-state'];",
             "nodes.config.mode='empty';applyFleetSelectorContract();const configEmpty=nodes.config.attrs['data-pursers-state'];",
@@ -2854,7 +2898,12 @@ def test_fleet_selector_contract_replays_board_and_route_panel_states() -> None:
     )
 
     assert json.loads(completed.stdout) == {
-        "initial": {"config": "empty", "workers": "empty", "board": "ready"},
+        "initial": {
+            "config": "empty",
+            "workers": "empty",
+            "board": "ready",
+            "agent": "available",
+        },
         "configLoading": "loading",
         "configReady": "ready",
         "configEmpty": "empty",
@@ -5678,6 +5727,72 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
     assert "http://cdn" not in html
 
 
+def test_dense_agent_grid_filters_counts_and_selector_contract_are_present() -> None:
+    html = dashboard.HTML
+
+    for status in ("working", "available", "stale", "offline"):
+        assert f"data-agent-status-filter=\"${{state}}\"" in html
+        assert f"'{status}'" in html
+    for filter_name in ("role", "status", "board", "client"):
+        assert f"agentFilters.{filter_name}" in html
+    for attribute in (
+        "data-pursers-panel=\"agents\"",
+        "data-pursers-state=\"ready\"",
+        "data-pursers-agent=\"${esc(identity)}\"",
+        "data-pursers-seat=\"${esc(identity)}\"",
+        "data-pursers-status=\"${esc(state)}\"",
+        "data-pursers-board=\"${esc(board)}\"",
+    ):
+        assert attribute in html
+    assert "Lease ${hours?hours+'h ':''}${minutes}m ${rest}s" in html
+    assert "last activity ${esc(detailedAge(a.last_seen))}" in html
+    assert ".dense-agent-grid{grid-template-columns:repeat(auto-fit,minmax(min(210px,100%),1fr))" in html
+    assert "@media(min-width:1200px){.dense-agent-grid{grid-template-columns:repeat(6" in html
+    assert ':root[data-density="compact"] .dense-agent-grid{grid-template-columns:repeat(8' in html
+    assert "@media(min-width:1200px) and (max-height:900px){main.agents-route{padding-block:12px}" in html
+    assert '.dense-agent-grid,:root[data-density="compact"] .dense-agent-grid{grid-template-columns:repeat(6' in html
+    assert ".dense-agent-grid .agent-card:not(.agent-state-stale) .agent-age{display:none}" in html
+    assert ".dense-agent-grid .agent-card>.meta,.dense-agent-grid .agent-ops,.dense-agent-grid .agent-ticket-row>.meta" in html
+    assert "@media(max-width:430px){.agent-count-strip,.agent-filters{grid-template-columns:1fr}" in html
+    assert ".dense-agent-grid{max-height:62vh;overflow-y:auto" in html
+    assert "declared&&declared!=='unknown'?declared:observed" in html
+
+
+def test_dense_agent_grid_uses_managed_process_state_for_offline() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    function = next(
+        line for line in script.splitlines() if line.startswith("function agentDisplayState(")
+    )
+    program = "\n".join(
+        [
+            function,
+            "console.log(JSON.stringify({",
+            "  stopped: agentDisplayState({pool_status:'available'},{running:false}),",
+            "  working: agentDisplayState({pool_status:'busy'},{running:true}),",
+            "  available: agentDisplayState({pool_status:'available'},{running:true}),",
+            "  stale: agentDisplayState({pool_status:'stale'},{running:true}),",
+            "  unreachable: agentDisplayState({pool_status:'unreachable'},null),",
+            "}));",
+        ]
+    )
+
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+
+    assert result == {
+        "stopped": "offline",
+        "working": "working",
+        "available": "available",
+        "stale": "stale",
+        "unreachable": "offline",
+    }
+
+
 def test_dashboard_uses_warm_guided_home_shell() -> None:
     html = dashboard.HTML
 
@@ -6573,15 +6688,27 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
             source("function agentIdentityLabel("),
             source("function workerForAgent("),
             source("function renderRoleChips("),
+            source("function agentRoles("),
+            source("function canonicalAgentClient("),
+            source("function agentClients("),
+            source("function agentBoards("),
+            source("function agentTier("),
+            source("function agentDisplayState("),
+            source("function detailedAge("),
+            source("function leaseCountdown("),
+            source("function agentMatchesFilters("),
+            source("function agentFilterOptions("),
+            source("function agentCountStrip("),
+            source("function agentFilterBar("),
             source("function liveAgentCard("),
                 source("function renderGuide("),
                 source("function inactiveAgentDrawer("),
                 source("function agentPoolScope("),
                 source("function renderAgentsHub("),
                 "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
-                f"let fleetData={{personal:{{agents:{json.dumps(agents)},pool_scope:{{covered_boards:['pursers'],excluded_boards:[{{board_id:'hidden-board',reason:'read unavailable'}}]}}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
-                "const active=renderAgentsHub();showStaleAgents=true;const all=renderAgentsHub();fleetData={personal:{agents:[fleetData.personal.agents[0]],pool_scope:{covered_boards:['pursers'],excluded_boards:[]}}};showStaleAgents=false;const filtered=renderAgentsHub();",
-                "console.log(JSON.stringify({active,all,filtered}));",
+                f"let fleetData={{personal:{{agents:{json.dumps(agents)},pool_scope:{{covered_boards:['pursers'],excluded_boards:[{{board_id:'hidden-board',reason:'read unavailable'}}]}}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false,agentFilters={{role:'all',status:'all',board:'all',client:'all'}};",
+                "const active=renderAgentsHub();agentFilters.status='stale';const staleOnly=renderAgentsHub();fleetData={personal:{agents:[fleetData.personal.agents[0]],pool_scope:{covered_boards:['pursers'],excluded_boards:[]}}};agentFilters.status='working';const filtered=renderAgentsHub();",
+                "console.log(JSON.stringify({active,staleOnly,filtered}));",
         ]
     )
     completed = subprocess.run(
@@ -6592,30 +6719,28 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
     )
     result = json.loads(completed.stdout)
     active = result["active"]
-    all_agents = result["all"]
+    stale_only = result["staleOnly"]
     filtered = result["filtered"]
 
-    assert "m-stale" not in active
+    assert "m-stale" in active
     assert active.index("z-busy") < active.index("a-available")
-    assert "Show stale" in active
-    assert 'aria-pressed="false"' in active
+    assert "Seat status counts" in active
+    assert 'data-pursers-status="working"' in active
     assert "TK-live" in active
     assert "Ticket title " + "x" * 34 + "…" in active
-    assert "Status claimed" in active
-    assert "Lease until" in active
+    assert "claimed · Pursers" in active
+    assert "Lease 8m 0s" in active
     assert "2m ago" in active
-    assert "None recorded" in active
-    assert "Last seen 2m ago" in active
-    assert all_agents.index("z-busy") < all_agents.index("a-available")
-    assert all_agents.index("a-available") < all_agents.index("m-stale")
-    assert "Show active only" in all_agents
-    assert 'aria-pressed="true"' in all_agents
+    assert "No held ticket" in active
+    assert "last activity 2m ago" in active
+    assert stale_only.count('<article class="agent-card') == 1
+    assert "m-stale" in stale_only
+    assert "z-busy" not in stale_only
     assert 'data-pursers-board="pursers"' in active
     assert 'data-pursers-status="ready"' in active
     assert "Readable but excluded" in active
     assert "hidden-board (read unavailable)" in active
-    assert "1 seats exist but are filtered out as stale" in filtered
-    assert "last-activity age" in filtered
+    assert "No seats match the selected filters" in filtered
 
 
 def test_agent_pool_rows_keep_details_and_default_to_active() -> None:
@@ -9220,13 +9345,25 @@ def test_agents_hub_keeps_duplicate_names_distinct_and_exposes_inactive_drawer()
             source("function agentIdentityLabel("),
             source("function workerForAgent("),
             source("function renderRoleChips("),
+            source("function agentRoles("),
+            source("function canonicalAgentClient("),
+            source("function agentClients("),
+            source("function agentBoards("),
+            source("function agentTier("),
+            source("function agentDisplayState("),
+            source("function detailedAge("),
+            source("function leaseCountdown("),
+            source("function agentMatchesFilters("),
+            source("function agentFilterOptions("),
+            source("function agentCountStrip("),
+            source("function agentFilterBar("),
             source("function liveAgentCard("),
             source("function renderGuide("),
             source("function inactiveAgentDrawer("),
             source("function renderAgentsHub("),
             "const managedControls=()=>'';",
             "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
-            f"let fleetData={{fleet:{{agents:{json.dumps(agents)},inactive_agents:{json.dumps(inactive)}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
+            f"let fleetData={{fleet:{{agents:{json.dumps(agents)},inactive_agents:{json.dumps(inactive)}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false,agentFilters={{role:'all',status:'all',board:'all',client:'all'}};",
             "console.log(renderAgentsHub());",
         ]
     )
@@ -9296,12 +9433,24 @@ def test_agents_hub_keeps_same_principal_seats_distinct_and_filters_only_stale()
             source("function agentIdentityLabel("),
             source("function workerForAgent("),
             source("function renderRoleChips("),
+            source("function agentRoles("),
+            source("function canonicalAgentClient("),
+            source("function agentClients("),
+            source("function agentBoards("),
+            source("function agentTier("),
+            source("function agentDisplayState("),
+            source("function detailedAge("),
+            source("function leaseCountdown("),
+            source("function agentMatchesFilters("),
+            source("function agentFilterOptions("),
+            source("function agentCountStrip("),
+            source("function agentFilterBar("),
             source("function liveAgentCard("),
             source("function inactiveAgentDrawer("),
             source("function renderAgentsHub("),
             "const renderGuide=()=>'';",
             "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
-            f"let fleetData={{fleet:{{agents:{json.dumps(agents)},inactive_agents:[]}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
+            f"let fleetData={{fleet:{{agents:{json.dumps(agents)},inactive_agents:[]}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false,agentFilters={{role:'all',status:'all',board:'all',client:'all'}};",
             "const active=renderAgentsHub();showStaleAgents=true;const all=renderAgentsHub();",
             "console.log(JSON.stringify({active,all}));",
         ]
@@ -9312,11 +9461,11 @@ def test_agents_hub_keeps_same_principal_seats_distinct_and_filters_only_stale()
         ).stdout
     )
 
-    assert result["active"].count('<article class="agent-card"') == 2
+    assert result["active"].count('<article class="agent-card') == 3
     assert 'data-agent-identity="AI-live-seat-one"' in result["active"]
     assert 'data-agent-identity="AI-live-seat-two"' in result["active"]
-    assert 'data-agent-identity="AI-stale-seat"' not in result["active"]
-    assert result["all"].count('<article class="agent-card"') == 3
+    assert 'data-agent-identity="AI-stale-seat"' in result["active"]
+    assert result["all"].count('<article class="agent-card') == 3
     assert 'data-agent-identity="AI-stale-seat"' in result["all"]
 
 
@@ -9366,13 +9515,25 @@ def test_agents_hub_does_not_attach_unidentified_worker_to_duplicate_live_names(
             source("function agentIdentityLabel("),
             source("function workerForAgent("),
             source("function renderRoleChips("),
+            source("function agentRoles("),
+            source("function canonicalAgentClient("),
+            source("function agentClients("),
+            source("function agentBoards("),
+            source("function agentTier("),
+            source("function agentDisplayState("),
+            source("function detailedAge("),
+            source("function leaseCountdown("),
+            source("function agentMatchesFilters("),
+            source("function agentFilterOptions("),
+            source("function agentCountStrip("),
+            source("function agentFilterBar("),
             source("function liveAgentCard("),
             source("function inactiveAgentDrawer("),
             source("function renderAgentsHub("),
             "const renderGuide=()=>'';",
             "const managedControls=()=>'<span>AMBIGUOUS-CONTROLS</span>';",
             "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
-            f"let fleetData={{fleet:{{agents:{json.dumps(agents)},inactive_agents:[]}}}},hubWorkers={{fleet:{json.dumps(workers)}}},hubGuide=null,showStaleAgents=false;",
+            f"let fleetData={{fleet:{{agents:{json.dumps(agents)},inactive_agents:[]}}}},hubWorkers={{fleet:{json.dumps(workers)}}},hubGuide=null,showStaleAgents=false,agentFilters={{role:'all',status:'all',board:'all',client:'all'}};",
             "console.log(renderAgentsHub());",
         ]
     )
@@ -9380,10 +9541,80 @@ def test_agents_hub_does_not_attach_unidentified_worker_to_duplicate_live_names(
         ["node", "-e", program], check=True, capture_output=True, text=True
     ).stdout
 
-    assert result.count('<article class="agent-card"') == 2
+    assert result.count('<article class="agent-card') == 2
     assert result.count('data-agent-identity="PR-') == 2
     assert "AMBIGUOUS-CONTROLS" not in result
     assert "Live pool seat · not locally managed" in result
+
+
+def test_agents_hub_includes_unrepresented_managed_worker_as_offline() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    workers = {
+        "workers": [
+            {
+                "name": "stopped-seat",
+                "role": "worker",
+                "running": False,
+                "current_work": [],
+                "host": "codex",
+                "max_tier": "standard",
+            }
+        ]
+    }
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const agentStatusRank="),
+            source("function compareAgents("),
+            source("function relativeAge("),
+            source("function clippedAgentTitle("),
+            source("function agentLiveWork("),
+            source("function agentTicketLink("),
+            source("function agentVisibilityToggle("),
+            source("function pageHead("),
+            source("function agentIdentity("),
+            source("function agentIdentityLabel("),
+            source("function workerForAgent("),
+            source("function renderRoleChips("),
+            source("function agentRoles("),
+            source("function canonicalAgentClient("),
+            source("function agentClients("),
+            source("function agentBoards("),
+            source("function agentTier("),
+            source("function agentDisplayState("),
+            source("function detailedAge("),
+            source("function leaseCountdown("),
+            source("function agentMatchesFilters("),
+            source("function agentFilterOptions("),
+            source("function agentCountStrip("),
+            source("function agentFilterBar("),
+            source("function liveAgentCard("),
+            source("function inactiveAgentDrawer("),
+            source("function renderAgentsHub("),
+            "const renderGuide=()=>'';",
+            "const managedControls=()=>'<span>MANAGED-CONTROLS</span>';",
+            f"let fleetData={{fleet:{{agents:[],inactive_agents:[]}}}},hubWorkers={{fleet:{json.dumps(workers)}}},hubGuide=null,agentFilters={{role:'all',status:'all',board:'all',client:'all'}};",
+            "console.log(renderAgentsHub());",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    ).stdout
+
+    assert result.count('<article class="agent-card') == 1
+    assert "<h3>stopped-seat</h3>" in result
+    assert 'data-pursers-status="offline"' in result
+    assert re.search(r'data-agent-status-filter="offline"[^>]*>.*?<b>1</b>', result)
+    assert "Tier standard" in result
+    assert "codex" in result
+    assert "MANAGED-CONTROLS" in result
 
 
 def test_overview_renders_exact_online_count_separately_from_central_health() -> None:
