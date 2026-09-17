@@ -228,6 +228,41 @@ def test_extensionless_operator_tool_cannot_be_smuggled(tmp_path: Path) -> None:
     )
 
 
+def test_symlinked_operator_tool_cannot_be_smuggled(tmp_path: Path) -> None:
+    root = _base_repository(tmp_path)
+    target = root / "tools/leak_scan.py"
+    target.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    target.chmod(0o755)
+    (root / "delivery-manifest.toml").write_text(
+        """schema_version = 1
+
+[[artifacts]]
+id = "operator-tool:tools/leak_scan.py"
+kind = "operator-tool"
+source = "tools/leak_scan.py"
+state = "exempt"
+reason = "The fixture registers the target so only its new symlink is missing."
+
+[[version_surfaces]]
+path = "README.md"
+version_key = "product"
+prefix = "main: <code>"
+""",
+        encoding="utf-8",
+    )
+    tool = root / "services/ops-console/reconcile"
+    tool.parent.mkdir(parents=True)
+    tool.symlink_to("../../tools/leak_scan.py")
+
+    failures = check_delivery_manifest.validate(root)
+
+    assert any(
+        "unregistered artifact: operator-tool:services/ops-console/reconcile "
+        "(services/ops-console/reconcile)" in failure
+        for failure in failures
+    )
+
+
 @pytest.mark.parametrize(
     ("filename", "body", "artifact_id"),
     [

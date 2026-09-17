@@ -172,7 +172,7 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
 
     tools_root = root / "tools"
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.is_symlink():
+        if not path.is_file():
             continue
         relative_parts = path.relative_to(root).parts
         if (
