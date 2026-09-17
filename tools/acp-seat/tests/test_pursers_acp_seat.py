@@ -164,6 +164,128 @@ async def agent_crash_releases_with_checkpoint(tmp_path: Path) -> None:
     assert any("ACPProcessError" in item for item in board.checkpoints)
 
 
+async def renewal_stops_before_terminal_submit(tmp_path: Path) -> None:
+    pre_submit_checked = asyncio.Event()
+    first_renewal_finished = asyncio.Event()
+    terminal_started = asyncio.Event()
+    renewal_stopped = asyncio.Event()
+    post_terminal_renewal = asyncio.Event()
+
+    class OrderedBoard(FakeBoard):
+        def __init__(self) -> None:
+            super().__init__(base_ticket("TK-renew-order"))
+            self.ticket_get_calls = 0
+            self.mutation_names: list[str] = []
+
+        async def ticket_get(self, ticket_id: str) -> dict[str, object]:
+            self.ticket_get_calls += 1
+            if self.ticket_get_calls == 2:
+                pre_submit_checked.set()
+                await first_renewal_finished.wait()
+            return await super().ticket_get(ticket_id)
+
+        async def renew(self, ticket_id: str) -> None:
+            self.mutation_names.append("lease_renew")
+            await super().renew(ticket_id)
+            if terminal_started.is_set():
+                post_terminal_renewal.set()
+            else:
+                first_renewal_finished.set()
+
+        async def submit(
+            self, ticket_id: str, completion: dict[str, object]
+        ) -> None:
+            self.mutation_names.append("ticket_submit")
+            terminal_started.set()
+            waiters = {
+                asyncio.create_task(post_terminal_renewal.wait()),
+                asyncio.create_task(renewal_stopped.wait()),
+            }
+            done, pending = await asyncio.wait(
+                waiters, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*done, *pending, return_exceptions=True)
+            await super().submit(ticket_id, completion)
+
+    board = OrderedBoard()
+    work_root = tmp_path / "work"
+    _work, branch, commit = committed_worktree(work_root, "TK-renew-order")
+    completion = {
+        "summary": "renewal ordering complete",
+        "files_changed": ["result.txt"],
+        "notes": "\n".join(
+            [
+                f"branch_and_commit: {branch}@{commit}",
+                "test-command: controlled renewal ordering",
+                "test-output: passed",
+                "observations: renewal stopped before terminal mutation",
+            ]
+        ),
+    }
+    script = write_script(
+        tmp_path,
+        {
+            "promptActions": [
+                {
+                    "type": "update",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {
+                            "type": "text",
+                            "text": seat.COMPLETION_PREFIX + json.dumps(completion),
+                        },
+                    },
+                }
+            ],
+            "stopReason": "end_turn",
+        },
+    )
+    runtime = seat.ACPSeatRuntime(
+        board,
+        [sys.executable, str(FAKE), "--script", str(script)],
+        work_root,
+    )
+
+    async def controlled_renew(ticket_id: str) -> None:
+        try:
+            await pre_submit_checked.wait()
+            await board.renew(ticket_id)
+            await terminal_started.wait()
+            await board.renew(ticket_id)
+        except asyncio.CancelledError:
+            renewal_stopped.set()
+            raise
+
+    runtime._renew = controlled_renew  # type: ignore[method-assign]
+    with patch.object(seat, "publish_branch"):
+        assert await runtime.run_ticket("TK-renew-order") == "submitted"
+
+    assert board.renewals == 1
+    assert not post_terminal_renewal.is_set()
+    assert board.mutation_names[-1] == "ticket_submit"
+
+
+async def refused_renewal_ends_task(tmp_path: Path) -> None:
+    class RefusingBoard(FakeBoard):
+        async def renew(self, _ticket_id: str) -> None:
+            self.renewals += 1
+            raise PermissionError("lease is no longer held")
+
+    board = RefusingBoard(base_ticket("TK-refused-renewal"))
+    runtime = seat.ACPSeatRuntime(
+        board,
+        [sys.executable, str(FAKE)],
+        tmp_path / "work",
+        lease_interval_s=0.001,
+    )
+
+    await asyncio.wait_for(runtime._renew("TK-refused-renewal"), timeout=1)
+
+    assert board.renewals == 1
+
+
 async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
     import central
     from mcp import Client
@@ -444,6 +566,14 @@ def test_permission_denied_releases_with_checkpoint(tmp_path: Path) -> None:
 
 def test_agent_crash_releases_with_checkpoint(tmp_path: Path) -> None:
     asyncio.run(agent_crash_releases_with_checkpoint(tmp_path))
+
+
+def test_renewal_stops_before_terminal_submit(tmp_path: Path) -> None:
+    asyncio.run(renewal_stops_before_terminal_submit(tmp_path))
+
+
+def test_refused_renewal_ends_task(tmp_path: Path) -> None:
+    asyncio.run(refused_renewal_ends_task(tmp_path))
 
 
 def test_fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:

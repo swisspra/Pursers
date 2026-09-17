@@ -792,6 +792,15 @@ class ACPSeatRuntime:
                     ticket_id, f"ACP permission for {ticket_id}: {entry}"
                 )
 
+        async def stop_renewal() -> None:
+            nonlocal renewal
+            task = renewal
+            if task is None:
+                return
+            renewal = None
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
         try:
             ticket = await self.board.ticket_get(ticket_id)
             work_dir = await asyncio.to_thread(self._prepare_work_dir, ticket_id)
@@ -907,11 +916,13 @@ class ACPSeatRuntime:
                 validated,
                 publish_repository=self.repository,
             )
+            await stop_renewal()
             await self.board.submit(ticket_id, validated)
             return "submitted"
         except asyncio.CancelledError:
             await flush_permission_log()
             await self.board.checkpoint(ticket_id, f"ACP seat cancelled {ticket_id}")
+            await stop_renewal()
             await self.board.unclaim(ticket_id)
             raise
         except Exception as exc:
@@ -920,6 +931,7 @@ class ACPSeatRuntime:
                 ticket_id,
                 f"ACP seat released {ticket_id} after {type(exc).__name__}: {exc}",
             )
+            await stop_renewal()
             await self.board.unclaim(ticket_id)
             return "released"
         finally:
@@ -936,7 +948,10 @@ class ACPSeatRuntime:
     async def _renew(self, ticket_id: str) -> None:
         while True:
             await asyncio.sleep(self.lease_interval_s)
-            await self.board.renew(ticket_id)
+            try:
+                await self.board.renew(ticket_id)
+            except PermissionError:
+                return
 
     def _prepare_work_dir(self, ticket_id: str) -> Path:
         work_dir = (self.work_root / _component(ticket_id)).resolve()
