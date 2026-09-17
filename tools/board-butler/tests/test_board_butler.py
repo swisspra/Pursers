@@ -916,6 +916,64 @@ def test_process_question_uses_reloaded_provider_without_exposing_key(
     assert secret not in captured.err
 
 
+def test_process_question_rejects_noncanonical_key_before_provider_or_finding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = args(tmp_path)
+    secret_root = tmp_path / "provider-secrets"
+    secret_root.mkdir()
+    secret = "resident-cycle-secret-6471 "
+    key_file = secret_root / "butler.key"
+    key_file.write_text(secret, encoding="utf-8")
+    key_file.chmod(0o600)
+    options.provider_secrets_dir = secret_root
+
+    class Backend(Source):
+        written: dict[str, Any] | None = None
+        project_name = "Pursers"
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            provider = {
+                "model": "model-unsafe",
+                "endpoint_ref": "http://127.0.0.1:9/v1",
+                "key_ref": "file:butler.key",
+            }
+            return {
+                "board_butler": {
+                    "schema_version": 1,
+                    "global": {
+                        "classification": dict(provider),
+                        "drafting": dict(provider),
+                    },
+                }
+            }
+
+        async def write_findings(self, value: str, _expected: str | None) -> None:
+            self.written = json.loads(value)
+
+    backend = Backend()
+    finding = asyncio.run(
+        butler.process_question(
+            backend,
+            {**question("Unsafe key?"), "question_id": "CQ-unsafe-key"},
+            options,
+            NOW,
+        )
+    )
+
+    assert finding["kind"] == "butler_config_invalid"
+    assert finding["verdict"] == "ESCALATE"
+    assert secret not in json.dumps(finding)
+    assert backend.written is not None
+    assert secret not in json.dumps(backend.written)
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
 def test_invalid_config_fails_closed_and_queues_question(tmp_path: Path) -> None:
     options = args(tmp_path)
 

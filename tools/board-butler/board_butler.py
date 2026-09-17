@@ -378,6 +378,13 @@ def resolve_provider_runtime(
             credential = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise ButlerConfigError(f"{task} credential reference is unreadable") from exc
+        if credential != credential.strip() or any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in credential
+        ):
+            raise ButlerConfigError(
+                f"{task} credential reference contains unsafe whitespace"
+            )
     return ProviderRuntime(
         endpoint=endpoint,
         model=model,

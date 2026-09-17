@@ -212,6 +212,53 @@ def test_save_writes_0600_key_and_restart_resolves_new_provider(tmp_path: Path) 
     assert secret not in json.dumps(effective.as_finding())
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "sentinel-space-6471 ",
+        " sentinel-space-6471",
+        "sentinel-space-6471\n",
+        "sentinel-space-6471\x7f",
+    ],
+)
+def test_save_rejects_noncanonical_key_before_any_side_effect(
+    tmp_path: Path, secret: str
+) -> None:
+    opener_calls = 0
+    save_calls = 0
+
+    def opener(*_args: object, **_kwargs: object) -> Response:
+        nonlocal opener_calls
+        opener_calls += 1
+        return Response({"data": [{"id": "Model/Exact-1"}]})
+
+    def save_config(
+        _value: dict[str, Any], _expected: str | None
+    ) -> dict[str, Any]:
+        nonlocal save_calls
+        save_calls += 1
+        return {}
+
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "private-keys", opener=opener
+    )
+    with pytest.raises(
+        butler_settings.ButlerSettingsError,
+        match="api_key must not contain surrounding whitespace or control characters",
+    ) as caught:
+        manager.save(
+            {"config": coordinator_config(), "expected_sha256": "a" * 64},
+            provider_request(api_key=secret),
+            "sandbox",
+            save_config,
+        )
+
+    assert secret not in str(caught.value)
+    assert opener_calls == 0
+    assert save_calls == 0
+    assert not (tmp_path / "private-keys").exists()
+
+
 def test_http_api_never_returns_key_or_persists_it_to_board_or_repo(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
 ) -> None:

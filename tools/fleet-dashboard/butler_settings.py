@@ -129,6 +129,12 @@ def validate_request(value: Any) -> dict[str, Any]:
     api_key = value["api_key"]
     if not isinstance(api_key, str) or len(api_key.encode("utf-8")) > MAX_KEY_BYTES:
         raise ButlerSettingsError("api_key is invalid")
+    if api_key != api_key.strip() or any(
+        ord(character) < 0x20 or ord(character) == 0x7F for character in api_key
+    ):
+        raise ButlerSettingsError(
+            "api_key must not contain surrounding whitespace or control characters"
+        )
     expected_sha256 = value["expected_sha256"]
     if expected_sha256 is not None and (
         not isinstance(expected_sha256, str)
