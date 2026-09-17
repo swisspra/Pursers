@@ -767,7 +767,7 @@ function renderConnection(data: Snapshot): void {
   } else if (data.data_mode === "stale" || data.stale) {
     tone = data.feed_error ? "error" : "stale";
     titleText = "Showing the last known local state";
-    detailText = data.feed_error ? "The local connection is unavailable. Retrying with bounded backoff." : "The activity feed is resynchronizing.";
+    detailText = data.feed_error ?? "The activity feed is resynchronizing.";
   } else {
     tone = "live";
     titleText = "Connected to the local board";
@@ -1635,6 +1635,7 @@ function renderTimeline(container: HTMLElement, events: BoardEvent[], emptyTitle
 }
 
 function renderActivity(data: Snapshot): void {
+  const panel = byId<HTMLElement>("activity-feed-panel");
   const actors = [...new Set(data.events.map((event) => event.actor_id).filter((value): value is string => Boolean(value)))].sort();
   const kinds = [...new Set(data.events.map((event) => event.kind))].sort();
   const syncOptions = (id: string, values: string[], selected: string, label: string) => {
@@ -1658,6 +1659,7 @@ function renderActivity(data: Snapshot): void {
     data.activity_scope === "synthetic-demo" ? "Authored fixtures only; not project data." : "Bounded local activity, not a complete audit log.",
   ));
   const notices: HTMLElement[] = [];
+  if (data.feed_error) notices.push(feedErrorNotice(data.feed_error));
   if (data.resync_notice) {
     const item = element("div", "notice");
     item.dataset.tone = "warning";
@@ -1676,7 +1678,19 @@ function renderActivity(data: Snapshot): void {
   }
   byId("activity-notice").replaceChildren(...notices);
   renderTimeline(byId("activity-list"), filtered, "No matching activity", activityEmptyDetail(data));
+  panel.setAttribute("data-pursers-state", data.feed_error ? "error" : filtered.length ? "ready" : "empty");
+  panel.setAttribute("data-pursers-source", "board-event-feed");
   byId<HTMLButtonElement>("load-more-btn").hidden = !data.has_more;
+}
+
+function feedErrorNotice(feedError: string): HTMLElement {
+  const item = element("div", "notice");
+  item.dataset.tone = "error";
+  item.setAttribute("role", "alert");
+  item.setAttribute("tabindex", "0");
+  item.setAttribute("data-pursers-state", "error");
+  item.append(element("p", undefined, feedError));
+  return item;
 }
 
 function renderApprovals(data: Snapshot): void {

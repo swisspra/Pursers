@@ -96,7 +96,7 @@
           <span id="search-count" class="search-count" aria-live="polite"></span>
         </section>
 
-        <section id="connection-banner" class="connection-banner" role="status" aria-live="polite" data-pursers-panel="connection" data-pursers-state="loading" data-pursers-connection="loading">
+        <section id="connection-banner" class="connection-banner" role="status" aria-live="polite" aria-atomic="true" tabindex="0" data-pursers-panel="connection" data-pursers-state="loading" data-pursers-connection="loading">
           <span class="status-dot" aria-hidden="true"></span>
           <div>
             <strong id="connection-title">Loading board</strong>
@@ -389,7 +389,7 @@
               <button id="tab-links" class="sub-tab" role="tab" type="button" aria-selected="false" aria-controls="links-panel" tabindex="-1" data-subview="links">Relationships</button>
             </nav>
 
-            <div id="activity-feed-panel" class="sub-panel" role="tabpanel" aria-labelledby="tab-activity-feed" data-subpanel="feed">
+            <div id="activity-feed-panel" class="sub-panel" role="tabpanel" aria-labelledby="tab-activity-feed" data-subpanel="feed" data-pursers-panel="activity-feed" data-pursers-state="loading" data-pursers-source="board-event-feed">
               <section class="card" aria-labelledby="scope-title">
                 <div class="section-heading"><div><p class="section-kicker">Scope</p><h2 id="scope-title">This is a bounded activity view</h2></div></div>
                 <div id="activity-scope"></div>

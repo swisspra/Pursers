@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "cf89d063b7cd1705e5b9f284aec9db4b1abee21a797ad98230f8ec2c721d3f2e"
-    assert len(payload) == 335354
+    expected = "f1251f6a415654b998bb90caf97173caf962e7dc6bcb2fa693bf42758e92cf70"
+    assert len(payload) == 338007
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0b1"
     assert lock["view"] == {
