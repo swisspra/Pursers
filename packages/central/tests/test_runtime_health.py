@@ -210,6 +210,132 @@ class RuntimeHealthUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
 
 
+class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
+    async def _initialize(
+        self,
+        *,
+        allowed_hosts: tuple[str, ...],
+        host_header: str,
+    ) -> httpx2.Response:
+        temp_dir = tempfile.TemporaryDirectory(dir=PACKAGE_ROOT)
+        root = Path(temp_dir.name)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(32)
+        port = int(listener.getsockname()[1])
+        audience = f"http://127.0.0.1:{port}/mcp"
+        jwks, token = _jwt_fixture(root, audience)
+        environment = patch.dict(
+            os.environ,
+            {
+                "CENTRAL_AUTH_MODE": "jwt",
+                "CENTRAL_JWT_ISSUER": "https://issuer.example",
+                "CENTRAL_JWT_AUDIENCE": audience,
+                "CENTRAL_JWKS_PATH": str(jwks),
+                "CENTRAL_ADMISSION": "invite",
+                "STORE_BACKEND": "sqlite",
+            },
+        )
+        environment.start()
+        mcp, service = central.build_server(
+            "127.0.0.1", port, root / "data"
+        )
+        app = create_streamable_http_app(
+            mcp,
+            service,
+            host="127.0.0.1",
+            allowed_hosts=allowed_hosts,
+        )
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=port,
+                log_level="error",
+                access_log=False,
+            )
+        )
+        thread = threading.Thread(
+            target=server.run,
+            kwargs={"sockets": [listener]},
+            daemon=True,
+        )
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5
+            while not server.started and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            self.assertTrue(server.started)
+            async with httpx2.AsyncClient(trust_env=False) as client:
+                return await client.post(
+                    audience,
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        "Authorization": _authorization(token),
+                        "Host": host_header,
+                    },
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-11-25",
+                            "capabilities": {},
+                            "clientInfo": {
+                                "name": "host-allowlist-test",
+                                "version": "1",
+                            },
+                        },
+                    },
+                    timeout=5,
+                )
+        finally:
+            server.should_exit = True
+            await asyncio.to_thread(thread.join, 5)
+            if thread.is_alive():
+                server.force_exit = True
+                await asyncio.to_thread(thread.join, 5)
+            listener.close()
+            environment.stop()
+            temp_dir.cleanup()
+
+    async def test_configured_bare_host_is_accepted(self) -> None:
+        response = await self._initialize(
+            allowed_hosts=("central.example",),
+            host_header="central.example",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_configured_host_with_port_is_accepted(self) -> None:
+        response = await self._initialize(
+            allowed_hosts=("central.example",),
+            host_header="central.example:443",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_loopback_host_is_accepted_without_configuration(self) -> None:
+        response = await self._initialize(
+            allowed_hosts=(),
+            host_header="127.0.0.1:8766",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_unlisted_host_is_rejected_with_421(self) -> None:
+        response = await self._initialize(
+            allowed_hosts=("central.example",),
+            host_header="unlisted.example",
+        )
+        self.assertEqual(response.status_code, 421)
+
+    async def test_default_configuration_allows_only_loopback(self) -> None:
+        response = await self._initialize(
+            allowed_hosts=(),
+            host_header="central.example",
+        )
+        self.assertEqual(response.status_code, 421)
+
+
 class RuntimeHealthNetworkStressTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(dir=PACKAGE_ROOT)

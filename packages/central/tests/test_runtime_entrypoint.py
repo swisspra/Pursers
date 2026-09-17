@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-import argparse
 import importlib.metadata
 import os
-from pathlib import Path
 import subprocess
 import sys
-import tomllib
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import tomllib
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT / "src"))
 
-from pursers_central import pursers_central_runtime as runtime  # noqa: E402
+from pursers_central import pursers_central_runtime as runtime
 
 
 def test_console_script_resolves_via_importlib_metadata() -> None:
@@ -106,12 +105,20 @@ def test_runtime_starts_production_app_with_banner_and_log_level(
         ),
         patch.object(runtime, "_acquire_data_lock", return_value=lock),
         patch.object(runtime.central, "build_server", return_value=(mcp, service)),
-        patch.object(runtime, "create_streamable_http_app", return_value=app),
+        patch.object(
+            runtime, "create_streamable_http_app", return_value=app
+        ) as create,
         patch.object(runtime.uvicorn, "run") as run,
     ):
         runtime.main()
 
     assert "bind=http://127.0.0.2:9012/mcp" in capsys.readouterr().err
+    create.assert_called_once_with(
+        mcp,
+        service,
+        host="127.0.0.2",
+        allowed_hosts=(),
+    )
     run.assert_called_once_with(
         app,
         host="127.0.0.2",
@@ -121,3 +128,80 @@ def test_runtime_starts_production_app_with_banner_and_log_level(
         access_log=False,
     )
     assert lock.exited_with == (None, None, None)
+
+
+def test_runtime_enables_tls_and_extra_hosts_only_when_explicitly_configured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Lock:
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    app = object()
+    mcp = object()
+    service = object()
+    cert = Path("/PATH/TO/cert.pem")
+    key = Path("/PATH/TO/key.pem")
+
+    with (
+        patch.object(
+            sys,
+            "argv",
+            [
+                "pursers-central",
+                "--data-dir",
+                str(tmp_path / "central-data"),
+                "--tls-certfile",
+                str(cert),
+                "--tls-keyfile",
+                str(key),
+                "--allowed-host",
+                "central.example",
+            ],
+        ),
+        patch.object(runtime, "_acquire_data_lock", return_value=Lock()),
+        patch.object(runtime.central, "build_server", return_value=(mcp, service)),
+        patch.object(
+            runtime, "create_streamable_http_app", return_value=app
+        ) as create,
+        patch.object(runtime.uvicorn, "run") as run,
+    ):
+        runtime.main()
+
+    assert "bind=https://127.0.0.1:8766/mcp" in capsys.readouterr().err
+    create.assert_called_once_with(
+        mcp,
+        service,
+        host="127.0.0.1",
+        allowed_hosts=("central.example",),
+    )
+    run.assert_called_once_with(
+        app,
+        host="127.0.0.1",
+        port=8766,
+        log_level="info",
+        server_header=False,
+        access_log=False,
+        ssl_certfile=str(cert),
+        ssl_keyfile=str(key),
+    )
+
+
+def test_runtime_rejects_incomplete_tls_configuration(tmp_path: Path) -> None:
+    with (
+        patch.object(
+            sys,
+            "argv",
+            [
+                "pursers-central",
+                "--data-dir",
+                str(tmp_path / "central-data"),
+                "--tls-certfile",
+                "/PATH/TO/cert.pem",
+            ],
+        ),
+        pytest.raises(SystemExit) as error,
+    ):
+        runtime.main()
+
+    assert error.value.code == 2

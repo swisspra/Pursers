@@ -13,10 +13,17 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 MACHINE_LOGGER_NAME = "pursers_central.machine"
+LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
+LOOPBACK_ALLOWED_ORIGINS = (
+    "http://127.0.0.1:*",
+    "http://localhost:*",
+    "http://[::1]:*",
+)
 
 
 def _machine_logger() -> logging.Logger:
@@ -206,13 +213,37 @@ def create_streamable_http_app(
     service: Any,
     *,
     host: str,
+    allowed_hosts: tuple[str, ...] = (),
     extra_payload: Mapping[str, Any] | Callable[[], Mapping[str, Any]] | None = None,
 ) -> Any:
     """Create the production-shaped stateless app with guarded healthz."""
+    host_patterns = list(LOOPBACK_ALLOWED_HOSTS)
+    for allowed_host in allowed_hosts:
+        candidate = allowed_host.strip()
+        if (
+            not candidate
+            or "*" in candidate
+            or ":" in candidate
+            or "/" in candidate
+            or any(character.isspace() for character in candidate)
+        ):
+            raise ValueError(
+                "allowed hosts must be bare hostnames or IPv4 addresses without "
+                "a scheme, port, path, whitespace, or wildcard"
+            )
+        for pattern in (candidate, f"{candidate}:*"):
+            if pattern not in host_patterns:
+                host_patterns.append(pattern)
+    transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=host_patterns,
+        allowed_origins=list(LOOPBACK_ALLOWED_ORIGINS),
+    )
     app = mcp.streamable_http_app(
         streamable_http_path="/mcp",
         stateless_http=True,
         host=host,
+        transport_security=transport_security,
     )
     return install_health_route(
         app,

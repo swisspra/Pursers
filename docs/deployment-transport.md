@@ -13,9 +13,21 @@ the remote endpoint to local port `8766`, so the seat still connects to
 `http://127.0.0.1:8766/mcp`. This preserves the existing bearer tokens and
 requires no CA installation or other client trust changes.
 
-If Central must be a shared network service, terminate TLS with a publicly
-trusted certificate on a real hostname. Do not distribute a private CA merely
-to expose Central.
+If a reverse proxy preserves its public hostname in the `Host` header, add that
+bare hostname to Central's allowlist. The packaged runtime accepts a repeated
+`--allowed-host HOST` option or the comma-separated
+`ONBOARD_CENTRAL_ALLOWED_HOSTS` environment variable. Each configured name is
+accepted both bare and with a port. Loopback remains allowed, DNS-rebinding
+protection remains enabled, and unlisted hosts receive HTTP 421.
+
+If Central must be a shared network service, use a publicly trusted certificate
+on a real hostname. The packaged runtime can terminate TLS when the operator
+supplies both `--tls-certfile /PATH/TO/cert.pem` and
+`--tls-keyfile /PATH/TO/key.pem`; the equivalent environment variables are
+`ONBOARD_CENTRAL_TLS_CERTFILE` and `ONBOARD_CENTRAL_TLS_KEYFILE`. With neither
+value, Central continues to serve plain HTTP. Central does not generate or
+store certificates or keys. Do not distribute a private CA merely to expose
+Central.
 
 ## URL-bound tokens
 
