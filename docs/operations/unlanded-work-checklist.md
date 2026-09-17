@@ -310,11 +310,22 @@ makes none of them and selects no release version.
    release documentation that currently assert "six wheels" must be updated to
    the new cohort. ACP's registry descriptor should be submitted upstream only
    after its pinned PyPI artifact exists and passes an isolated `uvx` smoke test.
-7. Add all 16 tracked ACP-agent and ACP-seat paths to
-   `tools/aionui-extension/INTEGRATION_FILES.sha256`, then regenerate that file
-   last. Every one of those paths is in the cumulative diff from the manifest's
-   frozen base `0c83cd8da4e8ac04ee2dd564559f57718335cdef`; the current manifest contains
-   17 wait-bridge rows and zero ACP-agent or ACP-seat rows.
+7. Do not treat `tools/aionui-extension/INTEGRATION_FILES.sha256` as a package
+   or release-shipping inventory. Its declared contract is the exact cumulative
+   changed-path set from frozen base
+   `0c83cd8da4e8ac04ee2dd564559f57718335cdef`, excluding the manifest itself.
+   At this audit's baseline, the exact ACP subset is only
+   `tools/acp-seat/README.md`, `tools/acp-seat/pursers_acp_seat.py`, and
+   `tools/acp-seat/tests/test_pursers_acp_seat.py`; it is not all 16 tracked ACP
+   paths. The release-train edits above are expected to newly change only the
+   ACP-agent consumers `pyproject.toml`, `src/pursers_acp/agent.py`,
+   `pursers/agent.json`, and `tests/test_registry.py`. Immediately before the
+   operator regenerates the manifest, derive the candidate's exact ACP subset
+   with `git diff --name-only 0c83cd8da4e8ac04ee2dd564559f57718335cdef..<candidate> -- tools/acp-agent tools/acp-seat`;
+   include those actual cumulative paths and no untouched ACP files. Regenerate
+   the checksum manifest last. This host-integration provenance gate is separate
+   from adding `pursers-acp` to release versions, workflow builds, the wheel
+   cohort, and PyPI Trusted Publishing.
 
 The Personal component lock is not a precedent for adding ACP. Its declared
 scope is only the embedded `pursers-central` and `pursers-client` wheels plus the
