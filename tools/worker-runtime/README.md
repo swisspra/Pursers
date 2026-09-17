@@ -75,6 +75,15 @@ model-visible output and logs; on macOS, the subprocess is additionally denied
 read access to the configured secret files. The runtime never reviews or merges
 its own work.
 
+Each worker submission and reviewer verdict also carries one content-free
+`model_usage` record in the existing Central mutation. The runtime counts model
+turns locally and sums only token counters reported by the OpenAI-compatible
+host. Both token totals are `null` if even one turn omits usage; prompt and
+completion text are never copied into the record. Thus the `headless` host
+reports measured tokens when its provider supplies the response `usage` object,
+and records null token totals when that provider does not. This adds neither a
+model call nor a Central round trip per turn.
+
 ## Per-ticket worktrees
 
 For a registered Git project, the worker creates a dedicated worktree after it

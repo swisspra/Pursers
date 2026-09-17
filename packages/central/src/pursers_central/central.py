@@ -132,6 +132,12 @@ DEFAULT_JOURNAL_RETENTION_DAYS = 7
 DEFAULT_JOURNAL_ROW_CAP = 50_000
 MIN_JOURNAL_ROW_CAP = MIN_COMPACTION_RETAIN_LAST + 1
 MAX_JOURNAL_ROW_CAP = 1_000_000
+MODEL_USAGE_SCHEMA_VERSION = 1
+MODEL_USAGE_ROLES = ("orchestrator", "worker", "reviewer")
+MODEL_USAGE_FIELDS = frozenset(
+    {"schema_version", "turns", "reported_turns", "input_tokens", "output_tokens"}
+)
+MODEL_USAGE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 DEFAULT_INVITE_PRUNE_AFTER_DAYS = 7
 MIN_RETENTION_DAYS = 0
 MAX_RETENTION_DAYS = 365
@@ -759,6 +765,7 @@ def project_ticket_read(
         "annotations", "annotations_omitted_count", "annotation_count",
         "coordinator_questions", "created_at", "created_by",
         "created_by_agent_id", "created_by_principal_id", "closed_at",
+        "creation_model_usage", "model_usage",
         "review_verdict", "review_notes", "fix_instructions",
         "reviewed_by", "reviewed_by_agent_id", "reviewed_by_agent_name",
         "reviewed_by_principal_id", "rejection_count", "abandoned_count",
@@ -5907,6 +5914,140 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             role=str(member.get("role") or "worker"),
         )
 
+    def model_usage_record(
+        value: Mapping[str, Any] | None,
+        *,
+        role: str,
+        actor: Mapping[str, Any],
+        principal_id: str,
+        now: float,
+    ) -> dict[str, Any]:
+        """Build a content-free usage record from runtime-reported counters."""
+        if role not in MODEL_USAGE_ROLES:
+            raise ValueError("model usage role is unsupported")
+        capabilities = member_capabilities(actor)
+
+        def identifier(name: str) -> str | None:
+            value = capabilities.get(name)
+            return (
+                value
+                if isinstance(value, str) and MODEL_USAGE_IDENTIFIER_RE.fullmatch(value)
+                else None
+            )
+
+        record: dict[str, Any] = {
+            "schema_version": MODEL_USAGE_SCHEMA_VERSION,
+            "role": role,
+            "host": identifier("host"),
+            "provider": identifier("provider"),
+            "model": identifier("model"),
+            "agent_id": actor.get("agent_id"),
+            "principal_id": principal_id,
+            "recorded_at": iso_at(now),
+            "turns": None,
+            "reported_turns": None,
+            "input_tokens": None,
+            "output_tokens": None,
+        }
+        if value is None:
+            return record
+        if not isinstance(value, Mapping):
+            raise ValueError("model_usage must be an object")
+        unknown = sorted(set(value) - MODEL_USAGE_FIELDS)
+        if unknown:
+            raise ValueError(
+                "unsupported model_usage fields: " + ", ".join(unknown)
+            )
+        if value.get("schema_version") != MODEL_USAGE_SCHEMA_VERSION:
+            raise ValueError("model_usage.schema_version must be 1")
+        turns = value.get("turns")
+        reported_turns = value.get("reported_turns")
+        for name, counter in (
+            ("turns", turns),
+            ("reported_turns", reported_turns),
+        ):
+            if (
+                isinstance(counter, bool)
+                or not isinstance(counter, int)
+                or not 0 <= counter <= 1_000_000
+            ):
+                raise ValueError(
+                    f"model_usage.{name} must be an integer between 0 and 1000000"
+                )
+        if reported_turns > turns:
+            raise ValueError("model_usage.reported_turns cannot exceed turns")
+        token_values: dict[str, int | None] = {}
+        for name in ("input_tokens", "output_tokens"):
+            counter = value.get(name)
+            if counter is not None and (
+                isinstance(counter, bool)
+                or not isinstance(counter, int)
+                or not 0 <= counter <= 1_000_000_000_000
+            ):
+                raise ValueError(
+                    f"model_usage.{name} must be null or a non-negative integer"
+                )
+            token_values[name] = counter
+        complete = reported_turns == turns
+        if complete != all(value is not None for value in token_values.values()):
+            raise ValueError(
+                "model_usage token totals must be integers only when every turn reports usage"
+            )
+        record.update(
+            turns=turns,
+            reported_turns=reported_turns,
+            **token_values,
+        )
+        return record
+
+    def append_model_usage(
+        ticket: dict[str, Any], record: Mapping[str, Any]
+    ) -> None:
+        """Update the queryable per-role split without retaining model content."""
+        summary = ticket.setdefault(
+            "model_usage",
+            {
+                "schema_version": MODEL_USAGE_SCHEMA_VERSION,
+                "roles": {},
+            },
+        )
+        roles = summary.setdefault("roles", {})
+        role = str(record["role"])
+        aggregate = roles.setdefault(
+            role,
+            {
+                "records": 0,
+                "turns": 0,
+                "reported_turns": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "hosts": [],
+                "providers": [],
+                "models": [],
+            },
+        )
+        aggregate["records"] += 1
+        for name in (
+            "turns",
+            "reported_turns",
+            "input_tokens",
+            "output_tokens",
+        ):
+            value = record.get(name)
+            if aggregate[name] is None or value is None:
+                aggregate[name] = None
+            else:
+                aggregate[name] += value
+        for source, target in (
+            ("host", "hosts"),
+            ("provider", "providers"),
+            ("model", "models"),
+        ):
+            value = record.get(source)
+            if isinstance(value, str) and value not in aggregate[target]:
+                aggregate[target].append(value)
+                aggregate[target].sort()
+
     def validate_seat_role(principal: Principal, role: str) -> str:
         if role not in SEAT_ROLES:
             raise ValueError(
@@ -8054,6 +8195,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         skills_required: list[str] | None = None,
         exclude_agents: list[str] | None = None,
         prefer_agents: list[str] | None = None,
+        model_usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a ticket; omitted IDs are generated inside the board transaction.
 
@@ -8257,6 +8399,15 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "created_at": iso_at(now),
                 "updated_at": iso_at(now),
             }
+            creation_usage = model_usage_record(
+                model_usage,
+                role="orchestrator",
+                actor=actor,
+                principal_id=principal.principal_id,
+                now=now,
+            )
+            ticket["creation_model_usage"] = creation_usage
+            append_model_usage(ticket, creation_usage)
             if intake_only:
                 ticket["created_at_epoch"] = now
                 ticket["origin"] = INTAKE_ORIGIN
@@ -10084,6 +10235,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         stay_active: bool = True,
         expected_generation: str | None = None,
         submission_preflight: dict[str, str] | None = None,
+        model_usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Submit only work claimed by this authenticated agent identity."""
         board_id = require_id("board_id", board_id)
@@ -10209,6 +10361,15 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 submission["submission_preflight"] = copy.deepcopy(
                     verified_preflight
                 )
+            submission_usage = model_usage_record(
+                model_usage,
+                role="worker",
+                actor=actor,
+                principal_id=principal.principal_id,
+                now=now,
+            )
+            submission["runtime_model_usage"] = submission_usage
+            append_model_usage(ticket, submission_usage)
             append_bounded_history(document, ticket, "submission_history", copy.deepcopy(submission))
             ticket.update(submission)
             ticket["status"] = "submitted"
@@ -10564,6 +10725,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         review_notes: str | None = None,
         fix_instructions: str | None = None,
         expected_generation: str | None = None,
+        model_usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Review under the board's strict or workflow policy with board:review."""
         board_id = require_id("board_id", board_id)
@@ -10720,6 +10882,15 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "reviewed_at": iso_at(now),
                 "status_to": new_status,
             }
+            review_usage = model_usage_record(
+                model_usage,
+                role="reviewer",
+                actor=actor,
+                principal_id=principal.principal_id,
+                now=now,
+            )
+            review_record["runtime_model_usage"] = review_usage
+            append_model_usage(ticket, review_usage)
             append_bounded_history(document, ticket, "review_history", review_record)
             ticket.pop("review_lease", None)
             review_offer = ticket.pop("review_offer", None)

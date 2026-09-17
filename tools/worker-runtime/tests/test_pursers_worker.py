@@ -186,6 +186,7 @@ class FakeBoard:
         *,
         review_notes: str,
         fix_instructions: str | None,
+        model_usage: dict[str, Any] | None = None,
     ) -> None:
         self.reviews.append(
             {
@@ -194,6 +195,7 @@ class FakeBoard:
                 "verdict": verdict,
                 "review_notes": review_notes,
                 "fix_instructions": fix_instructions,
+                "model_usage": model_usage,
             }
         )
         ticket = self.tickets[ticket_id]
@@ -263,8 +265,13 @@ class FakeLLMServer:
                 length = int(self.headers["Content-Length"])
                 owner.authorizations.append(self.headers.get("Authorization"))
                 owner.requests.append(json.loads(self.rfile.read(length)))
-                message = owner.responses.pop(0)
-                body = json.dumps({"choices": [{"message": message}]}).encode()
+                response = owner.responses.pop(0)
+                payload = (
+                    response
+                    if "choices" in response
+                    else {"choices": [{"message": response}]}
+                )
+                body = json.dumps(payload).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -516,6 +523,76 @@ def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
         assert "API_KEY_PRIVATE" not in log
         assert "TOKEN_PRIVATE" not in log
         assert "done" not in log
+
+
+def test_runtime_records_provider_usage_without_content_or_extra_model_call() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = FakeBoard()
+        responses = [
+            {
+                "choices": [
+                    {"message": tool_call("one", "read_file", {"path": "missing"})}
+                ],
+                "usage": {
+                    "prompt_tokens": 101,
+                    "completion_tokens": 11,
+                    "prompt_text": "must never be recorded",
+                    "completion_text": "must never be recorded",
+                },
+            },
+            {
+                "choices": [
+                    {
+                        "message": tool_call(
+                            "two", "submit_work", {"summary": "usage captured"}
+                        )
+                    }
+                ],
+                "usage": {"input_tokens": 202, "output_tokens": 22},
+            },
+        ]
+        with FakeLLMServer(responses) as server:
+            selected = config(root, server.url)
+            worker = worker_module.Worker(
+                selected,
+                board,
+                worker_module.OpenAICompatible(selected, "key"),
+                worker_module.SessionLog(selected.log_file),
+                directive="STATIC",
+            )
+            result = asyncio.run(
+                worker.run_ticket("board-one", {"ticket_id": "TK-usage"}, work)
+            )
+
+        assert result == "submitted"
+        assert len(server.requests) == 2
+        usage = board.submissions[0]["model_usage"]
+        assert usage == {
+            "schema_version": 1,
+            "turns": 2,
+            "reported_turns": 2,
+            "input_tokens": 303,
+            "output_tokens": 33,
+        }
+        assert "prompt_text" not in json.dumps(usage)
+        assert "completion_text" not in json.dumps(usage)
+
+
+def test_runtime_records_null_tokens_when_any_turn_has_no_provider_usage() -> None:
+    usage = worker_module.ModelUsage()
+    usage.add({"prompt_tokens": 7, "completion_tokens": 3})
+    usage.add(None)
+
+    assert usage.as_record() == {
+        "schema_version": 1,
+        "turns": 2,
+        "reported_turns": 1,
+        "input_tokens": None,
+        "output_tokens": None,
+    }
 
 
 @pytest.mark.parametrize(

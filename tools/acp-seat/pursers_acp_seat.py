@@ -598,6 +598,32 @@ def _offered_ticket_id(event: object) -> str | None:
     return nested if isinstance(nested, str) else None
 
 
+def _model_usage_from_result(result: JSON) -> JSON | None:
+    """Accept only explicit ACP counters; never derive usage from message text."""
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    turns = usage.get("turns")
+    reported_turns = usage.get("reported_turns", turns)
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    values = (turns, reported_turns, input_tokens, output_tokens)
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in values
+    ):
+        return None
+    if reported_turns != turns:
+        return None
+    return {
+        "schema_version": 1,
+        "turns": turns,
+        "reported_turns": reported_turns,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+
+
 def _git(work_dir: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args], cwd=work_dir, check=True, capture_output=True, text=True
@@ -910,6 +936,9 @@ class ACPSeatRuntime:
             ):
                 raise RuntimeError("seat no longer holds the ticket claim")
             validated = validate_completion(work_dir, completion)
+            reported_usage = _model_usage_from_result(result)
+            if reported_usage is not None:
+                validated["model_usage"] = reported_usage
             await asyncio.to_thread(
                 publish_branch,
                 work_dir,
