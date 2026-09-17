@@ -2,8 +2,8 @@
   "schema_version": 1,
   "artifact_kind": "personal_browser201_feasibility_precheck",
   "precheck_only": true,
-  "candidate_commit": "b3861ac3811438ecd1f3d2ceb62efbf759c88da0",
-  "candidate_ref": "origin/main",
+  "candidate_commit": "fee517420b780d3075a6b93663b25cb37ec45b79",
+  "candidate_ref": "codex/TK-e1cea022b42f-personal-feed-error-worker13",
   "catalogue_source": "docs/design-home/context/acceptance-facts.json",
   "landed_product_route": {
     "merge_commit": "6084b434",
@@ -17,32 +17,33 @@
     "decision_source": "docs/design-home/personal-browser-acceptance-decision.md"
   },
   "working_selector_contract": {
-    "source_ref": "codex/TK-9ca52e7ad8bf-personal-route@1c8807df975fd63968cfe6de9b66ee0c1513a9f3",
+    "source_ref": "codex/TK-e1cea022b42f-personal-feed-error-worker13@fee517420b780d3075a6b93663b25cb37ec45b79",
     "path": "docs/design-home/personal-selector-contract.md",
-    "present_at_candidate": false,
-    "ancestor_of_candidate": false
+    "present_at_candidate": true,
+    "ancestor_of_candidate": true
   },
   "static_observation": {
-    "data_pursers_attributes_in_personal_sources": 0,
+    "data_pursers_attributes_in_personal_sources": 50,
+    "unique_data_pursers_attributes_in_personal_sources": 13,
     "legacy_personal_attributes_present": true,
     "live_runtime_opened": false,
     "browser_task_space_opened": false,
     "catalogue_predicates_evaluated": 79,
-    "existing_bindings_found": 77,
-    "missing_bindings_found": 2,
+    "existing_bindings_found": 79,
+    "missing_bindings_found": 0,
     "note": "Current bindings include existing DOM IDs/ARIA/data attributes and product MCP responses/receipts; data-pursers-* is not treated as a prerequisite."
   },
   "summary": {
     "rows": 79,
-    "bindable_today": 77,
-    "candidate_or_adapter_change": 2,
+    "bindable_today": 79,
+    "candidate_or_adapter_change": 0,
     "runtime_attempted": 0,
     "success": 0,
     "failure": 0,
-    "blocked": 2
+    "blocked": 0
   },
-  "stop_reason": "Predicate-by-predicate static audit found current landed bindings for 77 rows. Runtime capture was not attempted. Two predicates remain blocked because their existing feed_error strings are not rendered into the DOM/AX tree.",
-  "required_change": "Expose the existing sanitized feed_error value for dashboard-ui.state.permission-denied and personal.activity-error, then freeze a candidate and run Browser201 capture. Do not add a second Personal route, and do not require data-pursers-* for the other 77 rows.",
+  "stop_reason": null,
+  "required_change": "No static binding gap remains. Run verifier-owned Browser201 capture against the frozen candidate and the existing single Personal MCP App route.",
   "rows": [
     {
       "id": "dashboard-ui.logic",
@@ -96,13 +97,12 @@
     },
     {
       "id": "dashboard-ui.state.permission-denied",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
-      "required_binding": "`#connection-detail` after a permission-denied tool failure",
-      "reason": "The live error string is stored in `feed_error`, but `renderConnection` replaces it with generic retry copy, so `Permission denied` is absent from the DOM/AX tree.",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "exact sanitized `feed_error` in `#connection-detail` inside the focusable connection status live region",
+      "reason": "`renderConnection` places the existing sanitized `feed_error` value into the DOM and status live region character for character.",
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "current_binding": "`#connection-detail` after a permission-denied tool failure",
-      "missing_change": "Render the existing sanitized `feed_error` value in the named live region; no new route or credential path is required.",
+      "current_binding": "`[data-pursers-panel=connection][data-pursers-state=error] #connection-detail` after a permission-denied tool failure",
       "predicate_ref": "docs/design-home/context/acceptance-facts.json#dashboard-ui.state.permission-denied.predicate"
     },
     {
@@ -247,13 +247,12 @@
     },
     {
       "id": "personal.activity-error",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
-      "required_binding": "`#activity-notice` or another live region containing `feed_error`",
-      "reason": "`refreshFeed` records `Local feed unavailable` in `feed_error`, but the Activity view never renders that value, so the predicate text is absent from the DOM/AX tree.",
+      "outcome": "BINDABLE",
+      "classification": "bindable_today",
+      "required_binding": "exact sanitized `feed_error` in a focusable alert under `#activity-notice`",
+      "reason": "The Activity view places the existing sanitized `feed_error` value into a DOM and accessibility-tree alert character for character.",
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "current_binding": "`#activity-notice` or another live region containing `feed_error`",
-      "missing_change": "Render the existing sanitized `feed_error` value in the named live region; no new route or credential path is required.",
+      "current_binding": "`[data-pursers-panel=activity-feed][data-pursers-state=error] #activity-notice [role=alert]`",
       "predicate_ref": "docs/design-home/context/acceptance-facts.json#personal.activity-error.predicate"
     },
     {
