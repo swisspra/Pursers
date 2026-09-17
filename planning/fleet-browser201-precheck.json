@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "artifact_kind": "fleet_browser201_feasibility_precheck",
-  "precheck_only": true,
+  "precheck_only": false,
   "candidate_commit": "afaf26ad317df0e305107fef7150fae71324b633",
   "candidate_ref": "origin/main",
   "catalogue_source": "docs/design-home/context/acceptance-facts.json",
@@ -37,18 +37,23 @@
     "rows": 93,
     "candidate_or_adapter_change": 0,
     "capturable": 93,
-    "runtime_attempted": 0,
-    "success": 0,
-    "failure": 0,
+    "runtime_attempted": 93,
+    "success": 60,
+    "failure": 33,
     "blocked": 0
   },
   "stop_reason": null,
-  "required_change": "None at the static selector layer. Proceed to product-backed runtime capture against this exact candidate; CAPTURABLE is not capture evidence.",
+  "required_change": "Restore a reachable seat-inventory surface: warm_home.py replaces navKind with a vocabulary that has no seats member, so renderSeats() never runs and data-pursers-seat is absent from every surveyed route.",
   "capture": {
-    "status": "not_run",
-    "reason": "The available loopback Fleet dashboard is not the exact frozen candidate, and this seat may use board token files only through MCP, so it cannot launch an exact-candidate Fleet runtime without violating seat governance. Operator-owned exact-tip capture is required.",
-    "available_loopback_html_sha256": "1e1abe5af0a74eaa65b3756718b90f72f2bfdbab4ea5eef3208da2d0ccbe9ab6",
-    "candidate_html_sha256": "d4c289ed89adcae41c995ed5140871ba2145713fd2f49f8aa807eb225e9e335a"
+    "status": "completed",
+    "browser_observer_id": "operator-cdp-chrome-1",
+    "capture_run_id": "b201-afaf26ad-20260917T0630Z",
+    "candidate_html_sha256": "d4c289ed89adcae41c995ed5140871ba2145713fd2f49f8aa807eb225e9e335a",
+    "per_row_results": "docs/ux-audit-visual/TK-97bde4aaaec2/per-row-results.json",
+    "per_row_results_sha256": "6bea29335819ab03af00065eb75a63d9d1b0f87d9505bea1c0eed4419a979c30",
+    "evidence_manifest": "docs/ux-audit-visual/TK-97bde4aaaec2/evidence-manifest.json",
+    "evidence_manifest_sha256": "e055459476fc8d64090c8c43038d698624f3f03df862e480081a703f5df970a1",
+    "reason": "Real Chrome surveyed 16 routes from the exact candidate. Twelve of thirteen approved selector attributes appeared; data-pursers-seat did not appear because the shipped warm-home navKind vocabulary makes renderSeats() unreachable."
   },
   "rows": [
     {
