@@ -73,6 +73,25 @@ python -m pip install \
 pursers-personal setup --project "$PWD" --apply
 ```
 
+Keep Pursers in this dedicated virtual environment. Do not install it into a
+shared interpreter or into a FastMCP environment: Pursers pins `mcp==2.2.0`,
+while `fastmcp==2.13.1` requires `mcp<2`, so no MCP version can satisfy both.
+Changing the MCP version in place will leave one of the applications broken.
+
+If another install has already changed MCP in a shared environment, recover by
+creating a clean Pursers environment from the verified release-bundle
+directory instead of trying to repair that shared interpreter:
+
+```bash
+python3 -m venv .venv-pursers
+.venv-pursers/bin/python -m pip install --upgrade pip
+.venv-pursers/bin/python -m pip install ./*.whl
+.venv-pursers/bin/python -m pip check
+```
+
+Keep FastMCP in a different virtual environment, and point each MCP host entry
+at the executable inside the environment for that application.
+
 The release bundle contains exactly these six product wheels plus
 `SHA256SUMS.txt`; if any file is missing or any hash differs, stop because the
 bundle is not the approved b1 release. The approved filenames and hashes are in
