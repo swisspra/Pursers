@@ -717,6 +717,7 @@ def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
         "busy": 1,
         "available": 0,
         "stale": 0,
+        "unknown_model": 2,
     }
 
 
@@ -756,6 +757,55 @@ def test_retired_and_stale_seats_are_outside_active_pool() -> None:
     assert result["pool_summary"]["online"] == 1
     assert result["inactive_agents"][0]["agent_name"] == "retired"
     assert result["boards"][0]["stale_after_days"] == 7
+
+
+def test_agent_projection_preserves_model_provider_and_counts_unknown_seats() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-known",
+                            "agent_name": "known",
+                            "agent_id": "AI-known",
+                            "last_activity_at": now.isoformat(),
+                            "capabilities": {
+                                "tier_max": 2,
+                                "host": "codex",
+                                "model": "Model/Exact-1.0",
+                                "provider": "Provider/Exact",
+                            },
+                        },
+                        {
+                            "principal_id": "PR-unknown",
+                            "agent_name": "unknown",
+                            "agent_id": "AI-unknown",
+                            "last_activity_at": now.isoformat(),
+                            "capabilities": {"tier_max": 1, "host": "headless"},
+                        },
+                    ],
+                    "tickets": [],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    seats = {row["agent_name"]: row["seats"][0] for row in result["agents"]}
+    assert seats["known"]["capabilities"] == {
+        "tier_max": 2,
+        "host": "codex",
+        "model": "Model/Exact-1.0",
+        "provider": "Provider/Exact",
+    }
+    assert "model" not in seats["unknown"]["capabilities"]
+    assert result["pool_summary"]["unknown_model"] == 1
 
 
 def test_agent_projection_preserves_distinct_ids_for_shared_principal() -> None:
@@ -888,6 +938,7 @@ def test_busy_status_respects_dispatch_activity_window(
         "busy": int(expected_status == "busy"),
         "available": int(expected_status == "available"),
         "stale": int(expected_status == "stale"),
+        "unknown_model": 1,
     }
 
 
@@ -7134,6 +7185,12 @@ def test_agent_pool_rows_keep_details_and_default_to_active() -> None:
                     "board_id": "pursers",
                     "project": "Pursers",
                     "role": "worker",
+                    "capabilities": {
+                        "tier_max": 2,
+                        "host": "codex",
+                        "model": "Model/Exact-1.0",
+                        "provider": "Provider/Exact",
+                    },
                     "current_ticket_id": "TK-held",
                     "current_ticket_title": "Held ticket",
                     "last_seen": "2030-01-01T11:58:00Z",
@@ -7153,7 +7210,13 @@ def test_agent_pool_rows_keep_details_and_default_to_active() -> None:
     ]
     fleet = {
         "central": "personal",
-        "pool_summary": {"online": 2, "busy": 1, "available": 1, "stale": 1},
+        "pool_summary": {
+            "online": 2,
+            "busy": 1,
+            "available": 1,
+            "stale": 1,
+            "unknown_model": 0,
+        },
         "boards": [],
         "agents": agents,
     }
@@ -7197,6 +7260,9 @@ def test_agent_pool_rows_keep_details_and_default_to_active() -> None:
     assert "Held ticket" in result["active"]
     assert "2m ago" in result["active"]
     assert '<div class="agent-body table-scroll"><table>' in result["active"]
+    assert "Unknown model · 0 seat(s)" in result["active"]
+    assert "tier 2 · client codex" in result["active"]
+    assert "model Model/Exact-1.0 · provider Provider/Exact" in result["active"]
     assert "stale-agent" in result["all"]
 
 
