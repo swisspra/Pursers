@@ -1,0 +1,1737 @@
+{
+  "schema_version": 1,
+  "candidate_commit": "afaf26ad317df0e305107fef7150fae71324b633",
+  "captured_at": "2026-09-17T06:18:01.646Z",
+  "base_url": "http://127.0.0.1:8897",
+  "routes_surveyed": [
+    "#/",
+    "#/home",
+    "#/boards",
+    "#/projects",
+    "#/agents",
+    "#/team",
+    "#/work",
+    "#/approvals",
+    "#/activity",
+    "#/operations",
+    "#/config",
+    "#/seats",
+    "#/settings",
+    "#/central/default/config",
+    "#/central/default/workers",
+    "#/central/default/overhead"
+  ],
+  "route_surveys": {
+    "#/": {
+      "url": "http://127.0.0.1:8897/#/",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 222,
+      "navKind": "home",
+      "routeKind": null,
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 2986,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 7,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 6,
+          "values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        },
+        "data-pursers-health": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "article"
+          ]
+        },
+        "data-pursers-ticket": {
+          "count": 2,
+          "values": [
+            "TK-0d76c72150e1",
+            "TK-97bde4aaaec2"
+          ],
+          "tags": [
+            "form"
+          ]
+        },
+        "data-pursers-status": {
+          "count": 2,
+          "values": [
+            "unknown"
+          ],
+          "tags": [
+            "form"
+          ]
+        },
+        "data-pursers-selected": {
+          "count": 2,
+          "values": [
+            "false"
+          ],
+          "tags": [
+            "form"
+          ]
+        }
+      }
+    },
+    "#/home": {
+      "url": "http://127.0.0.1:8897/#/home",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 222,
+      "navKind": "home",
+      "routeKind": "home",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 2986,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 7,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 6,
+          "values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        },
+        "data-pursers-health": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "article"
+          ]
+        },
+        "data-pursers-ticket": {
+          "count": 2,
+          "values": [
+            "TK-0d76c72150e1",
+            "TK-97bde4aaaec2"
+          ],
+          "tags": [
+            "form"
+          ]
+        },
+        "data-pursers-status": {
+          "count": 2,
+          "values": [
+            "unknown"
+          ],
+          "tags": [
+            "form"
+          ]
+        },
+        "data-pursers-selected": {
+          "count": 2,
+          "values": [
+            "false"
+          ],
+          "tags": [
+            "form"
+          ]
+        }
+      }
+    },
+    "#/boards": {
+      "url": "http://127.0.0.1:8897/#/boards",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 192,
+      "navKind": "projects",
+      "routeKind": "boards",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 1150,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 8,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 7,
+          "values": [
+            "connection",
+            "search",
+            "boards",
+            "board-detail",
+            "config",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        },
+        "data-pursers-board": {
+          "count": 5,
+          "values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ],
+          "tags": [
+            "article"
+          ]
+        },
+        "data-pursers-status": {
+          "count": 5,
+          "values": [
+            "ready"
+          ],
+          "tags": [
+            "article"
+          ]
+        },
+        "data-pursers-selected": {
+          "count": 5,
+          "values": [
+            "false"
+          ],
+          "tags": [
+            "article"
+          ]
+        }
+      }
+    },
+    "#/projects": {
+      "url": "http://127.0.0.1:8897/#/projects",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 192,
+      "navKind": "projects",
+      "routeKind": "projects",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 1150,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 8,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 7,
+          "values": [
+            "connection",
+            "search",
+            "boards",
+            "board-detail",
+            "config",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        },
+        "data-pursers-board": {
+          "count": 5,
+          "values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ],
+          "tags": [
+            "article"
+          ]
+        },
+        "data-pursers-status": {
+          "count": 5,
+          "values": [
+            "ready"
+          ],
+          "tags": [
+            "article"
+          ]
+        },
+        "data-pursers-selected": {
+          "count": 5,
+          "values": [
+            "false"
+          ],
+          "tags": [
+            "article"
+          ]
+        }
+      }
+    },
+    "#/agents": {
+      "url": "http://127.0.0.1:8897/#/agents",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 1258,
+      "navKind": "team",
+      "routeKind": "agents",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 3551,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 9,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 8,
+          "values": [
+            "connection",
+            "search",
+            "agents",
+            "board-detail",
+            "config",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        },
+        "data-pursers-board": {
+          "count": 5,
+          "values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-status": {
+          "count": 17,
+          "values": [
+            "ready",
+            "busy",
+            "available"
+          ],
+          "tags": [
+            "span",
+            "article"
+          ]
+        },
+        "data-pursers-agent": {
+          "count": 12,
+          "values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ],
+          "tags": [
+            "article"
+          ]
+        }
+      }
+    },
+    "#/team": {
+      "url": "http://127.0.0.1:8897/#/team",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 1258,
+      "navKind": "team",
+      "routeKind": "team",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 3551,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 9,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 8,
+          "values": [
+            "connection",
+            "search",
+            "agents",
+            "board-detail",
+            "config",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        },
+        "data-pursers-board": {
+          "count": 5,
+          "values": [
+            "a2a-sandbox",
+            "fullplatts",
+            "mi-mcp-prd",
+            "pursers",
+            "tk-0afa61ee7e94-retry-probe"
+          ],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-status": {
+          "count": 17,
+          "values": [
+            "ready",
+            "busy",
+            "available"
+          ],
+          "tags": [
+            "span",
+            "article"
+          ]
+        },
+        "data-pursers-agent": {
+          "count": 12,
+          "values": [
+            "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+            "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+            "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+            "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+            "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+            "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+            "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+            "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+          ],
+          "tags": [
+            "article"
+          ]
+        }
+      }
+    },
+    "#/work": {
+      "url": "http://127.0.0.1:8897/#/work",
+      "title": "Fleet Dashboard",
+      "bannerVisible": true,
+      "domNodes": 193,
+      "navKind": "work",
+      "routeKind": "work",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 2613,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 10,
+          "values": [
+            "ready",
+            "error",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 9,
+          "values": [
+            "connection",
+            "search",
+            "tickets",
+            "board-detail",
+            "config",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "reconnecting"
+          ],
+          "tags": [
+            "div"
+          ]
+        },
+        "data-pursers-ticket": {
+          "count": 9,
+          "values": [
+            "TK-c581f74ac96c",
+            "TK-891afe79aa99",
+            "TK-c3e4dbbd5dbb",
+            "TK-1771392453e4",
+            "TK-6f15dd177ee5",
+            "TK-db6ca1290d33",
+            "TK-9893df303b34",
+            "TK-e6660100174f"
+          ],
+          "tags": [
+            "div"
+          ]
+        },
+        "data-pursers-status": {
+          "count": 9,
+          "values": [
+            "open",
+            "claimed",
+            "submitted"
+          ],
+          "tags": [
+            "div"
+          ]
+        },
+        "data-pursers-selected": {
+          "count": 9,
+          "values": [
+            "false"
+          ],
+          "tags": [
+            "div"
+          ]
+        }
+      }
+    },
+    "#/approvals": {
+      "url": "http://127.0.0.1:8897/#/approvals",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 224,
+      "navKind": "approvals",
+      "routeKind": "approvals",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 3206,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 8,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 7,
+          "values": [
+            "connection",
+            "search",
+            "hub",
+            "tickets",
+            "board-detail",
+            "config",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        },
+        "data-pursers-ticket": {
+          "count": 5,
+          "values": [
+            "TK-0d76c72150e1",
+            "TK-97bde4aaaec2",
+            "TK-e6660100174f",
+            "TK-e1cea022b42f",
+            "TK-db6ca1290d33"
+          ],
+          "tags": [
+            "form",
+            "div"
+          ]
+        },
+        "data-pursers-status": {
+          "count": 5,
+          "values": [
+            "unknown",
+            "Submitted_for_independent_review"
+          ],
+          "tags": [
+            "form",
+            "div"
+          ]
+        },
+        "data-pursers-selected": {
+          "count": 5,
+          "values": [
+            "false"
+          ],
+          "tags": [
+            "form",
+            "div"
+          ]
+        }
+      }
+    },
+    "#/activity": {
+      "url": "http://127.0.0.1:8897/#/activity",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 224,
+      "navKind": "activity",
+      "routeKind": "activity",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 3102,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 7,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 6,
+          "values": [
+            "connection",
+            "search",
+            "hub",
+            "board-detail",
+            "config",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        }
+      }
+    },
+    "#/operations": {
+      "url": "http://127.0.0.1:8897/#/operations",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 134,
+      "navKind": "settings",
+      "routeKind": "operations",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 1221,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 7,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 6,
+          "values": [
+            "connection",
+            "search",
+            "config",
+            "board-detail",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        }
+      }
+    },
+    "#/config": {
+      "url": "http://127.0.0.1:8897/#/config",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 265,
+      "navKind": "settings",
+      "routeKind": "config",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 1855,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 7,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 6,
+          "values": [
+            "connection",
+            "search",
+            "config",
+            "board-detail",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        }
+      }
+    },
+    "#/seats": {
+      "url": "http://127.0.0.1:8897/#/seats",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 265,
+      "navKind": "settings",
+      "routeKind": "seats",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 1221,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 7,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 6,
+          "values": [
+            "connection",
+            "search",
+            "config",
+            "board-detail",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        }
+      }
+    },
+    "#/settings": {
+      "url": "http://127.0.0.1:8897/#/settings",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 265,
+      "navKind": "settings",
+      "routeKind": "settings",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 1221,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 7,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 6,
+          "values": [
+            "connection",
+            "search",
+            "config",
+            "board-detail",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        }
+      }
+    },
+    "#/central/default/config": {
+      "url": "http://127.0.0.1:8897/#/central/default/config",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 265,
+      "navKind": "settings",
+      "routeKind": "config",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 1855,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 7,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 6,
+          "values": [
+            "connection",
+            "search",
+            "config",
+            "board-detail",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        }
+      }
+    },
+    "#/central/default/workers": {
+      "url": "http://127.0.0.1:8897/#/central/default/workers",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 459,
+      "navKind": "settings",
+      "routeKind": "workers",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 3555,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 7,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 6,
+          "values": [
+            "connection",
+            "search",
+            "config",
+            "board-detail",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        }
+      }
+    },
+    "#/central/default/overhead": {
+      "url": "http://127.0.0.1:8897/#/central/default/overhead",
+      "title": "Fleet Dashboard",
+      "bannerVisible": false,
+      "domNodes": 472,
+      "navKind": "settings",
+      "routeKind": "overhead",
+      "seatLayoutNodes": 0,
+      "seatTableRows": 0,
+      "bodyTextLength": 672,
+      "attributes": {
+        "data-pursers-surface": {
+          "count": 1,
+          "values": [
+            "fleet"
+          ],
+          "tags": [
+            "main"
+          ]
+        },
+        "data-pursers-state": {
+          "count": 7,
+          "values": [
+            "ready",
+            "empty"
+          ],
+          "tags": [
+            "main",
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-selected-board": {
+          "count": 1,
+          "values": [],
+          "tags": [
+            "span"
+          ]
+        },
+        "data-pursers-selected-ticket": {
+          "count": 2,
+          "values": [],
+          "tags": [
+            "span",
+            "section"
+          ]
+        },
+        "data-pursers-panel": {
+          "count": 6,
+          "values": [
+            "connection",
+            "search",
+            "config",
+            "board-detail",
+            "seats"
+          ],
+          "tags": [
+            "div",
+            "section"
+          ]
+        },
+        "data-pursers-connection": {
+          "count": 1,
+          "values": [
+            "connected"
+          ],
+          "tags": [
+            "div"
+          ]
+        }
+      }
+    }
+  },
+  "attribute_union": {
+    "data-pursers-surface": {
+      "count": 16,
+      "routes": [
+        "#/",
+        "#/home",
+        "#/boards",
+        "#/projects",
+        "#/agents",
+        "#/team",
+        "#/work",
+        "#/approvals",
+        "#/activity",
+        "#/operations",
+        "#/config",
+        "#/seats",
+        "#/settings",
+        "#/central/default/config",
+        "#/central/default/workers",
+        "#/central/default/overhead"
+      ],
+      "values": [
+        "fleet"
+      ]
+    },
+    "data-pursers-state": {
+      "count": 122,
+      "routes": [
+        "#/",
+        "#/home",
+        "#/boards",
+        "#/projects",
+        "#/agents",
+        "#/team",
+        "#/work",
+        "#/approvals",
+        "#/activity",
+        "#/operations",
+        "#/config",
+        "#/seats",
+        "#/settings",
+        "#/central/default/config",
+        "#/central/default/workers",
+        "#/central/default/overhead"
+      ],
+      "values": [
+        "ready",
+        "empty",
+        "error"
+      ]
+    },
+    "data-pursers-selected-board": {
+      "count": 16,
+      "routes": [
+        "#/",
+        "#/home",
+        "#/boards",
+        "#/projects",
+        "#/agents",
+        "#/team",
+        "#/work",
+        "#/approvals",
+        "#/activity",
+        "#/operations",
+        "#/config",
+        "#/seats",
+        "#/settings",
+        "#/central/default/config",
+        "#/central/default/workers",
+        "#/central/default/overhead"
+      ],
+      "values": []
+    },
+    "data-pursers-selected-ticket": {
+      "count": 32,
+      "routes": [
+        "#/",
+        "#/home",
+        "#/boards",
+        "#/projects",
+        "#/agents",
+        "#/team",
+        "#/work",
+        "#/approvals",
+        "#/activity",
+        "#/operations",
+        "#/config",
+        "#/seats",
+        "#/settings",
+        "#/central/default/config",
+        "#/central/default/workers",
+        "#/central/default/overhead"
+      ],
+      "values": []
+    },
+    "data-pursers-panel": {
+      "count": 106,
+      "routes": [
+        "#/",
+        "#/home",
+        "#/boards",
+        "#/projects",
+        "#/agents",
+        "#/team",
+        "#/work",
+        "#/approvals",
+        "#/activity",
+        "#/operations",
+        "#/config",
+        "#/seats",
+        "#/settings",
+        "#/central/default/config",
+        "#/central/default/workers",
+        "#/central/default/overhead"
+      ],
+      "values": [
+        "connection",
+        "search",
+        "hub",
+        "board-detail",
+        "config",
+        "seats",
+        "boards",
+        "agents",
+        "tickets"
+      ]
+    },
+    "data-pursers-connection": {
+      "count": 16,
+      "routes": [
+        "#/",
+        "#/home",
+        "#/boards",
+        "#/projects",
+        "#/agents",
+        "#/team",
+        "#/work",
+        "#/approvals",
+        "#/activity",
+        "#/operations",
+        "#/config",
+        "#/seats",
+        "#/settings",
+        "#/central/default/config",
+        "#/central/default/workers",
+        "#/central/default/overhead"
+      ],
+      "values": [
+        "connected",
+        "reconnecting"
+      ]
+    },
+    "data-pursers-health": {
+      "count": 2,
+      "routes": [
+        "#/",
+        "#/home"
+      ],
+      "values": [
+        "connected"
+      ]
+    },
+    "data-pursers-ticket": {
+      "count": 18,
+      "routes": [
+        "#/",
+        "#/home",
+        "#/work",
+        "#/approvals"
+      ],
+      "values": [
+        "TK-0d76c72150e1",
+        "TK-97bde4aaaec2",
+        "TK-c581f74ac96c",
+        "TK-891afe79aa99",
+        "TK-c3e4dbbd5dbb",
+        "TK-1771392453e4",
+        "TK-6f15dd177ee5",
+        "TK-db6ca1290d33",
+        "TK-9893df303b34",
+        "TK-e6660100174f",
+        "TK-e1cea022b42f"
+      ]
+    },
+    "data-pursers-status": {
+      "count": 62,
+      "routes": [
+        "#/",
+        "#/home",
+        "#/boards",
+        "#/projects",
+        "#/agents",
+        "#/team",
+        "#/work",
+        "#/approvals"
+      ],
+      "values": [
+        "unknown",
+        "ready",
+        "busy",
+        "available",
+        "open",
+        "claimed",
+        "submitted",
+        "Submitted_for_independent_review"
+      ]
+    },
+    "data-pursers-selected": {
+      "count": 28,
+      "routes": [
+        "#/",
+        "#/home",
+        "#/boards",
+        "#/projects",
+        "#/work",
+        "#/approvals"
+      ],
+      "values": [
+        "false"
+      ]
+    },
+    "data-pursers-board": {
+      "count": 20,
+      "routes": [
+        "#/boards",
+        "#/projects",
+        "#/agents",
+        "#/team"
+      ],
+      "values": [
+        "a2a-sandbox",
+        "fullplatts",
+        "mi-mcp-prd",
+        "pursers",
+        "tk-0afa61ee7e94-retry-probe"
+      ]
+    },
+    "data-pursers-agent": {
+      "count": 24,
+      "routes": [
+        "#/agents",
+        "#/team"
+      ],
+      "values": [
+        "AI-91552deb00cd02c28674b38b9b09e6baf695da47cd15dfac738fb7cc9ba6ad1b",
+        "AI-a7a7cfead6ae8603b85d7eb28aad7c8c7006ed3226b61f51b904a86760f1324c",
+        "AI-17fdf73e4daeeb4935333a7c3b11e78379c211244aa5f3e166a871f0c78fbf14",
+        "AI-ee85ee5cd59bc528ef3eb87fe3502611dba14aefb3e4ae74cc928bf30315104e",
+        "AI-33e262cc27b204343a172bacd712244229a48faf02016348387355418d7bf47a",
+        "AI-a0710d61c48c3d7e3307a8efe9127f323f8c4d97992947220783751fe6308dcd",
+        "AI-3c40e6d3f8ca4efa424927715ba28ae69e0cd8f0c9d744db7b4b76b25082902b",
+        "PR-5e5c0f9104864e83c2d62e0c15c6081736f230b3f2963c66d8e8f85000691b70"
+      ]
+    }
+  },
+  "counts": {
+    "SUCCESS": 60,
+    "FAILURE": 33
+  }
+}
