@@ -9,10 +9,10 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.11–3.14](https://img.shields.io/badge/python-3.11%E2%80%933.14-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)
-[![Release v5.0.0b1](https://img.shields.io/badge/release-v5.0.0b1-orange)](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1)
+[![Release v5.0.0b2](https://img.shields.io/badge/release-v5.0.0b2-orange)](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b2)
 [![Status: beta](https://img.shields.io/badge/status-beta-orange)](#beta-status)
 
-<sub>main: <code>5.0.0b1</code> (beta release train)</sub>
+<sub>main: <code>5.0.0b2</code> (beta release train)</sub>
 
 </div>
 
@@ -56,18 +56,18 @@ wheels, and create a private project profile:
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-mkdir -p pursers-5.0.0b1 && cd pursers-5.0.0b1
-gh release download v5.0.0b1 \
+mkdir -p pursers-5.0.0b2 && cd pursers-5.0.0b2
+gh release download v5.0.0b2 \
   --repo swisspra/Pursers \
   --pattern '*.whl' \
   --pattern SHA256SUMS.txt \
   --dir .
 shasum -a 256 -c SHA256SUMS.txt
 python -m pip install \
-  ./pursers-5.0.0b1-py3-none-any.whl \
+  ./pursers-5.0.0b2-py3-none-any.whl \
   ./pursers_central-0.1.0a30-py3-none-any.whl \
   ./pursers_client-0.1.0a23-py3-none-any.whl \
-  ./pursers_personal-5.0.0b1-py3-none-any.whl \
+  ./pursers_personal-5.0.0b2-py3-none-any.whl \
   ./pursers_personal_import-5.0.0a3-py3-none-any.whl \
   ./pursers_wait_bridge-0.1.0a16-py3-none-any.whl
 pursers-personal setup --project "$PWD" --apply
@@ -107,7 +107,7 @@ by your private profile. Keep the generated credentials out of repositories and
 shared configuration. For identity admission, another host, health checks, and
 rollback, continue with [Getting Started](docs/GETTING-STARTED.md).
 
-The published [`v5.0.0b1` prerelease](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b1)
+The published [`v5.0.0b2` prerelease](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b2)
 contains the six wheel assets above plus `SHA256SUMS.txt`.
 
 ## How the pieces fit
@@ -149,7 +149,7 @@ beta-prep queue and will be linked only after they land on `main`.
 
 ## Beta status
 
-`v5.0.0b1` is a single-owner, single-machine beta. Central and its dashboards
+`v5.0.0b2` is a single-owner, single-machine beta. Central and its dashboards
 bind to loopback; every local process and OS user is inside the trust boundary.
 Do not expose it for remote access, shared/untrusted machines, or multi-person
 collaboration. Host integrations remain candidate-grade until their exact builds

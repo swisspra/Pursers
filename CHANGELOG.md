@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0b2] - 2026-09-17
+
+This release includes `pursers-central==0.1.0a31`,
+`pursers-client==0.1.0a24`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0b2`, `pursers==5.0.0b2`, and
+`pursers-wait-bridge==0.1.0a17`.
+
 ### Changed
 
 - Upgraded the Python MCP SDK pins across central, client, and personal from

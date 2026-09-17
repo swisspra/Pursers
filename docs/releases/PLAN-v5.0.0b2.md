@@ -6,44 +6,36 @@ candidate branch, a tag, publication, deployment, or a push to `main`.
 ## Planning basis
 
 The last published release is `v5.0.0b1` at
-`dc5847395e619359f6ba06e6f8d19fd2a7ec7bd5`. At the time this plan was
-prepared, `origin/main` was
-`4638823ef161f94708a6dc71990752de8e18f7ce` and did not yet contain the rc6
-lineage reconciliation. The working base is therefore the ticket-authorized
-fallback:
+`dc5847395e619359f6ba06e6f8d19fd2a7ec7bd5`. Candidate assembly ticket
+`TK-86f2fcaebee3` froze the current `origin/main` tip as the Beta.2 base:
 
 ```text
-origin/integration/TK-735be746039c-main-merge
-86c89b59b851f5e50897aafeb84d4dada8d17735
+origin/main
+0c83cd8da4e8ac04ee2dd564559f57718335cdef
 ```
 
-This is a **WORKING base, not an APPROVED base**. Candidate assembly must wait
-until `origin/main` contains this reconciliation (or an explicitly approved
-successor), record that exact full SHA as `B2_BASE_SHA`, and recompute the
-changed paths and version map. The scope below comes from
-`git log dc584739..86c89b59` and the net tree comparison
-`git diff v5.0.0b1..86c89b59`.
+`B2_BASE_SHA` is therefore
+`0c83cd8da4e8ac04ee2dd564559f57718335cdef`. It contains the rc6 lineage
+reconciliation at `86c89b59b851f5e50897aafeb84d4dada8d17735` and the later
+reviewed train merges, including the board butler. Exact-tip GitHub Actions
+run `35211638633` passed the `ci` workflow. CodeQL run `35211637611` passed
+Actions, JavaScript/TypeScript, and Python analysis at the same SHA.
 
-The newer `origin/main` commit upgrades `actions/setup-python` from 5 to 7
-(GitHub PR #24) but is not in the fallback branch. It is therefore not claimed
-as part of the working-base scope below. The final reconciliation/base freeze
-must include or explicitly dispose of that workflow change and rerun the
-release gates from the resulting exact tip.
-
-The rc6 host integration manifest is not green on this working base:
-`shasum -a 256 -c tools/aionui-extension/INTEGRATION_FILES.sha256` reports 37
-mismatches in files changed after rc6. That is an expected hard stop, not a
-waiver. The candidate-assembly ticket must regenerate and independently replay
-the cumulative manifest after all source and version changes, commit that
+The scope below comes from `git log v5.0.0b1..B2_BASE_SHA` and the net tree
+comparison `git diff v5.0.0b1..B2_BASE_SHA`. The comparison changes only
+Central, Client, Personal, and Wait Bridge under the versioned package paths;
+Import remains unchanged. The base's 190-entry host integration manifest
+replays green. Candidate assembly must still regenerate and independently
+replay that cumulative manifest after the version changes, commit that
 manifest freeze, and only then define `B2_CANDIDATE_SHA` and build artifacts.
 
 ## Scope since `v5.0.0b1`
 
-These ticketed changes are present in the working-base tree. Each line states
+These ticketed changes are present in the frozen base tree. Each line states
 the user-visible or release-visible effect; test-only work is labelled as
 such.
 
-| Ticket | Effect in the working base |
+| Ticket | Effect at `B2_BASE_SHA` |
 | --- | --- |
 | `TK-df1c517ceaf9` | Dispatch now honors live assignment targets instead of routing work to an ineligible seat. |
 | `TK-3590242ea7d3` | Adds a public architecture guide for the product, runtime boundaries, and release train. |
@@ -85,6 +77,7 @@ such.
 | `TK-939d37230fa3` | Preserves the immediate-offer reason while retaining the bridge's transport-mode label. |
 | `TK-dc0f4a677709` | Test-only: isolates wait-bridge timing cases and removes false intermittent failures from the gate. |
 | `TK-926aaf7d46d2` | ACP P0 adds the ACP seat client and its conformance coverage to the CI manifest. |
+| `TK-9910ee9be69f` | Advances the reviewed exact MCP dependency set to 2.2.0. |
 | `TK-6f9b26db13c0` | Documents the Central ACP client contract and operator direction. |
 | `TK-9ddd07bb1d25` | Records the Beta.1 first-run blockers rather than presenting the path as fully verified. |
 | `TK-707d0703a52e` | Makes the release runbook use an annotated `-a` tag and fail-closed chained commands, with optional signing. |
@@ -95,6 +88,30 @@ such.
 | `TK-87f7d7051241` | Research-only: records Qoder Wake coordination UX findings without claiming a shipped UI change. |
 | `TK-0267ecd5d14b` | Preserves the pre-beta CodeQL receipt and archives its release-history context. |
 | `TK-735be746039c` | Reconciles the reviewed rc6 source lineage into the post-release `main` tree while preserving the salvaged security receipt. |
+| `TK-d1ba904f0f53` | Re-bases the reviewed pairing workflow onto the reconciled tree. |
+| `TK-fc3eb834372b` | Adds stable Fleet board selectors and board-selection state for Browser201 capture. |
+| `TK-bc334fe4cdce` | Re-lands the reviewed ACP ticket set with the Linux case-normalised worktree fix. |
+| `TK-68fff0e4699b` | Rejects stale foreign Personal runtime processes deterministically. |
+| `TK-adeac4bbabe8` | Lands bounded offer catch-up behavior with a regenerated Personal component lock. |
+| `TK-93e833c54d6c` | Re-scopes Personal Browser201 observations to the real MCP App surface. |
+| `TK-6fa1eabbe4f3` | Adds Connect-helper origin and port prefill plus handoff tooling. |
+| `TK-2366c38205b6` | Lands response-projection phase 2 with collision-safe identifier abbreviation. |
+| `TK-4ff2f9f740ef` | Adds the helper startup bridge-compatibility handshake. |
+| `TK-daee8b8ce82f` | Keys the Fleet unified seat pool by stable agent identity. |
+| `TK-84e7e39328f5` | Records the reviewed Beta UI acceptance pass and 26 captured states. |
+| `TK-9ca52e7ad8bf` | Records the Personal 79-row Browser201 feasibility boundary. |
+| `TK-1430a4b5d7f2` | Stops ACP lease renewal before terminal mutations. |
+| `TK-b58fdaba3a63` | Bounds board-digest transitions and reports omitted counts. |
+| `TK-02bf4d01d662` | Adds the sourced Beta.2 known-limitations document and freeze markers. |
+| `TK-e6660100174f` | Adds the event-driven board butler in shadow mode. |
+| `TK-f0bfc072ebe0` | Makes the Fleet seat inventory route reachable to the acceptance selectors. |
+| `TK-db6ca1290d33` | Reworks Fleet Agents into a laptop-sized six-column grid. |
+| `TK-c3e4dbbd5dbb` | Rejects submissions whose declared tip is absent from the declared remote branch. |
+| `TK-9893df303b34` | Re-lands the Personal component lock with its regenerated digest. |
+| `TK-0d76c72150e1` | Regenerates the cumulative host integration manifest after the merged train. |
+| `TK-e1cea022b42f` | Renders the bounded sanitized Fleet feed error, verified in a real browser. |
+| `TK-97bde4aaaec2` | Captures and evaluates the Fleet Browser201 catalogue at the frozen base. |
+| `TK-fe5f8a526ba8` | Retains `mcp==2.1.1` and corrects the install guidance. |
 
 ### Merged history that is not in the net Beta.2 scope
 
@@ -103,9 +120,8 @@ such.
 | `TK-59681c3e4bb1` | Its first README overhaul was reverted; `TK-3b17c3239aaa` is the retained replacement. |
 | `TK-902db8904377` | Its first offer-reconciliation merge was reverted; the retained behavior comes from `TK-c801f9c8a3d9` and `TK-939d37230fa3`. |
 | `TK-f905e3b8469d` | Its wait-mode implementation was reverted; the retained immediate-return contract comes from `TK-939d37230fa3`. |
-| `TK-1bdfc3931bd3` | The MCP 2.2.0 dependency batch was merged for evaluation and then reverted at `ce39302bb497f0c5a6995f56db8d29ba416c6216`; Beta.2 must retain MCP 2.1.1 unless a later reviewed dependency ticket lands. |
-| `TK-3862f61d9ee7` | Response-projection phase 2 is not in the working-base history and is excluded unless it lands before `B2_BASE_SHA` is frozen. |
-| `TK-37bfac747069` | ACP P1 remains pending and is not part of this plan's working-base tree. |
+| `TK-1bdfc3931bd3` | The first MCP 2.2.0 evaluation batch was reverted at `ce39302bb497f0c5a6995f56db8d29ba416c6216`; reviewed successor `TK-9910ee9be69f` later landed the retained exact 2.2.0 set. |
+| `TK-1ec2ca97709b` | Its elicitation implementation was merged and later reverted; the dependency version is independently retained by `TK-9910ee9be69f`. |
 
 ## Version map
 
@@ -178,35 +194,37 @@ Before candidate review:
    tag target to be the same commit before the operator follows the publish
    portion of the runbook.
 
-### Parked Browser201 gaps
+### Browser201 evidence at the frozen base
 
-The working base does not contain any of these three tickets, so Beta.2 at
-this base **closes none and narrows none** of their acceptance gaps:
+All three implementation tickets below are closed, approved, and present in
+`B2_BASE_SHA`. Their implementation status must not be confused with a fresh
+Beta.2 candidate-bound browser pass:
 
 | Ticket | Current acceptance boundary | Beta.2 disposition at this base |
 | --- | --- | --- |
-| `TK-5ddf2539f157` | Twenty-one visually passing AionUi rows remain strict-blocked without typed-evidence records. | Open; no narrowing. |
-| `TK-93e833c54d6c` | The 79 Personal rows remain uncaptured because no supported Personal browser route exists on the AionUi origin. | Open; no narrowing. |
-| `TK-fc3eb834372b` | The 93 Fleet rows remain uncaptured because the stable board selectors and selection state are absent. | Open; no narrowing. |
+| `TK-5ddf2539f157` | The typed-evidence pipeline now emits fail-closed records and preserves trust-binding errors. | Implementation closed and approved. Its Full Access review replay was on the ticket candidate, not `B2_CANDIDATE_SHA`; AionUi still needs a fresh candidate-bound replay. |
+| `TK-93e833c54d6c` | The 79 Personal rows now target the real Personal MCP App frame with `surface=mcp-app`, rather than a nonexistent top-level route. | Implementation closed and approved. No 79-row Personal capture is yet bound to `B2_CANDIDATE_SHA`. |
+| `TK-fc3eb834372b` | Fleet now exposes the stable board selectors and selection state required by the harness. | Closed and approved. Operator evidence `AN-000000001087` binds the frozen base and records 93 SUCCESS / 0 FAILURE / 0 BLOCKED; do not relabel that base capture as a candidate-tip capture if the candidate bytes differ. |
 
-If any of these lands before `B2_BASE_SHA` is frozen, update the scope and
-version-path analysis, then require new product-produced responses, captures,
-typed evidence, and strict evaluation on the exact candidate. Worker fixtures
-or expected-value fabrication do not close a Browser201 row.
+Candidate acceptance still requires product-produced responses, captures,
+typed evidence, and strict evaluation for any domain claimed complete on the
+exact candidate. Worker fixtures or expected-value fabrication do not close a
+Browser201 row.
 
 ## Candidate-assembly ticket text to file
 
 ```text
 Title: Assemble and gate the immutable Pursers v5.0.0b2 candidate
 
-Branch: integration/v5.0.0b2-rc1
-Base: exact origin/main commit that contains
-origin/integration/TK-735be746039c-main-merge@86c89b59b851f5e50897aafeb84d4dada8d17735
-(record the resolved full SHA as B2_BASE_SHA before mutation)
+Branch: codex/TK-86f2fcaebee3-b2-candidate-worker13
+Base: exact frozen origin/main commit
+0c83cd8da4e8ac04ee2dd564559f57718335cdef
+(record this full SHA as B2_BASE_SHA before mutation)
 
 Scope:
-1. Fetch origin; prove B2_BASE_SHA is the current authorized main tip, contains
-   86c89b59b851f5e50897aafeb84d4dada8d17735, and has a clean checkout.
+1. Fetch origin; prove B2_BASE_SHA is still the authorized main tip, contains
+   86c89b59b851f5e50897aafeb84d4dada8d17735, and has a clean checkout. If main
+   moved, stop rather than silently rebasing the frozen candidate.
 2. Re-run git log and git diff from v5.0.0b1; reconcile every landed ticket,
    package-path change, Browser201 ticket, and coordinator decision with
    docs/releases/PLAN-v5.0.0b2.md. Stop for a revised decision if the planned
@@ -242,17 +260,19 @@ an exact-candidate pass.
 
 ## Risks and rollback
 
-- The reconciliation is not yet on `origin/main`; assembling before it lands
-  would create a stale-base candidate.
-- The inherited rc6 host integration manifest currently has 37 mismatches on
-  the working base. Candidate assembly is blocked until the final cumulative
+- `origin/main` moving away from `B2_BASE_SHA` voids this candidate; never
+  silently rebase a frozen release candidate.
+- The base host integration manifest is green, but version changes alter
+  covered files. Candidate assembly remains blocked until the final cumulative
   manifest is regenerated, independently replayed, and frozen before artifact
   construction.
-- MCP 2.2.0 and response-projection phase 2 are not in the net working tree.
-  Release notes must not claim them unless a reviewed successor lands before
-  the base freeze and the plan is recomputed.
-- ACP P1 and all three parked Browser201 gaps remain open. Beta.2 must publish
-  those boundaries rather than imply full ACP or 201-row acceptance.
+- MCP 2.2.0 is the exact reviewed dependency in the frozen tree. It remains
+  incompatible with FastMCP 2.13.1 in one environment, so the release keeps
+  the dedicated-virtual-environment guidance from `TK-fe5f8a526ba8`.
+  Response-projection phase 2 and the reviewed ACP ticket set are present.
+- Browser201 implementation tickets are closed, but Personal and AionUi still
+  lack fresh evidence bound to `B2_CANDIDATE_SHA`. Beta.2 must publish those
+  evidence boundaries rather than imply a full 201-row candidate pass.
 - Exact-tip CodeQL is a hard gate. A local test or historical green scan cannot
   waive a current alert.
 - Component versions and published artifacts are immutable. A mismatch after
