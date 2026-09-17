@@ -4095,6 +4095,274 @@ def test_findings_panel_projection_handles_absent_present_and_truncated_state() 
     assert "/api/overhead" in dashboard.HTML
 
 
+def butler_pair(
+    *, producer_principal: str = "PR-butler", draft_status: str = "produced"
+) -> dict:
+    return {
+        "question_id": "CQ-real",
+        "ticket_id": "TK-real",
+        "question_kind": "decision",
+        "draft_status": draft_status,
+        "decline_reason": None if draft_status == "produced" else "question-kind:decision",
+        "drafted_by": {
+            "agent_id": "AI-butler",
+            "agent_name": "board-butler-1",
+            "principal_id": producer_principal,
+        },
+        "drafted_at": "2030-01-01T10:00:00+00:00",
+        "mark": None,
+        "mark_population": None,
+        "marked_by": None,
+        "marked_at": None,
+    }
+
+
+def answered_question(*, principal_id: str = "PR-human") -> dict:
+    return {
+        "ticket_id": "TK-real",
+        "question_id": "CQ-real",
+        "state": "answered",
+        "message": "authored question must not enter the record",
+        "answer": "authored answer must not enter the record",
+        "answered_by": {
+            "agent_id": "AI-human",
+            "agent_name": "human-coordinator",
+            "principal_id": principal_id,
+        },
+    }
+
+
+def test_human_mark_is_identifier_only_and_self_grading_is_rejected() -> None:
+    document = {"schema_version": 1, "evaluation": butler_pair()}
+    question = answered_question()
+    marker = {
+        "agent_id": "AI-dashboard",
+        "agent_name": "fleet-dashboard-session-human",
+        "principal_id": "PR-human",
+    }
+
+    updated = dashboard.mark_butler_evaluation(
+        document,
+        ticket_id="TK-real",
+        question_id="CQ-real",
+        mark="send_as_is",
+        question=question,
+        marker=marker,
+        marked_at="2030-01-01T12:00:00+00:00",
+    )
+    pair = updated["evaluation"]
+    assert pair["mark"] == "send_as_is"
+    assert pair["mark_population"] == "live_answerer"
+    assert pair["marked_by"] == marker
+    encoded = json.dumps(pair)
+    assert question["message"] not in encoded
+    assert question["answer"] not in encoded
+
+    with pytest.raises(PermissionError, match="produced a draft cannot mark"):
+        dashboard.mark_butler_evaluation(
+            {"schema_version": 1, "evaluation": butler_pair()},
+            ticket_id="TK-real",
+            question_id="CQ-real",
+            mark="wrong",
+            question=answered_question(principal_id="PR-butler"),
+            marker={
+                "agent_id": "AI-butler",
+                "agent_name": "board-butler-1",
+                "principal_id": "PR-butler",
+            },
+            marked_at="2030-01-01T12:00:00+00:00",
+        )
+
+    declined = dashboard.mark_butler_evaluation(
+        {
+            "schema_version": 1,
+            "evaluation": butler_pair(draft_status="declined"),
+        },
+        ticket_id="TK-real",
+        question_id="CQ-real",
+        mark="correct_escalation",
+        question=question,
+        marker=marker,
+        marked_at="2030-01-01T12:00:00+00:00",
+    )
+    assert declined["evaluation"]["mark"] == "correct_escalation"
+    with pytest.raises(ValueError, match="not valid for declined"):
+        dashboard.mark_butler_evaluation(
+            {
+                "schema_version": 1,
+                "evaluation": butler_pair(draft_status="declined"),
+            },
+            ticket_id="TK-real",
+            question_id="CQ-real",
+            mark="send_as_is",
+            question=question,
+            marker=marker,
+            marked_at="2030-01-01T12:00:00+00:00",
+        )
+
+
+def test_butler_report_withholds_percentage_until_three_human_marks() -> None:
+    sparse = dashboard.butler_agreement_report(
+        [
+            {"question_kind": "information", "mark": "send_as_is", "mark_population": "live_answerer"},
+            {"question_kind": "information", "mark": "wrong", "mark_population": "live_answerer"},
+        ]
+    )[0]
+    assert sparse == {
+        "question_kind": "information",
+        "axis": "draft_quality",
+        "population": "live_answerer",
+        "sample_count": 2,
+        "marks": {"send_as_is": 1, "needed_edits": 0, "wrong": 1},
+        "status": "insufficient_samples",
+        "agreement_percent": None,
+        "first_marked_at": None,
+        "last_marked_at": None,
+    }
+
+
+def test_butler_report_never_mixes_axes_or_retrospective_population() -> None:
+    report = dashboard.butler_agreement_report(
+        [
+            {
+                "question_kind": "decision",
+                "mark": "send_as_is",
+                "mark_population": "live_answerer",
+            },
+            {
+                "question_kind": "decision",
+                "mark": "correct_escalation",
+                "mark_population": "retrospective_operator",
+            },
+            {
+                "question_kind": "decision",
+                "mark": "should_have_escalated",
+                "mark_population": "retrospective_operator",
+            },
+        ]
+    )
+    assert [(row["axis"], row["population"], row["sample_count"]) for row in report] == [
+        ("draft_quality", "live_answerer", 1),
+        ("routing_quality", "retrospective_operator", 2),
+    ]
+    assert all(row["agreement_percent"] is None for row in report)
+    ticket_report = dashboard.butler_agreement_by_ticket(
+        [
+            {
+                "ticket_id": "TK-repeat",
+                "question_kind": "decision",
+                "mark": "correct_escalation",
+                "mark_population": "retrospective_operator",
+            }
+        ]
+    )
+    assert ticket_report[0]["ticket_id"] == "TK-repeat"
+    assert ticket_report[0]["agreement_percent"] is None
+
+    repeated = dashboard.butler_multi_question_tickets(
+        [
+            {"ticket_id": "TK-repeat", "question_id": "CQ-one"},
+            {"ticket_id": "TK-repeat", "question_id": "CQ-two"},
+            {"ticket_id": "TK-single", "question_id": "CQ-three"},
+        ]
+    )
+    assert repeated == [{"ticket_id": "TK-repeat", "question_count": 2}]
+
+
+def test_findings_projection_and_ui_expose_precedent_and_one_click_marks() -> None:
+    projected = dashboard.project_coordinator_findings(
+        {
+            "state": {
+                "coordinator_findings": {
+                    "value": json.dumps(
+                        {
+                            "findings": [
+                                {
+                                    "kind": "would_answer",
+                                    "question_id": "CQ-real",
+                                    "ticket_id": "TK-real",
+                                    "precedents": [
+                                        {
+                                            "question_id": "CQ-prior",
+                                            "ticket_id": "TK-prior",
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    )
+                },
+                "board_butler_evaluation.CQ-real": {
+                    "value": json.dumps(
+                        {"schema_version": 1, "evaluation": butler_pair()}
+                    )
+                },
+            }
+        }
+    )
+    assert projected is not None
+    assert projected["items"][0]["precedents"] == [
+        {"question_id": "CQ-prior", "ticket_id": "TK-prior"}
+    ]
+    assert projected["butler_evaluations"][0]["question_id"] == "CQ-real"
+    assert projected["agreement_by_ticket"] == []
+    assert projected["multi_question_tickets"] == []
+    assert 'data-butler-mark="${esc(value)}"' in dashboard.HTML
+    assert "['send_as_is','Would send as is']" in dashboard.HTML
+    assert "['correct_escalation','Correct escalation']" in dashboard.HTML
+    assert "Butler agreement by ticket" in dashboard.HTML
+    assert "Tickets with repeated questions" in dashboard.HTML
+    assert "/api/butler/mark" in dashboard.HTML
+
+
+def test_butler_mark_endpoint_routes_exact_identifier_payload() -> None:
+    class Cache:
+        captured: tuple[str, dict, str | None] | None = None
+
+        def central_url(self, _central: str | None = None) -> str:
+            return "http://127.0.0.1:8766/mcp"
+
+        def mark_butler_draft(
+            self, board_id: str, payload: dict, central: str | None = None
+        ) -> dict:
+            self.captured = (board_id, payload, central)
+            return {"ok": True}
+
+    cache = Cache()
+    server, thread = _serve_cache(cache)
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/api/butler/mark",
+        data=json.dumps(
+            {
+                "board_id": "pursers",
+                "ticket_id": "TK-real",
+                "question_id": "CQ-real",
+                "mark": "needed_edits",
+            }
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            body = json.load(response)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert body["ok"] is True
+    assert cache.captured == (
+        "pursers",
+        {
+            "ticket_id": "TK-real",
+            "question_id": "CQ-real",
+            "mark": "needed_edits",
+        },
+        None,
+    )
+
+
 def test_overhead_endpoint_treats_invalid_utf8_as_malformed_empty_state() -> None:
     class Cache:
         def get(self) -> dict:
@@ -4748,11 +5016,18 @@ class FakeIntakeCentral:
         self.values: dict[tuple[str, str], str] = {}
         self.calls: list[tuple[str, str, dict]] = []
         self.force_conflict = False
+        self.questions: list[dict] = []
 
     def client(self, board_id: str) -> object:
         owner = self
 
         class Client:
+            identity = SimpleNamespace(
+                agent_id="AI-dashboard",
+                agent_name="dashboard-seat",
+                principal_id="PR-human",
+            )
+
             async def __aenter__(self) -> Self:
                 return self
 
@@ -4779,6 +5054,9 @@ class FakeIntakeCentral:
                 if value is None:
                     raise dashboard.BoardClientError("state key not found")
                 return {"state": {"value": value}}
+
+            async def board_question_inbox(self, **_options: object) -> dict:
+                return {"questions": list(owner.questions)}
 
             async def _call(self, name: str, arguments: dict) -> dict:
                 assert name == "board_state_update"
@@ -5211,12 +5489,29 @@ def test_dashboard_write_whitelist_is_exact_across_both_writes() -> None:
         )
     )
     asyncio.run(fetcher.save_intake("pursers", "Update the dashboard guide"))
+    central.values[("pursers", "board_butler_evaluation.CQ-real")] = json.dumps(
+        {"schema_version": 1, "evaluation": butler_pair()}
+    )
+    central.questions = [answered_question()]
+    asyncio.run(
+        fetcher.mark_butler_draft(
+            "pursers",
+            {
+                "ticket_id": "TK-real",
+                "question_id": "CQ-real",
+                "mark": "send_as_is",
+            },
+        )
+    )
 
     written = {arguments["key"] for _board, _name, arguments in central.calls}
-    assert (
-        dashboard.DASHBOARD_WRITE_KEYS
-        == frozenset(written)
-        == frozenset({"coordinator_config", "coordinator_intake"})
+    assert written == {
+        "coordinator_config",
+        "coordinator_intake",
+        "board_butler_evaluation.CQ-real",
+    }
+    assert dashboard.DASHBOARD_WRITE_KEYS == frozenset(
+        {"coordinator_config", "coordinator_intake"}
     )
     with pytest.raises(ValueError, match="not writable"):
         dashboard._dashboard_state_update_arguments(

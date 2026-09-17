@@ -1000,6 +1000,12 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
             key="coordinator_findings",
             value='{"schema_version":2}',
         )
+        evaluations = await self.call(
+            "board_state_update",
+            agent_name="coordinator-1",
+            key="board_butler_evaluation.CQ-real",
+            value='{"schema_version":1,"evaluation":{"question_id":"CQ-real"}}',
+        )
         digest = await self.call(
             "memory_write",
             agent_name="coordinator-1",
@@ -1010,6 +1016,7 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
             tags=["coordinator", "digest", "daily"],
         )
         self.assertFalse(report.is_error)
+        self.assertFalse(evaluations.is_error)
         self.assertFalse(digest.is_error)
 
     async def test_intake_scope_creates_origin_journaled_unassigned_ticket(self) -> None:

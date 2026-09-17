@@ -26,7 +26,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -221,7 +221,16 @@ TICKET_NEXT_LABELS = {
 CONFIG_STATE_KEY = "coordinator_config"
 INTAKE_STATE_KEY = "coordinator_intake"
 FINDINGS_STATE_KEY = "coordinator_findings"
+BUTLER_EVALUATION_STATE_PREFIX = "board_butler_evaluation."
 DASHBOARD_WRITE_KEYS = frozenset({CONFIG_STATE_KEY, INTAKE_STATE_KEY})
+BUTLER_DRAFT_MARK_VALUES = ("send_as_is", "needed_edits", "wrong")
+BUTLER_ROUTING_MARK_VALUES = (
+    "correct_escalation",
+    "should_have_answered",
+    "should_have_escalated",
+)
+BUTLER_MARK_VALUES = BUTLER_DRAFT_MARK_VALUES + BUTLER_ROUTING_MARK_VALUES
+BUTLER_MIN_AGREEMENT_SAMPLES = 3
 INTAKE_TEXT_MIN_CHARS = 5
 INTAKE_TEXT_MAX_CHARS = 500
 INTAKE_RATE_LIMIT = 10
@@ -425,6 +434,197 @@ def _state_value(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
     return (dict(parsed), value) if isinstance(parsed, dict) else (None, value)
 
 
+def _butler_evaluations(document: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    if isinstance(document, Mapping) and isinstance(document.get("evaluation"), Mapping):
+        rows = [document["evaluation"]]
+    else:
+        rows = document.get("evaluations", []) if isinstance(document, Mapping) else []
+    return [dict(row) for row in rows if isinstance(row, Mapping)]
+
+
+def butler_evaluation_state_key(question_id: str) -> str:
+    if not isinstance(question_id, str) or not re.fullmatch(
+        r"CQ-[0-9A-Za-z-]+", question_id
+    ):
+        raise ValueError("invalid question_id")
+    return f"{BUTLER_EVALUATION_STATE_PREFIX}{question_id}"
+
+
+def butler_agreement_report(
+    evaluations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Report only explicit human marks; free text is never scored."""
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for row in evaluations:
+        if row.get("mark") not in BUTLER_MARK_VALUES:
+            continue
+        mark = str(row["mark"])
+        axis = (
+            "draft_quality"
+            if mark in BUTLER_DRAFT_MARK_VALUES
+            else "routing_quality"
+        )
+        population = str(row.get("mark_population") or "unknown")
+        grouped.setdefault(
+            (str(row.get("question_kind", "unknown")), axis, population), []
+        ).append(row)
+    result: list[dict[str, Any]] = []
+    for kind, axis, population in sorted(grouped):
+        rows = grouped[(kind, axis, population)]
+        values = (
+            BUTLER_DRAFT_MARK_VALUES
+            if axis == "draft_quality"
+            else BUTLER_ROUTING_MARK_VALUES
+        )
+        counts = {
+            mark: sum(row.get("mark") == mark for row in rows)
+            for mark in values
+        }
+        enough = len(rows) >= BUTLER_MIN_AGREEMENT_SAMPLES
+        success_mark = (
+            "send_as_is" if axis == "draft_quality" else "correct_escalation"
+        )
+        result.append(
+            {
+                "question_kind": kind,
+                "axis": axis,
+                "population": population,
+                "sample_count": len(rows),
+                "marks": counts,
+                "status": "measured" if enough else "insufficient_samples",
+                "agreement_percent": (
+                    round(100 * counts[success_mark] / len(rows), 1)
+                    if enough
+                    else None
+                ),
+                "first_marked_at": min(
+                    (str(row["marked_at"]) for row in rows if row.get("marked_at")),
+                    default=None,
+                ),
+                "last_marked_at": max(
+                    (str(row["marked_at"]) for row in rows if row.get("marked_at")),
+                    default=None,
+                ),
+            }
+        )
+    return result
+
+
+def butler_agreement_by_ticket(
+    evaluations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    remapped = [
+        {**row, "question_kind": str(row.get("ticket_id", "unknown"))}
+        for row in evaluations
+    ]
+    report = butler_agreement_report(remapped)
+    for row in report:
+        row["ticket_id"] = row.pop("question_kind")
+    return report
+
+
+def butler_multi_question_tickets(
+    evaluations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, set[str]] = {}
+    for row in evaluations:
+        ticket_id = row.get("ticket_id")
+        question_id = row.get("question_id")
+        if isinstance(ticket_id, str) and ticket_id and isinstance(question_id, str):
+            grouped.setdefault(ticket_id, set()).add(question_id)
+    return [
+        {"ticket_id": ticket_id, "question_count": len(question_ids)}
+        for ticket_id, question_ids in sorted(
+            grouped.items(), key=lambda item: (-len(item[1]), item[0])
+        )
+        if len(question_ids) > 1
+    ]
+
+
+def _identity_fields(identity: Any) -> dict[str, str]:
+    result = {
+        name: str(getattr(identity, name, ""))
+        for name in ("agent_id", "agent_name", "principal_id")
+    }
+    if not all(result.values()):
+        raise PermissionError("dashboard identity is incomplete")
+    return result
+
+
+def mark_butler_evaluation(
+    document: Mapping[str, Any],
+    *,
+    ticket_id: str,
+    question_id: str,
+    mark: str,
+    question: Mapping[str, Any],
+    marker: Mapping[str, str],
+    marked_at: str,
+) -> dict[str, Any]:
+    """Apply one immutable human mark after identity and answer checks."""
+    if mark not in BUTLER_MARK_VALUES:
+        raise ValueError("mark is not valid")
+    if question.get("state") != "answered":
+        raise ValueError("question must be answered before its draft can be marked")
+    if question.get("question_id") != question_id or question.get("ticket_id") != ticket_id:
+        raise ValueError("question identifiers do not match the paired record")
+    answered_by = question.get("answered_by")
+    if not isinstance(answered_by, Mapping):
+        raise PermissionError("answered question has no authenticated answerer")
+    if marker.get("principal_id") != answered_by.get("principal_id"):
+        raise PermissionError("only the principal that answered may mark this draft")
+
+    result = dict(document)
+    rows = _butler_evaluations(result)
+    offset = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if row.get("question_id") == question_id
+            and row.get("ticket_id") == ticket_id
+        ),
+        None,
+    )
+    if offset is None:
+        raise ValueError("paired draft record not found")
+    producer = rows[offset].get("drafted_by")
+    if not isinstance(producer, Mapping):
+        raise ValueError("paired draft record has no producer identity")
+    if marker.get("principal_id") == producer.get("principal_id"):
+        raise PermissionError("the identity that produced a draft cannot mark it")
+    draft_status = rows[offset].get("draft_status")
+    allowed_marks = (
+        BUTLER_DRAFT_MARK_VALUES + ("should_have_escalated",)
+        if draft_status == "produced"
+        else ("correct_escalation", "should_have_answered")
+        if draft_status == "declined"
+        else ()
+    )
+    if mark not in allowed_marks:
+        raise ValueError(f"{mark} is not valid for {draft_status or 'unknown'} records")
+    previous = rows[offset].get("mark")
+    if previous is not None:
+        if previous == mark and rows[offset].get("marked_by") == dict(marker):
+            return result
+        raise ConfigConflictError("draft already has its single human mark")
+    rows[offset] = {
+        **rows[offset],
+        "mark": mark,
+        "mark_population": "live_answerer",
+        "marked_by": dict(marker),
+        "answered_by": {
+            name: str(answered_by.get(name, ""))
+            for name in ("agent_id", "agent_name", "principal_id")
+        },
+        "marked_at": marked_at,
+    }
+    result["schema_version"] = 1
+    result["evaluation"] = rows[0]
+    result.pop("evaluations", None)
+    result.pop("truncated", None)
+    return result
+
+
 def validate_intake_text(value: Any) -> str:
     """Return one bounded non-blank ask without changing its authored text."""
     if not isinstance(value, str):
@@ -443,7 +643,9 @@ def _dashboard_state_update_arguments(
     expected_sha256: str | None = None,
 ) -> dict[str, str]:
     """Build the dashboard's only state mutation, guarded by an exact key set."""
-    if key not in DASHBOARD_WRITE_KEYS:
+    if key not in DASHBOARD_WRITE_KEYS and not re.fullmatch(
+        rf"{re.escape(BUTLER_EVALUATION_STATE_PREFIX)}CQ-[0-9A-Za-z-]+", key
+    ):
         raise ValueError("dashboard state key is not writable")
     arguments = {"agent_name": agent_name, "key": key, "value": value}
     if expected_sha256 is not None:
@@ -2008,6 +2210,21 @@ def project_coordinator_findings(
             "ask_id": _clip(finding.get("ask_id"), 120) or None,
             "draft": draft_preview,
         }
+        precedents = finding.get("precedents")
+        if isinstance(precedents, list):
+            projected["precedents"] = [
+                {
+                    "question_id": _clip(item.get("question_id"), 120),
+                    "ticket_id": _clip(item.get("ticket_id"), MAX_LABEL_CHARS),
+                }
+                for item in precedents[:3]
+                if isinstance(item, dict)
+                and item.get("question_id")
+                and item.get("ticket_id")
+            ]
+            projected["precedent_status"] = (
+                "found" if projected["precedents"] else "none"
+            )
         for name, selected in (
             ("question_id", _clip(finding.get("question_id"), 120) or None),
             ("verdict", _clip(finding.get("verdict"), 32) or None),
@@ -2020,9 +2237,45 @@ def project_coordinator_findings(
             if selected is not None:
                 projected[name] = selected
         items.append(projected)
+    evaluations: list[dict[str, Any]] = []
+    for key, evaluation_entry in state.items():
+        if not str(key).startswith(BUTLER_EVALUATION_STATE_PREFIX):
+            continue
+        evaluation_raw = (
+            evaluation_entry.get("value")
+            if isinstance(evaluation_entry, dict) and "value" in evaluation_entry
+            else evaluation_entry
+        )
+        if isinstance(evaluation_raw, str):
+            try:
+                evaluation_raw = json.loads(evaluation_raw)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(evaluation_raw, dict):
+            evaluations.extend(_butler_evaluations(evaluation_raw))
+    projected_evaluations = [
+        {
+            "question_id": _clip(row.get("question_id"), 120),
+            "ticket_id": _clip(row.get("ticket_id"), MAX_LABEL_CHARS),
+            "question_kind": _clip(row.get("question_kind"), 32),
+            "draft_status": _clip(row.get("draft_status"), 16),
+            "mark": (
+                row.get("mark") if row.get("mark") in BUTLER_MARK_VALUES else None
+            ),
+            "mark_population": _clip(row.get("mark_population"), 32) or None,
+            "marked_at": _clip(row.get("marked_at"), 40) or None,
+        }
+        for row in evaluations
+        if row.get("question_id") and row.get("ticket_id")
+    ]
     return {
         "items": items,
         "truncated_count": reported_truncated + max(0, len(findings) - MAX_FINDINGS),
+        "butler_evaluations": projected_evaluations,
+        "butler_evaluation_truncated": 0,
+        "agreement_by_question_kind": butler_agreement_report(evaluations),
+        "agreement_by_ticket": butler_agreement_by_ticket(evaluations),
+        "multi_question_tickets": butler_multi_question_tickets(evaluations),
     }
 
 
@@ -3988,6 +4241,11 @@ class _FleetClientPool:
         async with replacement.lock:
             return await getattr(replacement.client, method_name)(*args, **kwargs)
 
+    async def identity(self, board_id: str) -> Any:
+        session = await self._session(board_id)
+        async with session.lock:
+            return session.client.identity
+
     async def _close(self) -> None:
         if self._lock is None:
             self._closed = True
@@ -4021,6 +4279,10 @@ class _FleetClientProxy:
     async def __aexit__(self, *_args: Any) -> None:
         return None
 
+    async def joined_identity(self) -> Any:
+        future = _fleet_runtime().submit(self.pool.identity(self.board_id))
+        return await asyncio.wrap_future(future)
+
     def __getattr__(self, method_name: str) -> Callable[..., Awaitable[Any]]:
         async def forwarded(*args: Any, **kwargs: Any) -> Any:
             future = _fleet_runtime().submit(
@@ -4042,6 +4304,7 @@ class FleetFetcher:
         self.client_factory = client_factory
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self._intake_write_lock = threading.Lock()
+        self._butler_write_lock = threading.Lock()
         self._intake_submissions: dict[str, list[tuple[str, datetime]]] = {}
         self._board_work_dirs: dict[str, str | None] = {}
         self._readable_boards: list[tuple[str, str]] = []
@@ -5069,6 +5332,88 @@ class FleetFetcher:
             "config": clean,
             "expected_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
             "concurrency": "cas" if expected_sha256 is not None else "lww",
+        }
+
+    async def mark_butler_draft(
+        self, board_id: Any, payload: Any
+    ) -> dict[str, Any]:
+        if not isinstance(board_id, str) or not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        if not isinstance(payload, dict) or set(payload) != {
+            "ticket_id",
+            "question_id",
+            "mark",
+        }:
+            raise ValueError("request must contain ticket_id, question_id, and mark")
+        ticket_id = payload["ticket_id"]
+        question_id = payload["question_id"]
+        mark = payload["mark"]
+        if not isinstance(ticket_id, str) or not re.fullmatch(r"TK-[0-9A-Za-z-]+", ticket_id):
+            raise ValueError("invalid ticket_id")
+        if not isinstance(question_id, str) or not re.fullmatch(r"CQ-[0-9A-Za-z-]+", question_id):
+            raise ValueError("invalid question_id")
+        if mark not in BUTLER_MARK_VALUES:
+            raise ValueError("invalid mark")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        marked_at = self.now_factory()
+        if marked_at.tzinfo is None:
+            marked_at = marked_at.replace(tzinfo=timezone.utc)
+        marked_at_text = marked_at.astimezone(timezone.utc).isoformat()
+        evaluation_key = butler_evaluation_state_key(question_id)
+
+        with self._butler_write_lock:
+            async with self._client(board_id) as client:
+                raw = await client.board_state_get(key=evaluation_key)
+                document, current_text = _state_value(raw)
+                if document is None or current_text is None:
+                    raise ConfigConflictError("board butler evaluation state is malformed")
+                inbox = await client.board_question_inbox(
+                    state="answered", ticket_id=ticket_id, limit=100
+                )
+                questions = inbox.get("questions", [])
+                question = next(
+                    (
+                        row
+                        for row in questions
+                        if isinstance(row, dict)
+                        and row.get("question_id") == question_id
+                    ),
+                    None,
+                )
+                if question is None:
+                    raise ValueError("answered question not found")
+                marker = _identity_fields(await client.joined_identity())
+                updated = mark_butler_evaluation(
+                    document,
+                    ticket_id=ticket_id,
+                    question_id=question_id,
+                    mark=mark,
+                    question=question,
+                    marker=marker,
+                    marked_at=marked_at_text,
+                )
+                encoded = json.dumps(updated, sort_keys=True, separators=(",", ":"))
+                expected = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+                arguments = _dashboard_state_update_arguments(
+                    agent_name=self.config.agent_name,
+                    key=evaluation_key,
+                    value=encoded,
+                    expected_sha256=expected,
+                )
+                try:
+                    await client._call("board_state_update", arguments)
+                except BoardClientError as exc:
+                    raise ConfigConflictError(
+                        "board butler evaluation changed; refresh before marking"
+                    ) from exc
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "ticket_id": ticket_id,
+            "question_id": question_id,
+            "mark": mark,
         }
 
     def _require_doors_config(self) -> tuple[Path, Path]:
@@ -7028,6 +7373,20 @@ class DashboardCache:
             label,
         )
 
+    def mark_butler_draft(
+        self,
+        board_id: str,
+        payload: dict[str, Any],
+        central: str | None = None,
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            self._async_runner.run(
+                self.fetchers[label].mark_butler_draft(board_id, payload)
+            ),
+            label,
+        )
+
     def save_config(
         self,
         value: Any,
@@ -7387,9 +7746,17 @@ function reconcileAttention(){const now=new Date(),before=loadAttentionState(),n
 function attentionRow(x){const link=x.ticket_id?`<a class="id" href="${ticketHref(x.central,x.board.board_id,x.ticket_id)}">${esc(x.ticket_id)}</a>`:`<a href="${centralHref(x.central,'overhead')}">Inspect</a>`;return `<div class="finding-row"><span class="severity ${esc(x.level)}"></span><div><b>${esc(x.title)}</b><p>${esc(x.text)}</p><span class="meta">${esc(x.central)} · ${esc(x.board.label)} · first seen ${esc(fmt(x.first_seen))}</span><div class="attention-actions"><button type="button" data-attention-action="ack" data-attention-key="${esc(x.key)}">Acknowledge</button><button type="button" data-attention-action="snooze" data-attention-key="${esc(x.key)}">Snooze 24h</button></div></div>${link}</div>`}
 function humanRequestRows(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const h of b.human_requests||[]){rows.push({central,board:b,h})}}}return rows}
 function butlerHoldRows(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const f of b.coordinator_findings?.items||[]){if(f.kind==='would_answer'&&f.question_id&&['shadow','pending'].includes(f.hold?.status))rows.push({central,board:b,f})}}}return rows}
+function butlerEvaluation(row){return(row.board.coordinator_findings?.butler_evaluations||[]).find(item=>item.question_id===row.f.question_id&&item.ticket_id===row.f.ticket_id)}
+function butlerAgreementRows(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[])for(const score of b.coordinator_findings?.agreement_by_question_kind||[])rows.push({central,board:b,score});return rows}
+function butlerTicketAgreementRows(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[])for(const score of b.coordinator_findings?.agreement_by_ticket||[])rows.push({central,board:b,score});return rows}
+function butlerRepeatedTicketRows(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[])for(const ticket of b.coordinator_findings?.multi_question_tickets||[])rows.push({central,board:b,ticket});return rows}
 function humanUrlHost(url){try{return new URL(url).host}catch(_error){return String(url)}}
-function butlerHoldCard(row){const f=row.f||{},hold=f.hold||{},link=f.ticket_id?`<a class="id" href="${ticketHref(row.central,row.board.board_id,f.ticket_id)}">${esc(f.ticket_id)}</a>`:'';return `<div class="finding-row"><span class="severity warn"></span><div><b>Waiting for you · board butler hold</b><p>${esc(f.text||'Evidence-backed draft')}</p><span class="meta">${esc(row.central)} · ${esc(row.board.label)} · ${esc(f.question_id)} · ${esc(f.verdict||'unknown')} · release ${esc(fmt(hold.release_at))}</span>${f.evidence?`<p class="meta">${esc(f.evidence)}</p>`:''}<p class="meta">Veto with board_butler.py --veto-question ${esc(f.question_id)} --control-reason &lt;reason&gt;</p></div>${link}</div>`}
-function renderWaitingForYou(){const humans=humanRequestRows(),holds=butlerHoldRows(),count=humans.length+holds.length;return `<div class="section-title"><h3>Waiting for you</h3><span class="status">${count} pending</span></div><section class="attention-card">${humans.map(humanRequestCard).join('')}${holds.map(butlerHoldCard).join('')||(!humans.length?'<p class="empty">No tickets or held drafts are waiting for a human answer.</p>':'')}</section>`}
+function butlerMarkButton(row,value,label){const f=row.f||{};return `<button type="button" data-butler-mark="${esc(value)}" data-central="${esc(row.central)}" data-board="${esc(row.board.board_id)}" data-ticket="${esc(f.ticket_id)}" data-question="${esc(f.question_id)}">${esc(label)}</button>`}
+function butlerHoldCard(row){const f=row.f||{},hold=f.hold||{},evaluation=butlerEvaluation(row),link=f.ticket_id?`<a class="id" href="${ticketHref(row.central,row.board.board_id,f.ticket_id)}">${esc(f.ticket_id)}</a>`:'',precedents=(f.precedents||[]).map(p=>`<a class="id" href="${ticketHref(row.central,row.board.board_id,p.ticket_id)}">${esc(p.question_id)} · ${esc(p.ticket_id)}</a>`).join(' · '),mark=evaluation?.mark,isDraft=evaluation?.draft_status==='produced',buttons=isDraft?[['send_as_is','Would send as is'],['needed_edits','Needed edits'],['wrong','Wrong'],['should_have_escalated','Should have escalated']]:[['correct_escalation','Correct escalation'],['should_have_answered','Should have answered']],marking=mark?`<p class="meta">Human mark: ${esc(mark.replaceAll('_',' '))}</p>`:`<div class="attention-actions">${buttons.map(([value,label])=>butlerMarkButton(row,value,label)).join('')}</div>`;return `<div class="finding-row"><span class="severity warn"></span><div><b>Waiting for you · board butler hold</b><p>${esc(f.text||'Evidence-backed draft')}</p><span class="meta">${esc(row.central)} · ${esc(row.board.label)} · ${esc(f.question_id)} · ${esc(f.verdict||'unknown')} · release ${esc(fmt(hold.release_at))}</span>${f.evidence?`<p class="meta">${esc(f.evidence)}</p>`:''}<p class="meta">Precedent: ${precedents||'No precedent found'}</p>${marking}<p class="meta">Veto with board_butler.py --veto-question ${esc(f.question_id)} --control-reason &lt;reason&gt;</p></div>${link}</div>`}
+function butlerScoreCard(row){const s=row.score||{},counts=s.marks||{},group=s.question_kind||s.ticket_id||'unknown',success=s.axis==='draft_quality'?'would send as is':'correct escalations',result=s.status==='measured'?`${esc(s.agreement_percent)}% ${success}`:`Too few samples (${esc(s.sample_count)}/${BUTLER_MIN_SAMPLES})`,details=s.axis==='draft_quality'?`send as is ${esc(counts.send_as_is||0)} · needed edits ${esc(counts.needed_edits||0)} · wrong ${esc(counts.wrong||0)}`:`correct escalation ${esc(counts.correct_escalation||0)} · should have answered ${esc(counts.should_have_answered||0)} · should have escalated ${esc(counts.should_have_escalated||0)}`;return `<div class="finding-row"><span class="severity"></span><div><b>Butler agreement · ${esc(group)} · ${esc(s.axis)}</b><p>${result}</p><span class="meta">${esc(row.central)} · ${esc(row.board.label)} · ${esc(s.population)} · ${details}</span></div></div>`}
+function butlerRepeatedTicketCard(row){const t=row.ticket||{};return `<div class="finding-row"><span class="severity"></span><div><b>Repeated questions · ${esc(t.ticket_id)}</b><p>${esc(t.question_count)} questions</p><span class="meta">${esc(row.central)} · ${esc(row.board.label)}</span></div><a class="id" href="${ticketHref(row.central,row.board.board_id,t.ticket_id)}">${esc(t.ticket_id)}</a></div>`}
+const BUTLER_MIN_SAMPLES=3;
+function renderWaitingForYou(){const humans=humanRequestRows(),holds=butlerHoldRows(),scores=butlerAgreementRows(),ticketScores=butlerTicketAgreementRows(),repeated=butlerRepeatedTicketRows(),count=humans.length+holds.length;return `<div class="section-title"><h3>Waiting for you</h3><span class="status">${count} pending</span></div><section class="attention-card">${humans.map(humanRequestCard).join('')}${holds.map(butlerHoldCard).join('')||(!humans.length?'<p class="empty">No tickets or held drafts are waiting for a human answer.</p>':'')}</section><div class="section-title"><h3>Butler agreement by question kind</h3><span class="status">human marks only</span></div><section class="attention-card">${scores.map(butlerScoreCard).join('')||'<p class="empty">No human marks yet. No question kind is trusted.</p>'}</section><div class="section-title"><h3>Butler agreement by ticket</h3><span class="status">human marks only</span></div><section class="attention-card">${ticketScores.map(butlerScoreCard).join('')||'<p class="empty">No marked tickets yet.</p>'}</section><div class="section-title"><h3>Tickets with repeated questions</h3></div><section class="attention-card">${repeated.map(butlerRepeatedTicketCard).join('')||'<p class="empty">No ticket has generated more than one recorded question.</p>'}</section>`}
 function renderAttentionOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=numberCount((b.counts||{})[k]);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Online<b>${esc(s.online||0)}</b></span><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const surfaced=reconcileAttention().sort((a,b)=>(b.level==='critical')-(a.level==='critical')||(b.age||0)-(a.age||0)),attention=surfaced.slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section>${renderWaitingForYou()}<div class="section-title"><h3>Needs attention</h3><span class="status">${surfaced.length} surfaced</span></div><section class="attention-card">${attention.map(attentionRow).join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
 function renderAttentionBoardsHub(){const cards=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[]){const total=Object.values(b.counts||{}).reduce((sum,v)=>sum+numberCount(v),0),tr=b.snapshot_truncation,info=tr&&tr.total>tr.returned?`<span class="status">snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets</span>`:'';cards.push(`<article class="board-card" data-board-id="${esc(b.board_id)}" data-central="${esc(central)}"><div><p class="eyebrow">${esc(central)}</p><h3>${esc(b.label)}</h3><span class="meta">${esc(b.board_id)} · ${esc(total)} visible tickets</span> ${info}</div><div class="counts">${Object.entries(b.counts||{}).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))} <b>${esc(v)}</b></span>`).join('')}</div><div class="card-actions"><a class="primary-action" href="${boardHref(central,b.board_id)}">Workspace</a><a href="${boardHref(central,b.board_id,'flow')}">Flow</a><a href="${boardHref(central,b.board_id,'timeline')}">Timeline</a><a href="${boardHref(central,b.board_id,'changes')}">Changes</a><a href="${boardHref(central,b.board_id,'routes')}">Routes</a></div></article>`)}return `${pageHead('Boards','Board workspaces','Open one board, then move through tickets, findings, intake, flow, timeline, changes, and routes.')}<section class="boards-list">${cards.join('')||'<div class="skeleton"></div>'}</section>`}
 function humanEnumOptions(prop){const p=prop&&typeof prop==='object'?prop:{};const source=p.type==='array'&&p.items&&typeof p.items==='object'?p.items:p;const options=[];if(Array.isArray(source.enum)){for(const value of source.enum)options.push({value:String(value),title:String(value)})}else if(Array.isArray(source.oneOf)){for(const arm of source.oneOf){if(arm&&typeof arm==='object'&&'const' in arm)options.push({value:String(arm.const),title:String(arm.title??arm.const)});else if(arm&&typeof arm==='object'&&Array.isArray(arm.enum))for(const value of arm.enum)options.push({value:String(value),title:String(value)})}}return options}
@@ -7631,6 +7998,8 @@ renderOverview=renderAttentionOverview;
 renderBoardsHub=renderAttentionBoardsHub;
 const humanHubClickV1=hubClick;
 hubClick=async function(event){const button=event.target.closest('[data-human-action]');if(!button)return humanHubClickV1(event);const form=button.closest('form.human-form');if(!form)return;const status=form.querySelector('.human-status');button.disabled=true;if(status)status.textContent='Sending\u2026';try{const disposition=form.querySelector('[data-human-disposition]')?.value||'reopen';const payload={board_id:form.dataset.board,ticket_id:form.dataset.ticket,request_id:form.dataset.request,action:button.dataset.humanAction,content:humanFormContent(form),disposition};await workerRequest('/api/human/resolve',form.dataset.central,payload);await refreshCentral(form.dataset.central);renderHub()}catch(error){button.disabled=false;if(status)status.textContent=`Failed: ${error.message}`}};
+const butlerHubClickV1=hubClick;
+hubClick=async function(event){const button=event.target.closest('[data-butler-mark]');if(!button)return butlerHubClickV1(event);button.disabled=true;try{await workerRequest('/api/butler/mark',button.dataset.central,{board_id:button.dataset.board,ticket_id:button.dataset.ticket,question_id:button.dataset.question,mark:button.dataset.butlerMark});await refreshCentral(button.dataset.central);renderHub()}catch(error){button.disabled=false;alert(`Butler mark failed: ${error.message}`)}};
 const attentionHubClickV1=hubClick;
 hubClick=async function(event){const button=event.target.closest('[data-attention-action]');if(!button)return attentionHubClickV1(event);const state=loadAttentionState(),row=state[button.dataset.attentionKey];if(!row)return;if(button.dataset.attentionAction==='ack')row.acknowledged=true;else row.snooze_until=new Date(Date.now()+86400000).toISOString();await saveAttentionState(state);renderHub()};
 if(navKind()==='overview')renderHub();
@@ -8530,6 +8899,7 @@ def make_handler(
                 "/api/agents/retire-inert",
                 "/api/attention",
                 "/api/human/resolve",
+                "/api/butler/mark",
                 "/api/doors/copy",
                 "/api/doors/rotate",
                 "/api/projects/add",
@@ -8744,6 +9114,28 @@ def make_handler(
                             "resolve_human_request",
                             request["board_id"],
                             request,
+                            central=central,
+                        )
+                    )
+                elif route == "/api/butler/mark":
+                    if not isinstance(request, dict) or set(request) != {
+                        "board_id",
+                        "ticket_id",
+                        "question_id",
+                        "mark",
+                    }:
+                        raise ValueError(
+                            "request must contain board_id, ticket_id, question_id, and mark"
+                        )
+                    body = _json_bytes(
+                        cache_call(
+                            "mark_butler_draft",
+                            request["board_id"],
+                            {
+                                "ticket_id": request["ticket_id"],
+                                "question_id": request["question_id"],
+                                "mark": request["mark"],
+                            },
                             central=central,
                         )
                     )

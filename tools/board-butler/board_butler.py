@@ -33,6 +33,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 STATE_KEY = "coordinator_findings"
+EVALUATION_STATE_PREFIX = "board_butler_evaluation."
 CONFIG_KEY = "coordinator_config"
 SCHEMA_VERSION = 1
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -58,6 +59,14 @@ PROVIDER_TIMEOUT_S = 30.0
 QUESTION_EVENT = "coordinator_question_asked"
 PARK_ANNOTATION_MARKER = "board-butler:no-live-candidates"
 REFUSAL_ANNOTATION_MARKER = "board-butler:incapable-target-refusal"
+MIN_AGREEMENT_SAMPLES = 3
+DRAFT_MARK_VALUES = ("send_as_is", "needed_edits", "wrong")
+ROUTING_MARK_VALUES = (
+    "correct_escalation",
+    "should_have_answered",
+    "should_have_escalated",
+)
+MARK_VALUES = DRAFT_MARK_VALUES + ROUTING_MARK_VALUES
 # Mirrored from coordinator.DEFAULT_ALWAYS_ASK_CATEGORIES.  The policy rules
 # below express these as gate/scope/release, membership, and registry hazards.
 COORDINATOR_ALWAYS_ASK_CATEGORIES = (
@@ -240,6 +249,7 @@ class Evidence:
 class EvidenceSource(Protocol):
     async def ticket_get(self, ticket_id: str) -> Mapping[str, Any]: ...
     async def board_status(self) -> Mapping[str, Any]: ...
+    async def answered_questions(self) -> Sequence[Mapping[str, Any]]: ...
 
 
 class AlreadyRunning(RuntimeError):
@@ -1008,6 +1018,243 @@ def classify_question(message: str, kind: str = "information") -> Classification
     return Classification(Outcome.UNKNOWN, "no-confident-policy-match")
 
 
+_PRECEDENT_STOP_WORDS = frozenset(
+    {
+        "about",
+        "after",
+        "again",
+        "because",
+        "before",
+        "could",
+        "from",
+        "have",
+        "into",
+        "must",
+        "only",
+        "please",
+        "question",
+        "should",
+        "that",
+        "their",
+        "there",
+        "these",
+        "they",
+        "this",
+        "ticket",
+        "what",
+        "when",
+        "where",
+        "which",
+        "with",
+        "would",
+    }
+)
+
+
+def _precedent_terms(value: Any) -> frozenset[str]:
+    return frozenset(
+        term
+        for term in re.findall(r"[a-z0-9][a-z0-9_.-]{2,}", str(value).casefold())
+        if term not in _PRECEDENT_STOP_WORDS
+    )
+
+
+def find_precedents(
+    question: Mapping[str, Any],
+    answered: Sequence[Mapping[str, Any]],
+    *,
+    limit: int = 3,
+) -> list[dict[str, str]]:
+    """Return identifier-only citations for lexically related answered questions."""
+    terms = _precedent_terms(question.get("message", ""))
+    if not terms:
+        return []
+    current_id = str(question.get("question_id", ""))
+    ranked: list[tuple[float, str, str]] = []
+    for row in answered:
+        if not isinstance(row, Mapping) or row.get("state") != "answered":
+            continue
+        question_id = row.get("question_id")
+        ticket_id = row.get("ticket_id")
+        if (
+            not isinstance(question_id, str)
+            or not question_id
+            or question_id == current_id
+            or not isinstance(ticket_id, str)
+            or not ticket_id
+            or not isinstance(row.get("answer"), str)
+        ):
+            continue
+        candidate = _precedent_terms(row.get("message", ""))
+        overlap = len(terms & candidate)
+        if overlap == 0:
+            continue
+        # Ranking is retrieval-only. It is deliberately not stored or reported
+        # as agreement; only a human mark can measure draft agreement.
+        score = overlap / max(1, len(terms | candidate))
+        ranked.append((score, question_id, ticket_id))
+    ranked.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [
+        {"question_id": question_id, "ticket_id": ticket_id}
+        for _score, question_id, ticket_id in ranked[: max(0, limit)]
+    ]
+
+
+def agreement_by_question_kind(
+    evaluations: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Summarize explicit marks without mixing draft and escalation axes."""
+    grouped: dict[tuple[str, str, str], list[Mapping[str, Any]]] = {}
+    for row in evaluations:
+        if not isinstance(row, Mapping) or row.get("mark") not in MARK_VALUES:
+            continue
+        mark = str(row["mark"])
+        axis = "draft_quality" if mark in DRAFT_MARK_VALUES else "routing_quality"
+        population = str(row.get("mark_population") or "unknown")
+        grouped.setdefault(
+            (str(row.get("question_kind", "unknown")), axis, population), []
+        ).append(row)
+    report: list[dict[str, Any]] = []
+    for kind, axis, population in sorted(grouped):
+        rows = grouped[(kind, axis, population)]
+        values = DRAFT_MARK_VALUES if axis == "draft_quality" else ROUTING_MARK_VALUES
+        counts = {mark: sum(row.get("mark") == mark for row in rows) for mark in values}
+        stamps = sorted(
+            str(row.get("marked_at")) for row in rows if row.get("marked_at")
+        )
+        enough = len(rows) >= MIN_AGREEMENT_SAMPLES
+        success_mark = "send_as_is" if axis == "draft_quality" else "correct_escalation"
+        report.append(
+            {
+                "question_kind": kind,
+                "axis": axis,
+                "population": population,
+                "sample_count": len(rows),
+                "marks": counts,
+                "status": "measured" if enough else "insufficient_samples",
+                "agreement_percent": (
+                    round(100 * counts[success_mark] / len(rows), 1)
+                    if enough
+                    else None
+                ),
+                "first_marked_at": stamps[0] if stamps else None,
+                "last_marked_at": stamps[-1] if stamps else None,
+            }
+        )
+    return report
+
+
+def agreement_by_ticket(
+    evaluations: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the same human-only axes grouped by ticket identifier."""
+    remapped = [
+        {**dict(row), "question_kind": str(row.get("ticket_id", "unknown"))}
+        for row in evaluations
+        if isinstance(row, Mapping)
+    ]
+    report = agreement_by_question_kind(remapped)
+    for row in report:
+        row["ticket_id"] = row.pop("question_kind")
+    return report
+
+
+def multi_question_tickets(
+    evaluations: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """List tickets with multiple distinct question identifiers."""
+    grouped: dict[str, set[str]] = {}
+    for row in evaluations:
+        if not isinstance(row, Mapping):
+            continue
+        ticket_id = row.get("ticket_id")
+        question_id = row.get("question_id")
+        if isinstance(ticket_id, str) and ticket_id and isinstance(question_id, str):
+            grouped.setdefault(ticket_id, set()).add(question_id)
+    return [
+        {"ticket_id": ticket_id, "question_count": len(question_ids)}
+        for ticket_id, question_ids in sorted(
+            grouped.items(), key=lambda item: (-len(item[1]), item[0])
+        )
+        if len(question_ids) > 1
+    ]
+
+
+def _public_identity(identity: Any) -> dict[str, str]:
+    result = {
+        name: str(getattr(identity, name, ""))
+        for name in ("agent_id", "agent_name", "principal_id")
+    }
+    if not all(result.values()):
+        raise ValueError("board butler identity is incomplete")
+    return result
+
+
+def evaluation_state_key(question_id: str) -> str:
+    if not re.fullmatch(r"CQ-[0-9A-Za-z-]+", question_id):
+        raise ValueError("evaluation question_id is invalid")
+    return f"{EVALUATION_STATE_PREFIX}{question_id}"
+
+
+def record_draft_evaluation(
+    state: Mapping[str, Any],
+    question: Mapping[str, Any],
+    finding: Mapping[str, Any],
+    identity: Any,
+    now: datetime,
+) -> dict[str, Any]:
+    """Upsert an identifier-only pairing row without authored text."""
+    result = dict(state)
+    existing = result.get("evaluation")
+    question_id = str(question.get("question_id", ""))
+    ticket_id = str(question.get("ticket_id", ""))
+    if not question_id or not ticket_id:
+        raise ValueError("draft evaluation needs question_id and ticket_id")
+    status = (
+        "produced"
+        if finding.get("kind") == "would_answer"
+        and finding.get("verdict") == Outcome.MECHANICAL.value
+        else "declined"
+    )
+    row = {
+        "question_id": question_id,
+        "ticket_id": ticket_id,
+        "question_kind": str(question.get("kind", "information")),
+        "draft_status": status,
+        "decline_reason": (
+            None
+            if status == "produced"
+            else str(finding.get("policy_rule") or finding.get("kind", "declined"))
+        ),
+        "drafted_by": _public_identity(identity),
+        "drafted_at": now.isoformat(),
+        "mark": None,
+        "mark_population": None,
+        "marked_by": None,
+        "marked_at": None,
+    }
+    if isinstance(existing, Mapping):
+        if existing.get("question_id") != question_id:
+            raise ValueError("evaluation state key contains another question")
+        # A retry may repair a missing finding, but it must never erase a human mark.
+        row.update(
+            {
+                key: existing.get(key)
+                for key in (
+                    "mark",
+                    "mark_population",
+                    "marked_by",
+                    "marked_at",
+                    "answered_by",
+                )
+                if key in existing
+            }
+        )
+    result["schema_version"] = 1
+    result["evaluation"] = row
+    return result
+
+
 def _identifier(pattern: str, text: str) -> str | None:
     match = re.search(pattern, text, re.I)
     return match.group(0) if match else None
@@ -1346,6 +1593,24 @@ def _decode_state(raw: Mapping[str, Any] | None) -> tuple[dict[str, Any], str | 
     if not isinstance(parsed, dict):
         raise ValueError("coordinator_findings must be an object")
     parsed.setdefault("findings", [])
+    return parsed, value
+
+
+def _decode_evaluation(
+    raw: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], str | None]:
+    state = raw.get("state") if isinstance(raw, Mapping) else None
+    value = state.get("value") if isinstance(state, Mapping) else None
+    if not isinstance(value, str):
+        return {"schema_version": 1}, None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("board_butler_evaluation is malformed") from exc
+    if not isinstance(parsed, dict) or parsed.get("schema_version") != 1:
+        raise ValueError("board_butler_evaluation schema is unsupported")
+    if not isinstance(parsed.get("evaluation"), Mapping):
+        raise ValueError("board_butler_evaluation.evaluation must be an object")
     return parsed, value
 
 
@@ -1964,6 +2229,11 @@ class CentralBackend:
         assert_complete_agent_view(status)
         return status
 
+    async def answered_questions(self) -> Sequence[Mapping[str, Any]]:
+        result = await self.client.board_question_inbox(state="answered", limit=100)
+        rows = result.get("questions", [])
+        return rows if isinstance(rows, list) else []
+
     async def coordinator_config(self) -> Mapping[str, Any]:
         try:
             raw = await self.client.board_state_get(CONFIG_KEY)
@@ -2009,6 +2279,14 @@ class CentralBackend:
                 return {}
             raise
 
+    async def evaluation(self, question_id: str) -> Mapping[str, Any]:
+        try:
+            return await self.client.board_state_get(evaluation_state_key(question_id))
+        except Exception as exc:
+            if "state key not found" in str(exc).lower():
+                return {}
+            raise
+
     async def write_findings(
         self, value: str, expected_value: str | None
     ) -> Mapping[str, Any]:
@@ -2019,6 +2297,18 @@ class CentralBackend:
         )
         return await self.client.board_state_update(
             STATE_KEY, value, expected_sha256=expected
+        )
+
+    async def write_evaluation(
+        self, question_id: str, value: str, expected_value: str | None
+    ) -> Mapping[str, Any]:
+        expected = (
+            hashlib.sha256(expected_value.encode("utf-8")).hexdigest()
+            if expected_value is not None
+            else None
+        )
+        return await self.client.board_state_update(
+            evaluation_state_key(question_id), value, expected_sha256=expected
         )
 
     async def wait_for_question(
@@ -2423,6 +2713,11 @@ async def process_question(
     raw = await backend.findings()
     state, previous_value = _decode_state(raw)
     question_id = str(question.get("question_id", ""))
+    evaluation_reader = getattr(backend, "evaluation", None)
+    raw_evaluation = (
+        await evaluation_reader(question_id) if callable(evaluation_reader) else {}
+    )
+    evaluation_state, previous_evaluation_value = _decode_evaluation(raw_evaluation)
     existing = next(
         (
             dict(item)
@@ -2435,6 +2730,15 @@ async def process_question(
         None,
     )
     if existing is not None:
+        if not isinstance(evaluation_state.get("evaluation"), Mapping):
+            repaired = record_draft_evaluation(
+                evaluation_state, question, existing, backend.identity, now
+            )
+            await backend.write_evaluation(
+                question_id,
+                json.dumps(repaired, sort_keys=True, separators=(",", ":")),
+                previous_evaluation_value,
+            )
         return existing
     document = await backend.coordinator_config()
     try:
@@ -2458,11 +2762,24 @@ async def process_question(
         finding = decorate_finding(
             config_invalid_finding(question, exc, now), safe_config, now
         )
+        answered_reader = getattr(backend, "answered_questions", None)
+        answered = await answered_reader() if callable(answered_reader) else []
+        precedents = find_precedents(question, answered)
+        finding["precedents"] = precedents
+        finding["precedent_status"] = "found" if precedents else "none"
+        paired = record_draft_evaluation(
+            evaluation_state, question, finding, backend.identity, now
+        )
         merged = merge_finding(state, finding, now)
         encoded = json.dumps(merged, sort_keys=True, separators=(",", ":"))
         if args.dry_run:
             print(json.dumps(finding, indent=2, sort_keys=True))
         else:
+            await backend.write_evaluation(
+                question_id,
+                json.dumps(paired, sort_keys=True, separators=(",", ":")),
+                previous_evaluation_value,
+            )
             await backend.write_findings(encoded, previous_value)
         return finding
     reason = rate_limit_reason(
@@ -2492,12 +2809,25 @@ async def process_question(
                     "Would escalate because the configured drafting provider failed."
                 )
                 finding["draft_source"] = "configured_provider_failed"
+    answered_reader = getattr(backend, "answered_questions", None)
+    answered = await answered_reader() if callable(answered_reader) else []
+    precedents = find_precedents(question, answered)
+    finding["precedents"] = precedents
+    finding["precedent_status"] = "found" if precedents else "none"
     finding = decorate_finding(finding, config, now)
+    paired = record_draft_evaluation(
+        evaluation_state, question, finding, backend.identity, now
+    )
     merged = merge_finding(state, finding, now)
     encoded = json.dumps(merged, sort_keys=True, separators=(",", ":"))
     if args.dry_run:
         print(json.dumps(finding, indent=2, sort_keys=True))
     else:
+        await backend.write_evaluation(
+            question_id,
+            json.dumps(paired, sort_keys=True, separators=(",", ":")),
+            previous_evaluation_value,
+        )
         await backend.write_findings(encoded, previous_value)
     return finding
 

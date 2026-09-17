@@ -38,12 +38,34 @@ class Source:
     def __init__(self) -> None:
         self.tickets: dict[str, dict[str, Any]] = {}
         self.agents: list[dict[str, Any]] = []
+        self.answered: list[dict[str, Any]] = []
+        self.identity = SimpleNamespace(
+            agent_id="AI-butler",
+            agent_name="board-butler-test",
+            principal_id="PR-butler",
+        )
+        self.evaluation_writes = 0
+        self.evaluation_value: str | None = None
 
     async def ticket_get(self, ticket_id: str) -> Mapping[str, Any]:
         return {"ticket": self.tickets[ticket_id]}
 
     async def board_status(self) -> Mapping[str, Any]:
         return {"agents": self.agents}
+
+    async def answered_questions(self) -> list[dict[str, Any]]:
+        return self.answered
+
+    async def evaluation(self, _question_id: str) -> Mapping[str, Any]:
+        if self.evaluation_value is None:
+            return {}
+        return {"state": {"value": self.evaluation_value}}
+
+    async def write_evaluation(
+        self, _question_id: str, value: str, _expected: str | None
+    ) -> None:
+        self.evaluation_writes += 1
+        self.evaluation_value = value
 
 
 def question(message: str, *, kind: str = "information") -> dict[str, str]:
@@ -227,6 +249,147 @@ def test_authoritative_backlog_replay_is_truthfully_partial() -> None:
         for row in available
         if row["expected_verdict"] != row["recorded_disposition"]
     } == {"CQ-53524d65cdb51016"}
+
+
+def test_real_question_precedent_cites_identifiers_without_copying_answer_text() -> None:
+    corpus = json.loads(BACKLOG_FIXTURE.read_text(encoding="utf-8"))
+    current = corpus["available_records"][1]
+    answered = [
+        {**row, "state": "answered"} for row in corpus["available_records"]
+    ]
+
+    citations = butler.find_precedents(current, answered)
+
+    assert citations
+    assert citations[0] == {
+        "question_id": "CQ-53524d65cdb51016",
+        "ticket_id": "TK-02bf4d01d662",
+    }
+    encoded = json.dumps(citations)
+    assert current["message"] not in encoded
+    assert all(row["answer"] not in encoded for row in answered)
+    assert all(set(item) == {"question_id", "ticket_id"} for item in citations)
+
+
+def test_identifier_only_pair_record_never_stores_question_or_answer_text() -> None:
+    real = json.loads(BACKLOG_FIXTURE.read_text(encoding="utf-8"))["available_records"][1]
+    authored_question = real["message"]
+    authored_answer = real["answer"]
+    state = butler.record_draft_evaluation(
+        {"findings": []},
+        {
+            "board_id": "pursers",
+            "ticket_id": real["ticket_id"],
+            "question_id": real["question_id"],
+            "kind": real["kind"],
+            "message": authored_question,
+            "answer": authored_answer,
+        },
+        {"kind": "would_answer"},
+        Source().identity,
+        NOW,
+    )
+
+    pair = state["evaluation"]
+    assert pair["question_id"] == "CQ-7bf548bf5e084198"
+    assert pair["ticket_id"] == "TK-02bf4d01d662"
+    assert pair["question_kind"] == "decision"
+    assert pair["draft_status"] == "declined"
+    assert authored_question not in json.dumps(pair)
+    assert authored_answer not in json.dumps(pair)
+    assert not ({"message", "question", "answer"} & set(pair))
+
+
+def test_agreement_uses_human_marks_and_suppresses_small_sample_percentage() -> None:
+    rows = [
+        {"question_kind": "decision", "mark": "send_as_is", "mark_population": "live_answerer", "marked_at": "2026-09-16T10:00:00+00:00"},
+        {"question_kind": "decision", "mark": "needed_edits", "mark_population": "live_answerer", "marked_at": "2026-09-16T11:00:00+00:00"},
+    ]
+    sparse = butler.agreement_by_question_kind(rows)[0]
+    assert sparse["sample_count"] == 2
+    assert sparse["axis"] == "draft_quality"
+    assert sparse["population"] == "live_answerer"
+    assert sparse["status"] == "insufficient_samples"
+    assert sparse["agreement_percent"] is None
+
+    measured = butler.agreement_by_question_kind(
+        [*rows, {"question_kind": "decision", "mark": "send_as_is", "mark_population": "live_answerer", "marked_at": "2026-09-16T12:00:00+00:00"}]
+    )[0]
+    assert measured["marks"] == {
+        "send_as_is": 2,
+        "needed_edits": 1,
+        "wrong": 0,
+    }
+    assert measured["agreement_percent"] == 66.7
+
+
+def test_retrospective_real_marks_stay_separate_and_use_routing_axis() -> None:
+    source = json.loads(BACKLOG_FIXTURE.read_text(encoding="utf-8"))
+    records = []
+    for item in source["available_records"]:
+        state = butler.record_draft_evaluation(
+            {"schema_version": 1},
+            item,
+            {
+                "kind": "would_answer",
+                "verdict": item["expected_verdict"],
+                "policy_rule": "historical-replay",
+            },
+            Source().identity,
+            NOW,
+        )
+        row = state["evaluation"]
+        row.update(
+            {
+                name: item[name]
+                for name in (
+                    "mark",
+                    "mark_population",
+                    "marked_by",
+                    "marked_at",
+                    "mark_source_question_id",
+                )
+            }
+        )
+        encoded = json.dumps(row)
+        assert item["message"] not in encoded
+        assert item["answer"] not in encoded
+        records.append(row)
+
+    report = butler.agreement_by_question_kind(records)
+    assert report == [
+        {
+            "question_kind": "decision",
+            "axis": "routing_quality",
+            "population": "retrospective_operator",
+            "sample_count": 3,
+            "marks": {
+                "correct_escalation": 2,
+                "should_have_answered": 0,
+                "should_have_escalated": 1,
+            },
+            "status": "measured",
+            "agreement_percent": 66.7,
+            "first_marked_at": "2026-09-17T12:08:46.324109+00:00",
+            "last_marked_at": "2026-09-17T12:08:46.324109+00:00",
+        }
+    ]
+    ticket_report = butler.agreement_by_ticket(records)
+    assert ticket_report[0]["ticket_id"] == "TK-02bf4d01d662"
+    assert ticket_report[0]["sample_count"] == 3
+    assert ticket_report[0]["agreement_percent"] == 66.7
+
+    repeated = butler.multi_question_tickets(
+        source["available_records"] + source["unavailable_records"]
+    )
+    assert repeated == [
+        {"ticket_id": "TK-9ca52e7ad8bf", "question_count": 6},
+        {"ticket_id": "TK-84e7e39328f5", "question_count": 4},
+        {"ticket_id": "TK-b58fdaba3a63", "question_count": 4},
+        {"ticket_id": "TK-02bf4d01d662", "question_count": 3},
+        {"ticket_id": "TK-daee8b8ce82f", "question_count": 2},
+        {"ticket_id": "TK-db6ca1290d33", "question_count": 2},
+    ]
 
 
 def test_ticket_status_draft_cites_product_source(tmp_path: Path) -> None:
@@ -704,9 +867,9 @@ def test_duplicate_question_is_idempotent_and_does_not_write(tmp_path: Path) -> 
         async def findings(self) -> Mapping[str, Any]:
             return {
                 "state": {
-                    "value": json.dumps(
-                        {"schema_version": 2, "findings": [existing]}
-                    )
+                        "value": json.dumps(
+                            {"schema_version": 2, "findings": [existing]}
+                        )
                 }
             }
 
@@ -717,6 +880,17 @@ def test_duplicate_question_is_idempotent_and_does_not_write(tmp_path: Path) -> 
             self.writes += 1
 
     backend = Backend()
+    backend.evaluation_value = json.dumps(
+        {
+            "schema_version": 1,
+            "evaluation": {
+                "question_id": "CQ-source",
+                "ticket_id": "TK-source",
+                "question_kind": "information",
+                "draft_status": "produced",
+            },
+        }
+    )
     result = asyncio.run(
         butler.process_question(backend, question("anything"), options, NOW)
     )
