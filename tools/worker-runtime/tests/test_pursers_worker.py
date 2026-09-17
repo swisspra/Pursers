@@ -123,7 +123,12 @@ class FakeBoard:
         return set(self.live_claims)
 
     async def submit(
-        self, board_id: str, ticket_id: str, arguments: dict[str, Any]
+        self,
+        board_id: str,
+        ticket_id: str,
+        arguments: dict[str, Any],
+        *,
+        repository: Path,
     ) -> None:
         self.submissions.append(
             {"board_id": board_id, "ticket_id": ticket_id, **arguments}
@@ -352,6 +357,117 @@ def init_git_repo(root: Path) -> Path:
         ["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True
     )
     return repo
+
+
+def test_headless_worker_submit_guard_blocks_before_board_mutation(
+    tmp_path: Path,
+) -> None:
+    repo = init_git_repo(tmp_path)
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(origin)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(origin)], cwd=repo, check=True
+    )
+    branch = "api/TK-remote-tip"
+    subprocess.run(
+        ["git", "switch", "-c", branch], cwd=repo, check=True, capture_output=True
+    )
+    (repo / "result.txt").write_text("done\n", encoding="utf-8")
+    subprocess.run(["git", "add", "result.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "candidate"], cwd=repo, check=True,
+        capture_output=True,
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "push", "origin", branch], cwd=repo, check=True,
+        capture_output=True,
+    )
+    board = FakeBoard()
+    selected = config(tmp_path, "http://unused")
+    worker = worker_module.Worker(
+        selected,
+        board,
+        None,
+        worker_module.SessionLog(selected.log_file),
+        directive="STATIC",
+    )
+    ticket = {
+        "ticket_id": "TK-remote-tip",
+        "required_fields": ["branch_and_commit", "test_output"],
+    }
+    wrong = "f" * 40
+    with pytest.raises(ValueError, match="mismatched remote branch") as rejected:
+        asyncio.run(worker._tool(
+            "submit_work",
+            {
+                "summary": "wrong tip",
+                "files_changed": ["result.txt"],
+                "notes": f"branch_and_commit: {branch} @ {wrong}",
+            },
+            repo,
+            "board-one",
+            "TK-remote-tip",
+            ticket,
+        ))
+    assert wrong in str(rejected.value)
+    assert commit in str(rejected.value)
+    assert branch in str(rejected.value)
+    assert board.submissions == []
+
+    outcome = asyncio.run(worker._tool(
+        "submit_work",
+        {
+            "summary": "correct tip",
+            "files_changed": ["result.txt"],
+            "notes": f"branch_and_commit: {branch} @ {commit}",
+        },
+        repo,
+        "board-one",
+        "TK-remote-tip",
+        ticket,
+    ))
+    assert outcome == ("submitted", True)
+    assert len(board.submissions) == 1
+
+
+@pytest.mark.anyio
+async def test_board_api_submit_cannot_skip_guarded_client_boundary(
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class View:
+        async def ticket_submit(self, ticket_id: str, **arguments: Any) -> dict[str, Any]:
+            captured.update({"ticket_id": ticket_id, **arguments})
+            return {"ok": True}
+
+    api = object.__new__(worker_module.PursersBoardAPI)
+    api.config = SimpleNamespace(agent_name="worker-agent")
+
+    async def view(_board_id: str) -> View:
+        return View()
+
+    api._view = view
+    await api.submit(
+        "board-one",
+        "TK-direct",
+        {
+            "summary": "done",
+            "files_changed": ["result.txt"],
+            "notes": "branch_and_commit: codex/TK-direct@" + "a" * 40,
+        },
+        repository=tmp_path,
+    )
+
+    assert captured["repository"] == tmp_path
+    assert captured["agent_name"] == "worker-agent"
+    assert captured["stay_active"] is True
 
 
 def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
@@ -2135,6 +2251,7 @@ def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> Non
                     "board-one",
                     "TK-race",
                     {"summary": "revision two", "notes": "test_output: second"},
+                    repository=root,
                 )
                 return tool_call(
                     "approve-stale",

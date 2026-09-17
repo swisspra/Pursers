@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -495,6 +497,136 @@ async def test_ticket_submit_truncates_notes_at_line_boundary(monkeypatch) -> No
         "submitted_chars": len(submitted),
         "truncated_chars": metadata["truncated_chars"],
         "marker": f"…[truncated {metadata['truncated_chars']} chars]",
+    }
+
+
+def _git(repo: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.anyio
+async def test_direct_ticket_submit_requires_and_forwards_exact_remote_preflight(
+    monkeypatch, tmp_path: Path
+) -> None:
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    _git(remote, "init", "--bare")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "codex/TK-direct")
+    _git(repo, "config", "user.name", "Client Test")
+    _git(repo, "config", "user.email", "client@example.invalid")
+    _git(repo, "remote", "add", "origin", str(remote))
+    tracked = repo / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    _git(repo, "add", "tracked.txt")
+    _git(repo, "commit", "-m", "one")
+    stale_sha = _git(repo, "rev-parse", "HEAD")
+    tracked.write_text("two\n", encoding="utf-8")
+    _git(repo, "commit", "-am", "two")
+    remote_sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "push", "origin", "HEAD:refs/heads/codex/TK-direct")
+
+    other = tmp_path / "other.txt"
+    other.write_text("other\n", encoding="utf-8")
+    _git(repo, "checkout", "-b", "codex/TK-other")
+    (repo / "other.txt").write_text(other.read_text(encoding="utf-8"), encoding="utf-8")
+    _git(repo, "add", "other.txt")
+    _git(repo, "commit", "-m", "other")
+    other_sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "push", "origin", "HEAD:refs/heads/codex/TK-other")
+    _git(repo, "checkout", "codex/TK-direct")
+    tracked.write_text("local only\n", encoding="utf-8")
+    _git(repo, "commit", "-am", "local only")
+    local_only_sha = _git(repo, "rev-parse", "HEAD")
+
+    board = client()
+    calls: list[dict[str, Any]] = []
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append({"name": name, **arguments})
+        return {"ok": True}
+
+    monkeypatch.setattr(board, "_call", call)
+
+    with pytest.raises(BoardClientError, match="clone-owning repository"):
+        await board.ticket_submit(
+            "TK-direct",
+            notes=f"branch_and_commit: codex/TK-direct@{remote_sha}",
+        )
+    with pytest.raises(BoardClientError, match="full-40-hex-sha"):
+        await board.ticket_submit(
+            "TK-direct",
+            notes="branch_and_commit: codex/TK-direct@d428fcd",
+            repository=repo,
+        )
+    for submitted_sha in (
+        "f" * 40,
+        stale_sha,
+        other_sha,
+        local_only_sha,
+    ):
+        with pytest.raises(BoardClientError, match="mismatched remote branch") as exc:
+            await board.ticket_submit(
+                "TK-direct",
+                notes=f"branch_and_commit: codex/TK-direct@{submitted_sha}",
+                repository=repo,
+            )
+        assert submitted_sha in str(exc.value)
+        assert remote_sha in str(exc.value)
+        assert "codex/TK-direct" in str(exc.value)
+    with pytest.raises(BoardClientError, match="missing remote branch") as missing:
+        await board.ticket_submit(
+            "TK-direct",
+            notes=f"branch_and_commit: codex/TK-missing@{remote_sha}",
+            repository=repo,
+        )
+    assert remote_sha in str(missing.value)
+    assert "codex/TK-missing" in str(missing.value)
+    _git(repo, "remote", "set-url", "origin", str(tmp_path / "unreachable.git"))
+    with pytest.raises(BoardClientError, match="could not reach origin") as unreachable:
+        await board.ticket_submit(
+            "TK-direct",
+            notes=f"branch_and_commit: codex/TK-direct@{remote_sha}",
+            repository=repo,
+        )
+    assert remote_sha in str(unreachable.value)
+    assert "codex/TK-direct" in str(unreachable.value)
+    assert calls == []
+
+    _git(repo, "remote", "set-url", "origin", str(remote))
+    result = await board.ticket_submit(
+        "TK-direct",
+        summary="verified",
+        notes=f"branch_and_commit: codex/TK-direct@{remote_sha}",
+        repository=repo,
+    )
+    assert result == {"ok": True}
+    assert len(calls) == 1
+    preflight = calls[0].pop("submission_preflight")
+    assert calls == [{
+        "name": "ticket_submit",
+        "agent_name": "env-default",
+        "ticket_id": "TK-direct",
+        "stay_active": True,
+        "summary": "verified",
+        "notes": f"branch_and_commit: codex/TK-direct@{remote_sha}",
+    }]
+    proof = preflight.pop("proof")
+    assert len(proof) == 64
+    assert all(character in "0123456789abcdef" for character in proof)
+    assert preflight == {
+        "kind": "git-ls-remote-exact-tip-v1",
+        "branch": "codex/TK-direct",
+        "commit": remote_sha,
+        "remote_ref": "origin/codex/TK-direct",
+        "remote_tip": remote_sha,
     }
 
 

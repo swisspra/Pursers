@@ -2298,6 +2298,31 @@ def test_generated_submit_preflights_exact_remote_tip_before_board_mutation(
         capture_output=True, text=True,
     ).stdout.strip()
     subprocess.run(["git", "push", "origin", branch], cwd=author, check=True, capture_output=True)
+    other_branch = "codex/TK-other"
+    subprocess.run(
+        ["git", "branch", other_branch, stale_sha], cwd=author, check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "push", "origin", other_branch], cwd=author, check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "switch", "-c", "codex/TK-local-only"], cwd=author,
+        check=True, capture_output=True,
+    )
+    (author / "change.txt").write_text("local only\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "commit", "-am", "local only"], cwd=author, check=True,
+        capture_output=True,
+    )
+    local_only_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=author, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "switch", branch], cwd=author, check=True, capture_output=True,
+    )
 
     ticket = {
         "ticket_id": "TK-submit",
@@ -2337,27 +2362,66 @@ def test_generated_submit_preflights_exact_remote_tip_before_board_mutation(
             ["submit", "TK-submit", "ready", notes, "change.txt"]
         )
 
-    with pytest.raises(ValueError, match="exactly one"):
+    with pytest.raises(ValueError, match="exactly one") as short:
         asyncio.run(generated._execute(parsed(
-            f"branch_and_commit: {branch} @ {current_sha[:12]}"
+            f"branch_and_commit: {branch} @ d428fcd"
         )))
+    assert "full-40-hex-sha" in str(short.value)
     wrong_sha = current_sha[:-1] + ("0" if current_sha[-1] != "0" else "1")
-    with pytest.raises(ValueError, match="nonexistent commit"):
+    with pytest.raises(ValueError, match="mismatched remote branch") as nonexistent:
         asyncio.run(generated._execute(parsed(
             f"branch_and_commit: {branch} @ {wrong_sha}"
         )))
-    with pytest.raises(ValueError, match="nonexistent commit"):
+    assert wrong_sha in str(nonexistent.value)
+    assert current_sha in str(nonexistent.value)
+    assert branch in str(nonexistent.value)
+    with pytest.raises(ValueError, match="mismatched remote branch") as typo:
         asyncio.run(generated._execute(parsed(
             f"branch_and_commit: {branch} @ {'f' * 40}"
         )))
-    with pytest.raises(ValueError, match="moved or mismatched"):
+    assert "f" * 40 in str(typo.value)
+    assert current_sha in str(typo.value)
+    with pytest.raises(ValueError, match="mismatched remote branch") as different_branch:
         asyncio.run(generated._execute(parsed(
             f"branch_and_commit: {branch} @ {stale_sha}"
         )))
-    with pytest.raises(RuntimeError, match="could not fetch origin/codex/TK-missing"):
+    assert stale_sha in str(different_branch.value)
+    assert current_sha in str(different_branch.value)
+    assert branch in str(different_branch.value)
+    with pytest.raises(ValueError, match="mismatched remote branch") as local_only:
+        asyncio.run(generated._execute(parsed(
+            f"branch_and_commit: {branch} @ {local_only_sha}"
+        )))
+    assert local_only_sha in str(local_only.value)
+    assert current_sha in str(local_only.value)
+    with pytest.raises(ValueError, match="missing remote branch") as missing_branch:
         asyncio.run(generated._execute(parsed(
             f"branch_and_commit: codex/TK-missing @ {current_sha}"
         )))
+    assert current_sha in str(missing_branch.value)
+    assert "codex/TK-missing" in str(missing_branch.value)
+    assert "<missing>" in str(missing_branch.value)
+    generated_repo = dest / "origin"
+    configured_origin = subprocess.run(
+        ["git", "remote", "get-url", "origin"], cwd=generated_repo, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", str(tmp_path / "unreachable.git")],
+        cwd=generated_repo, check=True,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="could not reach origin") as unreachable:
+            asyncio.run(generated._execute(parsed(
+                f"branch_and_commit: {branch} @ {current_sha}"
+            )))
+        assert current_sha in str(unreachable.value)
+        assert branch in str(unreachable.value)
+    finally:
+        subprocess.run(
+            ["git", "remote", "set-url", "origin", configured_origin],
+            cwd=generated_repo, check=True,
+        )
     assert submissions == []
 
     asyncio.run(generated._execute(parsed(

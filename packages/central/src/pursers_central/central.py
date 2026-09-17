@@ -181,6 +181,11 @@ DISPATCH_ACTIVITY_WINDOW_MULTIPLIER = 3.0
 BRANCH_AND_COMMIT_RE = re.compile(
     r"(?im)^\s*branch_and_commit\s*:\s*(.+?)\s*$"
 )
+SUBMIT_BRANCH_AND_COMMIT_RE = re.compile(
+    r"(?im)^\s*branch_and_commit\s*:\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+)"
+    r"\s*@\s*([0-9a-fA-F]{40})\s*$"
+)
 PRE_SUBMISSION_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 ACTIVE_TICKET_STATES = frozenset(
     {"open", "claimed", "in_progress", "creating_report", "submitted", "reviewing", "in_review", "needs_human"}
@@ -10067,6 +10072,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         notes: str | None = None,
         stay_active: bool = True,
         expected_generation: str | None = None,
+        submission_preflight: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Submit only work claimed by this authenticated agent identity."""
         board_id = require_id("board_id", board_id)
@@ -10091,12 +10097,80 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "notes", notes, required=notes is not None, max_length=5_000,
                 scrub_profile=profile, allow_counts=allow_counts,
             )
+            verified_preflight: dict[str, str] | None = None
             actor, released, renewed = prepare_board_call(document, principal, agent_name, now)
             ticket = document["tickets"].get(ticket_id)
             if ticket is None:
                 return {"error": "ticket not found", "released": released, "renewed": renewed}
             if ticket.get("server_generated_id") and safe_summary is None:
                 raise ValueError("summary is required for generated-ID tickets")
+            required_fields = ticket.get("required_fields", [])
+            if (
+                isinstance(required_fields, (list, tuple, set))
+                and "branch_and_commit" in required_fields
+            ):
+                branch_lines = BRANCH_AND_COMMIT_RE.findall(safe_notes or "")
+                exact_lines = SUBMIT_BRANCH_AND_COMMIT_RE.findall(safe_notes or "")
+                if len(branch_lines) != 1 or len(exact_lines) != 1:
+                    raise ValueError(
+                        "branch_and_commit must appear exactly once in notes as "
+                        "'<platform>/<branch> @ <full-40-hex-sha>'"
+                    )
+                branch, submitted_sha = exact_lines[0]
+                submitted_sha = submitted_sha.lower()
+                expected_preflight = {
+                    "kind": "git-ls-remote-exact-tip-v1",
+                    "branch": branch,
+                    "commit": submitted_sha,
+                    "remote_ref": f"origin/{branch}",
+                    "remote_tip": submitted_sha,
+                }
+                if submission_preflight is None:
+                    raise PermissionError(
+                        "raw ticket_submit is unavailable for code tickets; "
+                        "use a clone-owning submit boundary that verifies the exact remote tip"
+                    )
+                received_preflight = {
+                    key: value
+                    for key, value in submission_preflight.items()
+                    if key != "proof"
+                }
+                if received_preflight != expected_preflight:
+                    declared = submission_preflight.get("commit", "<missing>")
+                    actual = submission_preflight.get("remote_tip", "<missing>")
+                    preflight_branch = submission_preflight.get("branch", "<missing>")
+                    raise ValueError(
+                        "submission preflight does not match branch_and_commit: "
+                        f"branch {preflight_branch}, declared SHA {declared}, "
+                        f"actual remote SHA {actual}; expected branch {branch} "
+                        f"and SHA {submitted_sha}"
+                    )
+                access = get_access_token()
+                proof = submission_preflight.get("proof")
+                if access is None or not isinstance(proof, str):
+                    raise PermissionError(
+                        "raw ticket_submit is unavailable for code tickets; "
+                        "clone-owned remote-tip proof is missing"
+                    )
+                proof_payload = json.dumps(
+                    {
+                        "board_id": board_id,
+                        "ticket_id": ticket_id,
+                        "agent_name": agent_name,
+                        **expected_preflight,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                expected_proof = hmac.new(
+                    access.token.encode("utf-8"), proof_payload, hashlib.sha256
+                ).hexdigest()
+                if not hmac.compare_digest(proof, expected_proof):
+                    raise PermissionError(
+                        "raw ticket_submit is unavailable for code tickets; "
+                        "clone-owned remote-tip proof is invalid"
+                    )
+                verified_preflight = expected_preflight
             if ticket.get("claimed_by_agent_id") != actor["agent_id"]:
                 release = ticket.get("last_abandoned_at")
                 suffix = f" at {release}" if release else " or reassigned"
@@ -10120,6 +10194,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "submitted_by_principal_id": principal.principal_id,
                 "submitted_at": iso_at(now),
             }
+            if verified_preflight is not None:
+                submission["submission_preflight"] = copy.deepcopy(
+                    verified_preflight
+                )
             append_bounded_history(document, ticket, "submission_history", copy.deepcopy(submission))
             ticket.update(submission)
             ticket["status"] = "submitted"

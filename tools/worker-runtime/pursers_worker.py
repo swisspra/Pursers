@@ -88,6 +88,12 @@ REVIEWER_AUTH_ERROR = (
     "reviewer mode requires a dedicated board reviewer principal/token"
 )
 OPERATOR_CHECKOUT_REFUSAL = "operator checkout is read-only for seats"
+SUBMIT_BRANCH_COMMIT_RE = re.compile(
+    r"(?im)^\s*branch_and_commit:\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+)"
+    r"\s*@\s*([0-9a-fA-F]{40})\s*$"
+)
+SUBMIT_BRANCH_LABEL_RE = re.compile(r"(?im)^\s*branch_and_commit\s*:")
 
 
 @dataclass(frozen=True)
@@ -336,6 +342,51 @@ def read_keychain_secret(account: str) -> str:
     if not value:
         raise ValueError("API key is empty in macOS Keychain")
     return value
+
+
+def _required_field_names(ticket: dict[str, Any]) -> set[str]:
+    required = ticket.get("required_fields", [])
+    if isinstance(required, dict):
+        return {str(name) for name in required}
+    if isinstance(required, (list, tuple, set)):
+        return {str(name) for name in required if isinstance(name, str)}
+    return set()
+
+
+def verify_remote_submission(repo: Path, notes: str) -> dict[str, str]:
+    matches = list(SUBMIT_BRANCH_COMMIT_RE.finditer(notes))
+    labels = list(SUBMIT_BRANCH_LABEL_RE.finditer(notes))
+    if len(labels) != 1 or len(matches) != 1:
+        raise ValueError(
+            "submission preflight requires exactly one "
+            "'branch_and_commit: platform/branch @ <full-40-hex-sha>' line"
+        )
+    branch, submitted_sha = matches[0].groups()
+    submitted_sha = submitted_sha.lower()
+    remote = subprocess.run(
+        ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch}"],
+        cwd=repo, check=False, capture_output=True, text=True,
+    )
+    if remote.returncode != 0:
+        raise RuntimeError(
+            f"submission preflight could not reach origin for branch {branch}; "
+            f"submitted {submitted_sha}, actual remote SHA unavailable"
+        )
+    remote_lines = [
+        line.split() for line in remote.stdout.splitlines() if line.strip()
+    ]
+    if len(remote_lines) != 1 or len(remote_lines[0]) != 2:
+        raise ValueError(
+            f"submission preflight rejected missing remote branch {branch}; "
+            f"submitted {submitted_sha}, actual remote SHA <missing>"
+        )
+    remote_tip = remote_lines[0][0].lower()
+    if remote_tip != submitted_sha:
+        raise ValueError(
+            f"submission preflight rejected mismatched remote branch {branch}: "
+            f"submitted {submitted_sha}, remote tip {remote_tip}; refresh evidence and retry"
+        )
+    return {"branch": branch, "commit": submitted_sha, "remote_tip": remote_tip}
 
 
 def read_secret(config: Config, kind: str) -> str:
@@ -702,7 +753,12 @@ class BoardAPI(Protocol):
     async def work_dir(self, board_id: str) -> Path: ...
     async def renew(self, board_id: str, ticket_id: str) -> None: ...
     async def submit(
-        self, board_id: str, ticket_id: str, arguments: dict[str, Any]
+        self,
+        board_id: str,
+        ticket_id: str,
+        arguments: dict[str, Any],
+        *,
+        repository: Path,
     ) -> None: ...
     async def release(self, board_id: str, ticket_id: str, reason: str) -> None: ...
     async def submitted(self) -> list[tuple[str, dict[str, Any]]]: ...
@@ -870,18 +926,21 @@ class PursersBoardAPI:
             raise RuntimeError(str(result["error"]))
 
     async def submit(
-        self, board_id: str, ticket_id: str, arguments: dict[str, Any]
+        self,
+        board_id: str,
+        ticket_id: str,
+        arguments: dict[str, Any],
+        *,
+        repository: Path,
     ) -> None:
-        result = await (await self._view(board_id))._call(
-            "ticket_submit",
-            {
-                "agent_name": self.config.agent_name,
-                "ticket_id": ticket_id,
-                "summary": arguments.get("summary"),
-                "files_changed": arguments.get("files_changed", []),
-                "notes": arguments.get("notes"),
-                "stay_active": True,
-            },
+        result = await (await self._view(board_id)).ticket_submit(
+            ticket_id,
+            agent_name=self.config.agent_name,
+            summary=arguments.get("summary"),
+            files_changed=arguments.get("files_changed", []),
+            notes=arguments.get("notes"),
+            stay_active=True,
+            repository=repository,
         )
         if result.get("error"):
             raise RuntimeError(str(result["error"]))
@@ -1490,7 +1549,9 @@ class Worker:
             ),
             "ticket_branch": branch,
             "commit_requirement": (
-                "commit all ticket changes on ticket_branch before submit_work"
+                "commit all ticket changes on ticket_branch, push that exact tip "
+                "to origin, and include its full SHA in branch_and_commit before "
+                "submit_work"
                 if branch is not None
                 else None
             ),
@@ -1543,6 +1604,7 @@ class Worker:
         work_dir: Path,
         board_id: str,
         ticket_id: str,
+        ticket: dict[str, Any],
     ) -> tuple[str, bool]:
         if name == "read_file":
             path = _jailed(work_dir, _text(args.get("path"), "path"))
@@ -1611,9 +1673,15 @@ class Worker:
                 return "command timed out", False
             return output.decode("utf-8", errors="replace"), False
         if name == "submit_work":
+            if "branch_and_commit" in _required_field_names(ticket):
+                verify_remote_submission(
+                    work_dir, _text(args.get("notes"), "submit_work.notes")
+                )
             safe_args = self.log.scrub(args)
             try:
-                await self.board.submit(board_id, ticket_id, safe_args)
+                await self.board.submit(
+                    board_id, ticket_id, safe_args, repository=work_dir
+                )
             except Exception as exc:
                 self.log.write(
                     "submit_failed", ticket_id=ticket_id, error=type(exc).__name__
@@ -1708,6 +1776,7 @@ class Worker:
                             work_dir,
                             board_id,
                             ticket_id,
+                            ticket,
                         )
                     except Exception as exc:
                         output, done = f"error: {type(exc).__name__}: {exc}", False

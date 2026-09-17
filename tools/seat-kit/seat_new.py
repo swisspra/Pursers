@@ -458,48 +458,35 @@ def _submit_preflight(
         check=False, text=True, capture_output=True,
     ).returncode != 0:
         raise ValueError(f"submission preflight rejected invalid branch name: {branch}")
-    try:
-        origin = _git(repo, "remote", "get-url", "origin").stdout.strip()
-        if not origin:
-            raise ValueError("submission preflight requires a configured origin remote")
-        _git(
-            repo, "fetch", "--prune", "origin",
-            f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
-        )
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(
-            f"submission preflight could not fetch origin/{branch}; "
-            "confirm the branch was pushed and the configured origin is reachable"
-        ) from exc
-    resolved = _git(
-        repo, "rev-parse", "--verify", f"{submitted_sha}^{{commit}}", check=False
+    origin = _git(repo, "remote", "get-url", "origin", check=False)
+    if origin.returncode != 0 or not origin.stdout.strip():
+        raise ValueError("submission preflight requires a configured origin remote")
+    remote = _git(
+        repo, "ls-remote", "--heads", "origin", f"refs/heads/{branch}",
+        check=False,
     )
-    if resolved.returncode != 0:
-        raise ValueError(
-            f"submission preflight rejected nonexistent commit {submitted_sha}; "
-            "copy the full SHA from git rev-parse HEAD"
-        )
-    exact_sha = resolved.stdout.strip().lower()
-    remote_ref = f"refs/remotes/origin/{branch}"
-    remote = _git(repo, "rev-parse", "--verify", f"{remote_ref}^{{commit}}", check=False)
     if remote.returncode != 0:
-        raise ValueError(
-            f"submission preflight could not resolve origin/{branch}; push the branch first"
+        raise RuntimeError(
+            f"submission preflight could not reach origin for branch {branch}; "
+            f"submitted {submitted_sha}, actual remote SHA unavailable"
         )
-    remote_tip = remote.stdout.strip().lower()
-    if exact_sha != submitted_sha:
+    remote_lines = [
+        line.split() for line in remote.stdout.splitlines() if line.strip()
+    ]
+    if len(remote_lines) != 1 or len(remote_lines[0]) != 2:
         raise ValueError(
-            f"submission preflight rejected non-exact commit {submitted_sha}; "
-            f"Git resolved {exact_sha}"
+            f"submission preflight rejected missing remote branch {branch}; "
+            f"submitted {submitted_sha}, actual remote SHA <missing>"
         )
+    remote_tip = remote_lines[0][0].lower()
     if remote_tip != submitted_sha:
         raise ValueError(
-            f"submission preflight rejected moved or mismatched origin/{branch}: "
+            f"submission preflight rejected mismatched remote branch {branch}: "
             f"submitted {submitted_sha}, remote tip {remote_tip}; refresh evidence and retry"
         )
     return {
         "branch": branch,
-        "commit": exact_sha,
+        "commit": submitted_sha,
         "remote_ref": f"origin/{branch}",
         "remote_tip": remote_tip,
     }
@@ -1616,7 +1603,7 @@ async def _execute(args: argparse.Namespace) -> None:
                         )
                     result = await target.ticket_submit(
                         args.ticket_id, summary=args.summary, notes=notes,
-                        files_changed=files, stay_active=True,
+                        files_changed=files, stay_active=True, repository=source_repo,
                     )
                     if truncation is not None:
                         result["input_truncation"] = {"notes": truncation}
