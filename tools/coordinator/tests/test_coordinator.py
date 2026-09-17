@@ -71,6 +71,112 @@ def test_escalation_ladder_timing(priority: str, age: int, stage: int) -> None:
     assert coordinator.starvation_stage(ticket, NOW, coordinator.Thresholds()) == stage
 
 
+def test_parked_ticket_stops_reporting_starved_in_same_derivation_cycle() -> None:
+    ticket = {
+        "ticket_id": "TK-parked",
+        "status": "open",
+        "priority": "medium",
+        "created_at": ago(7_200),
+        "parked": True,
+    }
+
+    assert coordinator.starvation_stage(
+        ticket, NOW, coordinator.Thresholds()
+    ) == 0
+    assert coordinator.ticket_findings(
+        "board-a",
+        {"board": {"claim_ttl_s": 900}, "agents": [], "tickets": [ticket]},
+        NOW,
+    ) == []
+
+
+def test_real_derivation_preserves_durable_butler_question_hold(
+    tmp_path: Path,
+) -> None:
+    held = {
+        "kind": "would_answer",
+        "level": "info",
+        "board_id": "board-a",
+        "question_id": "CQ-held",
+        "ticket_id": "TK-held",
+        "text": "Draft remains held for a human.",
+        "generated_at": ago(60),
+        "hold": {"status": "held"},
+    }
+    state = coordinator.analyze_cycle(
+        [coordinator.Project("Example", "board-a", tmp_path)],
+        {
+            "board-a": {
+                "board": {"board_id": "board-a", "claim_ttl_s": 900},
+                "agents": [],
+                "tickets": [],
+            }
+        },
+        {"board-a": {"findings": [held]}},
+        (),
+        NOW,
+    )["board-a"]
+
+    assert any(
+        item.get("question_id") == "CQ-held" and item.get("kind") == "would_answer"
+        for item in state["findings"]
+    )
+
+
+def test_registry_driven_two_board_derivation_moves_both_timestamps(
+    tmp_path: Path,
+) -> None:
+    raw_registry = {
+        "state": {
+            "value": json.dumps(
+                {
+                    "schema_version": 1,
+                    "projects": {
+                        "Alpha": {
+                            "board_id": "board-a",
+                            "work_dir": str(tmp_path),
+                            "integration_ref": "main",
+                            "status": "active",
+                        },
+                        "Beta": {
+                            "board_id": "board-b",
+                            "work_dir": str(tmp_path),
+                            "integration_ref": "main",
+                            "status": "active",
+                        },
+                        "Dormant": {
+                            "board_id": "board-c",
+                            "work_dir": str(tmp_path),
+                            "integration_ref": "main",
+                            "status": "inactive",
+                        },
+                    },
+                }
+            )
+        }
+    }
+    projects = coordinator.parse_registry(raw_registry)
+    snapshots = {
+        project.board_id: {
+            "board": {"board_id": project.board_id, "claim_ttl_s": 900},
+            "agents": [],
+            "tickets": [],
+        }
+        for project in projects
+    }
+
+    first = coordinator.analyze_cycle(projects, snapshots, {}, (), NOW)
+    second = coordinator.analyze_cycle(
+        projects, snapshots, first, (), NOW + timedelta(seconds=60)
+    )
+
+    assert set(first) == set(second) == {"board-a", "board-b"}
+    assert all(
+        first[board_id]["generated_at"] != second[board_id]["generated_at"]
+        for board_id in first
+    )
+
+
 def test_stage_two_names_least_loaded_live_assignee() -> None:
     snapshot = {
         "board": {"claim_ttl_s": 900},
@@ -204,6 +310,39 @@ def test_planner_uses_soft_preferences_and_excludes_unsafe_identities() -> None:
     assert [(item.kind, item.target_agent_id) for item in actions] == [
         ("prefer", "AI-worker")
     ]
+
+
+def test_planner_refuses_identity_whose_capabilities_say_can_work_false() -> None:
+    snapshot = {
+        "board-a": {
+            "board": {"dispatch_enabled": True},
+            "agents": [
+                {
+                    "agent_id": "AI-viewer",
+                    "agent_name": "fleet-dashboard-viewer",
+                    "last_activity_at": ago(1),
+                    "status": "active",
+                    "lifecycle_status": "active",
+                    "membership_role": "member",
+                    "capabilities_explicit": True,
+                    "capabilities": {"can_work": False, "can_review": False},
+                    "role": "worker",
+                }
+            ],
+            "tickets": [
+                {
+                    "ticket_id": "TK-old",
+                    "status": "open",
+                    "priority": "medium",
+                    "created_at": ago(3_601),
+                }
+            ],
+        }
+    }
+
+    assert coordinator.plan_actions(
+        snapshot, {"board-a": {"drop_history": []}}, {}, NOW
+    ) == []
 
 
 def test_legacy_pin_requires_explicit_flag_and_dispatch_disabled_board() -> None:

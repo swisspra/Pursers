@@ -1348,15 +1348,295 @@ def test_findings_merge_refuses_to_displace_a_full_critical_set() -> None:
         )
 
 
-def test_module_has_no_question_answer_or_ticket_mutation_path() -> None:
+def test_module_has_no_question_answer_claim_submit_or_assign_path() -> None:
     source = MODULE_PATH.read_text(encoding="utf-8")
     forbidden = (
         "ticket_question_" + "answer",
         "ticket_" + "submit",
         "ticket_" + "claim",
-        "ticket_" + "update",
-        "ticket_" + "annotate",
+        "ticket_" + "assign",
     )
     assert all(name not in source for name in forbidden)
+    assert "ticket_update(action.ticket_id, parked=True)" in source
+    assert source.count("ticket_annotate(") == 2
     assert "board_catchup" not in source
     assert "ticket_list" not in source
+
+
+def test_mechanical_plan_parks_only_after_threshold_without_live_worker() -> None:
+    snapshot = {
+        "agents": [
+            {
+                "agent_id": "AI-viewer",
+                "agent_name": "fleet-dashboard-viewer",
+                "role": "worker",
+                "lifecycle_status": "active",
+                "last_activity_at": NOW.isoformat(),
+                "capabilities_explicit": True,
+                "capabilities": {"can_work": False},
+            }
+        ]
+    }
+    ticket = {
+        "ticket_id": "TK-loop",
+        "status": "open",
+        "parked": False,
+        "dispatch_history": [
+            {
+                "state": "broadcast",
+                "kind": "work",
+                "reason": "no_live_candidates",
+                "cycle": cycle,
+            }
+            for cycle in range(3)
+        ],
+        "annotations": [],
+    }
+
+    actions = butler.plan_mechanical_actions(
+        "fullplatts",
+        snapshot,
+        {"findings": []},
+        {"TK-loop": ticket},
+        NOW,
+        no_live_candidates_cycles=3,
+    )
+
+    assert [(action.kind, action.ticket_id, action.observed_cycles) for action in actions] == [
+        ("park_no_live_candidates", "TK-loop", 3)
+    ]
+    snapshot["agents"].append(
+        {
+            "agent_id": "AI-worker",
+            "agent_name": "worker-1",
+            "role": "worker",
+            "lifecycle_status": "active",
+            "last_activity_at": NOW.isoformat(),
+            "capabilities_explicit": True,
+            "capabilities": {"can_work": True},
+        }
+    )
+    assert butler.plan_mechanical_actions(
+        "fullplatts",
+        snapshot,
+        {"findings": []},
+        {"TK-loop": ticket},
+        NOW,
+        no_live_candidates_cycles=3,
+    ) == []
+
+
+def test_mechanical_plan_refuses_incapable_target_and_names_identity() -> None:
+    snapshot = {
+        "agents": [
+            {
+                "agent_id": "AI-viewer",
+                "agent_name": "fleet-dashboard-viewer",
+                "role": "worker",
+                "lifecycle_status": "active",
+                "last_activity_at": NOW.isoformat(),
+                "capabilities_explicit": True,
+                "capabilities": {"can_work": False},
+            }
+        ]
+    }
+    actions = butler.plan_mechanical_actions(
+        "fullplatts",
+        snapshot,
+        {
+            "findings": [
+                {
+                    "kind": "starved",
+                    "ticket_id": "TK-loop",
+                    "would_assign_to_agent_id": "AI-viewer",
+                    "would_assign_to_agent_name": "fleet-dashboard-viewer",
+                }
+            ]
+        },
+        {"TK-loop": {"status": "open", "annotations": []}},
+        NOW,
+        no_live_candidates_cycles=3,
+    )
+
+    assert len(actions) == 1
+    assert actions[0].kind == "refuse_incapable_target"
+    assert actions[0].identity_name == "fleet-dashboard-viewer"
+    assert actions[0].reason == "capabilities.can_work is not true"
+
+
+def test_mechanical_action_registers_durable_vetoable_hold() -> None:
+    action = butler.MechanicalAction(
+        "park_no_live_candidates",
+        "fullplatts",
+        "TK-loop",
+        None,
+        None,
+        26,
+        "repeated no_live_candidates cycles and no live can_work=true seat",
+    )
+    finding = butler.mechanical_action_finding(action, NOW, 60)
+
+    assert finding["kind"] == "would_answer"
+    assert finding["action_class"] == "park_no_live_candidates"
+    assert finding["question_id"].startswith("BA-")
+    assert finding["hold"] == {
+        "status": "pending",
+        "drafted_at": NOW.isoformat(),
+        "release_at": (NOW + butler.timedelta(seconds=60)).isoformat(),
+        "vetoable_until": (NOW + butler.timedelta(seconds=60)).isoformat(),
+        "veto_reason": None,
+    }
+    state = butler.veto_question(
+        {"findings": [finding]}, finding["question_id"], "operator veto", NOW
+    )
+    assert state["findings"][0]["hold"]["status"] == "vetoed"
+    assert butler.mechanical_hold_status(finding, NOW) == "held"
+    assert butler.mechanical_hold_status(
+        finding, NOW + butler.timedelta(seconds=60)
+    ) == "ready"
+    assert butler.mechanical_hold_status(state["findings"][0], NOW) == "vetoed"
+
+
+def test_mechanical_action_id_is_stable_across_reoffer_counts() -> None:
+    first = butler.MechanicalAction(
+        "park_no_live_candidates", "fullplatts", "TK-loop", None, None, 3, "reason"
+    )
+    later = butler.MechanicalAction(
+        "park_no_live_candidates", "fullplatts", "TK-loop", None, None, 26, "reason"
+    )
+
+    assert butler.mechanical_action_id(first) == butler.mechanical_action_id(later)
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        butler.MechanicalAction(
+            "park_no_live_candidates",
+            "fullplatts",
+            "TK-loop",
+            None,
+            None,
+            3,
+            "repeated no_live_candidates cycles and no live can_work=true seat",
+        ),
+        butler.MechanicalAction(
+            "refuse_incapable_target",
+            "fullplatts",
+            "TK-loop",
+            "fleet-dashboard-viewer",
+            "AI-viewer",
+            None,
+            "capabilities.can_work is not true",
+        ),
+    ],
+    ids=["park_no_live_candidates", "refuse_incapable_target"],
+)
+def test_mechanical_hold_predicate_disappears_then_gets_fresh_window(
+    action: butler.MechanicalAction,
+) -> None:
+    first_state, first_status = butler.ensure_mechanical_hold({}, action, NOW, 60)
+    action_id = butler.mechanical_action_id(action)
+
+    assert first_status == "registered"
+    withdrawn_state, withdrawn = butler.reconcile_mechanical_holds(
+        first_state, set(), NOW + butler.timedelta(seconds=10)
+    )
+    old_finding = withdrawn_state["findings"][0]
+    assert withdrawn == [action_id]
+    assert old_finding["hold"]["status"] == "withdrawn"
+    assert old_finding["hold"]["withdrawn_at"] == (
+        NOW + butler.timedelta(seconds=10)
+    ).isoformat()
+
+    reappeared_at = NOW + butler.timedelta(seconds=120)
+    renewed_state, renewed_status = butler.ensure_mechanical_hold(
+        withdrawn_state, action, reappeared_at, 60
+    )
+    renewed_finding = renewed_state["findings"][0]
+    assert renewed_status == "registered"
+    assert renewed_finding["hold"]["status"] == "pending"
+    assert renewed_finding["hold"]["drafted_at"] == reappeared_at.isoformat()
+    assert renewed_finding["hold"]["release_at"] == (
+        reappeared_at + butler.timedelta(seconds=60)
+    ).isoformat()
+    assert butler.mechanical_hold_status(renewed_finding, reappeared_at) == "held"
+
+
+def test_mechanical_hold_reconciliation_preserves_veto_fail_closed() -> None:
+    action = butler.MechanicalAction(
+        "park_no_live_candidates", "fullplatts", "TK-loop", None, None, 3, "reason"
+    )
+    state, _status = butler.ensure_mechanical_hold({}, action, NOW, 60)
+    vetoed = butler.veto_question(
+        state, butler.mechanical_action_id(action), "operator veto", NOW
+    )
+
+    reconciled, withdrawn = butler.reconcile_mechanical_holds(
+        vetoed, set(), NOW + butler.timedelta(seconds=10)
+    )
+    reappeared, status = butler.ensure_mechanical_hold(
+        reconciled, action, NOW + butler.timedelta(seconds=120), 60
+    )
+
+    assert withdrawn == []
+    assert status == "vetoed"
+    assert reappeared["findings"][0]["hold"]["status"] == "vetoed"
+
+
+def test_registry_refresh_runs_real_derivation_for_two_active_boards_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = args(tmp_path, dry_run=True)
+    options.refresh_seconds = 60
+    options.act_on_board = []
+    options.no_live_candidates_cycles = 3
+    backend = butler.CentralBackend(options, "opaque")
+    calls: list[argparse.Namespace] = []
+
+    class Reader:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "Reader":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    projects = [
+        SimpleNamespace(board_id="pursers"),
+        SimpleNamespace(board_id="fullplatts"),
+    ]
+
+    async def read_cycle(_reader: Reader, _home: str) -> tuple[Any, Any, Any]:
+        return projects, {"pursers": {}, "fullplatts": {}}, {
+            "pursers": {}, "fullplatts": {}
+        }
+
+    def parse_args(_argv: list[str]) -> argparse.Namespace:
+        return argparse.Namespace()
+
+    async def run(parsed: argparse.Namespace) -> None:
+        calls.append(parsed)
+
+    monkeypatch.setattr(
+        backend,
+        "_coordinator_api",
+        lambda: {
+            "RawReader": Reader,
+            "read_cycle": read_cycle,
+            "parse_args": parse_args,
+            "run": run,
+        },
+    )
+    first = asyncio.run(backend.refresh_registry_findings(NOW))
+    second = asyncio.run(
+        backend.refresh_registry_findings(NOW + butler.timedelta(seconds=60))
+    )
+
+    assert first["active_boards"] == second["active_boards"] == [
+        "fullplatts", "pursers"
+    ]
+    assert first["refreshed_at"] != second["refreshed_at"]
+    assert len(calls) == 2

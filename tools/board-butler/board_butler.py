@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Shadow-only coordinator question drafter.
+"""Registry-wide coordinator findings refresher and shadow question drafter.
 
-The butler listens on the same journal/seat resource subscriptions used by the
-wait bridge.  It never answers a question or mutates a ticket; its only Central
-write is a CAS-protected merge into ``coordinator_findings``.
+The butler runs the real coordinator derivation for every active registry board
+on a bounded cycle and listens for coordinator questions.  It never answers a
+question.  The only ticket mutations are two explicitly configured, mechanically
+checkable safety actions: parking repeated ``no_live_candidates`` loops and
+recording refusal of an escalation target that cannot work.
 """
 
 from __future__ import annotations
@@ -38,9 +40,18 @@ DEFAULT_DRAFTS_PER_BOARD = 20
 DEFAULT_HOLD_BEFORE_POST_S = 3_600
 DEFAULT_VETO_COUNT = 3
 DEFAULT_VETO_WINDOW_S = 3_600
+DEFAULT_REFRESH_SECONDS = 60
+DEFAULT_NO_LIVE_CANDIDATES_CYCLES = 3
+DEFAULT_ACTION_HOLD_SECONDS = 60
+MECHANICAL_ACTION_CLASSES = (
+    "park_no_live_candidates",
+    "refuse_incapable_target",
+)
 MAX_FINDINGS = 50
 MAX_STATE_CHARS = 4_800
 QUESTION_EVENT = "coordinator_question_asked"
+PARK_ANNOTATION_MARKER = "board-butler:no-live-candidates"
+REFUSAL_ANNOTATION_MARKER = "board-butler:incapable-target-refusal"
 # Mirrored from coordinator.DEFAULT_ALWAYS_ASK_CATEGORIES.  The policy rules
 # below express these as gate/scope/release, membership, and registry hazards.
 COORDINATOR_ALWAYS_ASK_CATEGORIES = (
@@ -235,6 +246,18 @@ class IdentityConflict(RuntimeError):
 
 class ButlerConfigError(ValueError):
     """Raised when coordinator_config cannot be interpreted safely."""
+
+
+@dataclass(frozen=True)
+class MechanicalAction:
+    kind: str
+    board_id: str
+    ticket_id: str
+    identity_name: str | None
+    identity_id: str | None
+    observed_cycles: int | None
+    reason: str
+    annotation_required: bool = True
 
 
 @dataclass(frozen=True)
@@ -1080,7 +1103,13 @@ def merge_finding(
         for item in state.get("findings", [])
         if isinstance(item, Mapping)
         and not (
-            item.get("kind") in {"would_answer", "butler_queued", "butler_config_invalid"}
+            item.get("kind")
+            in {
+                "would_answer",
+                "butler_queued",
+                "butler_config_invalid",
+                "butler_action",
+            }
             and item.get("question_id") == finding.get("question_id")
         )
     ]
@@ -1340,8 +1369,267 @@ def assert_complete_agent_view(status: Mapping[str, Any]) -> None:
         )
 
 
+def _capable_live_worker(
+    agent: Mapping[str, Any], now: datetime, *, stale_seconds: int = 300
+) -> bool:
+    capabilities = agent.get("capabilities")
+    if not isinstance(capabilities, Mapping):
+        capabilities = {}
+    if (
+        capabilities.get("can_work") is not True
+        or agent.get("capabilities_explicit") is not True
+        or agent.get("lifecycle_status", "active") != "active"
+        or agent.get("role") in {"coordinator", "orchestrator"}
+    ):
+        return False
+    seen = parse_time(agent.get("last_activity_at") or agent.get("last_seen"))
+    return seen is not None and (now - seen).total_seconds() <= stale_seconds
+
+
+def _no_live_candidate_cycle_count(ticket: Mapping[str, Any]) -> int:
+    history = ticket.get("dispatch_history")
+    if not isinstance(history, list):
+        summary = ticket.get("dispatch_summary")
+        history = summary.get("last", []) if isinstance(summary, Mapping) else []
+    return sum(
+        1
+        for row in history
+        if isinstance(row, Mapping)
+        and row.get("state") == "broadcast"
+        and row.get("kind", "work") == "work"
+        and row.get("reason") == "no_live_candidates"
+    )
+
+
+def _annotation_has_marker(ticket: Mapping[str, Any], marker: str) -> bool:
+    return any(
+        isinstance(row, Mapping)
+        and marker in str(row.get("text", row.get("message", "")))
+        for row in ticket.get("annotations", [])
+    )
+
+
+def mechanical_action_id(action: MechanicalAction) -> str:
+    material = json.dumps(
+        [
+            action.board_id,
+            action.ticket_id,
+            action.kind,
+            action.identity_id or action.identity_name,
+        ],
+        separators=(",", ":"),
+    )
+    return "BA-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+
+
+def mechanical_action_finding(
+    action: MechanicalAction, now: datetime, hold_seconds: int
+) -> dict[str, Any]:
+    action_id = mechanical_action_id(action)
+    release_at = now + timedelta(seconds=hold_seconds)
+    identity = action.identity_name or action.identity_id
+    message = (
+        f"Board butler intends to park {action.ticket_id} after "
+        f"{action.observed_cycles} no_live_candidates cycles because the board "
+        "has no live can_work=true seat."
+        if action.kind == "park_no_live_candidates"
+        else f"Board butler intends to refuse escalation target {identity} for "
+        f"{action.ticket_id} because {action.reason}."
+    )
+    return {
+        # Reuse the existing durable-hold projection consumed by Fleet's
+        # Waiting for you surface; action_id/action_class distinguish actions
+        # from coordinator-question drafts without changing Fleet assets.
+        "kind": "would_answer",
+        "level": "warn",
+        "board_id": action.board_id,
+        "ticket_id": action.ticket_id,
+        "question_id": action_id,
+        "action_id": action_id,
+        "action_class": action.kind,
+        "verdict": Outcome.MECHANICAL.value,
+        "message": message,
+        "evidence": (
+            "source=Central board_snapshot+ticket_get; "
+            f"reason={action.reason}"
+        ),
+        "next_action": (
+            "Veto during the hold window or allow the configured mechanical "
+            "action to execute."
+        ),
+        "mode": "active-hold",
+        "observed_at": now.isoformat(),
+        "hold": {
+            "status": "pending",
+            "drafted_at": now.isoformat(),
+            "release_at": release_at.isoformat(),
+            "vetoable_until": release_at.isoformat(),
+            "veto_reason": None,
+        },
+    }
+
+
+def mechanical_hold_status(finding: Mapping[str, Any], now: datetime) -> str:
+    hold = finding.get("hold")
+    if not isinstance(hold, Mapping):
+        return "invalid"
+    status = str(hold.get("status", "invalid"))
+    if status not in {"held", "pending"}:
+        return status
+    release_at = parse_time(hold.get("release_at"))
+    return "ready" if release_at is not None and release_at <= now else "held"
+
+
+def reconcile_mechanical_holds(
+    state: Mapping[str, Any], active_action_ids: set[str], now: datetime
+) -> tuple[dict[str, Any], list[str]]:
+    """Withdraw pending action holds whose board-state predicate disappeared."""
+    result = dict(state)
+    findings = [
+        dict(item) for item in state.get("findings", []) if isinstance(item, Mapping)
+    ]
+    withdrawn: list[str] = []
+    for finding in findings:
+        action_id = str(finding.get("action_id") or "")
+        if (
+            not action_id
+            or finding.get("action_class") not in MECHANICAL_ACTION_CLASSES
+            or action_id in active_action_ids
+        ):
+            continue
+        hold = dict(finding.get("hold", {}))
+        if hold.get("status") not in {"held", "pending"}:
+            continue
+        hold.update(
+            {
+                "status": "withdrawn",
+                "withdrawn_at": now.isoformat(),
+                "withdrawal_reason": "board-state predicate no longer holds",
+            }
+        )
+        finding["hold"] = hold
+        withdrawn.append(action_id)
+    if withdrawn:
+        result["findings"] = findings
+        result["generated_at"] = now.isoformat()
+    return result, withdrawn
+
+
+def ensure_mechanical_hold(
+    state: Mapping[str, Any],
+    action: MechanicalAction,
+    now: datetime,
+    hold_seconds: int,
+) -> tuple[dict[str, Any], str]:
+    """Register a new hold episode, or report the current episode's status."""
+    action_id = mechanical_action_id(action)
+    existing = next(
+        (
+            item
+            for item in state.get("findings", [])
+            if isinstance(item, Mapping)
+            and item.get("kind") in {"would_answer", "butler_action"}
+            and item.get("action_id") == action_id
+        ),
+        None,
+    )
+    hold = existing.get("hold", {}) if isinstance(existing, Mapping) else {}
+    status = hold.get("status") if isinstance(hold, Mapping) else None
+    if existing is None or status == "withdrawn":
+        finding = mechanical_action_finding(action, now, hold_seconds)
+        return merge_finding(state, finding, now), "registered"
+    return dict(state), mechanical_hold_status(existing, now)
+
+
+def plan_mechanical_actions(
+    board_id: str,
+    snapshot: Mapping[str, Any],
+    previous: Mapping[str, Any],
+    full_tickets: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+    *,
+    no_live_candidates_cycles: int,
+) -> list[MechanicalAction]:
+    """Plan only the two state-provable actions authorized for the butler."""
+    agents = [row for row in snapshot.get("agents", []) if isinstance(row, Mapping)]
+    agents_by_id = {str(row.get("agent_id")): row for row in agents if row.get("agent_id")}
+    agents_by_name = {
+        str(row.get("agent_name")): row for row in agents if row.get("agent_name")
+    }
+    actions: list[MechanicalAction] = []
+    seen_refusals: set[tuple[str, str]] = set()
+    for finding in previous.get("findings", []):
+        if not isinstance(finding, Mapping):
+            continue
+        ticket_id = str(finding.get("ticket_id") or "")
+        target_id = str(
+            finding.get("would_assign_to_agent_id")
+            or finding.get("target_agent_id")
+            or ""
+        )
+        target_name = str(
+            finding.get("would_assign_to_agent_name")
+            or finding.get("target_agent_name")
+            or ""
+        )
+        if not ticket_id or (not target_id and not target_name):
+            continue
+        agent = agents_by_id.get(target_id) or agents_by_name.get(target_name)
+        if agent is not None and _capable_live_worker(agent, now):
+            continue
+        ticket = full_tickets.get(ticket_id, {})
+        marker_key = (ticket_id, target_id or target_name)
+        marker = f"{REFUSAL_ANNOTATION_MARKER}:{target_id or target_name}"
+        if marker_key in seen_refusals:
+            continue
+        seen_refusals.add(marker_key)
+        reason = (
+            "capabilities.can_work is not true"
+            if agent is not None
+            else "identity is missing or reaped"
+        )
+        actions.append(
+            MechanicalAction(
+                "refuse_incapable_target",
+                board_id,
+                ticket_id,
+                target_name or None,
+                target_id or None,
+                None,
+                reason,
+                not _annotation_has_marker(ticket, marker),
+            )
+        )
+
+    if any(_capable_live_worker(agent, now) for agent in agents):
+        return actions
+    for ticket_id, ticket in sorted(full_tickets.items()):
+        if ticket.get("status") != "open":
+            continue
+        if ticket.get("parked") is True and not _annotation_has_marker(
+            ticket, PARK_ANNOTATION_MARKER
+        ):
+            continue
+        cycles = _no_live_candidate_cycle_count(ticket)
+        if cycles < no_live_candidates_cycles:
+            continue
+        actions.append(
+            MechanicalAction(
+                "park_no_live_candidates",
+                board_id,
+                ticket_id,
+                None,
+                None,
+                cycles,
+                "repeated no_live_candidates cycles and no live can_work=true seat",
+                not _annotation_has_marker(ticket, PARK_ANNOTATION_MARKER),
+            )
+        )
+    return actions
+
+
 class CentralBackend:
-    """Narrow Central adapter: push wait, evidence reads, findings CAS write."""
+    """Central adapter for push questions and registry-wide real derivation."""
 
     def __init__(self, args: argparse.Namespace, token: str) -> None:
         self.args = args
@@ -1351,6 +1639,7 @@ class CentralBackend:
         self._context: Any = None
         self.latest_seq = 0
         self.project_name: str | None = None
+        self._coordinator: dict[str, Any] | None = None
 
     async def __aenter__(self) -> "CentralBackend":
         from pursers_client import BoardClient
@@ -1497,6 +1786,320 @@ class CentralBackend:
             question = None
         return current[0], question
 
+    def _coordinator_api(self) -> dict[str, Any]:
+        if self._coordinator is None:
+            path = self.args.repo / "tools" / "coordinator" / "coordinator.py"
+            if not path.is_file():
+                raise RuntimeError(f"real coordinator derivation is missing: {path}")
+            self._coordinator = runpy.run_path(
+                str(path), run_name="board_butler_real_coordinator"
+            )
+        return self._coordinator
+
+    async def _full_tickets_for_board(
+        self, board_id: str, ticket_ids: Sequence[str]
+    ) -> dict[str, Mapping[str, Any]]:
+        from pursers_client import BoardClient
+
+        result: dict[str, Mapping[str, Any]] = {}
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities={
+                "can_work": False,
+                "can_review": False,
+                "tier_max": 0,
+                "max_parallel": 1,
+            },
+            allow_takeover=True,
+        ) as client:
+            for ticket_id in sorted(set(ticket_ids)):
+                payload = await client.ticket_get(
+                    ticket_id, view="full", include_dispatch_history=True
+                )
+                ticket = payload.get("ticket", {})
+                if isinstance(ticket, Mapping):
+                    result[ticket_id] = ticket
+        return result
+
+    async def _execute_mechanical_action(self, action: MechanicalAction) -> None:
+        from pursers_client import BoardClient
+
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            action.board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities={
+                "can_work": False,
+                "can_review": False,
+                "tier_max": 0,
+                "max_parallel": 1,
+            },
+            allow_takeover=True,
+        ) as client:
+            if action.kind == "refuse_incapable_target":
+                identity = action.identity_name or action.identity_id or "unknown"
+                marker = (
+                    f"{REFUSAL_ANNOTATION_MARKER}:"
+                    f"{action.identity_id or action.identity_name or 'unknown'}"
+                )
+                if action.annotation_required:
+                    await client.ticket_annotate(
+                        action.ticket_id,
+                        f"{marker} — refused escalation target {identity}: "
+                        f"{action.reason}; no assignment was performed.",
+                        kind="decision",
+                    )
+                return
+            if action.kind != "park_no_live_candidates":
+                raise ValueError(f"unsupported board-butler action: {action.kind}")
+            if action.annotation_required:
+                await client.ticket_annotate(
+                    action.ticket_id,
+                    f"{PARK_ANNOTATION_MARKER} — parked mechanically after "
+                    f"{action.observed_cycles} no_live_candidates dispatch cycles; "
+                    "the active registry board has no live can_work=true seat. "
+                    "The ticket remains open and was not canceled.",
+                    kind="decision",
+                )
+            await client.ticket_update(action.ticket_id, parked=True)
+
+    async def _mechanical_hold_status(
+        self, action: MechanicalAction, now: datetime
+    ) -> str:
+        """Register a durable hold or return its current execution status."""
+        from pursers_client import BoardClient
+
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            action.board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities={
+                "can_work": False,
+                "can_review": False,
+                "tier_max": 0,
+                "max_parallel": 1,
+            },
+            allow_takeover=True,
+        ) as client:
+            try:
+                raw = await client.board_state_get(STATE_KEY)
+            except Exception as exc:
+                if "state key not found" not in str(exc).lower():
+                    raise
+                raw = {}
+            state, previous_value = _decode_state(raw)
+            merged, status = ensure_mechanical_hold(
+                state, action, now, self.args.action_hold_seconds
+            )
+            if status == "registered":
+                expected = (
+                    hashlib.sha256(previous_value.encode("utf-8")).hexdigest()
+                    if previous_value is not None
+                    else None
+                )
+                await client.board_state_update(
+                    STATE_KEY,
+                    json.dumps(merged, sort_keys=True, separators=(",", ":")),
+                    expected_sha256=expected,
+                )
+                return "registered"
+            return status
+
+    async def _reconcile_mechanical_holds(
+        self, board_id: str, active_action_ids: set[str], now: datetime
+    ) -> list[str]:
+        """Persist withdrawal when an intended action is no longer provable."""
+        from pursers_client import BoardClient
+
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities={
+                "can_work": False,
+                "can_review": False,
+                "tier_max": 0,
+                "max_parallel": 1,
+            },
+            allow_takeover=True,
+        ) as client:
+            try:
+                raw = await client.board_state_get(STATE_KEY)
+            except Exception as exc:
+                if "state key not found" not in str(exc).lower():
+                    raise
+                raw = {}
+            state, previous_value = _decode_state(raw)
+            reconciled, withdrawn = reconcile_mechanical_holds(
+                state, active_action_ids, now
+            )
+            if not withdrawn:
+                return []
+            encoded = json.dumps(
+                _bound_control_state(reconciled),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected = (
+                hashlib.sha256(previous_value.encode("utf-8")).hexdigest()
+                if previous_value is not None
+                else None
+            )
+            await client.board_state_update(
+                STATE_KEY, encoded, expected_sha256=expected
+            )
+            return withdrawn
+
+    async def _mark_mechanical_hold_executed(
+        self, action: MechanicalAction, now: datetime
+    ) -> None:
+        from pursers_client import BoardClient
+
+        action_id = mechanical_action_id(action)
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            action.board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities={
+                "can_work": False,
+                "can_review": False,
+                "tier_max": 0,
+                "max_parallel": 1,
+            },
+            allow_takeover=True,
+        ) as client:
+            raw = await client.board_state_get(STATE_KEY)
+            state, previous_value = _decode_state(raw)
+            rows = [
+                dict(item)
+                for item in state.get("findings", [])
+                if isinstance(item, Mapping)
+            ]
+            selected = next(
+                (
+                    item
+                    for item in rows
+                    if item.get("kind") in {"would_answer", "butler_action"}
+                    and item.get("action_id") == action_id
+                ),
+                None,
+            )
+            if selected is None:
+                raise RuntimeError(f"durable action hold disappeared: {action_id}")
+            hold = dict(selected.get("hold", {}))
+            if hold.get("status") not in {"held", "pending"}:
+                raise RuntimeError(f"action hold is no longer executable: {action_id}")
+            hold["status"] = "executed"
+            hold["executed_at"] = now.isoformat()
+            selected["hold"] = hold
+            state["findings"] = rows
+            state["generated_at"] = now.isoformat()
+            encoded = json.dumps(
+                _bound_control_state(state, preserve_question_id=action_id),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            expected = (
+                hashlib.sha256(previous_value.encode("utf-8")).hexdigest()
+                if previous_value is not None
+                else None
+            )
+            await client.board_state_update(
+                STATE_KEY, encoded, expected_sha256=expected
+            )
+
+    async def refresh_registry_findings(self, now: datetime) -> dict[str, Any]:
+        """Act only on opted-in boards, then run coordinator's real derivation."""
+        coordinator = self._coordinator_api()
+        async with coordinator["RawReader"](self.args.url, self.token) as reader:
+            projects, snapshots, previous = await coordinator["read_cycle"](
+                reader, self.args.home_board
+            )
+        active_boards = {project.board_id for project in projects}
+        configured = set(self.args.act_on_board)
+        acting_boards = configured & active_boards
+        actions: list[MechanicalAction] = []
+        if not self.args.dry_run:
+            for board_id in sorted(acting_boards):
+                snapshot = snapshots[board_id]
+                tickets = snapshot.get(
+                    "coordination_tickets", snapshot.get("tickets", [])
+                )
+                ticket_ids = [
+                    str(row.get("ticket_id"))
+                    for row in tickets
+                    if isinstance(row, Mapping) and row.get("ticket_id")
+                ]
+                for finding in previous.get(board_id, {}).get("findings", []):
+                    if isinstance(finding, Mapping) and finding.get("ticket_id"):
+                        ticket_ids.append(str(finding["ticket_id"]))
+                full_tickets = await self._full_tickets_for_board(
+                    board_id, ticket_ids
+                )
+                board_actions = plan_mechanical_actions(
+                    board_id,
+                    snapshot,
+                    previous.get(board_id, {}),
+                    full_tickets,
+                    now,
+                    no_live_candidates_cycles=(
+                        self.args.no_live_candidates_cycles
+                    ),
+                )
+                enabled_actions = [
+                    action
+                    for action in board_actions
+                    if action.kind in self.args.active_action
+                ]
+                await self._reconcile_mechanical_holds(
+                    board_id,
+                    {mechanical_action_id(action) for action in enabled_actions},
+                    now,
+                )
+                for action in enabled_actions:
+                    hold_status = await self._mechanical_hold_status(action, now)
+                    if hold_status == "ready":
+                        await self._execute_mechanical_action(action)
+                        await self._mark_mechanical_hold_executed(action, now)
+                        actions.append(action)
+
+        coordinator_args = coordinator["parse_args"](
+            [
+                "--url",
+                self.args.url,
+                "--token-path",
+                str(self.args.token_path),
+                "--home-board",
+                self.args.home_board,
+                "--agent-name",
+                self.args.agent_name,
+                "--mode",
+                "shadow",
+                "--once",
+                *(["--dry-run"] if self.args.dry_run else []),
+            ]
+        )
+        await coordinator["run"](coordinator_args)
+        return {
+            "active_boards": sorted(active_boards),
+            "acting_boards": sorted(acting_boards),
+            "ignored_acting_boards": sorted(configured - active_boards),
+            "actions": [action.kind for action in actions],
+            "refreshed_at": now.isoformat(),
+        }
+
 
 def _read_token(path: Path) -> str:
     if not path.is_absolute() or not path.is_file():
@@ -1634,8 +2237,32 @@ async def run(
             cursor = load_cursor(args.cursor_file)
             if cursor is None:
                 cursor = backend.latest_seq
+            refresh = getattr(backend, "refresh_registry_findings", None)
+            next_refresh = 0.0
             while True:
-                timeout = float(args.wait_timeout) if args.once else None
+                monotonic_now = asyncio.get_running_loop().time()
+                if refresh is not None and monotonic_now >= next_refresh:
+                    observation = await refresh(utc_now())
+                    print(
+                        "board-butler: refresh "
+                        + json.dumps(observation, sort_keys=True),
+                        file=sys.stderr,
+                    )
+                    next_refresh = (
+                        asyncio.get_running_loop().time() + args.refresh_seconds
+                    )
+                timeout = (
+                    float(args.wait_timeout)
+                    if args.once
+                    else (
+                        max(
+                            0.1,
+                            next_refresh - asyncio.get_running_loop().time(),
+                        )
+                        if refresh is not None
+                        else None
+                    )
+                )
                 cursor, question = await backend.wait_for_question(cursor, timeout)
                 if question is not None:
                     await process_question(backend, question, args, utc_now())
@@ -1646,6 +2273,8 @@ async def run(
                 if args.once:
                     return
                 if question is None:
+                    if refresh is not None:
+                        continue
                     raise RuntimeError("board butler push subscription ended")
 
 
@@ -1664,6 +2293,42 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--drafts-per-board", type=int, default=DEFAULT_DRAFTS_PER_BOARD)
     parser.add_argument("--project", default=os.environ.get("PURSERS_PROJECT"))
     parser.add_argument("--wait-timeout", type=int, default=180)
+    parser.add_argument(
+        "--refresh-seconds",
+        type=int,
+        default=DEFAULT_REFRESH_SECONDS,
+        help="maximum interval between real coordinator derivations",
+    )
+    parser.add_argument(
+        "--act-on-board",
+        action="append",
+        default=[],
+        metavar="BOARD_ID",
+        help=(
+            "explicitly opt one active registry board into the two mechanical "
+            "ticket actions; repeat for multiple boards"
+        ),
+    )
+    parser.add_argument(
+        "--no-live-candidates-cycles",
+        type=int,
+        default=DEFAULT_NO_LIVE_CANDIDATES_CYCLES,
+    )
+    parser.add_argument(
+        "--active-action",
+        action="append",
+        choices=MECHANICAL_ACTION_CLASSES,
+        help=(
+            "enabled autonomous action class; repeat to configure the acting "
+            "set (defaults to the two operator-approved mechanical classes)"
+        ),
+    )
+    parser.add_argument(
+        "--action-hold-seconds",
+        type=int,
+        default=DEFAULT_ACTION_HOLD_SECONDS,
+        help="veto window before an enabled mechanical action can execute",
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     controls = parser.add_mutually_exclusive_group()
@@ -1685,6 +2350,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--drafts-per-board must be between 1 and 500")
     if args.wait_timeout < 1:
         parser.error("--wait-timeout must be positive")
+    if not 10 <= args.refresh_seconds <= 60:
+        parser.error("--refresh-seconds must be between 10 and 60")
+    if not 1 <= args.no_live_candidates_cycles <= 50:
+        parser.error("--no-live-candidates-cycles must be between 1 and 50")
+    if not 1 <= args.action_hold_seconds <= 86_400:
+        parser.error("--action-hold-seconds must be between 1 and 86400")
+    if args.active_action is None:
+        args.active_action = list(MECHANICAL_ACTION_CLASSES)
+    if any(not value.strip() for value in args.act_on_board):
+        parser.error("--act-on-board values must be non-empty")
     if (args.kill_switch or args.veto_question) and args.dry_run:
         parser.error("control actions cannot be combined with --dry-run")
     if args.veto_question and not args.control_reason.strip():

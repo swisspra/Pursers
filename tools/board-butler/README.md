@@ -1,9 +1,20 @@
 # Board butler (shadow mode)
 
-`board_butler.py` is a single resident coordinator seat that drafts evidence-backed
-answers to mechanically checkable coordinator questions. It never answers a
-question and never mutates a ticket. Its only Central write is a CAS-protected
-merge of `would_answer` findings into `coordinator_findings`.
+`board_butler.py` is a single resident coordinator seat that keeps findings
+fresh for every active board in `project_registry` and drafts evidence-backed
+answers to mechanically checkable coordinator questions. Each bounded refresh
+runs the real `tools/coordinator/coordinator.py` derivation in shadow mode; the
+butler never manufactures a timestamp or finding merely to satisfy freshness.
+Inactive registry projects are not read or acted on.
+
+Question handling remains shadow-only: the butler never answers a question.
+Two ticket actions are permitted, both derived entirely from current board
+state and disabled unless the operator opts that board in with
+`--act-on-board`: it parks (without canceling) an open ticket after the configured
+number of `no_live_candidates` dispatch cycles when the board has no live
+`can_work=true` seat, and it records refusal of a proposed escalation target
+whose identity cannot work. Every other judgment, including scope, gate,
+release, option, and version decisions, remains a draft for a human.
 
 The policy is intentionally fail-closed. Gate waivers, scope changes, release
 actions, membership changes, and registry changes always escalate. Unknown or
@@ -38,17 +49,39 @@ python3 tools/board-butler/board_butler.py \
   --repo /PATH/TO/Pursers \
   --pid-file /PATH/TO/state/board-butler.pid \
   --cursor-file /PATH/TO/state/board-butler.cursor.json \
+  --refresh-seconds 60 \
+  --act-on-board pursers \
+  --active-action park_no_live_candidates \
+  --active-action refuse_incapable_target \
+  --action-hold-seconds 60 \
+  --no-live-candidates-cycles 3 \
   --once --dry-run
 ```
 
-Without `--once`, the process holds one reconnecting journal/seat subscription
-and sleeps inside the push stream until a coordinator-question cue arrives.
-There is no polling fallback, repeated ticket list, or cursor-0 catch-up. The
-positive cursor file is reused across restarts; a zero or invalid cursor starts
-at the current journal watermark. A closed push stream terminates the process
-instead of reconnect-spinning. `--dry-run` prints the proposed finding and
-makes no Central write or cursor-file update, so the same question remains
-available to a later non-dry run.
+Repeat `--act-on-board` to opt in additional active registry boards. The acting
+set is empty by default, and a configured board that is not active in the
+registry is reported as ignored. Findings are still refreshed for every active
+registry board regardless of the acting set. After a mechanical action, the
+same cycle runs the real derivation again, so a newly parked ticket cannot
+remain reported as starved until a later event.
+
+The two operator-approved action classes form the default configured class set;
+repeat `--active-action` to narrow that set. Every intended action is first
+written durably to `coordinator_findings` with a release time and is shown in
+Fleet's **Waiting for you** surface. It cannot execute before
+`--action-hold-seconds` elapses, and `--veto-question BA-... --control-reason
+<reason>` changes the durable hold to `vetoed`. For a non-home board, run the
+control command with that board as `--home-board`. Adding another autonomous
+class requires adding it to the configured class set; decision questions do not
+become autonomous merely because the process is active.
+
+Without `--once`, the process waits in the journal/seat push stream for a
+coordinator-question cue, with a bounded timeout used to run the next registry
+refresh. There is no status polling or cursor-0 catch-up. The positive cursor
+file is reused across restarts; a zero or invalid cursor starts at the current
+journal watermark. `--dry-run` prints the real derived state and any proposed
+question finding, performs no ticket action, and makes no Central write or
+cursor-file update.
 
 ## Declared configuration
 

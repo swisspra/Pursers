@@ -38,6 +38,9 @@ MAX_EVIDENCE_CHARS = 300
 MAX_INTAKE_FINDING_CHARS = 4_000
 MAX_INTAKE_EVIDENCE_CHARS = 3_500
 MAX_STATE_CHARS = 5_000
+BUTLER_FINDING_KINDS = frozenset(
+    {"would_answer", "butler_queued", "butler_config_invalid", "butler_action"}
+)
 MAX_PRIVACY_COMMITS_PER_CYCLE = 1_000
 COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{7,64})(?![0-9a-fA-F])")
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
@@ -838,6 +841,7 @@ def classify_lease(
 def starvation_stage(ticket: Mapping[str, Any], now: datetime, thresholds: Thresholds) -> int:
     if (
         ticket.get("status") != "open"
+        or ticket.get("parked") is True
         or ticket.get("claimed_by_agent_id")
         or ticket.get("assigned_to_agent_id")
         or ticket.get("assigned_to")
@@ -887,9 +891,14 @@ def tier_allows(agent: Mapping[str, Any], ticket: Mapping[str, Any]) -> bool:
 
 
 def assignment_candidate(agent: Mapping[str, Any]) -> bool:
+    capabilities = agent.get("capabilities")
+    if not isinstance(capabilities, Mapping):
+        capabilities = {}
     return bool(
         agent.get("agent_id")
         and agent.get("capabilities_explicit") is True
+        and capabilities.get("can_work") is not False
+        and agent.get("lifecycle_status", "active") == "active"
         and agent.get("membership_role") in {"member", "admin"}
         and agent.get("role") not in {"coordinator", "orchestrator"}
         and str(agent.get("host", "")).casefold() != "coordinator"
@@ -2885,6 +2894,19 @@ def analyze_cycle(
         findings_by_board[project.board_id].extend(privacy)
         if watermark:
             watermarks_by_board[project.board_id][project.name] = watermark
+
+    # Question drafts share coordinator_findings with this derivation. Preserve
+    # their durable holds across refreshes; the butler deduplicates by question
+    # id when it writes a replacement.
+    for board_id in findings_by_board:
+        prior_findings = previous.get(board_id, {}).get("findings", [])
+        if isinstance(prior_findings, list):
+            findings_by_board[board_id].extend(
+                dict(item)
+                for item in prior_findings
+                if isinstance(item, Mapping)
+                and item.get("kind") in BUTLER_FINDING_KINDS
+            )
 
     # Fleet fairness order: critical first, then oldest-open-first across boards.
     ranks: list[tuple[int, datetime, str, str]] = []
