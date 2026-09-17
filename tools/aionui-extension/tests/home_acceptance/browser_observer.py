@@ -82,7 +82,8 @@ TRANSITION_CONTEXT_KEYS = {
     "board_id", "candidate_commit", "issued_at", "causal_index",
 }
 TRANSITION_PROPERTIES = frozenset({
-    "text", "value", "checked", "disabled", "count", "class", "hidden", "integer",
+    "text", "value", "nonempty", "checked", "disabled", "count", "class",
+    "hidden", "integer",
 })
 SEMANTIC_ATTRIBUTE_PROPERTY = re.compile(r"attribute:(?:data|aria)-[a-z][a-z0-9-]{0,63}")
 TRANSITION_ACTION_KEYS = {
@@ -1158,6 +1159,7 @@ const responseActions = recipe.actions.filter(spec => spec.kind === 'click_respo
 if (responseActions.length > 1) throw new Error('multiple response captures are unavailable')
 const responseAction = responseActions[0] || null
 const responseCaptureKey = '__pursersVerifierFetchCapture'
+let responseMainObjectId = null
 const pendingActions = recipe.actions.filter(spec => spec.kind === 'click_pending_state')
 if (pendingActions.length > 1 || (pendingActions.length && responseAction)) {
   throw new Error('pending-state capture must be unique')
@@ -1171,28 +1173,33 @@ if (jobActions.length > 1 || (jobActions.length && (responseAction || pendingAct
 const jobAction = jobActions[0] || null
 const jobCaptureKey = '__pursersVerifierJobCapture'
 if (responseAction) {
-  const installed = await cdp('Runtime.evaluate', {
-    expression: `(() => {
+  const mainDocumentTree = await cdp('DOM.getDocument', { depth: 0 })
+  const mainDocumentNodeId = mainDocumentTree && mainDocumentTree.root
+    ? mainDocumentTree.root.nodeId : null
+  const mainDocument = mainDocumentNodeId
+    ? await cdp('DOM.resolveNode', { nodeId: mainDocumentNodeId }) : null
+  responseMainObjectId = mainDocument && mainDocument.object
+    ? mainDocument.object.objectId : null
+  if (!responseMainObjectId) throw new Error('main page world unavailable')
+  const installed = await cdp('Runtime.callFunctionOn', {
+    functionDeclaration: `function () { return (() => {
       const key = ${JSON.stringify(responseCaptureKey)}
       const method = ${JSON.stringify(responseAction.method)}
       const endpoint = ${JSON.stringify(responseAction.endpoint)}
       const pointer = ${JSON.stringify(responseAction.pointer)}
-      if (typeof state !== 'object' || !state || typeof state.helper !== 'object' ||
-          !state.helper || typeof state.helper.baseUrl !== 'string' ||
-          typeof state.helper.token !== 'string' || !state.helper.token) {
-        throw new Error('connected helper state unavailable')
-      }
-      const helperUrl = new URL(state.helper.baseUrl)
-      const helperToken = state.helper.token
-      const helperHost = helperUrl.hostname.replace(/^\\[|\\]$/g, '').toLowerCase()
-      const helperIpv4 = helperHost.split('.').map(Number)
+      const helperInput = document.querySelector('#helper-url')
+      let helperUrl = null
+      try { helperUrl = new URL(String(helperInput && helperInput.value || '')) }
+      catch (_error) {}
+      const helperHost = helperUrl
+        ? helperUrl.hostname.replace(/^\\[|\\]$/g, '').toLowerCase() : ''
       const helperIsLoopback = helperHost === 'localhost'
         || helperHost.endsWith('.localhost')
         || helperHost === '::1'
-        || (helperIpv4.length === 4 && helperIpv4[0] === 127 &&
-            helperIpv4.every(part => Number.isInteger(part) && part >= 0 && part <= 255))
-      if (helperUrl.protocol !== 'http:' || !helperIsLoopback || helperUrl.username ||
-          helperUrl.password || helperUrl.pathname !== '/' || helperUrl.search || helperUrl.hash) {
+        || helperHost === '127.0.0.1'
+      if (!helperUrl || helperUrl.protocol !== 'http:' || !helperIsLoopback
+          || helperUrl.username || helperUrl.password || helperUrl.pathname !== '/'
+          || helperUrl.search || helperUrl.hash) {
         throw new Error('configured helper origin is invalid')
       }
       const helperOrigin = helperUrl.origin
@@ -1229,7 +1236,8 @@ if (responseAction) {
           const trustedHelperRequest = parsed && parsed.origin === helperOrigin
             && parsed.pathname === endpoint && !parsed.search && !parsed.hash
             && init.credentials === 'omit' && init.cache === 'no-store'
-            && init.referrerPolicy === 'no-referrer' && requestToken === helperToken
+            && init.referrerPolicy === 'no-referrer'
+            && requestToken.length >= 32 && requestToken.length <= 512
           if (requestMethod === method && trustedHelperRequest) {
             try {
               const body = await response.clone().json()
@@ -1251,7 +1259,8 @@ if (responseAction) {
       }, 30000)
       window[key] = capture
       return true
-    })()`,
+    })() }`,
+    objectId: responseMainObjectId,
     awaitPromise: true,
     returnByValue: true
   })
@@ -1454,6 +1463,7 @@ const transitionResult = await cdp('Runtime.evaluate', {
         else if (!node) result[spec.path] = null
         else if (spec.property === 'text') result[spec.path] = (node.textContent || '').trim()
         else if (spec.property === 'value') result[spec.path] = String(node.value ?? '')
+        else if (spec.property === 'nonempty') result[spec.path] = String(node.value ?? '').length > 0
         else if (spec.property === 'checked') result[spec.path] = node.checked === true
         else if (spec.property === 'disabled') result[spec.path] = node.disabled === true
         else if (spec.property === 'class') result[spec.path] = String(node.className || '')
@@ -1566,6 +1576,12 @@ const transitionResult = await cdp('Runtime.evaluate', {
   awaitPromise: true,
   returnByValue: true
 })
+if (transitionResult && transitionResult.exceptionDetails) {
+  const exception = transitionResult.exceptionDetails.exception
+  const detail = exception && exception.description
+    ? exception.description : transitionResult.exceptionDetails.text
+  throw new Error('browser transition failed: ' + String(detail || 'unknown error'))
+}
 if (pendingAction) {
   const captured = await cdp('Runtime.evaluate', {
     expression: `(() => {
@@ -1700,8 +1716,8 @@ const hostBinding = hostBindingResult && hostBindingResult.result ? hostBindingR
 const appBinding = appBindingResult && appBindingResult.result ? appBindingResult.result.value : null
 if (!transition || !hostBinding || !appBinding) throw new Error('transition result unavailable')
 if (responseAction) {
-  const captured = await cdp('Runtime.evaluate', {
-    expression: `(async () => {
+  const captured = await cdp('Runtime.callFunctionOn', {
+    functionDeclaration: `async function () { return await (async () => {
       const key = ${JSON.stringify(responseCaptureKey)}
       const state = window[key]
       if (!state) return null
@@ -1718,7 +1734,8 @@ if (responseAction) {
       if (window.fetch === state.wrapper) window.fetch = state.original
       delete window[key]
       return { values: state.values, error: state.error }
-    })()`,
+    })() }`,
+    objectId: responseMainObjectId,
     awaitPromise: true,
     returnByValue: true
   })
@@ -1917,12 +1934,14 @@ def _validate_transition_selectors(value: Any, label: str) -> list[dict[str, Any
             raise _fail(EXIT_USAGE, f"{label} selector fields do not match schema")
         path = item["path"]
         selector = item["selector"]
+        property_name = item["property"]
         if (
             not isinstance(path, str) or not path.startswith("/") or path in paths
             or not isinstance(selector, str) or not selector or len(selector) > 512
+            or not isinstance(property_name, str)
             or (
-                item["property"] not in TRANSITION_PROPERTIES
-                and SEMANTIC_ATTRIBUTE_PROPERTY.fullmatch(str(item["property"])) is None
+                property_name not in TRANSITION_PROPERTIES
+                and SEMANTIC_ATTRIBUTE_PROPERTY.fullmatch(property_name) is None
             )
         ):
             raise _fail(EXIT_USAGE, f"{label} selector is invalid")
@@ -2146,10 +2165,14 @@ def _run_transition_backend(
             f"browser transition backend failed ({type(exc).__name__})",
         ) from None
     if completed.returncode:
-        tail = completed.stderr.strip().splitlines()[-1:] or ["no stderr"]
+        lines = [line.strip() for line in completed.stderr.splitlines() if line.strip()]
+        detail = next(
+            (line for line in lines if "browser transition failed:" in line),
+            lines[-1] if lines else "no stderr",
+        )
         raise _fail(
             EXIT_CAPTURE_FAILED,
-            f"browser transition backend exited {completed.returncode}: {tail[0][:200]}",
+            f"browser transition backend exited {completed.returncode}: {detail[:500]}",
         )
     result: dict[str, Any] | None = None
     for stream in (completed.stdout, completed.stderr):
@@ -2170,7 +2193,15 @@ def _run_transition_backend(
         "candidate_status", "selected_board", "page_sha256",
     }
     if not isinstance(result, dict) or set(result) != expected:
-        raise _fail(EXIT_CAPTURE_FAILED, "browser transition result fields do not match schema")
+        detail = (
+            json.dumps(result, sort_keys=True, separators=(",", ":"))
+            if result is not None
+            else (completed.stderr.strip() or completed.stdout.strip() or "null")[-1024:]
+        )
+        raise _fail(
+            EXIT_CAPTURE_FAILED,
+            f"browser transition result fields do not match schema: {detail[:1024]}",
+        )
     for field in ("before", "action", "after"):
         if not isinstance(result[field], dict):
             raise _fail(EXIT_CAPTURE_FAILED, f"browser transition {field} is not structured")

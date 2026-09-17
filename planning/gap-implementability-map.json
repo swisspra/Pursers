@@ -145,7 +145,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -217,7 +217,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -350,7 +350,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -417,7 +417,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -882,7 +882,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -934,7 +934,7 @@
           "before": [
             {
               "path": "/door_supplied",
-              "property": "value",
+              "property": "nonempty",
               "selector": "#door"
             }
           ],
@@ -1351,7 +1351,7 @@
           },
           {
             "op": "eq",
-            "path": "/door_password_count",
+            "path": "/door_field_count",
             "phase": "after",
             "value": 1
           }
@@ -1387,7 +1387,7 @@
               "selector": "#connection-form"
             },
             {
-              "path": "/door_password_count",
+              "path": "/door_field_count",
               "property": "count",
               "selector": "#connection-form #door[type=\"password\"]"
             }
@@ -1433,7 +1433,7 @@
               "selector": "#connection-form"
             },
             {
-              "path": "/door_password_count",
+              "path": "/door_field_count",
               "property": "count",
               "selector": "#connection-form #door[type=\"password\"]"
             }
@@ -1448,7 +1448,7 @@
           "settle_milliseconds": 0
         },
         "select_allowlist": [
-          "/door_password_count",
+          "/door_field_count",
           "/form_before",
           "/form_observed",
           "/join_form_count"

@@ -20,6 +20,7 @@ from ci_manifest import (  # noqa: E402
     parse_collected_count,
     pytest_target,
     suite_environment,
+    validate_integration_files,
     validate_manifest,
     verify_counts,
 )
@@ -27,6 +28,27 @@ from ci_manifest import (  # noqa: E402
 
 def test_manifest_covers_every_test_directory() -> None:
     validate_manifest(REPOSITORY_ROOT)
+
+
+def test_integration_files_manifest_matches_the_tree() -> None:
+    validate_integration_files(REPOSITORY_ROOT)
+
+
+def test_integration_files_manifest_rejects_a_stale_entry(tmp_path: Path) -> None:
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("current\n", encoding="utf-8")
+    manifest = tmp_path / "INTEGRATION_FILES.sha256"
+    manifest.write_text(
+        "48aa6cae8c70abdb28631d22b316e6d9f9d0768ec2911de7090e248b2afe6ca1"
+        "  tracked.txt\n",
+        encoding="utf-8",
+    )
+
+    validate_integration_files(tmp_path, Path("INTEGRATION_FILES.sha256"))
+    manifest.write_text(f"{'0' * 64}  tracked.txt\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"stale_files=\['tracked.txt'\]"):
+        validate_integration_files(tmp_path, Path("INTEGRATION_FILES.sha256"))
 
 
 def test_central_suite_covers_board_move_regression() -> None:

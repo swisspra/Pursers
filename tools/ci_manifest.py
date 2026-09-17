@@ -12,6 +12,7 @@ state and process providers rather than depend on operator-machine access.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -63,6 +64,11 @@ SUITES: tuple[Suite, ...] = (
     ),
     Suite("release-tools", "tools/tests", covers=("tools",)),
 )
+
+INTEGRATION_FILES_MANIFEST = Path(
+    "tools/aionui-extension/INTEGRATION_FILES.sha256"
+)
+SHA256_MANIFEST_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
 
 
 def covering_suites(
@@ -129,6 +135,53 @@ def validate_manifest(root: Path, suites: Sequence[Suite] = SUITES) -> None:
         raise ValueError(
             "test-suite manifest mismatch: "
             f"unlisted_test_directories={missing}, missing_directories={stale}"
+        )
+
+
+def validate_integration_files(
+    root: Path,
+    manifest_path: Path = INTEGRATION_FILES_MANIFEST,
+) -> None:
+    """Verify that the cumulative integration manifest describes this tree."""
+    manifest = root / manifest_path
+    rows = manifest.read_text(encoding="utf-8").splitlines()
+    malformed: list[int] = []
+    duplicate_paths: list[str] = []
+    missing_files: list[str] = []
+    stale_files: list[str] = []
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    for line_number, row in enumerate(rows, start=1):
+        match = SHA256_MANIFEST_LINE.fullmatch(row)
+        if match is None:
+            malformed.append(line_number)
+            continue
+        expected, relative = match.groups()
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            malformed.append(line_number)
+            continue
+        if relative in seen:
+            duplicate_paths.append(relative)
+            continue
+        seen.add(relative)
+        paths.append(relative)
+        candidate = root / relative_path
+        if not candidate.is_file():
+            missing_files.append(relative)
+            continue
+        actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        if actual != expected:
+            stale_files.append(relative)
+
+    unsorted = paths != sorted(paths)
+    if malformed or duplicate_paths or missing_files or stale_files or unsorted:
+        raise ValueError(
+            "integration files manifest mismatch: "
+            f"malformed_lines={malformed}, duplicate_paths={duplicate_paths}, "
+            f"missing_files={missing_files}, stale_files={stale_files}, "
+            f"unsorted={unsorted}"
         )
 
 
@@ -269,6 +322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = repository_root()
     try:
         validate_manifest(root)
+        validate_integration_files(root)
         if args.command == "check":
             print(f"manifest covers all {len(SUITES)} test directories")
         elif args.command == "collect":

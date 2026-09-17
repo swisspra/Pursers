@@ -48,59 +48,59 @@
     {
       "row_id": 3,
       "observation_id": "team_setup",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "beta_blocking",
       "reason": "Prepare Team is the second onboarding step, so a first-time user needs an unambiguous selected-group state before proceeding.",
-      "required_change": "Expose selected-group semantics in tools/aionui-extension/webui/index.html or tools/aionui-extension/webui/app.js and teach trusted_browser_state_v1/browser_observer.py to read them."
+      "required_change": "Run the browser-team-setup recipe against a disposable group; no further candidate change is indicated."
     },
     {
       "row_id": 4,
       "observation_id": "five_workers_three_reviewers",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "ga_only",
       "reason": "The normal first-time path needs a worker and an independent reviewer, not an exact eight-seat 5-to-3 roster.",
-      "known_limitation": "The beta does not guarantee semantic worker, reviewer, and unique-identity counts for an exact five-worker and three-reviewer roster."
+      "known_limitation": "The exact eight-seat topology still requires an independently arranged disposable runtime fixture."
     },
     {
       "row_id": 5,
       "observation_id": "ticket_offer_claim",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "beta_blocking",
       "reason": "The documented lifecycle requires an offered ticket to become claimed by a real identity, so a read-only claim surface blocks the normal path.",
-      "required_change": "Add a live-offer claim control plus semantic claimed status and identity fields in tools/aionui-extension/webui/index.html and tools/aionui-extension/webui/app.js, then extend trusted_browser_state_v1/browser_observer.py."
+      "required_change": "Run the browser-ticket-offer-claim-live recipe against a live disposable offer; no further candidate change is indicated."
     },
     {
       "row_id": 6,
       "observation_id": "ticket_offer_claim",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "beta_blocking",
       "borderline": true,
       "reason": "An offer can expire while a first-time user follows the walkthrough, and accepting it or hiding the expiry would make the documented claim step silently wrong.",
-      "required_change": "Add an expired-offer claim control and semantic expiry error in tools/aionui-extension/webui/index.html and tools/aionui-extension/webui/app.js, then extend trusted_browser_state_v1/browser_observer.py."
+      "required_change": "Run the browser-ticket-offer-claim-expired recipe against an expired disposable offer; no further candidate change is indicated."
     },
     {
       "row_id": 7,
       "observation_id": "ticket_submit_independent_review",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "beta_blocking",
       "reason": "A first-time user must see one submitted ticket close only after independent review, with no approval still pending.",
-      "required_change": "Expose semantic closed-result, independent-review, and pending-approval counts in tools/aionui-extension/webui/app.js and read them in trusted_browser_state_v1/browser_observer.py."
+      "required_change": "Run the browser-ticket-submit-independent-review recipe after an independent disposable review; no further candidate change is indicated."
     },
     {
       "row_id": 8,
       "observation_id": "result_visible",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "beta_blocking",
       "reason": "The normal path ends with the dashboard showing the real closed result, reviewer attribution, status transition, and a fresh cursor rather than stale state.",
-      "required_change": "Expose actor, closed transition, result count, and cursor semantics in tools/aionui-extension/webui/app.js and extend trusted_browser_state_v1/browser_observer.py to record them after refresh."
+      "required_change": "Run the browser-result-visible recipe after the disposable ticket closes; no further candidate change is indicated."
     },
     {
       "row_id": 9,
       "observation_id": "pause_resume_stop",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "ga_only",
-      "reason": "Pausing, resuming, and cooperatively stopping an already running operation is an optional operator-control flow rather than the first ticket lifecycle.",
-      "known_limitation": "AionUI supports pause and cooperative stop, but it does not yet support resume."
+      "reason": "amended 2026-09-15 to product semantics: verify pause and cooperative stop on a disposable running seat and prove the unsupported Resume control is absent.",
+      "known_limitation": "AionUI intentionally has no Team resume operation; strict evidence must not invent one."
     },
     {
       "row_id": 10,
@@ -113,10 +113,10 @@
     {
       "row_id": 11,
       "observation_id": "clean_reconnect_after_rotation",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "ga_only",
       "reason": "Post-rotation cleanup counters matter to operators diagnosing an unusual recovery, not to a first-time user completing one clean connection.",
-      "known_limitation": "After a door replacement, the UI does not expose stale-offer, duplicate-identity, or orphan-registration cleanup counters."
+      "known_limitation": "The recovery path still requires an independently arranged disposable rotated-door fixture."
     },
     {
       "row_id": 12,
@@ -153,11 +153,11 @@
     {
       "row_id": 17,
       "observation_id": "extension.idempotent-reconnect",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "beta_blocking",
       "borderline": true,
       "reason": "Automatic reconnect can occur during normal first use, and duplicate connections or hidden registration errors can make the first ticket flow silently wrong.",
-      "required_change": "Expose connection and registration-error counts in tools/aionui-extension/webui/app.js and extend trusted_browser_state_v1/browser_observer.py to verify recover remains idempotent."
+      "required_change": "Run the browser-extension-idempotent-reconnect recipe against a connected disposable seat; no further candidate change is indicated."
     },
     {
       "row_id": 18,
@@ -178,10 +178,10 @@
     {
       "row_id": 23,
       "observation_id": "extension.settings-navigation",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "ga_only",
-      "reason": "The documented setup uses the Home connection and Fleet Config routes, not a hidden AionUI settings panel.",
-      "known_limitation": "The AionUI Home page does not provide a separate settings panel opened by a settings-navigation action."
+      "reason": "amended 2026-09-15 to product semantics: verify the visible Open Quickstart hash link targets the already-visible #helper section.",
+      "known_limitation": "AionUI intentionally has no separate hidden settings panel; strict evidence must use the real visible navigation semantics."
     },
     {
       "row_id": 26,
@@ -347,10 +347,10 @@
     {
       "row_id": 161,
       "observation_id": "final.quickstart-candidate-flow",
-      "gap_map_classification": "requires_candidate_or_adapter_change",
+      "gap_map_classification": "recipe_supported_requires_fixture",
       "tier": "beta_blocking",
       "reason": "Quickstart is the first-time route into connecting the Home helper, so an absent action or raw internal JSON leaves the normal path incomplete or misleading.",
-      "required_change": "Align tools/aionui-extension/webui/index.html and tools/aionui-extension/webui/app.js with the canonical quickstart action and expose a semantic raw-JSON count, then extend trusted_browser_state_v1/browser_observer.py."
+      "required_change": "Run the browser-final-quickstart-candidate-flow recipe on the clean candidate runtime; no further candidate change is indicated."
     },
     {
       "row_id": 162,
