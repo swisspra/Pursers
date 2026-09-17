@@ -2,682 +2,705 @@
   "schema_version": 1,
   "artifact_kind": "fleet_browser201_feasibility_precheck",
   "precheck_only": true,
-  "candidate_commit": "b3861ac3811438ecd1f3d2ceb62efbf759c88da0",
+  "candidate_commit": "afaf26ad317df0e305107fef7150fae71324b633",
   "candidate_ref": "origin/main",
   "catalogue_source": "docs/design-home/context/acceptance-facts.json",
   "approved_selector_contract": {
     "source_ref": "origin/codex/TK-e781bb89845b-fleet-selectors-worker3-fix1@139d8c06706c59026a9760f3c29cd8651b3f3aaa",
     "path": "docs/design-home/fleet-selector-contract.md",
-    "present_at_candidate": false,
-    "ancestor_of_candidate": false
+    "present_at_candidate": true,
+    "ancestor_of_candidate": true
   },
   "static_observation": {
-    "data_pursers_attributes_in_fleet_sources": 0,
+    "data_pursers_attributes_in_fleet_sources": 63,
+    "unique_data_pursers_attribute_names": 13,
+    "data_pursers_attributes": [
+      "data-pursers-agent",
+      "data-pursers-board",
+      "data-pursers-connection",
+      "data-pursers-health",
+      "data-pursers-panel",
+      "data-pursers-seat",
+      "data-pursers-selected",
+      "data-pursers-selected-board",
+      "data-pursers-selected-ticket",
+      "data-pursers-state",
+      "data-pursers-status",
+      "data-pursers-surface",
+      "data-pursers-ticket"
+    ],
     "legacy_data_board_id_present": true,
     "runtime_opened": false,
-    "browser_task_space_opened": false
+    "browser_task_space_opened": true
   },
   "summary": {
     "rows": 93,
-    "candidate_or_adapter_change": 93,
+    "candidate_or_adapter_change": 0,
+    "capturable": 93,
     "runtime_attempted": 0,
     "success": 0,
     "failure": 0,
-    "blocked": 93
+    "blocked": 0
   },
-  "stop_reason": "The frozen origin/main tip does not contain the approved Fleet selector contract or its data-pursers-* DOM bindings. The ticket forbids invented selectors and requires stopping before runtime when candidate_or_adapter_change is non-zero.",
-  "required_change": "Land the approved selector checkpoint, freeze the resulting main tip, rerun this precheck, and only then start the one-session Fleet capture.",
+  "stop_reason": null,
+  "required_change": "None at the static selector layer. Proceed to product-backed runtime capture against this exact candidate; CAPTURABLE is not capture evidence.",
+  "capture": {
+    "status": "not_run",
+    "reason": "The available loopback Fleet dashboard is not the exact frozen candidate, and this seat may use board token files only through MCP, so it cannot launch an exact-candidate Fleet runtime without violating seat governance. Operator-owned exact-tip capture is required.",
+    "available_loopback_html_sha256": "1e1abe5af0a74eaa65b3756718b90f72f2bfdbab4ea5eef3208da2d0ccbe9ab6",
+    "candidate_html_sha256": "d4c289ed89adcae41c995ed5140871ba2145713fd2f49f8aa807eb225e9e335a"
+  },
   "rows": [
     {
       "id": "fleet-dashboard.state.bounded",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet-dashboard.state.edit-paused",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet-dashboard.state.empty-agents",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet-dashboard.state.empty-centrals",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet-dashboard.state.empty-workers",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet-dashboard.state.error-board",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet-dashboard.state.loading-board",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet-dashboard.state.offline",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"connection\"][data-pursers-connection]` or `[data-pursers-health]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet-dashboard.state.routes-unavailable",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet-dashboard.state.truncated-tickets",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel]` plus `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet-dashboard.surface",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.active-ticket-rows",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"tickets\"] [data-pursers-ticket][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.add-project-authorization-error",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.add-project-board",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"boards\"] [data-pursers-board][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.add-project-clone-steps",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.add-project-idempotent-rerun",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.add-project-one-time-doors",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.add-project-partial-failure",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.add-project-policy",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.add-project-principals",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.add-project-registry",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"boards\"] [data-pursers-board][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.agent-current-claims",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.agent-duplicate-names",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.agent-pool",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.agent-retired-stale-drawer",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.board-cards",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"boards\"] [data-pursers-board][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.board-detail-activity",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.board-detail-metadata",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.board-detail-truncation",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.central-availability-isolation",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"connection\"][data-pursers-connection]` or `[data-pursers-health]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.config-add-update-preview",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.config-bridge-versions",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.config-current-offers",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.config-discovery-import-conflicts",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.config-dispatch-policy-gaps-history",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.config-doctor",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.config-exact-diff-confirmation",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.config-registry-worktrees",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.config-seat-inventory",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.config-tier-skill-role-capabilities",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.coordinator-configuration",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.default-central-aliases",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"connection\"][data-pursers-connection]` or `[data-pursers-health]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.density",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.doors-connected-seats",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.doors-copy",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.doors-disabled",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.doors-error",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.doors-expiry",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.doors-key-id",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.doors-project-rows",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.doors-rotation-warning",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.doors-secret-free-output",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.doors-unconfigured",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-board]`, and `[data-pursers-seat]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.findings",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.hub-agents",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.hub-boards",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"boards\"] [data-pursers-board][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.hub-operations",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.hub-overview",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"connection\"][data-pursers-connection]` or `[data-pursers-health]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.intake",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.keyboard-help",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.operations-disabled-controls",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.operations-job-progress",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.operations-job-result",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.operations-rollback-failure",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.operations-unavailable-services",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.pool-available",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.pool-busy",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.pool-online",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.pool-stale",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"agents\"] [data-pursers-agent][data-pursers-status]` and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.protocol-overhead",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.refresh-pause-resume",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.release-central",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.release-ci",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.release-github",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.release-immutable-confirmation-plan",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.release-manifest",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.release-pypi",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.release-restart-checklist",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.release-tag",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.search-no-results",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"search\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.search-results",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"search\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.tab-changes",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.tab-flow",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.tab-routes",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.tab-tickets",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.tab-timeline",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-selected-board]` and `[data-pursers-panel=\"board-detail\"]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.theme",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.ticket-counts",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"tickets\"] [data-pursers-ticket][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.unknown-route-recovery",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.updated-state",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-surface=\"fleet\"]` and `data-pursers-state`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "fleet.worker-management",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"]`, `[data-pursers-panel=\"seats\"]`, and `[data-pursers-seat][data-pursers-status]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "final.fleet-503-recovery",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"connection\"][data-pursers-connection]` and `[data-pursers-health]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     },
     {
       "id": "final.o1-readiness-rollback",
-      "outcome": "BLOCKED",
-      "classification": "candidate_or_adapter_change",
+      "outcome": "CAPTURABLE",
+      "classification": "selector_contract_binding_present",
       "required_binding": "`[data-pursers-panel=\"config\"][data-pursers-state]`",
-      "reason": "required data-pursers-* binding is absent from the frozen candidate"
+      "reason": "all attributes named in required_binding are present in Fleet sources at the frozen candidate; static precheck only, runtime capture pending"
     }
   ]
 }
