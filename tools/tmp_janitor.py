@@ -217,7 +217,10 @@ def process_use_state(
         for raw_value in _temp_environment_values(command):
             value = Path(raw_value)
             if not value.is_absolute():
-                continue
+                return None, (
+                    f"live pid {pid_text} has a relative temp environment; "
+                    "cwd-relative ownership cannot be proven"
+                )
             try:
                 comparison_value = _comparison_path(value)
             except OSError:

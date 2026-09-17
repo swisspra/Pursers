@@ -232,6 +232,79 @@ def test_live_temp_environment_refuses_dormant_directory() -> None:
     assert f"live pid {holder.pid}" in result.reason
 
 
+def test_delete_refuses_live_relative_temp_environment(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    test_root = (
+        Path.home()
+        / ".cache"
+        / "pursers-tmp-janitor-tests"
+        / f"relative-{os.getpid()}-{time.time_ns()}"
+    )
+    candidate = test_root / "seat-cache"
+    candidate.mkdir(parents=True)
+    make_old(candidate)
+
+    environment = os.environ.copy()
+    for name in ("TMPDIR", "TMP", "TEMP", "TEMPDIR", "PYTEST_DEBUG_TEMPROOT"):
+        environment.pop(name, None)
+    environment["TMPDIR"] = candidate.name
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time; print('ready', flush=True); time.sleep(30)",
+        ],
+        cwd=candidate.parent,
+        env=environment,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "ready"
+        assert tmp_janitor.run(
+            [candidate], older_than_seconds=3_600, delete=True
+        ) == 0
+        assert candidate.is_dir()
+        output = capsys.readouterr().out
+        assert f"SKIP {candidate}" in output
+        assert f"live pid {holder.pid}" in output
+        assert "reclaimed_bytes=0 candidates=0" in output
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+        shutil.rmtree(test_root, ignore_errors=True)
+
+
+def test_relative_temp_environment_from_process_probe_fails_closed(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "seat-cache"
+    candidate.mkdir()
+    make_old(candidate)
+
+    def unavailable_cwd_runner(
+        command: list[str], **_kwargs: object
+    ) -> SimpleNamespace:
+        if Path(command[0]).name == "lsof":
+            return completed(returncode=1)
+        if command[0] == "/bin/ps":
+            return completed(stdout="123 runner TMPDIR=seat-cache\n")
+        raise AssertionError(command)
+
+    result = tmp_janitor.inspect_candidate(
+        candidate,
+        older_than_seconds=3_600,
+        runner=unavailable_cwd_runner,
+    )
+
+    assert result.selected is False
+    assert "in-use state unknown" in result.reason
+    assert "live pid 123 has a relative temp environment" in result.reason
+    assert "cannot be proven" in result.reason
+
+
 def test_delete_refuses_ambiguous_live_temp_environment(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
