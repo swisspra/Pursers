@@ -79,7 +79,9 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
         )
         return result
 
-    async def create_and_claim(self) -> str:
+    async def create_and_claim(
+        self, *, required_fields: list[str] | None = None
+    ) -> str:
         self.principal = self.admin
         created = await self.call(
             "ticket_create",
@@ -88,7 +90,7 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
             description="exercise explicit claim release",
             target_url="pursers/packages/central",
             scope="interactive-no-send",
-            required_fields=["test_output"],
+            required_fields=required_fields or ["test_output"],
         )
         self.assertFalse(created.is_error)
         ticket_id = created.structured_content["ticket"]["ticket_id"]
@@ -243,6 +245,53 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
                 summary="over notes limit",
                 notes="n" * 5_001,
             )
+
+    async def test_ticket_submit_rejects_malformed_branch_and_commit_without_network(
+        self,
+    ) -> None:
+        for notes in (
+            "test_output: pass",
+            "branch_and_commit: codex/TK-shape @ d428fcd",
+            "branch_and_commit: missing-slash @ " + "a" * 40,
+            (
+                "branch_and_commit: codex/TK-one @ "
+                + "a" * 40
+                + "\nbranch_and_commit: codex/TK-two @ "
+                + "b" * 40
+            ),
+        ):
+            ticket_id = await self.create_and_claim(
+                required_fields=["branch_and_commit", "test_output"]
+            )
+            with self.assertRaisesRegex(
+                ToolError, "branch_and_commit must appear exactly once"
+            ):
+                await self.call(
+                    "ticket_submit",
+                    agent_name="member-agent",
+                    ticket_id=ticket_id,
+                    summary="malformed submission",
+                    notes=notes,
+                )
+            ticket = self.service.load("pursers")["tickets"][ticket_id]
+            self.assertEqual(ticket["status"], "claimed")
+
+    async def test_ticket_submit_accepts_well_formed_branch_and_commit_shape(self) -> None:
+        ticket_id = await self.create_and_claim(
+            required_fields=["branch_and_commit", "test_output"]
+        )
+        result = await self.call(
+            "ticket_submit",
+            agent_name="member-agent",
+            ticket_id=ticket_id,
+            summary="shape valid",
+            notes=(
+                "branch_and_commit: codex/TK-shape @ "
+                + "a" * 40
+                + "\ntest_output: pass"
+            ),
+        )
+        self.assertFalse(result.is_error)
 
 
 if __name__ == "__main__":

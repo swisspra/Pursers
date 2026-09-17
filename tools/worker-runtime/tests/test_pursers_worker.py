@@ -354,6 +354,83 @@ def init_git_repo(root: Path) -> Path:
     return repo
 
 
+def test_headless_worker_submit_guard_blocks_before_board_mutation(
+    tmp_path: Path,
+) -> None:
+    repo = init_git_repo(tmp_path)
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(origin)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", str(origin)], cwd=repo, check=True
+    )
+    branch = "api/TK-remote-tip"
+    subprocess.run(
+        ["git", "switch", "-c", branch], cwd=repo, check=True, capture_output=True
+    )
+    (repo / "result.txt").write_text("done\n", encoding="utf-8")
+    subprocess.run(["git", "add", "result.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "candidate"], cwd=repo, check=True,
+        capture_output=True,
+    )
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "push", "origin", branch], cwd=repo, check=True,
+        capture_output=True,
+    )
+    board = FakeBoard()
+    selected = config(tmp_path, "http://unused")
+    worker = worker_module.Worker(
+        selected,
+        board,
+        None,
+        worker_module.SessionLog(selected.log_file),
+        directive="STATIC",
+    )
+    ticket = {
+        "ticket_id": "TK-remote-tip",
+        "required_fields": ["branch_and_commit", "test_output"],
+    }
+    wrong = "f" * 40
+    with pytest.raises(ValueError, match="mismatched remote branch") as rejected:
+        asyncio.run(worker._tool(
+            "submit_work",
+            {
+                "summary": "wrong tip",
+                "files_changed": ["result.txt"],
+                "notes": f"branch_and_commit: {branch} @ {wrong}",
+            },
+            repo,
+            "board-one",
+            "TK-remote-tip",
+            ticket,
+        ))
+    assert wrong in str(rejected.value)
+    assert commit in str(rejected.value)
+    assert branch in str(rejected.value)
+    assert board.submissions == []
+
+    outcome = asyncio.run(worker._tool(
+        "submit_work",
+        {
+            "summary": "correct tip",
+            "files_changed": ["result.txt"],
+            "notes": f"branch_and_commit: {branch} @ {commit}",
+        },
+        repo,
+        "board-one",
+        "TK-remote-tip",
+        ticket,
+    ))
+    assert outcome == ("submitted", True)
+    assert len(board.submissions) == 1
+
+
 def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
     with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)

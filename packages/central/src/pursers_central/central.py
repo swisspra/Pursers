@@ -181,6 +181,11 @@ DISPATCH_ACTIVITY_WINDOW_MULTIPLIER = 3.0
 BRANCH_AND_COMMIT_RE = re.compile(
     r"(?im)^\s*branch_and_commit\s*:\s*(.+?)\s*$"
 )
+SUBMIT_BRANCH_AND_COMMIT_RE = re.compile(
+    r"(?im)^\s*branch_and_commit\s*:\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+)"
+    r"\s*@\s*([0-9a-fA-F]{40})\s*$"
+)
 PRE_SUBMISSION_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 ACTIVE_TICKET_STATES = frozenset(
     {"open", "claimed", "in_progress", "creating_report", "submitted", "reviewing", "in_review", "needs_human"}
@@ -10097,6 +10102,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 return {"error": "ticket not found", "released": released, "renewed": renewed}
             if ticket.get("server_generated_id") and safe_summary is None:
                 raise ValueError("summary is required for generated-ID tickets")
+            required_fields = ticket.get("required_fields", [])
+            if (
+                isinstance(required_fields, (list, tuple, set))
+                and "branch_and_commit" in required_fields
+            ):
+                branch_lines = BRANCH_AND_COMMIT_RE.findall(safe_notes or "")
+                exact_lines = SUBMIT_BRANCH_AND_COMMIT_RE.findall(safe_notes or "")
+                if len(branch_lines) != 1 or len(exact_lines) != 1:
+                    raise ValueError(
+                        "branch_and_commit must appear exactly once in notes as "
+                        "'<platform>/<branch> @ <full-40-hex-sha>'"
+                    )
             if ticket.get("claimed_by_agent_id") != actor["agent_id"]:
                 release = ticket.get("last_abandoned_at")
                 suffix = f" at {release}" if release else " or reassigned"
