@@ -117,6 +117,11 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
+    def _safe_header_value(self, value: str | None) -> str:
+        if not value:
+            return ""
+        return value.replace("\r", "").replace("\n", "")
+
     def _send(self, status: int, payload: dict[str, Any]) -> None:
         raw = json.dumps(payload).encode()
         self.send_response(status)
@@ -124,7 +129,7 @@ class _Handler(BaseHTTPRequestHandler):
             "X-Pursers-Observation-Id", "X-Pursers-Run-Id",
             "X-Pursers-Action-Id", "X-Pursers-Entity-Id",
         ):
-            self.send_header(name, self.headers.get(name, ""))
+            self.send_header(name, self._safe_header_value(self.headers.get(name, "")))
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
