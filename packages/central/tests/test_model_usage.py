@@ -218,6 +218,110 @@ class TicketModelUsageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(usage["input_tokens"])
         self.assertIsNone(usage["output_tokens"])
 
+    async def test_identifier_rollups_are_bounded_across_rejection_rounds(self) -> None:
+        self.principal = self.admin
+        created = await self.call(
+            "ticket_create",
+            agent_name="orchestrator-seat",
+            title="bound usage identifiers",
+            description="exercise more runtime identities than the rollup retains",
+            target_url="pursers/packages/central",
+            scope="interactive",
+            required_fields=["test_output"],
+            assigned_to="worker-seat",
+            model_usage=self.usage(1, 3, 1),
+        )
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        rounds = central.MODEL_USAGE_IDENTIFIER_LIMIT + 2
+
+        for index in range(rounds):
+            suffix = rounds - index - 1
+            self.principal = self.worker
+            await self.call(
+                "board_join",
+                agent_name="worker-seat",
+                allow_takeover=True,
+                capabilities={
+                    "host": f"worker-host-{suffix:02d}",
+                    "provider": f"worker-provider-{suffix:02d}",
+                    "model": f"worker-model-{suffix:02d}",
+                    "can_work": True,
+                    "can_review": False,
+                },
+            )
+            await self.call(
+                "ticket_claim", agent_name="worker-seat", ticket_id=ticket_id
+            )
+            await self.call(
+                "ticket_submit",
+                agent_name="worker-seat",
+                ticket_id=ticket_id,
+                summary=f"worker round {index}",
+                model_usage=self.usage(1, index + 1, 1),
+            )
+
+            self.principal = self.admin
+            await self.call(
+                "board_join",
+                agent_name="reviewer-seat",
+                role="reviewer",
+                allow_takeover=True,
+                capabilities={
+                    "host": f"reviewer-host-{suffix:02d}",
+                    "provider": f"reviewer-provider-{suffix:02d}",
+                    "model": f"reviewer-model-{suffix:02d}",
+                    "can_work": False,
+                    "can_review": True,
+                },
+            )
+            await self.call(
+                "ticket_review",
+                agent_name="reviewer-seat",
+                ticket_id=ticket_id,
+                verdict="approve" if index == rounds - 1 else "reject",
+                review_notes=f"review round {index}",
+                fix_instructions=(
+                    None if index == rounds - 1 else "exercise another identity"
+                ),
+                model_usage=self.usage(1, 2, 1),
+            )
+
+        fetched = await self.call("ticket_get", ticket_id=ticket_id, view="full")
+        usage = fetched.structured_content["ticket"]["model_usage"]
+        roles = usage["roles"]
+        for role in ("worker", "reviewer"):
+            row = roles[role]
+            for plural in ("hosts", "providers", "models"):
+                self.assertEqual(
+                    len(row[plural]), central.MODEL_USAGE_IDENTIFIER_LIMIT
+                )
+                self.assertTrue(row[f"{plural}_truncated"])
+                self.assertEqual(row[plural], sorted(row[plural]))
+
+        expected_suffixes = [
+            f"{index:02d}" for index in range(central.MODEL_USAGE_IDENTIFIER_LIMIT)
+        ]
+        self.assertEqual(
+            roles["worker"]["hosts"],
+            [f"worker-host-{suffix}" for suffix in expected_suffixes],
+        )
+        serialized_usage = json.dumps(usage, sort_keys=True)
+        self.assertNotIn("worker-host-08", serialized_usage)
+        self.assertNotIn("reviewer-model-09", serialized_usage)
+        self.assertEqual(roles["worker"]["records"], rounds)
+        self.assertEqual(roles["worker"]["turns"], rounds)
+        self.assertEqual(
+            roles["worker"]["input_tokens"], rounds * (rounds + 1) // 2
+        )
+        self.assertEqual(roles["worker"]["output_tokens"], rounds)
+        self.assertEqual(roles["reviewer"]["records"], rounds)
+        self.assertEqual(roles["reviewer"]["turns"], rounds)
+        self.assertEqual(roles["reviewer"]["input_tokens"], rounds * 2)
+        self.assertEqual(roles["reviewer"]["output_tokens"], rounds)
+        expected_total = 4 + rounds * (rounds + 1) // 2 + rounds + rounds * 3
+        self.assertEqual(usage["total_tokens"], expected_total)
+        self.assertAlmostEqual(usage["orchestrator_token_share"], 4 / expected_total)
+
 
 if __name__ == "__main__":
     unittest.main()

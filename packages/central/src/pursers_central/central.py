@@ -134,6 +134,7 @@ MIN_JOURNAL_ROW_CAP = MIN_COMPACTION_RETAIN_LAST + 1
 MAX_JOURNAL_ROW_CAP = 1_000_000
 MODEL_USAGE_SCHEMA_VERSION = 1
 MODEL_USAGE_ROLES = ("orchestrator", "worker", "reviewer")
+MODEL_USAGE_IDENTIFIER_LIMIT = 8
 MODEL_USAGE_FIELDS = frozenset(
     {"schema_version", "turns", "reported_turns", "input_tokens", "output_tokens"}
 )
@@ -6024,6 +6025,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "hosts": [],
                 "providers": [],
                 "models": [],
+                "hosts_truncated": False,
+                "providers_truncated": False,
+                "models_truncated": False,
             },
         )
         aggregate["records"] += 1
@@ -6044,9 +6048,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ("model", "models"),
         ):
             value = record.get(source)
-            if isinstance(value, str) and value not in aggregate[target]:
-                aggregate[target].append(value)
-                aggregate[target].sort()
+            if isinstance(value, str):
+                retained = sorted({*aggregate[target], value})
+                if len(retained) > MODEL_USAGE_IDENTIFIER_LIMIT:
+                    aggregate[f"{target}_truncated"] = True
+                aggregate[target] = retained[:MODEL_USAGE_IDENTIFIER_LIMIT]
         complete_roles = [
             roles.get(name) for name in MODEL_USAGE_ROLES
         ]
