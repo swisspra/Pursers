@@ -82,3 +82,16 @@ named fields (`summary`, `remaining_tasks`, `next_steps`, `files`, `blockers`,
 and `warnings` as applicable). Their legacy rendered `content` copy remains in
 storage but is omitted from memory read projections, so the same information is
 not sent twice.
+
+## Ticket model-usage accounting
+
+`ticket_create`, `ticket_submit`, and `ticket_review` accept a content-free
+`model_usage` object with turn counts and provider-reported input/output token
+totals. Central derives the host, provider, model, role, actor, and timestamp;
+unknown fields are rejected so prompt and completion text cannot enter the
+record. Missing host counters remain `null` rather than being estimated.
+
+`ticket_get` exposes the durable per-role aggregate at `model_usage`, including
+all rejection rounds, `total_tokens`, and `orchestrator_token_share`. The total
+and share remain `null` until orchestrator, worker, and reviewer token totals
+are all reported.

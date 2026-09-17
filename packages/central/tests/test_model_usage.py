@@ -151,9 +151,29 @@ class TicketModelUsageTests(unittest.IsolatedAsyncioTestCase):
             "ticket_review",
             agent_name="reviewer-seat",
             ticket_id=ticket_id,
+            verdict="reject",
+            review_notes="one correction",
+            fix_instructions="adjust the result",
+            model_usage=self.usage(2, 210, 25),
+        )
+        self.assertFalse(reviewed.is_error)
+        self.principal = self.worker
+        await self.call("ticket_claim", agent_name="worker-seat", ticket_id=ticket_id)
+        await self.call(
+            "ticket_submit",
+            agent_name="worker-seat",
+            ticket_id=ticket_id,
+            summary="corrected",
+            model_usage=self.usage(1, 20, 5),
+        )
+        self.principal = self.admin
+        reviewed = await self.call(
+            "ticket_review",
+            agent_name="reviewer-seat",
+            ticket_id=ticket_id,
             verdict="approve",
             review_notes="verified",
-            model_usage=self.usage(2, 210, 25),
+            model_usage=self.usage(1, 30, 5),
         )
         self.assertFalse(reviewed.is_error)
         fetched = await self.call("ticket_get", ticket_id=ticket_id, view="full")
@@ -164,13 +184,19 @@ class TicketModelUsageTests(unittest.IsolatedAsyncioTestCase):
              for role, row in roles.items()},
             {
                 "orchestrator": (3, 120, 30),
-                "worker": (5, 500, 80),
-                "reviewer": (2, 210, 25),
+                "worker": (6, 520, 85),
+                "reviewer": (3, 240, 30),
             },
         )
         self.assertEqual(roles["orchestrator"]["hosts"], ["codex"])
         self.assertEqual(roles["worker"]["hosts"], ["headless"])
         self.assertEqual(roles["reviewer"]["hosts"], ["codex"])
+        self.assertEqual(roles["worker"]["records"], 2)
+        self.assertEqual(roles["reviewer"]["records"], 2)
+        self.assertEqual(ticket["model_usage"]["total_tokens"], 1025)
+        self.assertAlmostEqual(
+            ticket["model_usage"]["orchestrator_token_share"], 150 / 1025
+        )
         rendered = json.dumps(ticket["model_usage"], sort_keys=True)
         self.assertNotIn("prompt", rendered)
         self.assertNotIn("completion", rendered)

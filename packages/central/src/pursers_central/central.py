@@ -6047,6 +6047,31 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if isinstance(value, str) and value not in aggregate[target]:
                 aggregate[target].append(value)
                 aggregate[target].sort()
+        complete_roles = [
+            roles.get(name) for name in MODEL_USAGE_ROLES
+        ]
+        complete = all(
+            isinstance(item, Mapping)
+            and type(item.get("input_tokens")) is int
+            and type(item.get("output_tokens")) is int
+            for item in complete_roles
+        )
+        if not complete:
+            summary["total_tokens"] = None
+            summary["orchestrator_token_share"] = None
+            return
+        total_tokens = sum(
+            item["input_tokens"] + item["output_tokens"]
+            for item in complete_roles
+        )
+        orchestrator = roles["orchestrator"]
+        orchestrator_tokens = (
+            orchestrator["input_tokens"] + orchestrator["output_tokens"]
+        )
+        summary["total_tokens"] = total_tokens
+        summary["orchestrator_token_share"] = (
+            orchestrator_tokens / total_tokens if total_tokens else None
+        )
 
     def validate_seat_role(principal: Principal, role: str) -> str:
         if role not in SEAT_ROLES:
