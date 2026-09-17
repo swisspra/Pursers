@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Personal feed error browser test host</title>
+  </head>
+  <body>
+    <iframe id="app-frame" title="Personal dashboard under test" src="../dashboard.html"></iframe>
+    <script>
+      const emptySnapshot = {
+        contract_version: 2,
+        data_mode: "stale",
+        activity_scope: "local-model-tools",
+        fixture_provenance: "browser acceptance product payload",
+        board: { id: "browser-acceptance", name: "Browser Acceptance" },
+        agents: [],
+        tickets: [],
+        highlights: { latest_handoff: null, important_pinned: null },
+        status: {
+          ticket_status_counts: {},
+          memory_type_counts: {},
+          visible_memory_count: 0,
+          scrub_profile: "internal",
+        },
+        events: [],
+        ticket_total: 0,
+        ticket_truncated: false,
+        agent_total: 0,
+        agents_live: 0,
+        agent_truncated: false,
+        event_cursor: 0,
+        dropped_events: 0,
+        has_more: false,
+        connected: false,
+        stale: true,
+        feed_error: "Initial sanitized browser state",
+        resync_notice: null,
+        snapshot_at: null,
+      };
+      let currentSnapshot = emptySnapshot;
+      const frame = document.querySelector("#app-frame");
+      const result = (structuredContent) => ({ content: [], structuredContent });
+      const fleet = {
+        schema_version: 1,
+        registry_warning: null,
+        projects: [],
+        pool: [],
+        truncation_counts: { projects: 0, boards: 0, agents: 0, tickets: 0, pool: 0 },
+        totals: { agents: 0, busy: 0, available: 0, stale: 0 },
+      };
+      const links = {
+        schema_version: 1,
+        board_id: "browser-acceptance",
+        source_tool: "memory_links",
+        relationship_authority: "authoritative",
+        nodes: [],
+        edges: [],
+        node_count: 0,
+        edge_count: 0,
+        returned_node_count: 0,
+        returned_edge_count: 0,
+        truncated: false,
+      };
+
+      window.addEventListener("message", (event) => {
+        if (event.source !== frame.contentWindow) return;
+        const message = event.data;
+        if (!message || message.jsonrpc !== "2.0" || typeof message.method !== "string") return;
+        if (message.method === "ui/initialize" && message.id !== undefined) {
+          event.source.postMessage({
+            jsonrpc: "2.0",
+            id: message.id,
+            result: {
+              protocolVersion: "2026-01-26",
+              hostInfo: { name: "pursers-browser-acceptance", version: "1.0.0" },
+              hostCapabilities: {},
+              hostContext: { platform: "desktop" },
+            },
+          }, "*");
+        } else if (message.method === "tools/call" && message.id !== undefined) {
+          const name = message.params && message.params.name;
+          const payload = name === "fleet_snapshot" ? fleet
+            : name === "link_snapshot" ? links : currentSnapshot;
+          event.source.postMessage({ jsonrpc: "2.0", id: message.id, result: result(payload) }, "*");
+        } else if (message.method === "ui/notifications/initialized") {
+          window.__pursersHostReady = true;
+        }
+      });
+
+      window.__pursersSendSnapshot = (snapshot) => {
+        currentSnapshot = snapshot;
+        frame.contentWindow.postMessage({
+          jsonrpc: "2.0",
+          method: "ui/notifications/tool-result",
+          params: result(snapshot),
+        }, "*");
+      };
+    </script>
+  </body>
+</html>
