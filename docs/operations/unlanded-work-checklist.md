@@ -1,5 +1,7 @@
 # Unlanded work checklist
 
+This checklist is built from ticket-associated branches and therefore cannot, by itself, see an unmerged remote ref with no ticket ID or a ticket branch omitted from the audited ticket set.
+
 Audit date: 2026-09-17. Baseline: `origin/main` at `ef4295f03e4702ed2278437b3b5fb9faa1ed13e4`.
 
 ## Method and scope
@@ -137,6 +139,50 @@ path.
 | `TK-891afe79aa99` | Butler settings in the Fleet dashboard: choose endpoint and model on the page, keep the key off the page and out of the board | **UNKNOWN** | `claimed` / review `reject`; source `b06e559d96f4d114a841b3581b805d9fa697e5e6`; 0/3 blobs equal main; insufficient carrier evidence |
 | `TK-cadfa2b8b33f` | Next train: beginner quickstart and recovery guide aligned with Warm Guided Home | **UNKNOWN** | `canceled` / review `reject`; source `7cbd1edaa6b883d2a06c8df461a5dd450889f487`; 0/1 blobs equal main; insufficient carrier evidence |
 | `TK-f8f45698471a` | Score the butler against the answers it did not give: keep every shadow draft next to the human answer, and cite precedent on the next question | **UNKNOWN** | `claimed` / review `None`; source `bfc2e7cf839d28c0ff8a5323d52906575652c2d3`; 0/0 blobs equal main; insufficient carrier evidence |
+
+## Round two: unmerged remote refs omitted by the ticket-first audit
+
+Round two was initially measured against `origin/main` at `e319890001d4a45d27db9956eb0ce4a3e7ba95aa`. There were 587 remote refs, of which 293 were not ancestors of main. Those refs contained 138 distinct `TK-…` IDs; this checklist mentioned 93 IDs. The set difference was 59 tickets. Thirty had at least one main commit whose message named the ticket, leaving the 29-row cohort below with no ticket-named trace on that baseline. Submission preflights first observed `26db4502855dd347a9ca3f37bb6d8351b480e9e1` (588 refs, 291 unmerged, 136 ticket IDs), then `31d73c633434318ba35472548a991256874b753d` (593 refs, 292 unmerged, 137 ticket IDs). Five cohort rows landed during validation and their verdicts were updated without dropping them from the auditable cohort. `tip = approved` is reported only for `STRANDED`; `—` means the verdict does not depend on that recovery check.
+
+| Ticket | Unmerged source | Verdict | Evidence | tip = approved |
+|---|---|---|---|---|
+| `TK-123094d395d2` | stale resubmissions through `d02cee9cec872b2e703af8dd715f8a276fd28207` | **LANDED ELSEWHERE** | The approved resubmission `919635c8924d091a74a614940a0aab3e549b7c7a` is itself an ancestor of main; the remaining refs are rejected/stale predecessors. | — |
+| `TK-1a726a0af323` | `07569718288f3655e31801db7dd3a40ff947e4bf` | **UNKNOWN** | The only submission is rejected and the ticket is actively claimed; there is no approved SHA or replacement to classify. | — |
+| `TK-31763c5179a3` | `123d9d6bcf6d8962fa815143246648fc5be2a711` | **LANDED ELSEWHERE** | Main carrier `74e2ee6953f0392ec754843d7580f528466e0b8b` has the same `fix(aionui): harden join retry states` subject and the same three-file change set; the current tests retain the retry coverage. | — |
+| `TK-365578d02928` | stale recovery tip `49b450344f62fc38cb5f61270d868350a6e56cb0` | **LANDED ELSEWHERE** | Approved recovery `3d920f9b936198ca9d4a572c30fc2417f0bc5353` landed during validation through merge carrier `8036e8f5f13db877633ab4d6b3dc7d0f9859b267`. | — |
+| `TK-39b568e28f7c` | `828f6d8647d3618f0a7c3120668ab216d85fccc6` | **LANDED ELSEWHERE** | Landed during this audit through merge carrier `5aa604a749d38b6369d69028113b4e14a8da9e54`; the exact approved SHA is now an ancestor of main. | — |
+| `TK-3ad851f504f4` | stale release-integrity tip `059ff4d8ea00cc62a5d1d8eac66898ed58dc733f` | **LANDED ELSEWHERE** | Approved fail-closed release result `773de5cce800354b9f9d88b2aa7cb6d67ac6dfcb` is an ancestor of main; the unmerged ref is an older sibling. | — |
+| `TK-4cecaa5d1901` | stale predecessor `d3b0a9f5243bfdadf35ed54a9e68e2474f5e568c` | **LANDED ELSEWHERE** | Approved report fix `767b4753fc49438e4b9beb12efcdfe70db78cb45` landed during validation through merge carrier `9c4b0e43f51e9684c9df6aabb06890cb8f31839b`. | — |
+| `TK-4d936aaace30` | `f256756cb72db028394ba70cf08d8c44d2556c58` | **STRANDED** | Approved door-confirmation rebase is absent from main; its `createDoorPreview`/second-confirmation UI is not present and no later replacement was located. | **yes** |
+| `TK-5d5cfe618350` | `7115eb6ef5c536a2507b66edbda8726032d9ed10` | **STRANDED** | Approved fail-closed empty-token-file behavior is absent: main has neither the error text nor its tests, and no carrier/replacement was found. | **yes** |
+| `TK-5ddf2539f157` | stale tips `0444c3a8fc37ab96d8ccbfff3123698043a039a6` and `af273f6825357ef47e06618cf50e1b9cd62b1efb` | **LANDED ELSEWHERE** | Approved binding-manifest result `b593d35aa65f7bb0c599d0dedb5403e9260c3c4c` and its reviewed successors are ancestors of main. | — |
+| `TK-61c78e178e9f` | stale first submission `61c3a79cd101802c1b91f1fadbd37c37e9d4aff5` | **LANDED ELSEWHERE** | Approved resubmission `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` is an ancestor of main. | — |
+| `TK-628602eedb90` | `f1984667dd035b249fbce4d6536bf1a7d4ffb3a3` | **LANDED ELSEWHERE** | Foundation carrier `133d5f5acd3bd1dca8121b9171879516bcfc3474` introduced the Team-adapter nonzero-exit envelope behavior; current main retains the contract, implementation, and regression. | — |
+| `TK-72cc260d3d63` | `7dd9875750ba649c8e077ecfa013d2ab2ae0bd43` | **LANDED ELSEWHERE** | Main carrier `88e02e05a0b2f95f64799c06a305196a727159a0` has the same partial-recovery subject and exact eight-file change set. | — |
+| `TK-7c1cddcc3761` | stale submissions `a1c31698bea26f37710ba42919dc65bb57b5ba54` and `a9724cbff0efd21a6604442e6fbd706c51215fe0` | **LANDED ELSEWHERE** | Approved result `e96e60176489287629ff172ef3f4968f8042bf27` is an ancestor of main. | — |
+| `TK-7c4310efb4d2` | `f04fbd9b09149146701d75c21f4e73db548f5daf` | **LANDED ELSEWHERE** | Landed during this audit through merge carrier `acfbb7829ab9777d5e4ce1df3e8e566fc56b1274`; the exact approved SHA is now an ancestor of main. | — |
+| `TK-8b7c5142d037` | `1756f8e2632a232ba63b0d02b07fb571162c8f7c` | **LANDED ELSEWHERE** | Patch-equivalent main carrier `17d1cc7a9af44a9ea453c410966a3bdee6f63cd7`; both changed blobs are identical on current main. | — |
+| `TK-912f3657c2bf` | stale first submission `741ce1e34409f7debcb188a1b7937668815276e9` | **LANDED ELSEWHERE** | Approved reconcile result `1e532b3b415e253f0d47867b67301b37043dacc6` is an ancestor of main. | — |
+| `TK-97d889c87952` | `9032bb3a78d662b826af3bba9a0e7e0e0484a84e` | **LANDED ELSEWHERE** | Main carrier `5e809adb626cdf75afa070df50678c45ac96c767` has the same offer-catchup subject and exact nine-file change set. | — |
+| `TK-a3f0627d27db` | abandoned assembly lines through `9d8e284333f9bffe2004dfaf7dd45c1849085559` | **SUPERSEDED** | Replaced by the landed assembly sequence `3f16f0595f0dad56b4d1b104a59c261b1ae93ca6`, `ad55c14a38e28fe49253d974d96d1771141a7607`, `62fb2d47dd78854debbc0c6fb7a773aed0d11030`, and `1e00c633e753334c75435835209b9dd577601abc`; the ticket itself was canceled after rejection. | — |
+| `TK-abf6fe93410b` | stale submissions `d2a1026d00edcc8f79bcce56b37345e786bf776a` and `c34b01ba1fcbe31dd1d0d2b36e73a18ba48fa5d0` | **LANDED ELSEWHERE** | Approved packaging-gate result `b06ce6627edb62fc588eee541fa568445b709054` is an ancestor of main. | — |
+| `TK-b084afea1f2e` | `a57688ed1fb94225cd5afbd7bb94eb9d69bbe382` | **STRANDED** | Approved two-commit post-join guidance rebase is absent from main; no carrier or successor was located. | **yes** |
+| `TK-b53abe93ab37` | `7881c5091ee67e1d38c6987d54d74af56416da15` | **LANDED ELSEWHERE** | Landed during this audit through merge carrier `d9a0c2f8fd1c9cef1565012d78423f2c5850e585`; the exact approved SHA is now an ancestor of main. | — |
+| `TK-bec9892c667b` | `281c66934648d846a7e886885498b7d2dfeb0195` | **UNKNOWN** | Current MCP Registry submission is rejected and actively claimed; there is no approved SHA or named replacement. | — |
+| `TK-caecfe4f5ad1` | `d2ea1237f50f06193eb03ad32fead93ab197b349` | **LANDED ELSEWHERE** | Main carrier `7d7a99cf3f063f414046c533863ae7fe4a9992b7` retains the approved `74c3ba1…` receipt content byte-for-byte and adds only a two-line historical-evidence header. | — |
+| `TK-cd4077916134` | stale producer tip `bee527481e66be9f1ede7cfde816024633e56a1f` | **LANDED ELSEWHERE** | Approved unique producer `85b8c20189344b1122e91906eee0d6ade0cc8103` and later reviewed typed-evidence refinements are ancestors of main. | — |
+| `TK-d0036357b381` | `f43639c815e6de9a31ac6295f307c6a6a01b8cf7` | **SUPERSEDED** | Replaced by the approved current-main rebase ticket `TK-b084afea1f2e` at `a57688ed1fb94225cd5afbd7bb94eb9d69bbe382`; that replacement is separately classified as stranded above. | — |
+| `TK-e6ad052cf533` | `e189dac87e7a5fcb4987f832a30363cc6dad8758` | **LANDED ELSEWHERE** | Main carrier `d2a42e4945a561d5f0bc09e61d908929b249e2f9` has the same disconnected-diagnostics subject and exact two-file change set. | — |
+| `TK-e760a0b5a88c` | `35fd38e41be2a176ecd85dd5ad563fae74a29ff7` | **SUPERSEDED** | Replaced by the approved current-main rebase ticket `TK-4d936aaace30` at `f256756cb72db028394ba70cf08d8c44d2556c58`; that replacement is separately classified as stranded above. | — |
+| `TK-fadd47fce924` | rejected predecessor lines through `e89f6b87788ade6783e18e7a9de9b54c8f1906a9` | **LANDED ELSEWHERE** | Approved causal-predicate result `4e9ef6a0b48b82ab7b823e67ba7362c5be082834` is an ancestor of main; the remaining refs are rejected predecessors. | — |
+
+The first audit missed these because its universe began with ticket IDs already selected for the checklist, then inspected branches for those tickets. A branch-first query would have caught both failure modes: enumerate every `refs/remotes/origin/*` ref for which `git merge-base --is-ancestor <ref> origin/main` is false, extract and de-duplicate every `TK-[0-9a-f]{12}` from those ref names, set-difference that list against the checklist, and separately retain every unmerged ref from which no ticket ID can be extracted. `TK-5f4211667ac2` was checked before this section was written; it remained claimed with no landed-but-unshipped section, so this change builds on current main without editing or pre-empting that ticket's section.
+
+### Unmerged remote ref with no ticket
+
+| Remote ref | Tip / base | Finding | Disposition |
+|---|---|---|---|
+| `origin/alert-autofix-12` | tip `1a7cc8e6f56efcd2a364f76838d06e7b87042d8c`; base `ef4295f03e4702ed2278437b3b5fb9faa1ed13e4` | Current main still contains the unsanitised `self.send_header(name, self.headers.get(name, ""))` at `tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py:127`. GitHub code-scanning alert 12 (`py/http-response-splitting`) is **open**. The branch adds `_safe_header_value`, stripping CR and LF before echoing the four request headers. `_Handler` is reachable only when this test module is launched as the disposable `--typed-evidence-http-server` acceptance fixture; it is not imported by or reachable through the shipped extension, Central, bridge, Fleet, or Personal runtime. `git for-each-ref` found no other `origin/alert-autofix-*` ref. | Audit only: operator decides whether a test-harness-only CodeQL fix should land. |
 
 ## Release-artifact gap
 
