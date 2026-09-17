@@ -117,6 +117,57 @@ pursers-missing = "missing_module:main"
         check_delivery_manifest.validate(root)
 
 
+def test_distribution_outside_conventional_roots_cannot_be_smuggled(
+    tmp_path: Path,
+) -> None:
+    root = _base_repository(tmp_path)
+    project = root / "services/audit-export/pyproject.toml"
+    project.parent.mkdir(parents=True)
+    project.write_text(
+        """[project]
+name = "pursers-audit-export"
+version = "1.0.0"
+
+[project.scripts]
+pursers-audit-export = "audit_export:main"
+""",
+        encoding="utf-8",
+    )
+    (project.parent / "audit_export.py").write_text(
+        "def main() -> None:\n    pass\n",
+        encoding="utf-8",
+    )
+
+    failures = check_delivery_manifest.validate(root)
+
+    assert any(
+        "unregistered artifact: python-distribution:pursers-audit-export "
+        "(services/audit-export/pyproject.toml)" in failure
+        for failure in failures
+    )
+    assert any(
+        "unregistered artifact: "
+        "python-console-script:pursers-audit-export:pursers-audit-export "
+        "(services/audit-export/audit_export.py)" in failure
+        for failure in failures
+    )
+
+
+@pytest.mark.parametrize("ignored_root", ["build", "tests", "vendor"])
+def test_generated_test_and_vendor_project_trees_stay_ignored(
+    tmp_path: Path, ignored_root: str
+) -> None:
+    root = _base_repository(tmp_path)
+    project = root / ignored_root / "nested/pyproject.toml"
+    project.parent.mkdir(parents=True)
+    project.write_text(
+        '[project]\nname = "third-party-fixture"\nversion = "1.0.0"\n',
+        encoding="utf-8",
+    )
+
+    assert check_delivery_manifest.validate(root) == []
+
+
 def test_stale_delivery_channel_fails(tmp_path: Path) -> None:
     root = _base_repository(tmp_path)
     project = root / "packages/alpha/pyproject.toml"

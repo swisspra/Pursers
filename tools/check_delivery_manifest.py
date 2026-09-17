@@ -67,9 +67,7 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
             )
         found[artifact_id] = artifact
 
-    project_files = set((root / "packages").rglob("pyproject.toml"))
-    project_files.update((root / "tools").rglob("pyproject.toml"))
-    for path in sorted(project_files):
+    for path in sorted(root.rglob("pyproject.toml")):
         if _ignored(path, root):
             continue
         try:
