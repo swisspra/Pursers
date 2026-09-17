@@ -7,6 +7,7 @@ import argparse
 import ast
 import difflib
 import hashlib
+import html
 import json
 import re
 import subprocess
@@ -93,6 +94,7 @@ COHORT_VERSION_FILES = (
 WHATS_NEW_HISTORY_HEADING = re.compile(
     r"(?m)^\s*<h3>\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)? · \d{4}-\d{2}-\d{2}</h3>\s*$"
 )
+VERSION_REFERENCE = r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?"
 
 LOCKED_SOURCE_PACKAGES = {
     "pursers-central": ("packages/central/src", "pursers_central"),
@@ -211,8 +213,71 @@ def _version_reference_regions(relative: str, text: str) -> tuple[str, str]:
     return text[: match.start()], text[match.start() :]
 
 
+def _package_distribution(root: Path, key: str) -> str:
+    candidates = (
+        root / "packages" / key / "pyproject.toml",
+        root / "tools" / key.replace("_", "-") / "pyproject.toml",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(_pyproject(candidate)["project"]["name"])
+    raise ReleaseTrainError(f"no project metadata found for package key {key!r}")
+
+
+def _component_aliases(distribution: str, key: str) -> tuple[str, ...]:
+    """Return reference labels derived from manifest keys and project metadata."""
+    words = distribution.split("-")
+    aliases = {
+        distribution,
+        distribution.replace("-", "_"),
+        distribution.replace("-", " "),
+        key.replace("_", " "),
+    }
+    if words[:1] == ["pursers"] and len(words) > 1:
+        aliases.add(" ".join(words[1:]))
+    return tuple(sorted(aliases, key=len, reverse=True))
+
+
+def _visible_reference_line(line: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", " ", line))
+
+
+def _component_version_references(
+    root: Path,
+    versions: ReleaseVersions,
+    text: str,
+) -> dict[str, list[tuple[str, int]]]:
+    references: dict[str, list[tuple[str, int]]] = {
+        key: [] for key in versions.packages
+    }
+    forward_separator = r"(?:\s|==|[-:=/·,()])+"
+    reverse_separator = r"\s+"
+    for key in versions.packages:
+        distribution = _package_distribution(root, key)
+        alias = "(?:" + "|".join(
+            re.escape(value) for value in _component_aliases(distribution, key)
+        ) + ")"
+        forward = re.compile(
+            rf"(?<![\w-]){alias}(?![\w]){forward_separator}(?P<version>{VERSION_REFERENCE})(?![\w])",
+            re.IGNORECASE,
+        )
+        reverse = re.compile(
+            rf"(?<![\w])(?P<version>{VERSION_REFERENCE})(?![\w]){reverse_separator}{alias}(?![\w-])",
+            re.IGNORECASE,
+        )
+        for line_number, raw_line in enumerate(text.splitlines(), 1):
+            line = _visible_reference_line(raw_line)
+            seen: set[tuple[int, int]] = set()
+            for pattern in (forward, reverse):
+                for match in pattern.finditer(line):
+                    if match.span() in seen:
+                        continue
+                    seen.add(match.span())
+                    references[key].append((match.group("version"), line_number))
+    return references
+
+
 def _cohort_version_errors(root: Path, versions: ReleaseVersions) -> list[str]:
-    values = {"product": versions.product, **versions.packages}
     errors: list[str] = []
     for relative in COHORT_VERSION_FILES:
         try:
@@ -220,12 +285,27 @@ def _cohort_version_errors(root: Path, versions: ReleaseVersions) -> list[str]:
                 relative,
                 (root / relative).read_text(encoding="utf-8"),
             )
+            references = _component_version_references(root, versions, current)
         except ReleaseTrainError as exc:
             errors.append(str(exc))
             continue
-        for key, expected in values.items():
-            if expected not in current:
-                errors.append(f"{relative}: missing {key} version {expected}")
+        correct_versions: set[str] = set()
+        for key, expected in versions.packages.items():
+            distribution = _package_distribution(root, key)
+            for actual, line_number in references[key]:
+                if actual == expected:
+                    correct_versions.add(expected)
+                else:
+                    errors.append(
+                        f"{relative}:{line_number}: {distribution} reference "
+                        f"{actual} != {key} version {expected}"
+                    )
+        # Product, pursers, and personal intentionally share one version. Requiring
+        # each distinct manifest value keeps combined labels valid while ensuring a
+        # component's version cannot be supplied by another component's label.
+        for key, expected in {"product": versions.product, **versions.packages}.items():
+            if expected not in correct_versions:
+                errors.append(f"{relative}: missing bound {key} version {expected}")
     return errors
 
 

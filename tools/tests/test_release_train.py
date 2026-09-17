@@ -84,7 +84,7 @@ def test_component_only_bump_rewrites_and_checks_every_cohort_document(
 
     before = release_train.check(root, target)
     assert {
-        f"{relative}: missing central version 0.1.0a31"
+        f"{relative}: missing bound central version 0.1.0a31"
         for relative in release_train.COHORT_VERSION_FILES
     } <= set(before)
 
@@ -105,6 +105,40 @@ def test_component_only_bump_rewrites_and_checks_every_cohort_document(
             for relative in release_train.COHORT_VERSION_FILES
         )
     }
+
+
+@pytest.mark.parametrize("relative", release_train.COHORT_VERSION_FILES)
+def test_check_rejects_swapped_component_versions_even_when_both_remain_present(
+    tmp_path: Path,
+    relative: str,
+) -> None:
+    root = _fixture_repository(tmp_path)
+    manifest = load_versions(root / "tools/release_versions.toml")
+    path = root / relative
+    current, history = release_train._version_reference_regions(
+        relative, path.read_text(encoding="utf-8")
+    )
+    central = manifest.packages["central"]
+    client = manifest.packages["client"]
+    swapped = current.replace(central, "CENTRAL_VERSION_PLACEHOLDER")
+    swapped = swapped.replace(client, central)
+    swapped = swapped.replace("CENTRAL_VERSION_PLACEHOLDER", client)
+    path.write_text(swapped + history, encoding="utf-8")
+
+    errors = release_train.check(root, manifest)
+
+    assert any(
+        error.startswith(f"{relative}:")
+        and "pursers-central reference" in error
+        and f"!= central version {central}" in error
+        for error in errors
+    )
+    assert any(
+        error.startswith(f"{relative}:")
+        and "pursers-client reference" in error
+        and f"!= client version {client}" in error
+        for error in errors
+    )
 
 
 def test_component_only_bump_preserves_whats_new_release_history(
