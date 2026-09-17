@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import inspect
 import json
 import os
 import re
+import subprocess
 import warnings
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterable
 
 import httpx2
@@ -68,6 +72,90 @@ STATUS_ICONS = {
 PRIORITY_ICONS = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}
 SHORT_RESPONSE_ID_RE = re.compile(r"^(?:AI|PR)-[0-9a-f]{8,64}$")
 FULL_RESPONSE_ID_RE = re.compile(r"^(?:AI|PR)-[0-9a-f]{64}$")
+SUBMIT_BRANCH_COMMIT_RE = re.compile(
+    r"(?im)^\s*branch_and_commit:\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+)"
+    r"\s*@\s*([0-9a-fA-F]{40})\s*$"
+)
+SUBMIT_BRANCH_LABEL_RE = re.compile(r"(?im)^\s*branch_and_commit\s*:")
+
+
+def verify_remote_submission(repo: Path, notes: str) -> dict[str, str]:
+    """Build Central's code-submit attestation from an exact origin ref."""
+    matches = list(SUBMIT_BRANCH_COMMIT_RE.finditer(notes))
+    labels = list(SUBMIT_BRANCH_LABEL_RE.finditer(notes))
+    if len(labels) != 1 or len(matches) != 1:
+        raise BoardClientError(
+            "submission preflight requires exactly one "
+            "'branch_and_commit: platform/branch @ <full-40-hex-sha>' line"
+        )
+    branch, submitted_sha = matches[0].groups()
+    submitted_sha = submitted_sha.lower()
+    try:
+        remote = subprocess.run(
+            ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch}"],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise BoardClientError(
+            f"submission preflight could not reach origin for branch {branch}; "
+            f"submitted {submitted_sha}, actual remote SHA unavailable"
+        ) from exc
+    if remote.returncode != 0:
+        raise BoardClientError(
+            f"submission preflight could not reach origin for branch {branch}; "
+            f"submitted {submitted_sha}, actual remote SHA unavailable"
+        )
+    remote_lines = [
+        line.split() for line in remote.stdout.splitlines() if line.strip()
+    ]
+    if len(remote_lines) != 1 or len(remote_lines[0]) != 2:
+        raise BoardClientError(
+            f"submission preflight rejected missing remote branch {branch}; "
+            f"submitted {submitted_sha}, actual remote SHA <missing>"
+        )
+    remote_tip = remote_lines[0][0].lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", remote_tip):
+        raise BoardClientError(
+            f"submission preflight rejected invalid remote response for branch {branch}; "
+            f"submitted {submitted_sha}, actual remote SHA {remote_tip}"
+        )
+    if remote_tip != submitted_sha:
+        raise BoardClientError(
+            f"submission preflight rejected mismatched remote branch {branch}: "
+            f"submitted {submitted_sha}, remote tip {remote_tip}; refresh evidence and retry"
+        )
+    return {
+        "kind": "git-ls-remote-exact-tip-v1",
+        "branch": branch,
+        "commit": submitted_sha,
+        "remote_ref": f"origin/{branch}",
+        "remote_tip": remote_tip,
+    }
+
+
+def _sign_submission_preflight(
+    token: str,
+    *,
+    board_id: str,
+    ticket_id: str,
+    agent_name: str,
+    preflight: dict[str, str],
+) -> str:
+    payload = json.dumps(
+        {
+            "board_id": board_id,
+            "ticket_id": ticket_id,
+            "agent_name": agent_name,
+            **preflight,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hmac.new(token.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
 
 def expand_response_id_map(value: dict[str, Any]) -> dict[str, Any]:
@@ -807,19 +895,42 @@ class BoardClient:
         files_changed: list[str] | None = None,
         notes: str | None = None,
         stay_active: bool = True,
+        repository: Path | str | None = None,
     ) -> dict[str, Any]:
+        selected_agent_name = self.agent_name if agent_name is None else agent_name
         arguments: dict[str, Any] = {
-            "agent_name": self.agent_name if agent_name is None else agent_name,
+            "agent_name": selected_agent_name,
             "ticket_id": ticket_id,
             "stay_active": stay_active,
         }
         notes_truncation: dict[str, int | str] | None = None
         if notes is not None:
             notes, notes_truncation = _truncate_ticket_submit_notes(notes)
+        submission_preflight: dict[str, str] | None = None
+        if notes is not None and SUBMIT_BRANCH_LABEL_RE.search(notes):
+            if repository is None:
+                raise BoardClientError(
+                    "code-ticket ticket_submit is unavailable without a "
+                    "clone-owning repository for exact remote-tip verification"
+                )
+            repo = Path(repository).expanduser().resolve()
+            if not (repo / ".git").exists():
+                raise BoardClientError(
+                    "submission preflight requires a clone-owning git repository"
+                )
+            submission_preflight = verify_remote_submission(repo, notes)
+            submission_preflight["proof"] = _sign_submission_preflight(
+                self.token,
+                board_id=self.board_id,
+                ticket_id=ticket_id,
+                agent_name=selected_agent_name,
+                preflight=submission_preflight,
+            )
         optional = {
             "summary": summary,
             "files_changed": files_changed,
             "notes": notes,
+            "submission_preflight": submission_preflight,
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
         result = await self._call("ticket_submit", arguments)

@@ -753,7 +753,12 @@ class BoardAPI(Protocol):
     async def work_dir(self, board_id: str) -> Path: ...
     async def renew(self, board_id: str, ticket_id: str) -> None: ...
     async def submit(
-        self, board_id: str, ticket_id: str, arguments: dict[str, Any]
+        self,
+        board_id: str,
+        ticket_id: str,
+        arguments: dict[str, Any],
+        *,
+        repository: Path,
     ) -> None: ...
     async def release(self, board_id: str, ticket_id: str, reason: str) -> None: ...
     async def submitted(self) -> list[tuple[str, dict[str, Any]]]: ...
@@ -921,18 +926,21 @@ class PursersBoardAPI:
             raise RuntimeError(str(result["error"]))
 
     async def submit(
-        self, board_id: str, ticket_id: str, arguments: dict[str, Any]
+        self,
+        board_id: str,
+        ticket_id: str,
+        arguments: dict[str, Any],
+        *,
+        repository: Path,
     ) -> None:
-        result = await (await self._view(board_id))._call(
-            "ticket_submit",
-            {
-                "agent_name": self.config.agent_name,
-                "ticket_id": ticket_id,
-                "summary": arguments.get("summary"),
-                "files_changed": arguments.get("files_changed", []),
-                "notes": arguments.get("notes"),
-                "stay_active": True,
-            },
+        result = await (await self._view(board_id)).ticket_submit(
+            ticket_id,
+            agent_name=self.config.agent_name,
+            summary=arguments.get("summary"),
+            files_changed=arguments.get("files_changed", []),
+            notes=arguments.get("notes"),
+            stay_active=True,
+            repository=repository,
         )
         if result.get("error"):
             raise RuntimeError(str(result["error"]))
@@ -1671,7 +1679,9 @@ class Worker:
                 )
             safe_args = self.log.scrub(args)
             try:
-                await self.board.submit(board_id, ticket_id, safe_args)
+                await self.board.submit(
+                    board_id, ticket_id, safe_args, repository=work_dir
+                )
             except Exception as exc:
                 self.log.write(
                     "submit_failed", ticket_id=ticket_id, error=type(exc).__name__

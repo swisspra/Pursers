@@ -289,10 +289,22 @@ async def refused_renewal_ends_task(tmp_path: Path) -> None:
 async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
     import central
     from mcp import Client
-    from pursers_client.client import expand_response_id_map
+    from pursers_client.client import (
+        _sign_submission_preflight,
+        expand_response_id_map,
+        verify_remote_submission,
+    )
 
     work_root = tmp_path / "work"
-    _work, branch, commit = committed_worktree(work_root, "TK-acp-e2e")
+    work, branch, commit = committed_worktree(work_root, "TK-acp-e2e")
+    remote = tmp_path / "remote.git"
+    subprocess.run(
+        ["git", "init", "--bare", str(remote)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    git("remote", "add", "origin", str(remote), cwd=work)
     notes = "\n".join(
         [
             f"branch_and_commit: {branch}@{commit}",
@@ -355,10 +367,13 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
     )
     principal = contextvars.ContextVar("acp_test_principal", default=admin)
     original = central.current_principal
+    original_access = central.get_access_token
+    access_token = "acp-test-access-token"
 
     with patch.dict(os.environ, environment):
         mcp, _service = central.build_server("localhost", 8765, tmp_path / "central")
         central.current_principal = principal.get
+        central.get_access_token = lambda: SimpleNamespace(token=access_token)
         try:
             async with Client(mcp, mode="2026-07-28", cache=None) as raw:
                 async def call(who: object, name: str, **arguments: object) -> dict[str, object]:
@@ -504,6 +519,22 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                         stay_active: bool = False,
                         **completion: object,
                     ) -> dict[str, object]:
+                        repository = Path(str(completion.pop("repository")))
+                        preflight = verify_remote_submission(
+                            repository, str(completion.get("notes", ""))
+                        )
+                        preflight["proof"] = _sign_submission_preflight(
+                            access_token,
+                            board_id="pursers",
+                            ticket_id=ticket_id,
+                            agent_name=(
+                                self.agent_name
+                                if agent_name is None
+                                else agent_name
+                            ),
+                            preflight=preflight,
+                        )
+                        completion["submission_preflight"] = preflight
                         return await self._call(
                             "ticket_submit",
                             {
@@ -520,7 +551,9 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
 
                 client = InProcessClient()
                 board = object.__new__(seat.CentralBoard)
-                board.config = SimpleNamespace(agent_name="acp-seat")
+                board.config = SimpleNamespace(
+                    agent_name="acp-seat", repository=work
+                )
                 board.client = client
                 board.agent_id = str(joined["agent_id"])
                 board.principal_id = worker.principal_id
@@ -557,6 +590,7 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                     for _operation, agent_name in client.mutation_names
                 )
         finally:
+            central.get_access_token = original_access
             central.current_principal = original
 
 

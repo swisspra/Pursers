@@ -123,7 +123,12 @@ class FakeBoard:
         return set(self.live_claims)
 
     async def submit(
-        self, board_id: str, ticket_id: str, arguments: dict[str, Any]
+        self,
+        board_id: str,
+        ticket_id: str,
+        arguments: dict[str, Any],
+        *,
+        repository: Path,
     ) -> None:
         self.submissions.append(
             {"board_id": board_id, "ticket_id": ticket_id, **arguments}
@@ -429,6 +434,40 @@ def test_headless_worker_submit_guard_blocks_before_board_mutation(
     ))
     assert outcome == ("submitted", True)
     assert len(board.submissions) == 1
+
+
+@pytest.mark.anyio
+async def test_board_api_submit_cannot_skip_guarded_client_boundary(
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class View:
+        async def ticket_submit(self, ticket_id: str, **arguments: Any) -> dict[str, Any]:
+            captured.update({"ticket_id": ticket_id, **arguments})
+            return {"ok": True}
+
+    api = object.__new__(worker_module.PursersBoardAPI)
+    api.config = SimpleNamespace(agent_name="worker-agent")
+
+    async def view(_board_id: str) -> View:
+        return View()
+
+    api._view = view
+    await api.submit(
+        "board-one",
+        "TK-direct",
+        {
+            "summary": "done",
+            "files_changed": ["result.txt"],
+            "notes": "branch_and_commit: codex/TK-direct@" + "a" * 40,
+        },
+        repository=tmp_path,
+    )
+
+    assert captured["repository"] == tmp_path
+    assert captured["agent_name"] == "worker-agent"
+    assert captured["stay_active"] is True
 
 
 def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
@@ -2212,6 +2251,7 @@ def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> Non
                     "board-one",
                     "TK-race",
                     {"summary": "revision two", "notes": "test_output: second"},
+                    repository=root,
                 )
                 return tool_call(
                     "approve-stale",

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -54,6 +58,13 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
         self.principal = self.admin
         self.original_current_principal = central.current_principal
         central.current_principal = lambda: self.principal
+        self.access_token = "central-test-access-token"
+        self.access_patch = patch.object(
+            central,
+            "get_access_token",
+            return_value=SimpleNamespace(token=self.access_token),
+        )
+        self.access_patch.start()
         await self.call("board_join", agent_name="admin-agent")
         for principal in (self.member, self.other_member):
             await self.call(
@@ -68,6 +79,7 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
         await self.call("board_join", agent_name="other-agent")
 
     async def asyncTearDown(self) -> None:
+        self.access_patch.stop()
         central.current_principal = self.original_current_principal
         self.environment.stop()
         self.temp_dir.cleanup()
@@ -100,6 +112,31 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(claimed.is_error)
         return ticket_id
+
+    def submission_preflight(
+        self, ticket_id: str, branch: str, sha: str
+    ) -> dict[str, str]:
+        preflight = {
+            "kind": "git-ls-remote-exact-tip-v1",
+            "branch": branch,
+            "commit": sha,
+            "remote_ref": f"origin/{branch}",
+            "remote_tip": sha,
+        }
+        payload = json.dumps(
+            {
+                "board_id": "pursers",
+                "ticket_id": ticket_id,
+                "agent_name": "member-agent",
+                **preflight,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        preflight["proof"] = hmac.new(
+            self.access_token.encode("utf-8"), payload, hashlib.sha256
+        ).hexdigest()
+        return preflight
 
     async def test_ticket_transport_allows_bearer_prose_and_placeholders(self) -> None:
         self.principal = self.admin
@@ -276,22 +313,102 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
             ticket = self.service.load("pursers")["tickets"][ticket_id]
             self.assertEqual(ticket["status"], "claimed")
 
-    async def test_ticket_submit_accepts_well_formed_branch_and_commit_shape(self) -> None:
+    async def test_ticket_submit_rejects_raw_code_submission_without_preflight(
+        self,
+    ) -> None:
         ticket_id = await self.create_and_claim(
             required_fields=["branch_and_commit", "test_output"]
         )
+        with self.assertRaisesRegex(ToolError, "raw ticket_submit is unavailable"):
+            await self.call(
+                "ticket_submit",
+                agent_name="member-agent",
+                ticket_id=ticket_id,
+                summary="shape valid but unverified",
+                notes=(
+                    "branch_and_commit: codex/TK-shape @ "
+                    + "a" * 40
+                    + "\ntest_output: pass"
+                ),
+            )
+        self.assertEqual(
+            self.service.load("pursers")["tickets"][ticket_id]["status"], "claimed"
+        )
+
+    async def test_ticket_submit_accepts_matching_clone_preflight(self) -> None:
+        ticket_id = await self.create_and_claim(
+            required_fields=["branch_and_commit", "test_output"]
+        )
+        sha = "a" * 40
         result = await self.call(
             "ticket_submit",
             agent_name="member-agent",
             ticket_id=ticket_id,
-            summary="shape valid",
-            notes=(
-                "branch_and_commit: codex/TK-shape @ "
-                + "a" * 40
-                + "\ntest_output: pass"
+            summary="shape and clone preflight valid",
+            notes=f"branch_and_commit: codex/TK-shape @ {sha}\ntest_output: pass",
+            submission_preflight=self.submission_preflight(
+                ticket_id, "codex/TK-shape", sha
             ),
         )
         self.assertFalse(result.is_error)
+        self.assertEqual(
+            result.structured_content["ticket"]["submission_preflight"]["remote_tip"],
+            sha,
+        )
+
+    async def test_ticket_submit_rejects_fabricated_matching_preflight(self) -> None:
+        ticket_id = await self.create_and_claim(
+            required_fields=["branch_and_commit", "test_output"]
+        )
+        sha = "a" * 40
+        preflight = self.submission_preflight(ticket_id, "codex/TK-shape", sha)
+        preflight["proof"] = "0" * 64
+        with self.assertRaisesRegex(ToolError, "remote-tip proof is invalid"):
+            await self.call(
+                "ticket_submit",
+                agent_name="member-agent",
+                ticket_id=ticket_id,
+                summary="fabricated",
+                notes=(
+                    f"branch_and_commit: codex/TK-shape @ {sha}"
+                    "\ntest_output: pass"
+                ),
+                submission_preflight=preflight,
+            )
+        self.assertEqual(
+            self.service.load("pursers")["tickets"][ticket_id]["status"], "claimed"
+        )
+
+    async def test_ticket_submit_rejects_mismatched_clone_preflight(self) -> None:
+        ticket_id = await self.create_and_claim(
+            required_fields=["branch_and_commit", "test_output"]
+        )
+        submitted_sha = "a" * 40
+        remote_sha = "b" * 40
+        with self.assertRaisesRegex(
+            ToolError, f"declared SHA {submitted_sha}.*actual remote SHA {remote_sha}"
+        ):
+            await self.call(
+                "ticket_submit",
+                agent_name="member-agent",
+                ticket_id=ticket_id,
+                summary="mismatch",
+                notes=(
+                    f"branch_and_commit: codex/TK-shape @ {submitted_sha}"
+                    "\ntest_output: pass"
+                ),
+                submission_preflight={
+                    "kind": "git-ls-remote-exact-tip-v1",
+                    "branch": "codex/TK-shape",
+                    "commit": submitted_sha,
+                    "remote_ref": "origin/codex/TK-shape",
+                    "remote_tip": remote_sha,
+                    "proof": "0" * 64,
+                },
+            )
+        self.assertEqual(
+            self.service.load("pursers")["tickets"][ticket_id]["status"], "claimed"
+        )
 
 
 if __name__ == "__main__":

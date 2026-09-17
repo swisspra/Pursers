@@ -1603,7 +1603,7 @@ async def _execute(args: argparse.Namespace) -> None:
                         )
                     result = await target.ticket_submit(
                         args.ticket_id, summary=args.summary, notes=notes,
-                        files_changed=files, stay_active=True,
+                        files_changed=files, stay_active=True, repository=source_repo,
                     )
                     if truncation is not None:
                         result["input_truncation"] = {"notes": truncation}

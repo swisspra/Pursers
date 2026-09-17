@@ -125,6 +125,12 @@ Run this loop continuously. Each pass is one unit of work:
    not verify. Notes are capped at 5000 characters, so trim test tails to the
    evidence needed. Client and generated seat helpers truncate oversized notes
    at a line boundary, emit a warning, and report the truncation in the result.
+   For code tickets requiring `branch_and_commit`, raw Central submission is
+   unavailable: submit through the clone-owning client/runtime boundary. It
+   verifies the exact `origin` ref and adds a bearer-bound proof that Central
+   checks without making a network request. Generated `board.sh`, headless
+   `submit_work`, and ACP submission already use this boundary; a direct
+   `BoardClient.ticket_submit` caller must pass its ticket repository.
 6. **AWAIT REVIEW** — a reviewer (not you) will approve or reject. If rejected,
    the held-ticket wake returns with fix instructions; refetch it immediately,
    address them, and resubmit before accepting other work.

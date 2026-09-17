@@ -1156,7 +1156,11 @@ class CentralBoard:
         if identity is None:
             raise PermissionError("ACP seat has no claim identity for submission")
         await self.client.ticket_submit(
-            ticket_id, agent_name=identity[2], **completion, stay_active=False
+            ticket_id,
+            agent_name=identity[2],
+            **completion,
+            stay_active=False,
+            repository=self.config.repository,
         )
         self._claim_identities.pop(ticket_id, None)
 
