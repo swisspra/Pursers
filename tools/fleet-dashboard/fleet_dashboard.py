@@ -79,6 +79,11 @@ import runtime_environment
 from warm_home import apply_warm_guided_home
 from result_visibility import project_ticket_result
 from evidence_trace import CORRELATION_HEADERS, EvidenceTrace, EvidenceTraceConfigError
+from butler_settings import (
+    ButlerSettingsError,
+    ButlerSettingsManager,
+    validate_board_butler_document,
+)
 
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -182,6 +187,10 @@ def _default_config_state_dir() -> Path:
         _IMPORTED_CONFIG_STATE_DIR,
         runtime_environment.dashboard_state_dir,
     )
+
+
+def _default_butler_secrets_dir() -> Path:
+    return (runtime_environment.pursers_state_root() / "board-butler" / "secrets").resolve()
 
 
 BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
@@ -604,13 +613,18 @@ def _validated_intake_draft(raw: Any, ask_id: str) -> dict[str, str] | None:
 
 def validate_coordinator_config(value: Any) -> dict[str, Any]:
     """Validate the complete dashboard-owned value; no arbitrary state keys pass."""
-    if not isinstance(value, dict) or set(value) != {
+    required_fields = {
         "schema_version",
         "thresholds",
         "integration_watch_since",
         "intake",
-    }:
-        raise ValueError("config must contain only the coordinator schema fields")
+    }
+    if (
+        not isinstance(value, dict)
+        or not required_fields.issubset(value)
+        or not set(value).issubset(required_fields | {"board_butler"})
+    ):
+        raise ValueError("config must contain only the coordinator and board_butler schema fields")
     if value.get("schema_version") != 1:
         raise ValueError("schema_version must be 1")
     thresholds = value.get("thresholds")
@@ -703,7 +717,15 @@ def validate_coordinator_config(value: Any) -> dict[str, Any]:
         or ".." in Path(token_path).parts
     ):
         raise ValueError("intake.token_path must be null or a safe absolute path")
-    return json.loads(json.dumps(value))
+    clean = json.loads(json.dumps(value))
+    if "board_butler" in clean:
+        try:
+            clean["board_butler"] = validate_board_butler_document(
+                clean["board_butler"]
+            )
+        except ButlerSettingsError as exc:
+            raise ValueError(str(exc)) from exc
+    return clean
 
 
 def context_pressure_thresholds(value: Any) -> dict[str, int | float]:
@@ -7286,7 +7308,7 @@ function renderConfig(d){coordinatorConfig=d;const e=d.effective||{};if(!e.thres
 const legacyRenderConfigLifecycle=renderConfig;
 renderConfig=function(d){legacyRenderConfigLifecycle(d);const boards=fleetData[d.central]?.boards||[],host=document.querySelector('#config-view');host.insertAdjacentHTML('beforeend',`<section class="card pool"><h3>Agent lifecycle</h3><p class="muted">Board inactivity thresholds; join/onboard reactivates retired or stale identities.</p><div class="table-scroll"><table><thead><tr><th>Board</th><th>Stale after</th></tr></thead><tbody>${boards.length?boards.map(b=>`<tr><td>${esc(b.label)}<div class="meta">${esc(b.board_id)}</div></td><td>${esc(b.stale_after_days||3)} days</td></tr>`).join(''):'<tr><td colspan="2" class="empty">No active boards.</td></tr>'}</tbody></table></div></section>`)};
 async function refreshConfig(){const r=route();if(!r||r.kind!=='config'||refreshPaused())return;const key=`config:${r.central}`;try{const data=await fetchJson(`/api/config?${apiCentral(r.central)}`);if(route()?.central===r.central&&!refreshPaused()){renderConfig(data);markConnectionSuccess(key)}}catch(e){markConnectionFailure(key,e);if(!coordinatorConfig||coordinatorConfig.central!==r.central)document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Config unavailable for ${esc(r.central)}.</p>`}}
-async function saveConfig(event){event.preventDefault();const f=new FormData(event.target),thresholds={};for(const [key] of CONFIG_NUMBERS)thresholds[key]=key.endsWith('_ratio')?Number(f.get(key)):Number.parseInt(f.get(key),10);const auto=[],always=[];for(const c of CONFIG_CATEGORIES)(f.get(`category_${c}`)==='auto'?auto:always).push(c);const config={schema_version:1,thresholds,integration_watch_since:f.get('integration_watch_since').trim()||null,intake:{enabled:f.get('enabled')==='on',token_path:f.get('token_path').trim()||null,auto_categories:auto,always_ask_categories:always,work_domain_always_ask:f.get('work_domain_always_ask')==='on',rate_per_hour:Number.parseInt(f.get('rate_per_hour'),10)}};const status=document.querySelector('#config-status'),central=coordinatorConfig.central;status.textContent=`Saving ${central}…`;try{const r=await fetch(`/api/config?${apiCentral(central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config,expected_sha256:coordinatorConfig.expected_sha256})});const body=await r.json();if(!r.ok)throw new Error(body.error||`HTTP ${r.status}`);status.textContent=`Saved ${body.central} with ${body.concurrency.toUpperCase()}; waiting for coordinator poll`;setTimeout(refreshConfig,1000)}catch(e){status.textContent=`Save failed for ${central}: ${e.message}`;status.className='error'}}
+async function saveConfig(event){event.preventDefault();const f=new FormData(event.target),thresholds={};for(const [key] of CONFIG_NUMBERS)thresholds[key]=key.endsWith('_ratio')?Number(f.get(key)):Number.parseInt(f.get(key),10);const auto=[],always=[];for(const c of CONFIG_CATEGORIES)(f.get(`category_${c}`)==='auto'?auto:always).push(c);const config={schema_version:1,thresholds,integration_watch_since:f.get('integration_watch_since').trim()||null,intake:{enabled:f.get('enabled')==='on',token_path:f.get('token_path').trim()||null,auto_categories:auto,always_ask_categories:always,work_domain_always_ask:f.get('work_domain_always_ask')==='on',rate_per_hour:Number.parseInt(f.get('rate_per_hour'),10)}};if(coordinatorConfig.config?.board_butler)config.board_butler=coordinatorConfig.config.board_butler;const status=document.querySelector('#config-status'),central=coordinatorConfig.central;status.textContent=`Saving ${central}…`;try{const r=await fetch(`/api/config?${apiCentral(central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config,expected_sha256:coordinatorConfig.expected_sha256})});const body=await r.json();if(!r.ok)throw new Error(body.error||`HTTP ${r.status}`);status.textContent=`Saved ${body.central} with ${body.concurrency.toUpperCase()}; waiting for coordinator poll`;setTimeout(refreshConfig,1000)}catch(e){status.textContent=`Save failed for ${central}: ${e.message}`;status.className='error'}}
 function syncConfigRoute(){const r=route(),active=r?.kind==='config';document.querySelector('#config-view').hidden=!active;if(active){document.querySelector('#home-view').hidden=true;document.querySelector('#detail-view').hidden=true;if(centralLabels.length)refreshConfig()}}
 window.addEventListener('hashchange',syncConfigRoute);syncConfigRoute();
 </script></body>""",
@@ -7849,12 +7871,14 @@ def make_handler(
     worker_manager: WorkerManager | None = None,
     seat_manager: SeatConfigManager | None = None,
     evidence_trace: EvidenceTrace | None = None,
+    butler_manager: ButlerSettingsManager | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     selected_stats_path = (
         bridge_stats_path() if stats_path is None else Path(stats_path)
     )
     workers = worker_manager or WorkerManager()
     seats = seat_manager or SeatConfigManager()
+    butlers = butler_manager or ButlerSettingsManager(_default_butler_secrets_dir())
     project_operation_lock = threading.RLock()
 
     def requested_central(path: str) -> str | None:
@@ -8345,6 +8369,28 @@ def make_handler(
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            if route == "/api/butler":
+                try:
+                    payload = butlers.view(
+                        cache_call("get_config", central=central), label
+                    )
+                    body = _json_bytes(payload)
+                except (ButlerSettingsError, ValueError) as exc:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc), "central": label}),
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - bounded type only.
+                    self._send(
+                        503,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": type(exc).__name__, "central": label}),
+                    )
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
             if route == "/api/intake":
                 try:
                     board_id = requested_board(self.path)
@@ -8478,6 +8524,7 @@ def make_handler(
                 "/api/config/ops/plan",
                 "/api/config/ops",
                 "/api/config/registry/clone",
+                "/api/butler",
                 "/api/dispatch",
                 "/api/agents/retire",
                 "/api/agents/retire-inert",
@@ -8613,6 +8660,21 @@ def make_handler(
                             "expected_sha256": saved["expected_sha256"],
                             "central": label,
                         }
+                    )
+                elif route == "/api/butler":
+                    current = cache_call("get_config", central=central)
+                    body = _json_bytes(
+                        butlers.save(
+                            current,
+                            request,
+                            label,
+                            lambda value, expected: cache_call(
+                                "save_config",
+                                value,
+                                expected,
+                                central=central,
+                            ),
+                        )
                     )
                 elif route == "/api/dispatch":
                     if not isinstance(request, dict) or set(request) != {
@@ -9115,6 +9177,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=str(_default_workers_dir()),
     )
     parser.add_argument(
+        "--butler-secrets-dir",
+        default=str(_default_butler_secrets_dir()),
+        help="Private 0700 directory for write-only Board Butler keys",
+    )
+    parser.add_argument(
         "--seat-state-dir",
         default=str(_default_config_state_dir()),
         help=argparse.SUPPRESS,
@@ -9147,6 +9214,7 @@ def main(argv: list[str] | None = None) -> None:
         [FleetFetcher(config) for config in configs], args.cache_seconds
     )
     worker_manager = WorkerManager(args.workers_dir, worker_script=args.worker_script)
+    butler_manager = ButlerSettingsManager(args.butler_secrets_dir)
     seat_state_dir = Path(args.seat_state_dir).expanduser()
     seat_manager = SeatConfigManager(
         seat_state_dir / "seats.json", state_dir=seat_state_dir
@@ -9167,6 +9235,7 @@ def main(argv: list[str] | None = None) -> None:
             worker_manager,
             seat_manager,
             evidence_trace=trace,
+            butler_manager=butler_manager,
         ),
     )
     print(f"Fleet Dashboard: http://{args.host}:{args.port}", flush=True)

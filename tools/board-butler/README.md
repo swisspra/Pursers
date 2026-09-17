@@ -133,9 +133,26 @@ The class list is not a general permission switch. `scope_change`,
 `gate_waiver`, `release`, `membership`, and `registry` are permanently
 escalation-only; validation rejects attempts to set them to `auto`. An empty or
 disabled evidence floor is also rejected, as are self-review, merge-to-main,
-and inline API-key fields because none belong to the schema. Model, endpoint,
-and credential values are references only; the credential itself stays in the
-provider's secret store.
+and inline API-key fields because none belong to the schema. Model and endpoint
+are configuration; `key_ref` is an opaque `file:<id>.key` reference into the
+private 0600 provider secret directory, never a home path or credential value.
+Provider entries may also contain bounded
+non-secret `extra_headers`, `key_header`, `key_prefix`, and a relative
+`validation_path`. The relative `draft_path` and explicit
+`draft_protocol=pursers_json_v1` select the provider-neutral draft contract.
+Fleet validates and saves these settings, then the resident
+re-resolves them and reads the referenced key at the start of every question
+cycle. No process restart or hand edit is required.
+
+When the drafting provider is configured, the resident sends one bounded
+`pursers_json_v1` request to the configured relative draft path for each question
+that clears the local rate limits. The request contains `protocol`, `model`, a
+bounded `input` object, and `max_output_chars`; the response is a JSON object with
+a string `draft`. The request uses the exact selected model, optional headers,
+and credential read from `key_ref`; none of those secret bytes enter the input.
+Deterministic policy and evidence still set the verdict, and the provider supplies
+only the shadow draft text. A provider failure or a response that contains the
+credential fails closed to a fixed, key-free escalation message.
 
 The three draft ceilings are real queue boundaries. A hit produces a
 `butler_queued` finding with an `ESCALATE` verdict instead of dropping the

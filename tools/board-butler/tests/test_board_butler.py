@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import importlib.util
 import json
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -78,6 +81,42 @@ def args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
         veto_question=None,
         control_reason="operator",
     )
+
+
+@contextlib.contextmanager
+def provider_server(content: str) -> Any:
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            requests.append(
+                {
+                    "path": self.path,
+                    "headers": dict(self.headers.items()),
+                    "body": json.loads(self.rfile.read(length)),
+                }
+            )
+            payload = json.dumps({"draft": content}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}/v1", requests
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 @pytest.mark.parametrize(
@@ -775,6 +814,168 @@ def test_process_question_reports_every_effective_value_and_durable_hold(
     assert backend.written["findings"][-1]["hold"] == finding["hold"]
 
 
+def test_process_question_uses_reloaded_provider_without_exposing_key(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = args(tmp_path)
+    secret_root = tmp_path / "provider-secrets"
+    secret_root.mkdir()
+    secret = "resident-cycle-secret-6471"
+    key_file = secret_root / "butler.key"
+    key_file.write_text(secret, encoding="utf-8")
+    key_file.chmod(0o600)
+    options.provider_secrets_dir = secret_root
+
+    class Backend(Source):
+        endpoint = ""
+        model = ""
+        writes: list[dict[str, Any]] = []
+        project_name = "Pursers"
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            provider = {
+                "model": self.model,
+                "endpoint_ref": self.endpoint,
+                "key_ref": "file:butler.key",
+                "extra_headers": {"X-Butler-Test": "cycle"},
+                "draft_path": "generate",
+                "draft_protocol": "pursers_json_v1",
+            }
+            return {
+                "board_butler": {
+                    "schema_version": 1,
+                    "global": {
+                        "classification": dict(provider),
+                        "drafting": dict(provider),
+                    },
+                }
+            }
+
+        async def write_findings(self, value: str, _expected: str | None) -> None:
+            self.writes.append(json.loads(value))
+
+    backend = Backend()
+    with provider_server("first provider draft") as (first_url, first_requests):
+        backend.endpoint = first_url
+        backend.model = "model-first"
+        first = asyncio.run(
+            butler.process_question(
+                backend,
+                {**question("Anything?"), "question_id": "CQ-first"},
+                options,
+                NOW,
+            )
+        )
+    with provider_server("second provider draft") as (second_url, second_requests):
+        backend.endpoint = second_url
+        backend.model = "model-second"
+        second = asyncio.run(
+            butler.process_question(
+                backend,
+                {**question("Anything else?"), "question_id": "CQ-second"},
+                options,
+                NOW + butler.timedelta(seconds=1),
+            )
+        )
+    with provider_server(secret) as (unsafe_url, unsafe_requests):
+        backend.endpoint = unsafe_url
+        backend.model = "model-unsafe"
+        unsafe = asyncio.run(
+            butler.process_question(
+                backend,
+                {**question("Unsafe echo?"), "question_id": "CQ-unsafe"},
+                options,
+                NOW + butler.timedelta(seconds=2),
+            )
+        )
+
+    assert first["message"] == "first provider draft"
+    assert second["message"] == "second provider draft"
+    assert len(first_requests) == len(second_requests) == 1
+    assert first_requests[0]["path"] == second_requests[0]["path"] == "/v1/generate"
+    assert first_requests[0]["body"]["model"] == "model-first"
+    assert second_requests[0]["body"]["model"] == "model-second"
+    assert first_requests[0]["body"]["protocol"] == "pursers_json_v1"
+    assert first_requests[0]["body"]["input"]["question"] == "Anything?"
+    assert len(unsafe_requests) == 1
+    assert unsafe_requests[0]["body"]["model"] == "model-unsafe"
+    assert first_requests[0]["headers"]["Authorization"] == f"Bearer {secret}"
+    assert second_requests[0]["headers"]["X-Butler-Test"] == "cycle"
+    assert secret not in json.dumps(first_requests[0]["body"])
+    assert secret not in json.dumps(backend.writes)
+    assert secret not in json.dumps(first)
+    assert secret not in json.dumps(second)
+    assert unsafe["message"] == (
+        "Would escalate because the configured drafting provider failed."
+    )
+    assert unsafe["draft_source"] == "configured_provider_failed"
+    assert secret not in json.dumps(unsafe)
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+def test_process_question_rejects_noncanonical_key_before_provider_or_finding(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = args(tmp_path)
+    secret_root = tmp_path / "provider-secrets"
+    secret_root.mkdir()
+    secret = "resident-cycle-secret-6471 "
+    key_file = secret_root / "butler.key"
+    key_file.write_text(secret, encoding="utf-8")
+    key_file.chmod(0o600)
+    options.provider_secrets_dir = secret_root
+
+    class Backend(Source):
+        written: dict[str, Any] | None = None
+        project_name = "Pursers"
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            provider = {
+                "model": "model-unsafe",
+                "endpoint_ref": "http://127.0.0.1:9/v1",
+                "key_ref": "file:butler.key",
+            }
+            return {
+                "board_butler": {
+                    "schema_version": 1,
+                    "global": {
+                        "classification": dict(provider),
+                        "drafting": dict(provider),
+                    },
+                }
+            }
+
+        async def write_findings(self, value: str, _expected: str | None) -> None:
+            self.written = json.loads(value)
+
+    backend = Backend()
+    finding = asyncio.run(
+        butler.process_question(
+            backend,
+            {**question("Unsafe key?"), "question_id": "CQ-unsafe-key"},
+            options,
+            NOW,
+        )
+    )
+
+    assert finding["kind"] == "butler_config_invalid"
+    assert finding["verdict"] == "ESCALATE"
+    assert secret not in json.dumps(finding)
+    assert backend.written is not None
+    assert secret not in json.dumps(backend.written)
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
 def test_invalid_config_fails_closed_and_queues_question(tmp_path: Path) -> None:
     options = args(tmp_path)
 
@@ -1147,6 +1348,12 @@ def test_active_window_and_task_model_references_are_preserved_exactly(
         "model": "Model/Classify-Exact",
         "endpoint_ref": "endpoint://classification",
         "key_ref": "secret-ref://classification",
+        "extra_headers": {},
+        "key_header": "Authorization",
+        "key_prefix": "Bearer",
+        "validation_path": "models",
+        "draft_path": "draft",
+        "draft_protocol": "pursers_json_v1",
     }
     assert reported["drafting"]["model"] == "Model/Draft-Exact"
 

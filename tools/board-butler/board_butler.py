@@ -18,10 +18,13 @@ import json
 import os
 import re
 import runpy
+import stat
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -49,6 +52,9 @@ MECHANICAL_ACTION_CLASSES = (
 )
 MAX_FINDINGS = 50
 MAX_STATE_CHARS = 4_800
+MAX_PROVIDER_RESPONSE_BYTES = 1_000_000
+MAX_PROVIDER_DRAFT_CHARS = 2_000
+PROVIDER_TIMEOUT_S = 30.0
 QUESTION_EVENT = "coordinator_question_asked"
 PARK_ANNOTATION_MARKER = "board-butler:no-live-candidates"
 REFUSAL_ANNOTATION_MARKER = "board-butler:incapable-target-refusal"
@@ -278,9 +284,21 @@ class EffectiveConfig:
     classification_model: str | None
     classification_endpoint_ref: str | None
     classification_key_ref: str | None
+    classification_extra_headers: dict[str, str]
+    classification_key_header: str
+    classification_key_prefix: str
+    classification_validation_path: str
+    classification_draft_path: str
+    classification_draft_protocol: str
     drafting_model: str | None
     drafting_endpoint_ref: str | None
     drafting_key_ref: str | None
+    drafting_extra_headers: dict[str, str]
+    drafting_key_header: str
+    drafting_key_prefix: str
+    drafting_validation_path: str
+    drafting_draft_path: str
+    drafting_draft_protocol: str
     source_layers: tuple[str, ...]
 
     def as_finding(self) -> dict[str, Any]:
@@ -309,15 +327,175 @@ class EffectiveConfig:
                 "model": self.classification_model,
                 "endpoint_ref": self.classification_endpoint_ref,
                 "key_ref": self.classification_key_ref,
+                "extra_headers": dict(self.classification_extra_headers),
+                "key_header": self.classification_key_header,
+                "key_prefix": self.classification_key_prefix,
+                "validation_path": self.classification_validation_path,
+                "draft_path": self.classification_draft_path,
+                "draft_protocol": self.classification_draft_protocol,
             },
             "drafting": {
                 "model": self.drafting_model,
                 "endpoint_ref": self.drafting_endpoint_ref,
                 "key_ref": self.drafting_key_ref,
+                "extra_headers": dict(self.drafting_extra_headers),
+                "key_header": self.drafting_key_header,
+                "key_prefix": self.drafting_key_prefix,
+                "validation_path": self.drafting_validation_path,
+                "draft_path": self.drafting_draft_path,
+                "draft_protocol": self.drafting_draft_protocol,
             },
             "source_layers": list(self.source_layers),
             "precedence": list(BOARD_BUTLER_CONFIG_SCHEMA["precedence"]),
         }
+
+
+@dataclass(frozen=True)
+class ProviderRuntime:
+    """Cycle-local provider values; the credential is deliberately non-representable."""
+
+    endpoint: str
+    model: str
+    credential: str = field(repr=False)
+    extra_headers: dict[str, str] = field(default_factory=dict)
+    key_header: str = "Authorization"
+    key_prefix: str = "Bearer"
+    validation_path: str = "models"
+    draft_path: str = "draft"
+    draft_protocol: str = "pursers_json_v1"
+
+    def request_headers(self) -> dict[str, str]:
+        headers = dict(self.extra_headers)
+        if self.credential:
+            headers[self.key_header] = f"{self.key_prefix} {self.credential}".strip()
+        return headers
+
+
+def resolve_provider_runtime(
+    config: EffectiveConfig, task: str, secrets_dir: str | Path | None = None
+) -> ProviderRuntime | None:
+    """Resolve one provider at cycle time while keeping its key out of findings."""
+    if task not in {"classification", "drafting"}:
+        raise ButlerConfigError("provider task is invalid")
+    endpoint = getattr(config, f"{task}_endpoint_ref")
+    model = getattr(config, f"{task}_model")
+    key_ref = getattr(config, f"{task}_key_ref")
+    if endpoint is None or model is None:
+        return None
+    credential = ""
+    if key_ref is not None:
+        match = re.fullmatch(r"file:([A-Za-z0-9._-]{1,160}\.key)", key_ref)
+        if match is not None:
+            root = (
+                Path(secrets_dir).expanduser()
+                if secrets_dir is not None
+                else Path(os.environ.get("PURSERS_STATE_DIR", "~/.pursers")).expanduser()
+                / "board-butler"
+                / "secrets"
+            )
+            path = root / match.group(1)
+        else:
+            path = Path(key_ref)
+        try:
+            info = path.stat()
+        except OSError as exc:
+            raise ButlerConfigError(f"{task} credential reference is unavailable") from exc
+        if (
+            not path.is_absolute()
+            or not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size > 8_192
+        ):
+            raise ButlerConfigError(f"{task} credential reference is not a 0600 file")
+        try:
+            credential = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ButlerConfigError(f"{task} credential reference is unreadable") from exc
+        if credential != credential.strip() or any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in credential
+        ):
+            raise ButlerConfigError(
+                f"{task} credential reference contains unsafe whitespace"
+            )
+    return ProviderRuntime(
+        endpoint=endpoint,
+        model=model,
+        credential=credential,
+        extra_headers=dict(getattr(config, f"{task}_extra_headers")),
+        key_header=getattr(config, f"{task}_key_header"),
+        key_prefix=getattr(config, f"{task}_key_prefix"),
+        validation_path=getattr(config, f"{task}_validation_path"),
+        draft_path=getattr(config, f"{task}_draft_path"),
+        draft_protocol=getattr(config, f"{task}_draft_protocol"),
+    )
+
+
+def _provider_draft_text(document: Any) -> str | None:
+    if not isinstance(document, Mapping):
+        return None
+    draft = document.get("draft")
+    return draft if isinstance(draft, str) else None
+
+
+async def draft_with_provider(
+    runtime: ProviderRuntime,
+    question: Mapping[str, Any],
+    finding: Mapping[str, Any],
+) -> str:
+    """Create one bounded shadow draft without exposing provider credentials."""
+    if runtime.draft_protocol != "pursers_json_v1":
+        raise ValueError("provider draft protocol is unsupported")
+    request_body = json.dumps(
+        {
+            "protocol": runtime.draft_protocol,
+            "model": runtime.model,
+            "input": {
+                "question": str(question.get("message", "")),
+                "question_kind": str(question.get("kind", "information")),
+                "verdict": finding.get("verdict"),
+                "policy_rule": finding.get("policy_rule"),
+                "evidence": finding.get("evidence"),
+                "fallback_draft": finding.get("message"),
+            },
+            "max_output_chars": MAX_PROVIDER_DRAFT_CHARS,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    def request() -> str:
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            **runtime.request_headers(),
+        }
+        raw = urllib.request.Request(
+            urllib.parse.urljoin(
+                runtime.endpoint.rstrip("/") + "/", runtime.draft_path.lstrip("/")
+            ),
+            data=request_body,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(raw, timeout=PROVIDER_TIMEOUT_S) as response:
+            payload = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
+        if len(payload) > MAX_PROVIDER_RESPONSE_BYTES:
+            raise ValueError("provider response exceeded the safe bound")
+        document = json.loads(payload)
+        text = _provider_draft_text(document)
+        if text is None:
+            raise ValueError("provider response had no draft text")
+        text = text.strip()
+        if (
+            not text
+            or len(text) > MAX_PROVIDER_DRAFT_CHARS
+            or any(ord(character) < 0x20 and character not in "\n\t" for character in text)
+            or (runtime.credential and runtime.credential in text)
+        ):
+            raise ValueError("provider draft was unsafe")
+        return text
+
+    return await asyncio.to_thread(request)
 
 
 class SingletonLock:
@@ -511,12 +689,87 @@ def _validate_settings(value: Any, path: str) -> dict[str, Any]:
         selected = value[task]
         if not isinstance(selected, Mapping):
             raise ButlerConfigError(f"{path}.{task} must be an object")
-        _reject_unknown_keys(selected, ("model", "endpoint_ref", "key_ref"), f"{path}.{task}")
+        _reject_unknown_keys(
+            selected,
+            (
+                "model",
+                "endpoint_ref",
+                "key_ref",
+                "extra_headers",
+                "key_header",
+                "key_prefix",
+                "validation_path",
+                "draft_path",
+                "draft_protocol",
+            ),
+            f"{path}.{task}",
+        )
         result[task] = {
             name: _optional_reference(selected.get(name), f"{path}.{task}.{name}")
             for name in ("model", "endpoint_ref", "key_ref")
             if name in selected
         }
+        if "extra_headers" in selected:
+            headers = selected["extra_headers"]
+            if (
+                not isinstance(headers, Mapping)
+                or len(headers) > 16
+                or any(
+                    not isinstance(name, str)
+                    or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}", name)
+                    or re.search(r"authorization|api[-_]?key|token|secret|cookie", name, re.I)
+                    or not isinstance(header_value, str)
+                    or len(header_value) > 1_000
+                    or any(ord(character) < 0x20 for character in header_value)
+                    for name, header_value in headers.items()
+                )
+            ):
+                raise ButlerConfigError(
+                    f"{path}.{task}.extra_headers must contain bounded non-secret headers"
+                )
+            result[task]["extra_headers"] = dict(headers)
+        if "key_header" in selected:
+            header = selected["key_header"]
+            if not isinstance(header, str) or not re.fullmatch(
+                r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}", header
+            ):
+                raise ButlerConfigError(f"{path}.{task}.key_header is invalid")
+            result[task]["key_header"] = header
+        if "key_prefix" in selected:
+            prefix = selected["key_prefix"]
+            if (
+                not isinstance(prefix, str)
+                or len(prefix) > 80
+                or any(ord(character) < 0x20 for character in prefix)
+            ):
+                raise ButlerConfigError(f"{path}.{task}.key_prefix is invalid")
+            result[task]["key_prefix"] = prefix
+        for field_name in ("validation_path", "draft_path"):
+            if field_name not in selected:
+                continue
+            relative_path = selected[field_name]
+            parsed_path = (
+                urllib.parse.urlsplit(relative_path)
+                if isinstance(relative_path, str)
+                else None
+            )
+            if (
+                not isinstance(relative_path, str)
+                or not relative_path
+                or len(relative_path) > 500
+                or any(ord(character) < 0x20 for character in relative_path)
+                or parsed_path is None
+                or parsed_path.scheme
+                or parsed_path.netloc
+                or parsed_path.query
+                or parsed_path.fragment
+            ):
+                raise ButlerConfigError(f"{path}.{task}.{field_name} is invalid")
+            result[task][field_name] = relative_path
+        if "draft_protocol" in selected:
+            if selected["draft_protocol"] != "pursers_json_v1":
+                raise ButlerConfigError(f"{path}.{task}.draft_protocol is invalid")
+            result[task]["draft_protocol"] = selected["draft_protocol"]
     return result
 
 
@@ -616,8 +869,28 @@ def resolve_config(
             "veto_count": DEFAULT_VETO_COUNT,
             "window_s": DEFAULT_VETO_WINDOW_S,
         },
-        "classification": {"model": None, "endpoint_ref": None, "key_ref": None},
-        "drafting": {"model": None, "endpoint_ref": None, "key_ref": None},
+        "classification": {
+            "model": None,
+            "endpoint_ref": None,
+            "key_ref": None,
+            "extra_headers": {},
+            "key_header": "Authorization",
+            "key_prefix": "Bearer",
+            "validation_path": "models",
+            "draft_path": "draft",
+            "draft_protocol": "pursers_json_v1",
+        },
+        "drafting": {
+            "model": None,
+            "endpoint_ref": None,
+            "key_ref": None,
+            "extra_headers": {},
+            "key_header": "Authorization",
+            "key_prefix": "Bearer",
+            "validation_path": "models",
+            "draft_path": "draft",
+            "draft_protocol": "pursers_json_v1",
+        },
     }
     sources = ["safe_defaults"]
     raw = document.get("board_butler")
@@ -702,9 +975,21 @@ def resolve_config(
         classification_model=merged["classification"]["model"],
         classification_endpoint_ref=merged["classification"]["endpoint_ref"],
         classification_key_ref=merged["classification"]["key_ref"],
+        classification_extra_headers=dict(merged["classification"]["extra_headers"]),
+        classification_key_header=merged["classification"]["key_header"],
+        classification_key_prefix=merged["classification"]["key_prefix"],
+        classification_validation_path=merged["classification"]["validation_path"],
+        classification_draft_path=merged["classification"]["draft_path"],
+        classification_draft_protocol=merged["classification"]["draft_protocol"],
         drafting_model=merged["drafting"]["model"],
         drafting_endpoint_ref=merged["drafting"]["endpoint_ref"],
         drafting_key_ref=merged["drafting"]["key_ref"],
+        drafting_extra_headers=dict(merged["drafting"]["extra_headers"]),
+        drafting_key_header=merged["drafting"]["key_header"],
+        drafting_key_prefix=merged["drafting"]["key_prefix"],
+        drafting_validation_path=merged["drafting"]["validation_path"],
+        drafting_draft_path=merged["drafting"]["draft_path"],
+        drafting_draft_protocol=merged["drafting"]["draft_protocol"],
         source_layers=tuple(sources),
     )
 
@@ -2160,6 +2445,12 @@ async def process_question(
             now,
             project_name=getattr(backend, "project_name", None),
         )
+        # Provider configuration is intentionally re-resolved on every question
+        # cycle, so a dashboard save takes effect without restarting the resident.
+        # Runtime objects stay local and are never serialized into findings.
+        secret_root = getattr(args, "provider_secrets_dir", None)
+        resolve_provider_runtime(config, "classification", secret_root)
+        drafting_provider = resolve_provider_runtime(config, "drafting", secret_root)
     except ButlerConfigError as exc:
         safe_config = resolve_config(
             {}, args, state, now, project_name=getattr(backend, "project_name", None)
@@ -2183,13 +2474,24 @@ async def process_question(
         config.drafts_per_ticket,
         config.drafts_per_board,
     )
-    finding = (
-        rate_limit_finding(question, reason, now)
-        if reason
-        else await make_finding(
+    if reason:
+        finding = rate_limit_finding(question, reason, now)
+    else:
+        finding = await make_finding(
             question, backend, args.repo, args.integration_ref, now
         )
-    )
+        if drafting_provider is not None:
+            try:
+                finding["message"] = await draft_with_provider(
+                    drafting_provider, question, finding
+                )
+                finding["draft_source"] = "configured_provider"
+            except Exception:
+                finding["verdict"] = Outcome.UNKNOWN.value
+                finding["message"] = (
+                    "Would escalate because the configured drafting provider failed."
+                )
+                finding["draft_source"] = "configured_provider_failed"
     finding = decorate_finding(finding, config, now)
     merged = merge_finding(state, finding, now)
     encoded = json.dumps(merged, sort_keys=True, separators=(",", ":"))
@@ -2288,6 +2590,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--integration-ref", default="origin/main")
     parser.add_argument("--pid-file", type=Path, required=True)
     parser.add_argument("--cursor-file", type=Path, required=True)
+    parser.add_argument(
+        "--provider-secrets-dir",
+        type=Path,
+        default=(
+            Path(os.environ.get("PURSERS_STATE_DIR", "~/.pursers")).expanduser()
+            / "board-butler"
+            / "secrets"
+        ),
+    )
     parser.add_argument("--drafts-per-hour", type=int, default=DEFAULT_DRAFTS_PER_HOUR)
     parser.add_argument("--drafts-per-ticket", type=int, default=DEFAULT_DRAFTS_PER_TICKET)
     parser.add_argument("--drafts-per-board", type=int, default=DEFAULT_DRAFTS_PER_BOARD)
@@ -2336,7 +2647,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     controls.add_argument("--veto-question")
     parser.add_argument("--control-reason", default="operator")
     args = parser.parse_args(argv)
-    for name in ("token_path", "repo", "pid_file", "cursor_file"):
+    for name in (
+        "token_path",
+        "repo",
+        "pid_file",
+        "cursor_file",
+        "provider_secrets_dir",
+    ):
         value = getattr(args, name)
         if not value.is_absolute():
             parser.error(f"--{name.replace('_', '-')} must be absolute")
