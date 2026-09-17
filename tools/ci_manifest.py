@@ -31,6 +31,35 @@ class Suite:
     covers: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class IntegrationFilesState:
+    paths: tuple[str, ...]
+    malformed_lines: tuple[int, ...]
+    duplicate_paths: tuple[str, ...]
+    missing_files: tuple[str, ...]
+    stale_files: tuple[str, ...]
+    unsorted: bool
+
+    @property
+    def valid(self) -> bool:
+        return not (
+            self.malformed_lines
+            or self.duplicate_paths
+            or self.missing_files
+            or self.stale_files
+            or self.unsorted
+        )
+
+    def mismatch_message(self) -> str:
+        return (
+            "integration files manifest mismatch: "
+            f"malformed_lines={list(self.malformed_lines)}, "
+            f"duplicate_paths={list(self.duplicate_paths)}, "
+            f"missing_files={list(self.missing_files)}, "
+            f"stale_files={list(self.stale_files)}, unsorted={self.unsorted}"
+        )
+
+
 SUITES: tuple[Suite, ...] = (
     Suite("central", "packages/central/tests", covers=("packages/central",)),
     Suite("client", "packages/client/tests", covers=("packages/client",)),
@@ -138,11 +167,11 @@ def validate_manifest(root: Path, suites: Sequence[Suite] = SUITES) -> None:
         )
 
 
-def validate_integration_files(
+def inspect_integration_files(
     root: Path,
     manifest_path: Path = INTEGRATION_FILES_MANIFEST,
-) -> None:
-    """Verify that the cumulative integration manifest describes this tree."""
+) -> IntegrationFilesState:
+    """Inspect the cumulative integration manifest without deciding gate policy."""
     manifest = root / manifest_path
     rows = manifest.read_text(encoding="utf-8").splitlines()
     malformed: list[int] = []
@@ -176,13 +205,50 @@ def validate_integration_files(
             stale_files.append(relative)
 
     unsorted = paths != sorted(paths)
-    if malformed or duplicate_paths or missing_files or stale_files or unsorted:
-        raise ValueError(
-            "integration files manifest mismatch: "
-            f"malformed_lines={malformed}, duplicate_paths={duplicate_paths}, "
-            f"missing_files={missing_files}, stale_files={stale_files}, "
-            f"unsorted={unsorted}"
+    return IntegrationFilesState(
+        paths=tuple(paths),
+        malformed_lines=tuple(malformed),
+        duplicate_paths=tuple(duplicate_paths),
+        missing_files=tuple(missing_files),
+        stale_files=tuple(stale_files),
+        unsorted=unsorted,
+    )
+
+
+def validate_integration_files(
+    root: Path,
+    manifest_path: Path = INTEGRATION_FILES_MANIFEST,
+) -> None:
+    """Verify that the cumulative integration manifest describes this tree."""
+    state = inspect_integration_files(root, manifest_path)
+    if not state.valid:
+        raise ValueError(state.mismatch_message())
+
+
+def changed_paths_since(root: Path, base_ref: str) -> tuple[str, ...]:
+    """Return committed and local paths changed from the supplied base ref."""
+    commands = (
+        ["git", "diff", "--name-only", "--diff-filter=ACDMRTUXB", f"{base_ref}...HEAD"],
+        ["git", "diff", "--name-only", "--diff-filter=ACDMRTUXB", "HEAD"],
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACDMRTUXB", "HEAD"],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    )
+    changed: set[str] = set()
+    for command in commands:
+        completed = subprocess.run(
+            command,
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
         )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            raise RuntimeError(
+                f"cannot identify branch changes from {base_ref!r}: {detail}"
+            )
+        changed.update(line for line in completed.stdout.splitlines() if line)
+    return tuple(sorted(changed))
 
 
 def parse_collected_count(output: str, suite_path: str) -> int:
@@ -271,6 +337,51 @@ def run_suites(root: Path, suites: Sequence[Suite] = SUITES) -> None:
             )
 
 
+def run_seat_suites(root: Path, suites: Sequence[Suite] = SUITES) -> None:
+    """Run every suite for seat evidence, with release-owned gates reported apart."""
+    failures: list[str] = []
+    for suite in suites:
+        print(f"::group::pytest {suite.name} ({suite.path})", flush=True)
+        command = [sys.executable, "-m", "pytest", "-q", pytest_target(suite)]
+        if suite.path == "tools/tests":
+            command.extend(
+                ["-k", "not test_integration_files_manifest_matches_the_tree"]
+            )
+        completed = subprocess.run(
+            command,
+            cwd=root / suite.cwd,
+            env=suite_environment(root),
+            check=False,
+        )
+        print("::endgroup::", flush=True)
+        if completed.returncode != 0:
+            failures.append(
+                f"{suite.name} ({suite.path}) exit={completed.returncode}"
+            )
+    if failures:
+        raise RuntimeError("seat suite failures: " + ", ".join(failures))
+
+
+def print_seat_digest_report(root: Path, base_ref: str) -> None:
+    """Print explicit non-gate digest evidence for a worker branch."""
+    state = inspect_integration_files(root)
+    changed = changed_paths_since(root, base_ref)
+    listed = set(state.paths)
+    changed_listed = sorted(listed.intersection(changed))
+    status = "current" if state.valid else "stale"
+    print("SEAT SUITE REPORT (NOT A RELEASE/CI GATE)")
+    print(f"integration_digest_status={status}")
+    print(f"integration_base_ref={base_ref}")
+    print(f"integration_digest_stale_files={list(state.stale_files)}")
+    print(f"integration_listed_files_changed={changed_listed}")
+    print("integration_digest_test=reported_separately_not_run_as_a_suite_test")
+    print("release_gate_command=python3 tools/ci_manifest.py run")
+    print(
+        "release_gate_owner=operator_at_merge; worker seats must not regenerate "
+        "INTEGRATION_FILES.sha256 or component-lock.json"
+    )
+
+
 def verify_counts(payload: Any, suites: Sequence[Suite] = SUITES) -> None:
     if not isinstance(payload, dict) or payload.get("schema") != 1:
         raise ValueError("collection report must be a schema 1 object")
@@ -312,6 +423,11 @@ def build_parser() -> argparse.ArgumentParser:
     collect = subparsers.add_parser("collect", help="collect every required suite")
     collect.add_argument("--output", type=Path, required=True)
     subparsers.add_parser("run", help="run every required suite")
+    seat_run = subparsers.add_parser(
+        "seat-suite-report",
+        help="run seat suites and report release-owned digest drift; not a CI gate",
+    )
+    seat_run.add_argument("--base-ref", default="origin/main")
     verify = subparsers.add_parser("verify", help="verify a collection report")
     verify.add_argument("--input", type=Path, required=True)
     return parser
@@ -322,7 +438,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = repository_root()
     try:
         validate_manifest(root)
-        validate_integration_files(root)
+        if args.command != "seat-suite-report":
+            validate_integration_files(root)
         if args.command == "check":
             print(f"manifest covers all {len(SUITES)} test directories")
         elif args.command == "collect":
@@ -331,6 +448,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         elif args.command == "run":
             run_suites(root)
+        elif args.command == "seat-suite-report":
+            print_seat_digest_report(root, args.base_ref)
+            run_seat_suites(root)
         elif args.command == "verify":
             payload = json.loads(args.input.read_text(encoding="utf-8"))
             verify_counts(payload)

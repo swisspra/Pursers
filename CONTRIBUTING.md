@@ -20,8 +20,21 @@ uv pip install --python .venv/bin/python --no-deps --editable packages/pursers
 ```
 
 The test manifest adds checkout package sources to `PYTHONPATH`, so tests use
-the code in this clone rather than an operator-installed package. Run the same
-suite inventory as CI:
+the code in this clone rather than an operator-installed package. A worker seat
+whose branch changes a path listed in `INTEGRATION_FILES.sha256` must run the
+explicit non-gate suite command:
+
+```sh
+.venv/bin/python tools/ci_manifest.py seat-suite-report --base-ref origin/main
+```
+
+It runs every suite, reports the recorded digest state and the listed paths the
+branch changed, and identifies itself as **not** the release/CI gate. Worker
+seats must not regenerate `INTEGRATION_FILES.sha256` or `component-lock.json`.
+The operator rebuilds wheels, deterministically regenerates both release-owned
+artifacts, and then runs the strict gate at merge.
+
+The strict gate used by CI and the merge operator remains:
 
 ```sh
 .venv/bin/python tools/ci_manifest.py check
@@ -44,7 +57,10 @@ suite before submitting.
 3. Keep the change inside the ticket's bounded scope.
 4. Preserve unrelated local changes and never commit credentials or private paths.
 5. Renew the ticket lease during long work.
-6. Run the affected suites, leak scan, and `git diff --check`.
+6. Run the affected suites, leak scan, and `git diff --check`. If a listed file
+   changed, submit the literal `seat-suite-report` result and digest report; do
+   not claim that it is the strict manifest gate. The merge operator separately
+   refreshes release-owned artifacts and runs `ci_manifest.py run`.
 7. Commit and push the exact branch that was tested.
 8. Submit the full commit SHA, exact changed-file list, and literal test evidence.
 9. A reviewer under a different principal independently checks that exact SHA.
