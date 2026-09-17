@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- Wait Bridge documentation records the measured AionUi 2.2.1 / AionCore
+  0.2.1 imported-stdio behavior: bounded waits used poll mode, native
+  elicitation was not rendered, and session delivery required the authenticated
+  MCP import API with transport fields nested under `mcpServers[].transport`.
+
 ## [5.0.0b2] - 2026-09-17
 
 This release includes `pursers-central==0.1.0a31`,
