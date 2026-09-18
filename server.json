@@ -7,12 +7,12 @@
     "url": "https://github.com/swisspra/Pursers",
     "source": "github"
   },
-  "version": "5.0.0b2",
+  "version": "5.0.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "pursers-central",
-      "version": "0.1.0a31",
+      "version": "0.1.0",
       "runtimeHint": "uvx",
       "packageArguments": [
         {

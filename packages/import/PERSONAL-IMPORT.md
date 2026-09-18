@@ -1,4 +1,4 @@
-# Pursers Personal Import 5.0.0a3
+# Pursers Personal Import 5.0.0
 
 `pursers-personal-import` is a copy-only importer from On Board v4 into Pursers
 Personal. It does not modify or replace the On Board v4 command or its data.

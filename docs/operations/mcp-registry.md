@@ -15,7 +15,7 @@ serves for the package:
 It is in `packages/central/README.md` and `packages/pursers/README.md`. The
 releases already on PyPI were built before the marker existed, so **the listing
 cannot be verified until the next publish carries it.** The operator decision
-is to ship the marker with the b3 train, not as a marker-only patch.
+is to ship the marker with the 5.0.0 release, not as a marker-only patch.
 
 ## Keeping it honest
 
@@ -33,13 +33,13 @@ It fails unless all of these hold:
 
 `--repository` points it at another checkout; the default is this one.
 
-## At b3
+## Publishing a release
 
-1. Bump versions through the release train as usual, then copy the b3 product
+1. Bump versions through the release train as usual, then copy the new product
    and central versions into `server.json`. Do not edit them by hand anywhere
    else.
 2. `python3 tools/check_server_json.py` must print `PASS`.
-3. Publish b3 to PyPI.
+3. Publish the release to PyPI.
 4. Install `mcp-publisher` using the method the registry documents at that
    time, then `mcp-publisher login github`, `mcp-publisher validate`, and only
    after that passes, `mcp-publisher publish`.

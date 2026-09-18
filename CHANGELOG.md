@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-09-18
+
+This release includes `pursers-central==0.1.0`,
+`pursers-client==0.1.0`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.0.0`, `pursers==5.0.0`,
+`pursers-wait-bridge==0.1.0`, and
+`pursers-acp==0.1.0`.
+
 ### Added
 
 - Central: add `pursers-central init` and `pursers-central run` as the packaged
@@ -28,13 +36,33 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Packaging: `pursers`, `pursers-personal`, and `pursers-personal-import` are
+  classified `Development Status :: 5 - Production/Stable`; every PyPI summary
+  uses the Pursers name, and the package READMEs document the real install
+  paths instead of pre-release installation gates.
+- Personal: the MCP App title and footer read `Pursers Personal` instead of
+  `On Board Personal Preview`. The MCP server name is unchanged, so existing
+  host configurations keep working.
 - Wait Bridge documentation records the measured AionUi 2.2.1 / AionCore
   0.2.1 imported-stdio behavior: bounded waits used poll mode, native
   elicitation was not rendered, and session delivery required the authenticated
   MCP import API with transport fields nested under `mcpServers[].transport`.
 
+### Fixed
+
+- Fleet dashboard: pages no longer jump while you read. The server serves the
+  last snapshot while one background refresh runs, so slow Central reads no
+  longer time out the 5-second page refresh, and the connection banner is an
+  overlay that takes no layout space.
+- Personal import: documented commands use the real `pursers-personal-import`
+  console script.
+
 ### Security
 
+- Fleet dashboard: Board Butler provider validation refuses link-local targets,
+  including non-canonical numeric IPv4 forms and DNS names that resolve to
+  them, connects only to the validated address, and rejects cross-origin
+  redirects (CodeQL `py/full-ssrf`).
 - Managed seat configuration and Wait Bridge child-process checks compare
   token fingerprints instead of storing or forwarding raw JWTs.
 

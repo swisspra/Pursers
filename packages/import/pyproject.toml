@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pursers-personal-import"
-version = "5.0.0a3"
+version = "5.0.0"
 description = "Copy-only importer from On Board v4 into Pursers Personal"
 readme = "PERSONAL-IMPORT.md"
 requires-python = ">=3.11"

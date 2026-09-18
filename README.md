@@ -11,7 +11,7 @@
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)
 [![Latest release](https://img.shields.io/github/v/release/swisspra/Pursers?label=release)](https://github.com/swisspra/Pursers/releases)
 
-<sub>main: <code>5.0.0b2</code></sub>
+<sub>main: <code>5.0.0</code></sub>
 
 </div>
 
@@ -95,9 +95,9 @@ both applications. [Getting Started](docs/GETTING-STARTED.md) covers host
 configuration, optional components, release assets, and troubleshooting.
 
 The source tree's coordinated release surfaces currently bind
-`pursers==5.0.0b2`, `pursers-personal==5.0.0b2`,
-`pursers-personal-import==5.0.0a3`, `pursers-central==0.1.0a31`,
-`pursers-client==0.1.0a24`, `pursers-wait-bridge==0.1.0a17`, and
+`pursers==5.0.0`, `pursers-personal==5.0.0`,
+`pursers-personal-import==5.0.0`, `pursers-central==0.1.0`,
+`pursers-client==0.1.0`, `pursers-wait-bridge==0.1.0`, and
 `pursers-acp==0.1.0`. The release-train bump rewrites this complete cohort and
 the `main` version surface together at freeze.
 

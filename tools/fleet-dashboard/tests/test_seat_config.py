@@ -277,7 +277,7 @@ def test_codex_worker_and_reviewer_connectors_coexist_and_match_independently(
         assert "${PURSERS_BOARD_CONNECTOR_TOKEN_SHA256-}" in wait["args"][1]
 
     doctor = seat_config.Doctor(
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         runner=hermetic_doctor_runner,
         live_probe=lambda _d, _t: {
             "mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}
@@ -449,7 +449,7 @@ def test_bridge_installer_unsets_private_ca_and_never_uses_uvx(
     monkeypatch.setattr(seat_config.shutil, "which", which)
     monkeypatch.setenv("SSL_CERT_FILE", "/private/ca.pem")
     command = seat_config.BridgeInstaller(
-        "0.1.0a17",
+        "0.1.0",
         runner=run,
         discovered_configs=(),
         home=tmp_path,
@@ -461,7 +461,7 @@ def test_bridge_installer_unsets_private_ca_and_never_uses_uvx(
         "tool",
         "install",
         "--force",
-        "pursers-wait-bridge==0.1.0a17",
+        "pursers-wait-bridge==0.1.0",
     ]
     assert "SSL_CERT_FILE" not in calls[0][1]["env"]
     assert "uvx" not in calls[0][0]
@@ -743,11 +743,11 @@ def test_inventory_and_doctor_redact_token_and_report_push(
     def run(command, **_kwargs):
         if command[0] == "ps":
             return subprocess.CompletedProcess(command, 0, "", "")
-        return subprocess.CompletedProcess(command, 0, "0.1.0a17\n", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0\n", "")
 
     doctor = seat_config.Doctor(
         runner=run,
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _desired, timeout: {
             "mode": "push",
             "registry_boards": ["pursers", "project-a"],
@@ -763,7 +763,7 @@ def test_inventory_and_doctor_redact_token_and_report_push(
     assert "TOKEN_MUST_NOT_APPEAR" not in serialized
 
     inventory = seat_config.SeatInventory(tmp_path / "state/seats.json")
-    inventory.upsert(target, bridge_version="0.1.0a17", doctor=report)
+    inventory.upsert(target, bridge_version="0.1.0", doctor=report)
     loaded = inventory.load()
     assert loaded["seats"][0]["host"] == "codex"
     assert loaded["seats"][0]["last_doctor"]["overall"] == "PASS"
@@ -940,7 +940,7 @@ def test_claude_desktop_doctor_reports_identity_and_runtime_start(
             "registry_boards": ["pursers"],
             "skipped_boards": {},
         },
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
     )
 
     checks = {row.check: row for row in doctor.run(target)}
@@ -1030,12 +1030,12 @@ def test_doctor_poll_is_explicit_warning(
     )
 
     def run(command, **_kwargs):
-        stdout = "" if command[0] == "ps" else "0.1.0a17\n"
+        stdout = "" if command[0] == "ps" else "0.1.0\n"
         return subprocess.CompletedProcess(command, 0, stdout, "")
 
     rows = seat_config.Doctor(
         runner=run,
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _desired, _timeout: {
             "mode": "poll",
             "registry_boards": ["pursers"],
@@ -1051,23 +1051,23 @@ def test_bridge_installer_stale_shim_and_pypi(tmp_path: Path) -> None:
     shim.write_text("#!/bin/sh\nexit 0\n")
     shim.chmod(0o755)
 
-    # 1. Stale shim: returns 0.1.0a6 while pinned is 0.1.0a17
+    # 1. Stale shim: returns 0.1.0a6 while pinned is 0.1.0
     def run_stale(command, **_kwargs):
         return subprocess.CompletedProcess(command, 0, "0.1.0a6\n", "")
 
     installer = seat_config.BridgeInstaller(
-        "0.1.0a17",
+        "0.1.0",
         runner=run_stale,
         command=shim,
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
     )
     info = installer.inspect()
     assert info["installed"] is True
     assert info["installed_version"] == "0.1.0a6"
-    assert info["pinned_version"] == "0.1.0a17"
-    assert info["latest_pypi_version"] == "0.1.0a17"
+    assert info["pinned_version"] == "0.1.0"
+    assert info["latest_pypi_version"] == "0.1.0"
     assert info["status"] == "FAIL"
-    assert "installed=0.1.0a6; pinned=0.1.0a17" in info["message"]
+    assert "installed=0.1.0a6; pinned=0.1.0" in info["message"]
 
     # In Doctor, stale bridge causes FAIL
     target = desired(tmp_path, "codex", bridge_command=str(shim))
@@ -1075,7 +1075,7 @@ def test_bridge_installer_stale_shim_and_pypi(tmp_path: Path) -> None:
     Path(target.ca_file).write_text("ca")
     doc = seat_config.Doctor(
         runner=run_stale,
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
     )
     rows = doc.run(target)
@@ -1084,16 +1084,16 @@ def test_bridge_installer_stale_shim_and_pypi(tmp_path: Path) -> None:
 
     # 2. Installed matches pinned, but PyPI is unreachable: WARN
     def run_current(command, **_kwargs):
-        return subprocess.CompletedProcess(command, 0, "0.1.0a17\n", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0\n", "")
 
     installer_warn = seat_config.BridgeInstaller(
-        "0.1.0a17",
+        "0.1.0",
         runner=run_current,
         command=shim,
         pypi_fetcher=lambda: None,
     )
     info_warn = installer_warn.inspect()
-    assert info_warn["installed_version"] == "0.1.0a17"
+    assert info_warn["installed_version"] == "0.1.0"
     assert info_warn["latest_pypi_version"] is None
     assert info_warn["status"] == "WARN"
     assert "PyPI unreachable" in info_warn["message"]
@@ -1143,7 +1143,7 @@ def test_codex_headers_helper_removes_raw_token_env_dependency(
     rows = seat_config.Doctor(
         runner=hermetic_doctor_runner,
         runtime_probe=lambda _d, _i, _t: (True, "stub ok"),
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _d, _t: {
             "mode": "push",
             "registry_boards": ["pursers"],
@@ -1169,7 +1169,7 @@ def test_doctor_ignores_obsolete_raw_env_when_fingerprint_matches(
     adapter = seat_config.CodexAdapter(target.config_path)
     adapter.apply(adapter.plan(target))
     doctor = seat_config.Doctor(
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         runner=hermetic_doctor_runner,
         live_probe=lambda _d, _t: {
             "mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}
@@ -1208,7 +1208,7 @@ def test_doctor_compares_token_file_and_managed_fingerprint(
         runner=hermetic_doctor_runner,
         identity_probe=identity_probe,
         runtime_probe=lambda _d, _i, _t: (True, "stub ok"),
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _d, _t: {
             "mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}
         },
@@ -1259,7 +1259,7 @@ def test_goose_doctor_uses_fingerprint_without_raw_token_env(
     rows = seat_config.Doctor(
         runner=hermetic_doctor_runner,
         runtime_probe=lambda _d, _i, _t: (True, "stub ok"),
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _d, _t: {
             "mode": "push",
             "registry_boards": ["pursers"],
@@ -1397,11 +1397,11 @@ def test_doctor_token_file_validation_and_redaction(
     def run_ok(command, **_kwargs):
         if command[0] == "ps":
             return subprocess.CompletedProcess(command, 0, "", "")
-        return subprocess.CompletedProcess(command, 0, "0.1.0a17\n", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0\n", "")
 
     doc = seat_config.Doctor(
         runner=run_ok,
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
     )
 
@@ -1464,11 +1464,11 @@ def test_doctor_uvx_under_private_ca_fails(
     def run_bridge(command, **_kwargs):
         if command[0] == "ps":
             return subprocess.CompletedProcess(command, 0, "", "")
-        return subprocess.CompletedProcess(command, 0, "0.1.0a17\n", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0\n", "")
 
     doc = seat_config.Doctor(
         runner=run_bridge,
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
     )
     rows_sys = doc.run(target_sys)
@@ -1530,11 +1530,11 @@ def test_doctor_cat_token_file_reference_validation(
     def run_ok(command, **_kwargs):
         if command[0] == "ps":
             return subprocess.CompletedProcess(command, 0, "", "")
-        return subprocess.CompletedProcess(command, 0, "0.1.0a17\n", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0\n", "")
 
     doc = seat_config.Doctor(
         runner=run_ok,
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
     )
 
@@ -1607,11 +1607,11 @@ def test_doctor_dead_nvm_npx_path_warns(
     def run_ok(command, **_kwargs):
         if command[0] == "ps":
             return subprocess.CompletedProcess(command, 0, "", "")
-        return subprocess.CompletedProcess(command, 0, "0.1.0a17\n", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0\n", "")
 
     doc = seat_config.Doctor(
         runner=run_ok,
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
     )
     rows = doc.run(target)
@@ -1728,11 +1728,11 @@ def test_doctor_warns_when_central_capabilities_drift(
     def run(command, **_kwargs):
         if command[0] == "ps":
             return subprocess.CompletedProcess(command, 0, "", "")
-        return subprocess.CompletedProcess(command, 0, "0.1.0a17\n", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0\n", "")
 
     rows = seat_config.Doctor(
         runner=run,
-        pypi_fetcher=lambda: "0.1.0a17",
+        pypi_fetcher=lambda: "0.1.0",
         live_probe=lambda _desired, _timeout: {
             "mode": "push",
             "registry_boards": ["pursers"],
