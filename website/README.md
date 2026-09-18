@@ -16,22 +16,18 @@ publish it as `docs/showcase/pursers-og.png` at the site origin and replace the
 empty value with `https://pursers.app/docs/showcase/pursers-og.png`. Do not
 activate that URL before the asset resolves.
 
-## Deployment choices
+## Deployment
 
-The operator should choose exactly one deployment path. None is activated by
-this directory.
+The checked-in [GitHub Pages workflow](../.github/workflows/pages.yml) is the
+deployment source of truth. A push to `main` or a manual dispatch checks out
+the repository, configures Pages, uploads `website/` as the static artifact,
+and deploys it. There is no site build command.
 
-### 1. GitHub Pages
-
-1. Copy [`deploy/pages.yml`](deploy/pages.yml) to
-   `.github/workflows/pages.yml` in an operator-owned change.
-2. In repository **Settings > Pages**, set the source to **GitHub Actions**.
-3. Set the custom domain to `pursers.app`, wait for the DNS check, then enable
-   HTTPS enforcement.
-
-The draft follows GitHub's current static Pages flow: checkout, configure
-Pages, upload `website/` as the Pages artifact, then deploy it. There is no
-site build command.
+Before the first deployment, an operator must open repository **Settings >
+Pages** and set **Build and deployment > Source** to **GitHub Actions**. Set the
+custom domain to `pursers.app`, wait for the DNS check, then enable HTTPS
+enforcement. This repository does not use a `CNAME` file; the custom domain is
+configured in repository settings.
 
 Use this exact DNS set for GitHub Pages. Remove conflicting apex `A`, `AAAA`,
 `ALIAS`, or `ANAME` records first; do not add a wildcard record.
@@ -50,7 +46,7 @@ Use this exact DNS set for GitHub Pages. Remove conflicting apex `A`, `AAAA`,
 
 Source: [GitHub's custom-domain documentation](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site).
 
-### 2. Cloudflare Pages
+### Alternative: Cloudflare Pages
 
 Create a Git-integrated Pages project with these values:
 
@@ -82,7 +78,7 @@ the Pages dashboard; do not deploy the table above unchanged.
 
 Source: [Cloudflare Pages custom domains](https://developers.cloudflare.com/pages/configuration/custom-domains/).
 
-### 3. Plain static host
+### Alternative: plain static host
 
 Upload the contents of `website/` to the host's document root. Configure
 `pursers.app` as the canonical domain, serve `index.html` at `/`, serve

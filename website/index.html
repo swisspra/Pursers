@@ -152,11 +152,10 @@
             <p class="kicker">Quickstart</p>
             <h2>Install the verified beta.</h2>
             <p>
-              The published
+              The six distributions in the published
               <a href="https://github.com/swisspra/Pursers/releases/tag/v5.0.0b2">v5.0.0b2 prerelease</a>
-              contains six wheel assets and SHA256SUMS.txt. Download and verify
-              all seven files, then follow the exact profile and Central steps
-              in the getting-started guide.
+              are available from PyPI. Install the prerelease set below, then follow
+              the profile and Central steps in the getting-started guide.
             </p>
             <div class="doc-links">
               <a href="https://github.com/swisspra/Pursers/blob/main/docs/GETTING-STARTED.md">
@@ -172,11 +171,15 @@
               <span></span><span></span><span></span>
               <small>terminal</small>
             </div>
-            <pre><code><span class="prompt">$</span> gh release download v5.0.0b2 -R swisspra/Pursers
-<span class="prompt">$</span> shasum -a 256 -c SHA256SUMS.txt
-<span class="prompt">$</span> python3 -m venv .venv
+            <pre><code><span class="prompt">$</span> python3 -m venv .venv
 <span class="prompt">$</span> . .venv/bin/activate
-<span class="prompt">$</span> python -m pip install ./*.whl
+<span class="prompt">$</span> python -m pip install --pre \
+    pursers \
+    pursers-central \
+    pursers-client \
+    pursers-personal \
+    pursers-personal-import \
+    pursers-wait-bridge
 <span class="prompt">$</span> pursers-personal setup --project "$PWD" --apply
 <span class="prompt">$</span> pursers-personal central --project "$PWD"</code></pre>
           </div>
