@@ -656,19 +656,31 @@ The banner clears and the live region announces `Connection restored.`
 
 ### Page shows stale information
 
-**Symptom**
+**Verification status**
+
+`not verified on this release`: Fleet 5.0.0 does not render a dedicated label
+when page data is stale. If a refresh fails after data has loaded, the page
+retains that data and keeps the last successful refresh time in this form:
 
 ```text
-Last-known data stays labeled stale.
+Updated <TIMESTAMP>
+```
+
+At the same time, the connection banner from the preceding section remains
+visible and the live region announces:
+
+```text
+Connection interrupted. Reconnecting.
 ```
 
 Agents can also be classified as `stale` after the configured activity
-threshold.
+threshold. That agent state is separate from the freshness of the page data.
 
 **Cause**
 
-The latest refresh failed or an agent has not reported recent activity. The
-dashboard preserves bounded last-known data instead of presenting it as live.
+The latest refresh failed, or an agent has not reported recent activity. A
+failed page refresh preserves the previously loaded data; the shipped UI does
+not add a separate stale-data label.
 
 **Fix**
 
