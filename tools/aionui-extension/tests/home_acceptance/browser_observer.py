@@ -943,7 +943,7 @@ if (surfaceId === 'mcp-app') {
     })
     const value = probe && probe.result ? probe.result.value : null
     if (value && value.embedded === true
-        && value.title === 'On Board Personal Preview'
+        && value.title === 'Pursers Personal'
         && value.hasBoard === true && value.hasNavigation === true) {
       matches.push({ frameId: entry.frame.id, contextId: probeContext, title: value.title })
     }
@@ -1124,7 +1124,7 @@ if (surfaceId === 'mcp-app') {
     })
     const value = probe && probe.result ? probe.result.value : null
     if (value && value.embedded === true
-        && value.title === 'On Board Personal Preview'
+        && value.title === 'Pursers Personal'
         && value.hasBoard === true && value.hasNavigation === true) {
       matches.push({ frameId: entry.frame.id, contextId: probeContext })
     }

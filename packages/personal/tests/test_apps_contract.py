@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "b537a2cfa674f6b735e62a035dd5478eaebc4f4b40f0af9bd4a302a0e8644a17"
-    assert len(payload) == 338007
+    expected = "01ba685a331baaa90e4ac630d0b32aa1479e7726d065d4311e53970a7f05d70c"
+    assert len(payload) == 337980
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0b2"
     assert lock["view"] == {
@@ -464,7 +464,7 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
             html = resource.contents[0]
             assert html.mime_type == APP_MIME_TYPE
             assert html.meta["ui"]["csp"] == {}
-            assert "On Board Personal Preview" in html.text
+            assert "Pursers Personal" in html.text
             assert fake_config().token not in html.text
             assert all(
                 name not in html.text

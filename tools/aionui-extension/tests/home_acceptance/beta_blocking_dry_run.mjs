@@ -77,7 +77,7 @@ const mcpAppContext = async () => {
     });
     const value = probe && probe.result ? probe.result.value : null;
     if (value && value.embedded === true
-        && value.title === "On Board Personal Preview"
+        && value.title === "Pursers Personal"
         && value.hasBoard === true && value.hasNavigation === true) {
       matches.push(world.executionContextId);
     }

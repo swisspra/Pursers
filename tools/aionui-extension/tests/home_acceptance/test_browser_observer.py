@@ -630,7 +630,7 @@ def test_ego_mcp_app_capture_is_bound_to_one_embedded_personal_frame() -> None:
     )
     assert "frameEntries.slice(1)" in script
     assert "window.parent !== window" in script
-    assert "On Board Personal Preview" in script
+    assert "Pursers Personal" in script
     assert "matches.length !== 1" in script
     assert "Accessibility.getFullAXTree', { frameId: frameId }" in script
     assert "host_nodes: hostNodes" in script

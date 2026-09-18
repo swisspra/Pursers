@@ -1,4 +1,4 @@
-"""On Board Personal Preview public package."""
+"""Pursers Personal public package."""
 
 from importlib.metadata import PackageNotFoundError, version
 

@@ -1,4 +1,4 @@
-"""Single user-facing console for On Board Personal Preview."""
+"""Single user-facing console for Pursers Personal."""
 
 from __future__ import annotations
 
