@@ -10,9 +10,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-  "pursers-client==0.1.0a23",
-  "pursers-personal==5.0.0a26",
-  "pursers-wait-bridge==0.1.0a16",
+  "pursers-client==0.1.0a24",
+  "pursers-personal==5.0.0b2",
+  "pursers-wait-bridge==0.1.0a17",
 ]
 
 [project.scripts]

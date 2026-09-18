@@ -290,6 +290,7 @@ uvx --from "pursers-personal==5.0.0b2" pursers-personal doctor \
           <tr><td><code>pursers-client</code></td><td><code>0.1.0a24</code></td><td>Python client used by Personal and the wait bridge.</td></tr>
           <tr><td><code>pursers-personal-import</code></td><td><code>5.0.0a3</code></td><td>Controlled Personal import utility.</td></tr>
           <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a17</code></td><td>Subscription-first single-board and multi-board wait server.</td></tr>
+          <tr><td><code>pursers-acp</code></td><td><code>0.1.0</code></td><td>ACP v1 board assistant staged for the next beta train.</td></tr>
         </tbody>
       </table>
       <p>The released package set described here is <code>5.0.0b2</code>, including the push-wait changes below. Verify the operator-approved manifest and <code>SHA256SUMS.txt</code> before installing. PyPI versions are immutable.</p>
@@ -850,7 +851,7 @@ git commit -m "release: &lt;release_tag&gt;"
 release_commit="$(git rev-parse HEAD)"
 git show --stat --oneline "$release_commit"
 test -z "$(git status --porcelain)"</code></pre>
-      <p>Push the train, obtain review, and require both jobs in <code>.github/workflows/ci.yml</code>. This block independently verifies the checked-out train branch and recomputes its release commit. Record the printed commit and immutable PR URL in the release change before pausing. The Python job builds the six checkout wheels, performs isolated wheel imports, checks/collects/runs/verifies all ten suites, and runs the leak scan. The dashboard job installs the locked npm tree and runs TypeScript without emitting files.</p>
+      <p>Push the train, obtain review, and require both jobs in <code>.github/workflows/ci.yml</code>. This block independently verifies the checked-out train branch and recomputes its release commit. Record the printed commit and immutable PR URL in the release change before pausing. The Python job builds the seven checkout wheels, performs isolated wheel imports, checks/collects/runs/verifies all suites, and runs the leak scan. The dashboard job installs the locked npm tree and runs TypeScript without emitting files.</p>
       <pre><code>set -euo pipefail
 train_branch="train/&lt;product_version&gt;"
 test "$(git branch --show-current)" = "$train_branch"
@@ -870,7 +871,7 @@ pr_head="$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)"
 test "$pr_head" = "$release_commit"
 gh pr checks "$pr_url" --watch
 printf 'release_commit=%s\nrelease_pr_url=%s\n' "$release_commit" "$pr_url"</code></pre>
-      <p>After the reviewed train is integrated, start from a fresh shell and replace <code>&lt;release_pr_url&gt;</code> and <code>&lt;recorded_release_commit&gt;</code> with the immutable values recorded by the preceding stage. The block verifies that exact PR was merged, its head equals the recorded release commit, and its merge commit is present on <code>origin/main</code> before tagging. The tag-triggered release workflow builds all six wheels with the pinned toolchain, writes <code>SHA256SUMS.txt</code>, extracts non-empty CHANGELOG notes, and creates or completes the GitHub Release.</p>
+      <p>After the reviewed train is integrated, start from a fresh shell and replace <code>&lt;release_pr_url&gt;</code> and <code>&lt;recorded_release_commit&gt;</code> with the immutable values recorded by the preceding stage. The block verifies that exact PR was merged, its head equals the recorded release commit, and its merge commit is present on <code>origin/main</code> before tagging. The tag-triggered release workflow builds all seven wheels with the pinned toolchain, writes <code>SHA256SUMS.txt</code>, extracts non-empty CHANGELOG notes, and creates or completes the GitHub Release.</p>
       <pre><code>set -euo pipefail
 release_pr_url="&lt;release_pr_url&gt;"
 recorded_release_commit="&lt;recorded_release_commit&gt;"
@@ -898,7 +899,7 @@ gh workflow run publish-pypi.yml --ref &lt;release_tag&gt;
 gh run list --workflow publish-pypi.yml \
   --branch &lt;release_tag&gt; --limit 1
 gh run watch &lt;publish_run_id&gt; --exit-status</code></pre>
-      <p>Confirm all six expected distributions on PyPI and compare the GitHub Release wheels against <code>SHA256SUMS.txt</code>. If any published artifact is wrong, advance the affected version and cut another train; never replace an existing PyPI version.</p>
+      <p>Confirm all seven expected distributions on PyPI and compare the GitHub Release wheels against <code>SHA256SUMS.txt</code>. If any published artifact is wrong, advance the affected version and cut another train; never replace an existing PyPI version.</p>
 
       <h3>3. Promote Central, bridge, Personal, and seats</h3>
       <p>Stage Central before touching the running service. The release-tag checkout is authoritative for component versions and dependency ranges. The resolver commands below supply the exact PyJWT and uvicorn pins for this train; record their output in the deployment change. On each host, the <code>tools/central_scaffold.py init</code> artifacts are the deployment inventory: <code>&lt;central_instance_root&gt;/.pursers-central-instance.json</code> supplies the label, <code>profile.env</code> supplies Central runtime values, and the loaded <code>&lt;launch_agents_dir&gt;/&lt;central_launchd_label&gt;.plist</code> is the authoritative current service definition (the plist under the instance root is only its scaffold seed). <code>&lt;launch_agents_dir&gt;</code>, <code>&lt;ca_bundle&gt;</code>, and <code>&lt;central_health_url&gt;</code> are explicit operator-owned paths/URL; stop if any cannot be resolved rather than guessing.</p>
@@ -1163,7 +1164,7 @@ python3 tools/worker-runtime/pursers_worker.py \
 
       <h3>7. Restart checklist</h3>
       <ol class="steps">
-        <li><strong>Freeze intake and dispatch.</strong> Do not create or offer new work during the upgrade. Record the approved integration commit, release tag, manifest, six wheel names, and checksums.</li>
+        <li><strong>Freeze intake and dispatch.</strong> Do not create or offer new work during the upgrade. Record the approved integration commit, release tag, manifest, seven wheel names, and checksums.</li>
         <li><strong>Finish release verification.</strong> Require all CI jobs, verify the signed tag and GitHub Release, then publish from that tag and confirm every expected immutable PyPI version.</li>
         <li><strong>Promote in dependency order.</strong> Stage and hash-check Central, switch the versioned venv, kickstart and health-check it; then upgrade the persistent bridge shim and each Personal venv.</li>
         <li><strong>Restart every host.</strong> Reload Codex, Goose, Claude Desktop/Code, and headless services. Do not assume an open process discovered the new binary.</li>

@@ -38,6 +38,10 @@ chat session so every seat can resume from the same record.
 - **Verifiable releases.** A pinned build toolchain produces hash-locked wheels;
   every repository change is also scanned for credentials and identifying data.
 
+The next beta train also stages `pursers-acp 0.1.0`, the standalone ACP v1
+board assistant for IDE hosts. Its package-specific launch instructions are in
+[`tools/acp-agent/README.md`](tools/acp-agent/README.md).
+
 ## 60-second quickstart
 
 The archived offline b1 wheelhouse requires CPython 3.12 on Apple silicon; the

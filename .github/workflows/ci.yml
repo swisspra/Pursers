@@ -33,6 +33,7 @@ jobs:
             packages/personal/pyproject.toml
             packages/import/pyproject.toml
             tools/wait-bridge/pyproject.toml
+            tools/acp-agent/pyproject.toml
             tools/release_versions.toml
 
       - name: Install pinned test and wheel-build dependencies
@@ -71,6 +72,8 @@ jobs:
             --outdir .ci/wheels packages/import
           python -m build --wheel --no-isolation \
             --outdir .ci/wheels tools/wait-bridge
+          python -m build --wheel --no-isolation \
+            --outdir .ci/wheels tools/acp-agent
           printf 'PIP_FIND_LINKS=%s/.ci/wheels\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           printf 'UV_FIND_LINKS=%s/.ci/wheels\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           python -m pip install --disable-pip-version-check --no-input \
@@ -101,7 +104,8 @@ jobs:
             .ci/wheels/pursers_central-*.whl \
             .ci/wheels/pursers_client-*.whl \
             .ci/wheels/pursers_personal-*.whl \
-            .ci/wheels/pursers_wait_bridge-*.whl
+            .ci/wheels/pursers_wait_bridge-*.whl \
+            .ci/wheels/pursers_acp-*.whl
           env -u PYTHONPATH .ci/isolated-wheel-imports/bin/python - <<'PY'
           import importlib.metadata as metadata
           import tomllib
@@ -109,6 +113,7 @@ jobs:
           import pursers_personal
           import pursers_wait_server
           import pursers_client
+          import pursers_acp
 
           with open("tools/release_versions.toml", "rb") as stream:
               packages = tomllib.load(stream)["packages"]
@@ -117,6 +122,7 @@ jobs:
               "pursers-client": packages["client"],
               "pursers-personal": packages["personal"],
               "pursers-wait-bridge": packages["wait_bridge"],
+              "pursers-acp": packages["acp"],
           }
           assert {name: metadata.version(name) for name in expected} == expected
           print("isolated-wheel-imports=pass")

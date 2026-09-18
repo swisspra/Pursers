@@ -54,6 +54,20 @@ pursers-acp --project /PATH/TO/PROJECT
 pursers-acp --project /PATH/TO/PROJECT --login
 ```
 
+## Published launch
+
+Install the released package in its own environment, or run the exact release
+with `uvx`. Point it at a project that already has a Pursers Personal profile;
+add `--login` only when you want the existing Personal setup flow to create and
+activate one:
+
+```sh
+python -m pip install "pursers-acp==0.1.0"
+pursers-acp --project /PATH/TO/PROJECT
+
+uvx --from "pursers-acp==0.1.0" pursers-acp --project /PATH/TO/PROJECT
+```
+
 For current Zed development builds, the custom agent configuration is:
 
 ```json

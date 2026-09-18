@@ -285,6 +285,7 @@ def _version_map(root: Path) -> tuple[str, dict[str, str]]:
         "pursers-personal": "personal",
         "pursers-personal-import": "import",
         "pursers-wait-bridge": "wait_bridge",
+        "pursers-acp": "acp",
     }
     resolved = {
         distribution: str(packages[key])

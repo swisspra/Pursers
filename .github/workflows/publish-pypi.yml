@@ -5,7 +5,7 @@ name: publish-pypi
 #
 # Environment mapping (per-project trusted publishers on PyPI):
 #   pypi        -> pursers, pursers-central, pursers-client,
-#                  pursers-personal, pursers-personal-import
+#                  pursers-personal, pursers-personal-import, pursers-acp
 #   pypi-bridge -> pursers-wait-bridge
 # (pending publishers required distinct environments per project; regular
 #  per-project publishers share the `pypi` environment.)
@@ -61,7 +61,7 @@ jobs:
           print(f"build_toolchain={actual}")
           PY
 
-      - name: Build the five main-environment wheels
+      - name: Build the six main-environment wheels
         run: |
           set -euo pipefail
           mkdir dist
@@ -70,6 +70,7 @@ jobs:
           python -m build --wheel --no-isolation --outdir dist packages/client
           python -m build --wheel --no-isolation --outdir dist packages/personal
           python -m build --wheel --no-isolation --outdir dist packages/import
+          python -m build --wheel --no-isolation --outdir dist tools/acp-agent
           ls -l dist
 
       - name: Verify component lock and wheel generators

@@ -93,7 +93,7 @@ jobs:
           print(f"release_version={version}; prerelease={version.is_prerelease}")
           PY
 
-      - name: Build all six wheels
+      - name: Build all seven wheels
         run: |
           set -euo pipefail
           mkdir dist
@@ -102,7 +102,7 @@ jobs:
               --outdir dist "packages/$project"
           done
           python -m pip wheel --no-deps --no-build-isolation \
-            --wheel-dir dist packages/pursers tools/wait-bridge
+            --wheel-dir dist packages/pursers tools/wait-bridge tools/acp-agent
           python - <<'PY'
           from pathlib import Path
           from tools.release_versions import expected_wheel_filenames
