@@ -5,7 +5,6 @@ import contextlib
 import importlib.util
 import json
 import os
-import re
 import signal
 import stat
 import subprocess
@@ -27,6 +26,7 @@ REPO_ROOT = MODULE_DIR.parents[1]
 sys.path.insert(0, str(MODULE_DIR))
 
 import butler_settings  # noqa: E402
+from html.parser import HTMLParser
 
 DASHBOARD_SPEC = importlib.util.spec_from_file_location(
     "butler_settings_dashboard", MODULE_DIR / "fleet_dashboard.py"
@@ -951,7 +951,7 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
     assert 'data-pursers-action="kill-butler"' in html
     assert "/api/butler/kill" in html
 
-    scripts = re.findall(r"<script>(.*?)</script>", html, re.DOTALL)
+    scripts = _inline_scripts(html)
     assert scripts
     for source in scripts:
         subprocess.run(
@@ -961,3 +961,31 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
             check=True,
             capture_output=True,
         )
+
+
+class _InlineScripts(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.scripts: list[str] = []
+        self._current: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script" and not dict(attrs).get("src"):
+            self._current = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script" and self._current is not None:
+            self.scripts.append("".join(self._current))
+            self._current = None
+
+    def handle_data(self, data: str) -> None:
+        if self._current is not None:
+            self._current.append(data)
+
+
+def _inline_scripts(html: str) -> list[str]:
+    """Inline <script> bodies, found by a real HTML parser rather than a regex."""
+    parser = _InlineScripts()
+    parser.feed(html)
+    parser.close()
+    return parser.scripts

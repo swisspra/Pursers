@@ -124,7 +124,12 @@ class _Handler(BaseHTTPRequestHandler):
             "X-Pursers-Observation-Id", "X-Pursers-Run-Id",
             "X-Pursers-Action-Id", "X-Pursers-Entity-Id",
         ):
-            self.send_header(name, self.headers.get(name, ""))
+            value = self.headers.get(name, "")
+            # Echoing a request header into the response is how this stub
+            # proves correlation ids round-trip; never echo a line break.
+            if "\r" in value or "\n" in value:
+                value = ""
+            self.send_header(name, value)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
