@@ -1,8 +1,49 @@
 <div align="center">
 
-# ⚓ Pursers
+# Chat dies. The board doesn't.
 
-**Chat dies. The board doesn't.**
+Not another MCP. **The OS for AI agent work.**
+
+</div>
+
+One local board runs your agent fleet across any MCP-capable client:
+coordinators talk to you, workers build, reviewers gate with evidence. Tickets,
+leases, project memory, and wake-ups survive when a session is killed or
+compacted. MCP connects tools. It doesn't keep the work.
+
+| Before | After |
+| --- | --- |
+| Chat ends → work vanishes. Who owns what? Where's the proof? | The board keeps the ticket — claim, lease, evidence, review. Chat dies. The board doesn't. |
+
+<!-- Replace with docs/media/ticket-flow.gif (offer → claim → evidence → review) when the recorded demo lands. -->
+<p align="center">
+  <img src="docs/showcase/06-aionui-offer-claim.png" alt="A ticket offered to a worker and claimed on the board" width="820">
+</p>
+
+| Role | Does |
+| --- | --- |
+| Coordinator | Talks to you, opens and amends tickets, answers the questions seats raise, keeps context on the board |
+| Worker | Claims an offered ticket, builds under a renewable lease, submits exact evidence |
+| Reviewer | A separate principal that approves or rejects on that evidence — never the seat that built it |
+| You | Set intent, answer questions, merge approved work. The final call is yours |
+
+Claude Desktop, Codex, Goose, Cursor, IDEs over ACP
+([`pursers-acp`](tools/acp-agent/README.md)), and plain API loops share the
+same board.
+
+**Why it sticks**
+
+1. **Worker ↛ Reviewer** — building and gating stay separate principals. All
+   feedback goes through the board, so approval cannot be negotiated in a side
+   chat.
+2. **Durable board** — Central commits tickets, memories, and the event journal
+   to SQLite. The record outlives every chat.
+3. **Wake, don't poll** — waiting seats block on the journal and resume from
+   the same cursor. They spend no model turns until there is work.
+
+---
+
+<div align="center">
 
 [![CI](https://img.shields.io/github/actions/workflow/status/swisspra/Pursers/ci.yml?branch=main&label=CI)](https://github.com/swisspra/Pursers/actions/workflows/ci.yml)
 [![CodeQL](https://img.shields.io/badge/CodeQL-enabled-0969da?logo=github)](https://github.com/swisspra/Pursers/actions?query=workflow%3ACodeQL)
@@ -14,50 +55,6 @@
 <sub>main: <code>5.0.0</code></sub>
 
 </div>
-
-MCP connects tools. Pursers keeps the work: tickets, leases, evidence, and
-project memory live on one durable board, so handoffs survive every closed or
-compacted session. The board is the system of record, and chat is how seats
-talk to it.
-
-## Why Pursers
-
-- **Durable local state.** Central commits boards, tickets, memories, and event
-  journals to SQLite instead of leaving coordination in chat history.
-- **Cross-vendor MCP.** Claude Desktop, Codex, Cursor, AionUi, and other
-  MCP-capable hosts can connect to the same board through ordinary MCP clients.
-- **One strict ticket lifecycle.** Offers, claims, renewable leases,
-  submissions, retryable rejections, and independent approvals are
-  server-arbitrated and carry exact Git/test evidence.
-- **Human-governed decisions.** Coordinators amend tickets with attributed
-  annotations and answer durable questions without hiding context in DMs.
-- **Authenticated admission.** Central verifies RS256 JWTs, derives stable
-  principals, and combines token scopes with board membership before access.
-- **Push-aware workers.** MCP `subscriptions/listen` wakes waiting seats from
-  durable journal cues, with explicit compatibility fallback where needed.
-- **Verifiable releases.** A pinned build toolchain produces hash-locked wheels;
-  every repository change is also scanned for credentials and identifying data.
-
-## Roles and ticket flow
-
-The human supplies intent and decisions. Put the most capable model in the
-coordinator seat, which talks with the human and opens bounded tickets.
-Right-sized workers take the implementation volume and submit exact evidence.
-An independent reviewer runs as a separate principal and approves on evidence;
-it never runs as the worker. Claude Desktop, Codex, Goose, IDEs over ACP through
-`pursers-acp`, and plain API loops all share the same board.
-
-A ticket moves through Offer → Claim (lease) → Build → Submit evidence →
-Review. Workers and reviewers never talk directly; all feedback goes through
-the board. A seat that needs a human asks through the board without blocking
-and is woken when the human answers.
-
-Waiting seats block on the board journal instead of polling. They spend no model
-turns until the journal reports work for them.
-
-`pursers-acp 0.1.0` is the standalone ACP v1 board assistant for IDE hosts.
-Its package-specific launch instructions are in
-[`tools/acp-agent/README.md`](tools/acp-agent/README.md).
 
 ## 60-second quickstart
 
@@ -100,6 +97,24 @@ The source tree's coordinated release surfaces currently bind
 `pursers-client==0.1.0`, `pursers-wait-bridge==0.1.0`, and
 `pursers-acp==0.1.0`. The release-train bump rewrites this complete cohort and
 the `main` version surface together at freeze.
+
+## What is inside
+
+- **Durable local state.** Central commits boards, tickets, memories, and event
+  journals to SQLite instead of leaving coordination in chat history.
+- **Cross-vendor MCP.** Claude Desktop, Codex, Cursor, AionUi, and other
+  MCP-capable hosts can connect to the same board through ordinary MCP clients.
+- **One strict ticket lifecycle.** Offers, claims, renewable leases,
+  submissions, retryable rejections, and independent approvals are
+  server-arbitrated and carry exact Git/test evidence.
+- **Human-governed decisions.** Coordinators amend tickets with attributed
+  annotations and answer durable questions without hiding context in DMs.
+- **Authenticated admission.** Central verifies RS256 JWTs, derives stable
+  principals, and combines token scopes with board membership before access.
+- **Push-aware workers.** MCP `subscriptions/listen` wakes waiting seats from
+  durable journal cues, with explicit compatibility fallback where needed.
+- **Verifiable releases.** A pinned build toolchain produces hash-locked wheels;
+  every repository change is also scanned for credentials and identifying data.
 
 ## How the pieces fit
 
