@@ -4,11 +4,11 @@
 
 | Version | Supported |
 | --- | --- |
-| 5.0.0b1 beta | Yes, until superseded by a newer beta |
+| 5.0.0 | Yes |
 | Earlier prereleases | No |
 
-Beta interfaces may change. Security fixes normally target the newest beta
-rather than older prerelease lines.
+Security fixes normally target the current supported release rather than older
+prerelease lines.
 
 ## Report a vulnerability
 
@@ -32,9 +32,9 @@ The following are out of scope:
 - ordinary bugs, feature requests, or documentation corrections without a
   security impact;
 - unsupported versions or modified builds that cannot be reproduced on the
-  supported beta;
+  supported release;
 - attacks that require an already trusted local OS user or process on the same
-  single-owner machine, unless they cross a documented Pursers boundary;
+  host, unless they cross a documented Pursers boundary;
 - vulnerabilities solely in third-party services or MCP hosts that Pursers
   does not maintain;
 - denial-of-service testing against infrastructure you do not own or lack

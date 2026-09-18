@@ -2,23 +2,23 @@
 
 # ⚓ Pursers
 
-**The purser for your AI fleet: one local, auditable coordination board for agents across MCP hosts.**
+**Chat dies. The board doesn't.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/swisspra/Pursers/ci.yml?branch=main&label=CI)](https://github.com/swisspra/Pursers/actions/workflows/ci.yml)
 [![CodeQL](https://img.shields.io/badge/CodeQL-enabled-0969da?logo=github)](https://github.com/swisspra/Pursers/actions?query=workflow%3ACodeQL)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.11–3.14](https://img.shields.io/badge/python-3.11%E2%80%933.14-3776ab?logo=python&logoColor=white)](https://www.python.org/)
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)
-[![Release v5.0.0b2](https://img.shields.io/badge/release-v5.0.0b2-orange)](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b2)
-[![Status: beta](https://img.shields.io/badge/status-beta-orange)](#beta-status)
+[![Latest release](https://img.shields.io/github/v/release/swisspra/Pursers?label=release)](https://github.com/swisspra/Pursers/releases)
 
-<sub>main: <code>5.0.0b2</code> (beta release train)</sub>
+<sub>main: <code>5.0.0b2</code></sub>
 
 </div>
 
-On a ship, the purser keeps the trusted accounts and records. Pursers does that
-for a fleet of AI agents: work, decisions, evidence, and handoffs survive the
-chat session so every seat can resume from the same record.
+MCP connects tools. Pursers keeps the work: tickets, leases, evidence, and
+project memory live on one durable board, so handoffs survive every closed or
+compacted session. The board is the system of record, and chat is how seats
+talk to it.
 
 ## Why Pursers
 
@@ -38,81 +38,68 @@ chat session so every seat can resume from the same record.
 - **Verifiable releases.** A pinned build toolchain produces hash-locked wheels;
   every repository change is also scanned for credentials and identifying data.
 
-The next beta train also stages `pursers-acp 0.1.0`, the standalone ACP v1
-board assistant for IDE hosts. Its package-specific launch instructions are in
+## Roles and ticket flow
+
+The human supplies intent and decisions. Put the most capable model in the
+coordinator seat, which talks with the human and opens bounded tickets.
+Right-sized workers take the implementation volume and submit exact evidence.
+An independent reviewer runs as a separate principal and approves on evidence;
+it never runs as the worker. Claude Desktop, Codex, Goose, IDEs over ACP through
+`pursers-acp`, and plain API loops all share the same board.
+
+A ticket moves through Offer → Claim (lease) → Build → Submit evidence →
+Review. Workers and reviewers never talk directly; all feedback goes through
+the board. A seat that needs a human asks through the board without blocking
+and is woken when the human answers.
+
+Waiting seats block on the board journal instead of polling. They spend no model
+turns until the journal reports work for them.
+
+`pursers-acp 0.1.0` is the standalone ACP v1 board assistant for IDE hosts.
+Its package-specific launch instructions are in
 [`tools/acp-agent/README.md`](tools/acp-agent/README.md).
 
 ## 60-second quickstart
 
-The archived offline b1 wheelhouse requires CPython 3.12 on Apple silicon; the
-six release product wheels support Python 3.11–3.14 when dependencies are
-resolved from their normal package index.
-
-The GitHub Release bundle contains exactly six product wheels plus
-`SHA256SUMS.txt`. The archived Home runtime wheelhouse is a different artifact:
-it has 30 wheels, a checksum file named `SHA256SUMS` (without `.txt`), and only
-the `pursers_client` and `pursers_wait_bridge` product wheels alongside locked
-dependencies. It is not the install source for this quickstart.
-
-These commands download and verify the release bundle, install its six product
-wheels, and create a private project profile:
+1. Install Pursers into a dedicated Python 3.11–3.14 virtual environment:
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-mkdir -p pursers-5.0.0b2 && cd pursers-5.0.0b2
-gh release download v5.0.0b2 \
-  --repo swisspra/Pursers \
-  --pattern '*.whl' \
-  --pattern SHA256SUMS.txt \
-  --dir .
-shasum -a 256 -c SHA256SUMS.txt
-python -m pip install \
-  ./pursers-5.0.0b2-py3-none-any.whl \
-  ./pursers_central-0.1.0a31-py3-none-any.whl \
-  ./pursers_client-0.1.0a24-py3-none-any.whl \
-  ./pursers_personal-5.0.0b2-py3-none-any.whl \
-  ./pursers_personal_import-5.0.0a3-py3-none-any.whl \
-  ./pursers_wait_bridge-0.1.0a17-py3-none-any.whl
-pursers-personal setup --project "$PWD" --apply
+python -m pip install --upgrade pip
+python -m pip install pursers
+python -m pip check
 ```
 
-Keep Pursers in this dedicated virtual environment. Do not install it into a
-shared interpreter or into a FastMCP environment: Pursers pins `mcp==2.2.0`,
-while `fastmcp==2.13.1` requires `mcp<2`, so no MCP version can satisfy both.
-Changing the MCP version in place will leave one of the applications broken.
-
-If another install has already changed MCP in a shared environment, recover by
-creating a clean Pursers environment from the verified release-bundle
-directory instead of trying to repair that shared interpreter:
+2. Create private credentials and run Central:
 
 ```bash
-python3 -m venv .venv-pursers
-.venv-pursers/bin/python -m pip install --upgrade pip
-.venv-pursers/bin/python -m pip install ./*.whl
-.venv-pursers/bin/python -m pip check
+pursers-central init ./pursers-local
+pursers-central run ./pursers-local
 ```
 
-Keep FastMCP in a different virtual environment, and point each MCP host entry
-at the executable inside the environment for that application.
+3. Connect any Streamable HTTP MCP client to
+`http://127.0.0.1:8766/mcp`. Use `admin.jwt` first to create the board, then
+use `worker.jwt` for a worker seat. The packaged Central
+[Quickstart](packages/central/README.md#quickstart) explains the generated
+paths without printing credential values.
 
-The release bundle contains exactly these six product wheels plus
-`SHA256SUMS.txt`; if any file is missing or any hash differs, stop because the
-bundle is not the approved b1 release. The approved filenames and hashes are in
-[Getting Started](docs/GETTING-STARTED.md#1-download-and-install-the-release).
+To serve other machines, pass `--tls-certfile`, `--tls-keyfile`, and an
+`--allowed-host` value such as a Tailscale MagicDNS name. On macOS,
+`pursers-personal setup` wires Claude Desktop; preview the plan first, then use
+`--apply --activate`.
 
-Continue with Getting Started sections 2–3 to record the generated profile
-paths and start `pursers_central.pursers_central_runtime`; then verify
-`http://127.0.0.1:8766/healthz`. The beta.1 Personal-embedded service is not
-the Central health endpoint.
+Keep Pursers separate from applications that require MCP v1. Pursers uses MCP
+v2, and mixing incompatible MCP dependency lines in one environment can break
+both applications. [Getting Started](docs/GETTING-STARTED.md) covers host
+configuration, optional components, release assets, and troubleshooting.
 
-Restart Claude Desktop, then use its Pursers tools to join the board described
-by your private profile. Keep the generated credentials out of repositories and
-shared configuration. For identity admission, another host, health checks, and
-rollback, continue with [Getting Started](docs/GETTING-STARTED.md).
-
-The published [`v5.0.0b2` prerelease](https://github.com/swisspra/Pursers/releases/tag/v5.0.0b2)
-contains the six wheel assets above plus `SHA256SUMS.txt`.
+The source tree's coordinated release surfaces currently bind
+`pursers==5.0.0b2`, `pursers-personal==5.0.0b2`,
+`pursers-personal-import==5.0.0a3`, `pursers-central==0.1.0a31`,
+`pursers-client==0.1.0a24`, `pursers-wait-bridge==0.1.0a17`, and
+`pursers-acp==0.1.0`. The release-train bump rewrites this complete cohort and
+the `main` version surface together at freeze.
 
 ## How the pieces fit
 
@@ -148,16 +135,18 @@ the result of an exact-identity claim by `aion-showcase-worker`.
 - [Getting Started](docs/GETTING-STARTED.md)
 - [Architecture](docs/ARCHITECTURE.md)
 
-Quality, comparison, release-note, contributing, and security guides are in the
-beta-prep queue and will be linked only after they land on `main`.
+The repository also contains the [comparison](docs/COMPARISON.md),
+[contributing](CONTRIBUTING.md), and [security](SECURITY.md) guides.
 
-## Beta status
+## Current limitations
 
-`v5.0.0b2` is a single-owner, single-machine beta. Central and its dashboards
-bind to loopback; every local process and OS user is inside the trust boundary.
-Do not expose it for remote access, shared/untrusted machines, or multi-person
-collaboration. Host integrations remain candidate-grade until their exact builds
-pass the live host gate, and the MCP Apps dashboard remains read-only.
+Central binds plain HTTP on loopback by default. TLS is operator-supplied for
+remote use, together with an allowed host. Storage is SQLite, and boards admit
+agents by invite. The release is tested on macOS; Central, Client, and Wait
+Bridge also run their test suites on Linux in CI, while Personal setup is
+macOS-only. Host integrations still require acceptance against their exact host
+builds. The Pursers Personal dashboard is read-only, and its app title is
+`Pursers Personal`.
 
 Pursers is the successor to On Board v4 (`onboard-memory-mcp` 4.0.4). It is a
 separate package and does not modify a v4 installation; migration is an explicit,

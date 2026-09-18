@@ -7,12 +7,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Central: add `pursers-central init` and `pursers-central run` as the packaged
+  newcomer path from a PyPI installation to private credentials, a local board,
+  and a running authenticated service.
+- ACP: publish `pursers-acp 0.1.0` for ACP-capable IDEs and include it in the
+  coordinated release manifest.
+- Distribution: prepare the Central metadata and `server.json` used for an MCP
+  Registry listing.
+- Release workflow: build and upload the AionUi extension ZIP and the locked
+  Home runtime wheelhouse alongside the Python distributions.
+- Central: support TLS certificate and key inputs plus a configurable HTTP Host
+  allowlist in the packaged runtime.
+- Fleet dashboard: add repository-owned launch and upgrade commands so the
+  operator service can follow an exact checkout instead of an untracked host
+  script.
+- Release checks: compare every approved ticket's content with `main` so an
+  approved but unmerged change blocks the release gate.
+
 ### Changed
 
 - Wait Bridge documentation records the measured AionUi 2.2.1 / AionCore
   0.2.1 imported-stdio behavior: bounded waits used poll mode, native
   elicitation was not rendered, and session delivery required the authenticated
   MCP import API with transport fields nested under `mcpServers[].transport`.
+
+### Security
+
+- Managed seat configuration and Wait Bridge child-process checks compare
+  token fingerprints instead of storing or forwarding raw JWTs.
 
 ## [5.0.0b2] - 2026-09-17
 
