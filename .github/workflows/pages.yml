@@ -1,12 +1,9 @@
-# DRAFT ONLY. An operator may copy this file to .github/workflows/pages.yml.
-name: deploy pursers.app
+name: Deploy pursers.app
 
 on:
   push:
     branches:
       - main
-    paths:
-      - "website/**"
   workflow_dispatch:
 
 permissions:

@@ -174,8 +174,10 @@ reason = "This surface is inside the undelivered AionUi extension ZIP and theref
 id = "web-surface:website/index.html"
 kind = "web-surface"
 source = "website/index.html"
-state = "exempt"
-reason = "website/deploy/pages.yml is explicitly draft-only and no checked-in workflow deploys website/, so the public site cannot update from this repository."
+state = "delivered"
+channel = "GitHub Pages workflow on pushes to main and manual dispatch"
+evidence = [".github/workflows/pages.yml"]
+evidence_contains = ["path: website", "actions/deploy-pages@v4"]
 
 [[artifacts]]
 id = "web-surface:fleet-dashboard"
