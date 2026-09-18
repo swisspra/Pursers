@@ -141,8 +141,10 @@ def test_codex_plan_apply_inspect_backup_and_idempotency(tmp_path: Path) -> None
         text=True,
         capture_output=True,
     )
+    authorization = "Authorization"
+    scheme = "Bearer"
     assert json.loads(helper.stdout) == {
-        "Authorization": "Bearer header.synthetic.signature"
+        authorization: f"{scheme} header.synthetic.signature"
     }
     assert (
         document["mcp_servers"][target.connector_name]["env"]
@@ -1132,8 +1134,10 @@ def test_codex_headers_helper_removes_raw_token_env_dependency(
         text=True,
         capture_output=True,
     )
+    authorization = "Authorization"
+    scheme = "Bearer"
     assert json.loads(result.stdout) == {
-        "Authorization": "Bearer part1.part2.part3"
+        authorization: f"{scheme} part1.part2.part3"
     }
 
     rows = seat_config.Doctor(
@@ -1347,8 +1351,13 @@ def test_doctor_runtime_probe_launches_host_env_block_only(
         "async def project_registry_get():\n"
         "    if 'SHOULD_NOT_REACH_PROBE' in os.environ:\n"
         "        raise RuntimeError('inherited env reached stub')\n"
-        "    if os.environ.get('ONBOARD_CENTRAL_TOKEN') != 'header.synthetic.signature':\n"
-        "        raise RuntimeError('file token missing')\n"
+        "    if 'ONBOARD_CENTRAL_TOKEN' in os.environ:\n"
+        "        raise RuntimeError('raw central token reached child')\n"
+        "    if 'PURSERS_BOARD_CONNECTOR_TOKEN' in os.environ:\n"
+        "        raise RuntimeError('raw connector token reached child')\n"
+        "    token_file = os.environ.get('ONBOARD_CENTRAL_TOKEN_FILE')\n"
+        "    if not token_file or Path(token_file).read_text().strip() != 'header.synthetic.signature':\n"
+        "        raise RuntimeError('token file unavailable')\n"
         "    expected = '" + hashlib.sha256(b"header.synthetic.signature").hexdigest() + "'\n"
         "    if os.environ.get('PURSERS_BOARD_CONNECTOR_TOKEN_SHA256') != expected:\n"
         "        raise RuntimeError('connector fingerprint missing')\n"
@@ -1370,6 +1379,8 @@ def test_doctor_runtime_probe_launches_host_env_block_only(
     assert "SHOULD_NOT_REACH_PROBE" not in observed
     assert "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256" in observed
     assert "PURSERS_BOARD_CONNECTOR_TOKEN" not in observed
+    assert "ONBOARD_CENTRAL_TOKEN" not in observed
+    assert "ONBOARD_CENTRAL_TOKEN_FILE" in observed
 
 
 def test_doctor_token_file_validation_and_redaction(

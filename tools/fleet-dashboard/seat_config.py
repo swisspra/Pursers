@@ -1211,9 +1211,8 @@ def _remove_toml_tables(text: str, names: set[str]) -> str:
 def _bridge_shell_args() -> list[str]:
     script = (
         f'connector_token_sha256=${{{CONNECTOR_TOKEN_SHA256_ENV}-}}; '
-        'token=$(tr -d "\\r\\n" < "$ONBOARD_CENTRAL_TOKEN_FILE"); '
         f'export {CONNECTOR_TOKEN_SHA256_ENV}="$connector_token_sha256"; '
-        'export ONBOARD_CENTRAL_TOKEN="$token"; exec "$PURSERS_BRIDGE_COMMAND"'
+        'exec "$PURSERS_BRIDGE_COMMAND"'
     )
     return ["-c", script]
 
