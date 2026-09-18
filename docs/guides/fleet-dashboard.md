@@ -126,6 +126,13 @@ The global search filters visible data. The theme, density, and keyboard-help
 controls are local browser preferences. A synthetic four-ticket board looks
 like this:
 
+**Light theme** / **Dark theme** and **Compact density** / **Comfortable
+density** change only local presentation. **?** opens the keyboard reference;
+**Close**, Escape, or **?** closes it. Search results are navigation links and
+do not mutate data. While a form has focus or unsaved input, the five-second
+refresh pauses; **Resume** discards the local dirty marker, removes focus, and
+allows refresh again without submitting the form.
+
 ![Fleet overview with health, waiting requests, and attention](img/fleet-home.png)
 
 ### Home
@@ -148,6 +155,12 @@ external hand-offs open only after an explicit click. For an attention row,
 **Acknowledge** hides that exact fingerprint until it changes; **Snooze 24h**
 hides it for one day. These controls change the dashboard's private attention
 state, not the ticket lifecycle.
+
+A held Butler draft also offers quality-mark buttons. **Would send as is**,
+**Needed edits**, **Wrong**, and **Should have escalated** score a produced
+draft; **Correct escalation** and **Should have answered** score an escalation.
+They record a human evaluation in Central and refresh the agreement summaries;
+they do not send the draft, answer the question, or release the hold.
 
 ### Projects
 
@@ -172,6 +185,29 @@ board, or client. Operator controls can test, start, stop, or restart a
 configured seat and open its bounded logs. **New agent** and **Copy seat
 command** lead into the configuration workflow; retired and stale seats remain
 visibly distinct from available ones.
+
+The controls have these effects:
+
+- **Test** checks the configured local worker without changing its running
+  state. **Start**, **Stop**, and **Restart** control that one managed worker;
+  disabled buttons show actions that do not match its current state. The
+  action status appears above the Team list, and failures stay visible there.
+- **Log tail** expands the last 20 bounded lines for that worker. It does not
+  start a live stream or expose the worker's credential file.
+- **Copy seat command** copies the one-time local provisioning command when
+  the seat files do not exist. **New agent** opens the two-step provisioning
+  card; **Start** remains disabled until the seat is detected. In the New API
+  agent dialog, **Save and continue** validates the provider settings, stores
+  the API key in Keychain rather than the local config, and opens the
+  provisioning step. The × button closes the dialog without saving.
+- **Retire** marks one stale identity retired after Central authorizes the
+  request. **Retire inert** applies Central's guarded cleanup to eligible
+  inactive identities on that board. The refreshed retired/inactive drawer is
+  the result surface. There is no **Resume** button in this release: the same
+  identity resumes by calling `board_join` or `board_onboard`, after which the
+  next Fleet refresh moves it back into the active pool.
+- The role/state/board/client filters, **Reset**, and the stale-agent visibility
+  toggle only change the browser view; they do not modify Central.
 
 ### Approvals
 
@@ -206,6 +242,33 @@ Settings contains service and operator controls:
 Release, stage, kickstart, and restart controls are operator actions. A worker
 must not use them unless a ticket explicitly authorizes that operation.
 
+In the Board Butler card, **Validate & save** sends one bounded validation
+request to the configured provider, then atomically writes the non-secret
+settings and any supplied API key to the private `0600` credential file. It
+does not start Butler or switch it to active mode. The message directly below
+the button reports validation or save failure; on success the refreshed card
+shows the saved endpoint, model, key-present state, and runtime state. An
+existing key is preserved when the key field is left blank. **Stop butler now**
+is enabled only for a verified live process; it engages the private kill switch
+and reports the stopped state on the refreshed card.
+
+The linked **Coordinator config** page exposes the published thresholds and
+intake policy. **Save config** uses the displayed revision for concurrency and
+shows success or conflict beside the button; mode changes still require a
+service restart. **Workers** lists local API workers: **Test**, **Start**, and
+**Stop** act on one worker, **Copy seat command** copies missing-seat
+provisioning, and **Save worker** stores its key in Keychain. An existing worker
+must be stopped before it can be overwritten. **Overhead** and its expandable
+bridge diagnostics are read-only.
+
+Config's release card has four separately guarded buttons. **Publish from tag**,
+**Stage Central**, **Kickstart Central**, and **Restart dashboard** first fetch
+an immutable server-generated plan and show its exact command and digest in a
+confirmation dialog. Cancel leaves state unchanged. Confirm queues the plan;
+the output pane then shows the job ID, bounded logs, terminal outcome, and
+reported effect. These controls require operator authority and are outside an
+ordinary worker task.
+
 ### Config
 
 Config is the write-oriented setup page. It inventories seats, bridge versions,
@@ -233,6 +296,19 @@ Open a project, then use its five tabs:
 The board header warns when a snapshot is truncated. Timeline, Changes, Flow,
 and Routes do not extrapolate beyond the displayed bounds.
 
+At the top of the Tickets view, **Submit ask** adds the 5–500 character request
+to the board's bounded coordinator-intake queue; the form reports the queued
+ask ID or the rejection. It does not create a ticket immediately. When the
+coordinator supplies a draft title and category, **Approve** authorizes guarded,
+idempotent ticket creation with the displayed title, while **Decline** removes
+the ask from the active queue and records the decision. Both decisions use the
+displayed queue revision, so a concurrent change fails instead of overwriting
+it. Their result appears in **Pending asks** after refresh. The ticket
+**Details** disclosure and links to Timeline, Changes, Flow, and Routes are
+read-only navigation. **Copy memory ID** copies the latest handoff's identifier
+without changing it. On Changes, **Apply** only recalculates the bounded view
+after the entered sequence number; it does not acknowledge or alter events.
+
 ## Common operator tasks
 
 ### Add a project
@@ -243,9 +319,22 @@ and Routes do not extrapolate beyond the displayed bounds.
    and integration ref.
 3. Select **Add project** and inspect each ordered result: registry entry, board,
    worker/reviewer Door principals, policy defaults, and clean fleet clone.
-4. Copy each returned `prs1.…` Door string once to its intended role. The
-   dashboard does not persist or list the string.
-5. On the seat, run `pursers-door join <door-string>`.
+4. **Copy door string** issues or retrieves each role Door and places the
+   one-time value on the local clipboard. The result panel shows only its
+   non-secret key ID and success or failure; the dashboard does not persist or
+   list the Door.
+5. Stop before joining a remote seat unless your environment already provides
+   an approved secret-file hand-off. The shipped `pursers-door join` command in
+   this release accepts the Door only as a positional command-line argument;
+   it has no file or standard-input option. A Door contains a bearer
+   credential, so putting it in process arguments violates this guide's
+   file-based-credential rule.
+
+**Not verified on this release:** there is no shipped file-based or dashboard
+join workflow for a new Door. Issuing and rotating Doors in the loopback UI was
+verified, but completing `pursers-door join` was deliberately not prescribed
+or run. Use an existing administrator-provisioned token file with the seat
+wizard, or wait for a file/stdin Door import before onboarding through a Door.
 
 Re-running the same project is idempotent. The endpoint requires the dashboard
 principal to be a board administrator and does not touch key material until
@@ -302,12 +391,49 @@ python3 tools/fleet-dashboard/seat_config.py doctor --fix --json
 Doctor redacts token contents. Its configuration references token files and a
 fingerprint; it never requires a raw bearer token in host configuration.
 
+The remaining Config controls are guarded as follows:
+
+- **Suggest skills from connectors** proposes capability labels in the form; it
+  changes no file. **Preview exact changes** validates paths and renders a
+  redacted plan. **Confirm and apply** becomes available only for that plan,
+  creates timestamped backups, writes atomically, and reports either completion
+  or **NEEDS RESTART** above the inventory. **Copy session prompt** copies the
+  generated non-secret restart prompt from that result.
+- **Use in wizard** loads a discovered host config into the form without
+  writing it. **Import and run Doctor** imports only the reviewed,
+  conflict-free inventory mappings, leaves host configs untouched, and starts
+  Doctor; the import count and job result appear above the inventory.
+- **Doctor** checks one row; **Doctor all** checks every configured row. **Fix**
+  applies only repairs declared safe by Doctor. Results appear in the Doctor
+  panel and the affected inventory row.
+- **Install / upgrade bridge** updates the persistent bridge executable.
+  **Upgrade bridge** targets one row, and **Upgrade all seats** rewrites every
+  managed seat configuration to the installed bridge. **Regenerate Goose** is
+  limited to that host's managed Goose configuration. Each job shows progress,
+  completion, and any restart prompt above the inventory.
+
+Each board's **Save policy** writes the displayed claim TTL, offer TTL,
+broadcast re-offer delay, second-opinion switch, and fallback-broadcast switch
+through the board-admin-authorized endpoint. Invalid bounds are rejected; a
+successful write says **Policy saved** and refreshes the offers, unassignable
+work, dispatch history, and recent timeline beneath the form. In **Registry
+work trees**, **Create fleet clone** creates the fleet-owned clone when absent;
+**Fetch and detach origin/main** refreshes an existing clean clone. The button
+refuses unsafe or conflicting Git state, and its success or failure appears at
+the top of Config. Neither action makes the operator checkout writable to
+seats.
+
 ### Issue, rotate, and revoke Doors
 
 In Config, **Copy door string** issues or fetches a role Door and returns it once
 over loopback with `Cache-Control: no-store`. **Rotate** creates a new signing
 key version, publishes its public key, revokes the previous key ID, and returns
 the replacement Door string. Seats using the prior string must join again.
+Both actions require the dashboard's configured key directory and Central
+JWKS path; their scrubbed result appears in the Doors panel. There is no
+**Revoke** button in this release; revocation uses the headless key-ID command
+below. Do not paste a copied or rotated Door into a shell argument: this release
+has no compliant file/stdin join path, as noted under **Add a project**.
 
 For an explicit headless revocation, use only the visible non-secret `kid` from
 the inventory:
