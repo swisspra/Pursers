@@ -372,6 +372,51 @@ evidence = ["tools/fleet-dashboard/README.md", "tools/fleet-dashboard/launch.sh"
 evidence_contains = ["PURSERS_FLEET_REPO", "PURSERS_FLEET_RUNTIME_DIR", "PURSERS_FLEET_STATE_DIR"]
 
 [[artifacts]]
+id = "operator-tool:tools/media/record_demo.py"
+kind = "operator-tool"
+source = "tools/media/record_demo.py"
+state = "delivered"
+channel = "checked-in synthetic-media recording runbook"
+evidence = ["tools/media/README.md"]
+evidence_contains = ["record_demo.py", "ticket-flow.gif", "wake-dont-poll.gif"]
+
+[[artifacts]]
+id = "media:docs/media/ticket-flow.gif"
+kind = "media"
+source = "docs/media/ticket-flow.gif"
+state = "delivered"
+channel = "README and pursers.app media asset"
+evidence = ["tools/media/README.md"]
+evidence_contains = ["ticket-flow.gif", "ticket-flow.mp4", "ticket-flow.webm"]
+
+[[artifacts]]
+id = "media:docs/media/ticket-flow.mp4"
+kind = "media"
+source = "docs/media/ticket-flow.mp4"
+state = "delivered"
+channel = "pursers.app media asset"
+evidence = ["tools/media/README.md"]
+evidence_contains = ["ticket-flow.mp4"]
+
+[[artifacts]]
+id = "media:docs/media/ticket-flow.webm"
+kind = "media"
+source = "docs/media/ticket-flow.webm"
+state = "delivered"
+channel = "pursers.app media asset"
+evidence = ["tools/media/README.md"]
+evidence_contains = ["ticket-flow.webm"]
+
+[[artifacts]]
+id = "media:docs/media/wake-dont-poll.gif"
+kind = "media"
+source = "docs/media/wake-dont-poll.gif"
+state = "delivered"
+channel = "README and pursers.app media asset"
+evidence = ["tools/media/README.md"]
+evidence_contains = ["wake-dont-poll.gif"]
+
+[[artifacts]]
 id = "operator-tool:tools/fleet-dashboard/launch.sh"
 kind = "operator-tool"
 source = "tools/fleet-dashboard/launch.sh"

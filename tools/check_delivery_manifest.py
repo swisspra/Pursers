@@ -209,6 +209,16 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
         relative = _relative(path, root)
         add(f"web-surface:{relative}", "web-surface", path)
 
+    media_root = root / "docs" / "media"
+    if media_root.is_dir():
+        for path in sorted(media_root.iterdir()):
+            if _ignored(path, root) or not path.is_file():
+                continue
+            if path.suffix.lower() not in {".gif", ".mp4", ".webm"}:
+                continue
+            relative = _relative(path, root)
+            add(f"media:{relative}", "media", path)
+
     tools_root = root / "tools"
     for path in sorted(root.rglob("*")):
         relative_parts = path.relative_to(root).parts
