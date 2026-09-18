@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import plistlib
+import random
 import re
 import shlex
 import stat
@@ -10260,6 +10261,13 @@ def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
     assert clean("secret= \t") == "secret= \t[REDACTED]"
     # Lines without a sensitive keyword are untouched.
     assert clean("plain = value") == "plain = value"
+    assert clean("https://operator:s3cret@example.test/path") == (
+        "https://operator:[REDACTED:URL_PASSWORD]@example.test/path"
+    )
+    jwt = ".".join(("eyJ" + "abcdefgh", "ijklmnop", "qrstuvwx"))
+    assert clean(jwt) == "[REDACTED JWT]"
+    assert clean("Bearer abcdefgh") == "Bearer [REDACTED]"
+    assert clean("release_status=healthy") == "release_status=healthy"
     # Multi-line input redacts per line.
     assert clean("alpha=1\nmy bearer: x\nbeta=2") == (
         "alpha=1\nmy bearer: [REDACTED]\nbeta=2"
@@ -10275,6 +10283,108 @@ def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
         assert clean(f"token:{ending}plain=x") == (
             f"token:[REDACTED]{ending}plain=x"
         )
+
+
+_NESTED_TEST_JWT = ".".join(("eyJ" + "abcdefgh", "ijklmnop", "qrstuvwx"))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://u:bad-http://operator:s3cret@example.test/path",
+        "https://u:bad+http://operator:s3cret@example.test/path",
+        "eyJshort-" + _NESTED_TEST_JWT,
+        "eyJ" + "abcdefgh.ijklmnop-" + _NESTED_TEST_JWT,
+        "x-" + _NESTED_TEST_JWT + "-y",
+    ],
+)
+def test_linear_credential_scanners_match_legacy_for_nested_starts(
+    value: str,
+) -> None:
+    legacy_url = re.sub(
+        r"\b([a-z][a-z0-9+.-]*://[^:\s/@]+):[^@\s/]+@",
+        r"\1:[REDACTED:URL_PASSWORD]@",
+        value,
+        flags=re.IGNORECASE,
+    )
+    legacy = re.sub(
+        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+        "[REDACTED JWT]",
+        legacy_url,
+    )
+
+    actual = dashboard.SeatConfigManager._redact_url_passwords(value)
+    actual = dashboard.SeatConfigManager._redact_jwts(actual)
+    assert actual == legacy
+
+
+def test_failed_outer_url_does_not_hide_nested_credentials() -> None:
+    value = "https://u:bad-http://operator:s3cret@example.test/path"
+    expected = (
+        "https://u:bad-http://operator:"
+        "[REDACTED:URL_PASSWORD]@example.test/path"
+    )
+    legacy = re.sub(
+        r"\b([a-z][a-z0-9+.-]*://[^:\s/@]+):[^@\s/]+@",
+        r"\1:[REDACTED:URL_PASSWORD]@",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    assert legacy == expected
+    assert dashboard.SeatConfigManager._redact_url_passwords(value) == expected
+
+
+def test_linear_credential_scanners_match_legacy_for_composed_inputs() -> None:
+    """Exercise overlapping starts and failure delimiters deterministically."""
+    rng = random.Random(0)
+    fragments = (
+        "plain",
+        "-http://u:p@h",
+        "+https://u:no-at/path",
+        _NESTED_TEST_JWT,
+        "-eyJshort",
+        _NESTED_TEST_JWT + "---",
+        " ",
+        "/",
+        "@",
+        ":",
+        "\u0130ttp://u:p@h",
+    )
+    legacy_url_pattern = re.compile(
+        r"\b([a-z][a-z0-9+.-]*://[^:\s/@]+):[^@\s/]+@", re.IGNORECASE
+    )
+    legacy_jwt_pattern = re.compile(
+        r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+    )
+
+    for _ in range(10_000):
+        value = "".join(rng.choices(fragments, k=rng.randrange(1, 8)))
+        legacy = legacy_url_pattern.sub(
+            r"\1:[REDACTED:URL_PASSWORD]@", value
+        )
+        legacy = legacy_jwt_pattern.sub("[REDACTED JWT]", legacy)
+        actual = dashboard.SeatConfigManager._redact_url_passwords(value)
+        actual = dashboard.SeatConfigManager._redact_jwts(actual)
+        assert actual == legacy
+
+
+@pytest.mark.parametrize(
+    "adversarial",
+    [
+        "https://u:" + "p-" * 12_000,
+        "eyJ-" * 12_000,
+    ],
+    ids=["url-password-missing-at", "jwt-missing-segments"],
+)
+def test_clean_text_redaction_has_linear_budget(adversarial: str) -> None:
+    """Failed matches with many word boundaries must not cause quadratic retries."""
+    started = time.monotonic()
+    result = dashboard.SeatConfigManager._clean_text(adversarial)
+    elapsed = time.monotonic() - started
+
+    assert result == adversarial
+    assert elapsed < 0.2
 
 
 def _deployment_runbook_blocks() -> list[str]:
