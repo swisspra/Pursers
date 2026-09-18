@@ -251,13 +251,14 @@ class RuntimeHealthUnitTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
-    async def _initialize(
+    async def _request(
         self,
         *,
         allowed_hosts: tuple[str, ...],
         host_header: str,
         origin_header: str | None = None,
         use_tls: bool = False,
+        path: str = "/mcp",
     ) -> httpx2.Response:
         temp_dir = tempfile.TemporaryDirectory(dir=PACKAGE_ROOT)
         root = Path(temp_dir.name)
@@ -329,6 +330,12 @@ class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
                 }
                 if origin_header is not None:
                     headers["Origin"] = origin_header.format(port=port)
+                if path == "/healthz":
+                    return await client.get(
+                        f"{scheme}://127.0.0.1:{port}{path}",
+                        headers=headers,
+                        timeout=5,
+                    )
                 return await client.post(
                     audience,
                     headers=headers,
@@ -356,6 +363,37 @@ class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
             listener.close()
             environment.stop()
             temp_dir.cleanup()
+
+    async def _initialize(
+        self,
+        *,
+        allowed_hosts: tuple[str, ...],
+        host_header: str,
+        origin_header: str | None = None,
+        use_tls: bool = False,
+    ) -> httpx2.Response:
+        return await self._request(
+            allowed_hosts=allowed_hosts,
+            host_header=host_header,
+            origin_header=origin_header,
+            use_tls=use_tls,
+        )
+
+    async def _healthz(
+        self,
+        *,
+        allowed_hosts: tuple[str, ...],
+        host_header: str,
+        origin_header: str | None = None,
+        use_tls: bool = False,
+    ) -> httpx2.Response:
+        return await self._request(
+            allowed_hosts=allowed_hosts,
+            host_header=host_header,
+            origin_header=origin_header,
+            use_tls=use_tls,
+            path="/healthz",
+        )
 
     async def test_configured_bare_host_is_accepted(self) -> None:
         response = await self._initialize(
@@ -406,6 +444,50 @@ class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
         response = await self._initialize(
             allowed_hosts=(),
             host_header="central.example",
+        )
+        self.assertEqual(response.status_code, 421)
+
+    async def test_healthz_accepts_configured_bare_host_over_http(self) -> None:
+        response = await self._healthz(
+            allowed_hosts=("central.example",),
+            host_header="central.example",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_healthz_accepts_configured_host_with_port_over_https(self) -> None:
+        response = await self._healthz(
+            allowed_hosts=("central.example",),
+            host_header="central.example:{port}",
+            origin_header="https://central.example:{port}",
+            use_tls=True,
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_healthz_accepts_loopback_defaults_over_http_and_https(self) -> None:
+        for use_tls in (False, True):
+            with self.subTest(use_tls=use_tls):
+                scheme = "https" if use_tls else "http"
+                response = await self._healthz(
+                    allowed_hosts=(),
+                    host_header="127.0.0.1:{port}",
+                    origin_header=f"{scheme}://127.0.0.1:{{port}}",
+                    use_tls=use_tls,
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_healthz_rejects_unlisted_host_over_http_with_421(self) -> None:
+        response = await self._healthz(
+            allowed_hosts=("central.example",),
+            host_header="unlisted.example",
+        )
+        self.assertEqual(response.status_code, 421)
+
+    async def test_healthz_rejects_unlisted_origin_over_https_with_421(self) -> None:
+        response = await self._healthz(
+            allowed_hosts=("central.example",),
+            host_header="central.example:{port}",
+            origin_header="https://unlisted.example:{port}",
+            use_tls=True,
         )
         self.assertEqual(response.status_code, 421)
 
