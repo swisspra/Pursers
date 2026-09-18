@@ -5968,25 +5968,73 @@ class _ReusableAsyncRunner:
 
 
 class TimedCache:
+    """Serve the last value while one background load refreshes it.
+
+    Only the first load blocks. After expiry the previous value is returned at
+    once and a single background thread reloads it, so a slow Central read never
+    makes the browser's 4-second request time out and flash the connection
+    banner. A value older than ``max_stale_seconds`` whose refresh failed is not
+    served; the refresh error is raised instead so a real outage stays visible.
+    """
+
     def __init__(
         self,
         ttl_seconds: float,
         loader: Callable[[], Awaitable[dict[str, Any]]],
         runner: Callable[[Awaitable[dict[str, Any]]], dict[str, Any]] = asyncio.run,
+        *,
+        max_stale_seconds: float | None = None,
+        background: bool = True,
     ) -> None:
         self.ttl_seconds = ttl_seconds
         self.loader = loader
         self.runner = runner
+        self.max_stale_seconds = (
+            max(60.0, 12 * ttl_seconds) if max_stale_seconds is None else max_stale_seconds
+        )
+        self.background = background
         self._lock = threading.Lock()
         self._expires_at = 0.0
+        self._loaded_at = 0.0
         self._value: dict[str, Any] | None = None
+        self._refreshing = False
+        self._refresh_error: BaseException | None = None
+
+    def _store(self, value: dict[str, Any]) -> None:
+        now = time.monotonic()
+        self._value = value
+        self._loaded_at = now
+        self._expires_at = now + self.ttl_seconds
+        self._refresh_error = None
+
+    def _refresh(self) -> None:
+        try:
+            value = self.runner(self.loader())
+        except BaseException as exc:  # noqa: BLE001 - surfaced by get() once stale.
+            with self._lock:
+                self._refresh_error = exc
+                self._refreshing = False
+            return
+        with self._lock:
+            self._store(value)
+            self._refreshing = False
 
     def get(self) -> dict[str, Any]:
         with self._lock:
             now = time.monotonic()
-            if self._value is None or now >= self._expires_at:
-                self._value = self.runner(self.loader())
-                self._expires_at = time.monotonic() + self.ttl_seconds
+            if self._value is None or (not self.background and now >= self._expires_at):
+                self._store(self.runner(self.loader()))
+                return self._value
+            if now >= self._expires_at and not self._refreshing:
+                self._refreshing = True
+                threading.Thread(
+                    target=self._refresh, name="fleet-cache-refresh", daemon=True
+                ).start()
+            if (
+                self._refresh_error is not None
+                and now - self._loaded_at > self.max_stale_seconds
+            ):
+                raise self._refresh_error
             return self._value
 
 

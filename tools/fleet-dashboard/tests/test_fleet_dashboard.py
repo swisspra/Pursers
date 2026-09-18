@@ -4684,7 +4684,16 @@ def test_two_fake_central_aggregation_and_failure_isolation() -> None:
         with urllib.request.urlopen(f"{root}/api/fleet?central=work") as response:
             work_result = json.load(response)
         work.fail = True
-        cache._fleets["work"]._expires_at = 0
+        work_cache = cache._fleets["work"]
+        work_cache._expires_at = 0
+        with urllib.request.urlopen(f"{root}/api/fleet?central=work") as response:
+            stale_work = json.load(response)
+        for _ in range(500):
+            if not work_cache._refreshing:
+                break
+            time.sleep(0.01)
+        assert work_cache._refresh_error is not None
+        work_cache.max_stale_seconds = 0
         with pytest.raises(urllib.error.HTTPError) as captured:
             urllib.request.urlopen(f"{root}/api/fleet?central=work")
         assert captured.value.code == 503
@@ -4701,6 +4710,7 @@ def test_two_fake_central_aggregation_and_failure_isolation() -> None:
     assert personal_result["boards"][0]["board_id"] == "personal-home"
     assert work_result["central"] == "work"
     assert work_result["boards"][0]["board_id"] == "work-home"
+    assert stale_work == work_result
     assert isolated["central"] == "personal"
     assert "secret-personal" not in json.dumps(index)
     assert "secret-work" not in json.dumps([personal_result, work_result])
@@ -10813,3 +10823,69 @@ def test_ticket_rows_expose_semantic_status_and_active_marker() -> None:
     assert 'data-ticket-status="${esc(t.status)}"' in source
     assert 'data-active-ticket-row="${[' in source
     assert "'open','claimed','in_progress','creating_report','submitted','reviewing','in_review'" in source
+
+
+def _cache_runner(value):
+    return value
+
+
+def test_timed_cache_serves_stale_value_while_one_background_refresh_runs() -> None:
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    loads: list[int] = []
+
+    def loader() -> dict:
+        loads.append(len(loads))
+        if len(loads) > 1:
+            started.set()
+            assert release.wait(5)
+        return {"n": len(loads)}
+
+    cache = dashboard.TimedCache(0.0, loader, _cache_runner)
+    assert cache.get() == {"n": 1}
+    assert cache.get() == {"n": 1}
+    assert started.wait(5)
+    assert cache.get() == {"n": 1}
+    assert len(loads) == 2
+    release.set()
+    for _ in range(200):
+        if not cache._refreshing:
+            break
+        threading.Event().wait(0.01)
+    assert cache._value == {"n": 2}
+
+
+def test_timed_cache_raises_refresh_error_once_the_value_is_too_old() -> None:
+    import threading
+
+    calls: list[int] = []
+    failed = threading.Event()
+
+    def loader() -> dict:
+        calls.append(1)
+        if len(calls) > 1:
+            failed.set()
+            raise RuntimeError("central down")
+        return {"ok": True}
+
+    cache = dashboard.TimedCache(0.0, loader, _cache_runner, max_stale_seconds=0.0)
+    assert cache.get() == {"ok": True}
+    assert cache.get() == {"ok": True}
+    assert failed.wait(5)
+    for _ in range(200):
+        if not cache._refreshing:
+            break
+        threading.Event().wait(0.01)
+    with pytest.raises(RuntimeError, match="central down"):
+        cache.get()
+
+
+def test_timed_cache_first_load_still_blocks_and_propagates_errors() -> None:
+    def loader() -> dict:
+        raise RuntimeError("no central")
+
+    cache = dashboard.TimedCache(5.0, loader, _cache_runner)
+    with pytest.raises(RuntimeError, match="no central"):
+        cache.get()
