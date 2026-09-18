@@ -302,6 +302,15 @@ evidence = [".github/workflows/ci.yml", "tools/ci_manifest.py"]
 evidence_contains = ["python tools/ci_manifest.py run", "tools/tests"]
 
 [[artifacts]]
+id = "operator-tool:tools/check_server_json.py"
+kind = "operator-tool"
+source = "tools/check_server_json.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["docs/operations/mcp-registry.md"]
+evidence_contains = ["tools/check_server_json.py"]
+
+[[artifacts]]
 id = "operator-tool:tools/ci_manifest.py"
 kind = "operator-tool"
 source = "tools/ci_manifest.py"
