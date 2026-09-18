@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pursers.fleet-dashboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/PATH/TO/Pursers/tools/fleet-dashboard/launch.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PURSERS_FLEET_PYTHON</key>
+    <string>/PATH/TO/python3</string>
+    <key>PURSERS_FLEET_REPO</key>
+    <string>/PATH/TO/Pursers</string>
+    <key>PURSERS_FLEET_RUNTIME_DIR</key>
+    <string>/PATH/TO/private/fleet-dashboard-runtime</string>
+    <key>PURSERS_FLEET_STATE_DIR</key>
+    <string>/PATH/TO/private/fleet-dashboard-state</string>
+    <key>PURSERS_FLEET_URL</key>
+    <string>https://central.example.invalid/mcp</string>
+    <key>PURSERS_FLEET_TOKEN_PATH</key>
+    <string>/PATH/TO/private/fleet-dashboard.jwt</string>
+    <key>PURSERS_FLEET_HOME_BOARD</key>
+    <string>pursers</string>
+    <key>PYTHONPATH</key>
+    <string>/PATH/TO/Pursers/packages/client/src</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/PATH/TO/private/logs/fleet-dashboard.log</string>
+  <key>StandardErrorPath</key>
+  <string>/PATH/TO/private/logs/fleet-dashboard.log</string>
+</dict>
+</plist>

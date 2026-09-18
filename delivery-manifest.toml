@@ -181,8 +181,10 @@ reason = "website/deploy/pages.yml is explicitly draft-only and no checked-in wo
 id = "web-surface:fleet-dashboard"
 kind = "web-surface"
 source = "tools/fleet-dashboard/fleet_dashboard.py"
-state = "exempt"
-reason = "The dashboard has no repository-owned install or restart channel; the running launcher and service definition remain operator-local."
+state = "delivered"
+channel = "repository-owned LaunchAgent launcher and exact-SHA upgrade command"
+evidence = ["tools/fleet-dashboard/README.md", "tools/fleet-dashboard/launch.sh", "tools/fleet-dashboard/upgrade.sh", "tools/fleet-dashboard/com.pursers.fleet-dashboard.plist.template"]
+evidence_contains = ["GET /api/version", "launchctl kickstart", "com.pursers.fleet-dashboard"]
 
 [[artifacts]]
 id = "release-artifact:aionui-extension-zip"
@@ -339,8 +341,28 @@ reason = "Simulation helper has no packaged entry point or checked-in operator r
 id = "operator-tool:tools/fleet-dashboard/fleet_dashboard.py"
 kind = "operator-tool"
 source = "tools/fleet-dashboard/fleet_dashboard.py"
-state = "exempt"
-reason = "Documented source exists, but the installed launcher and service channel are operator-local and absent from the repository."
+state = "delivered"
+channel = "repository-owned LaunchAgent launcher"
+evidence = ["tools/fleet-dashboard/README.md", "tools/fleet-dashboard/launch.sh", "tools/fleet-dashboard/com.pursers.fleet-dashboard.plist.template"]
+evidence_contains = ["PURSERS_FLEET_REPO", "PURSERS_FLEET_RUNTIME_DIR", "PURSERS_FLEET_STATE_DIR"]
+
+[[artifacts]]
+id = "operator-tool:tools/fleet-dashboard/launch.sh"
+kind = "operator-tool"
+source = "tools/fleet-dashboard/launch.sh"
+state = "delivered"
+channel = "repository-owned LaunchAgent launcher"
+evidence = ["tools/fleet-dashboard/README.md", "tools/fleet-dashboard/com.pursers.fleet-dashboard.plist.template"]
+evidence_contains = ["tools/fleet-dashboard/launch.sh", "PURSERS_FLEET_RUNTIME_DIR"]
+
+[[artifacts]]
+id = "operator-tool:tools/fleet-dashboard/upgrade.sh"
+kind = "operator-tool"
+source = "tools/fleet-dashboard/upgrade.sh"
+state = "delivered"
+channel = "documented exact-SHA upgrade and rollback command"
+evidence = ["tools/fleet-dashboard/README.md"]
+evidence_contains = ["tools/fleet-dashboard/upgrade.sh", "deployments/previous-sha"]
 
 [[artifacts]]
 id = "operator-tool:tools/fleet-dashboard/seat_config.py"
@@ -553,8 +575,10 @@ evidence_contains = ["tools/worker-runtime/pursers_worker.py"]
 id = "external:fleet-dashboard-launcher"
 kind = "external-dependency"
 source = "external"
-state = "exempt"
-reason = "The installed fleet launcher and launchd definition live outside the repository, so merged dashboard changes cannot be delivered automatically."
+state = "delivered"
+channel = "repository-owned launcher and uninstalled LaunchAgent template"
+evidence = ["tools/fleet-dashboard/launch.sh", "tools/fleet-dashboard/com.pursers.fleet-dashboard.plist.template", "tools/fleet-dashboard/README.md"]
+evidence_contains = ["PURSERS_FLEET_REPO", "com.pursers.fleet-dashboard", "Repository-owned LaunchAgent"]
 
 [[artifacts]]
 id = "external:legacy-tls-server"
