@@ -175,15 +175,6 @@ state = "exempt"
 reason = "This surface is inside the undelivered AionUi extension ZIP and therefore has no independent user delivery channel."
 
 [[artifacts]]
-id = "web-surface:website/index.html"
-kind = "web-surface"
-source = "website/index.html"
-state = "delivered"
-channel = "GitHub Pages workflow on pushes to main and manual dispatch"
-evidence = [".github/workflows/pages.yml"]
-evidence_contains = ["path: website", "actions/deploy-pages@v4"]
-
-[[artifacts]]
 id = "web-surface:fleet-dashboard"
 kind = "web-surface"
 source = "tools/fleet-dashboard/fleet_dashboard.py"
@@ -628,12 +619,6 @@ evidence_contains = ["regenerate_integration_manifest.py", "already current"]
 path = "README.md"
 version_key = "product"
 prefix = "main: <code>"
-
-[[version_surfaces]]
-path = "website/index.html"
-version_key = "product"
-prefix = "Beta v"
-reject_other_product_versions = true
 
 [[version_surfaces]]
 path = "packages/personal/README.md"
