@@ -453,6 +453,15 @@ evidence = [".github/workflows/release.yml"]
 evidence_contains = ["tools/release_notes.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/media/ticket_flow_svg.py"
+kind = "operator-tool"
+source = "tools/media/ticket_flow_svg.py"
+state = "delivered"
+channel = "README animated ticket-flow diagram"
+evidence = ["README.md", "docs/media/ticket-flow-light.svg", "docs/media/ticket-flow-dark.svg"]
+evidence_contains = ["docs/media/ticket-flow-light.svg"]
+
+[[artifacts]]
 id = "operator-tool:tools/deterministic_tar.py"
 kind = "operator-tool"
 source = "tools/deterministic_tar.py"

@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 300" width="820" height="300" role="img" aria-labelledby="t d">
+  <title id="t">How a ticket moves on a Pursers board</title>
+  <desc id="d">A coordinator creates a ticket; the board offers it and the waiting worker wakes; the worker claims it under a lease and submits evidence; an independent reviewer rejects it once with fixes, the worker resubmits, the reviewer approves, and the work is ready for you to merge.</desc>
+  <style>
+    :root { --fg: #f0f6fc; --muted: #9198a1; --line: #3d444d; --card: #151b23; --accent: #4493f8; --ok: #3fb950; --bad: #f85149; --node: #0d1117; --ease-move: cubic-bezier(0.77, 0, 0.175, 1); --ease-out: cubic-bezier(0.23, 1, 0.32, 1); }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--fg); }
+    .muted { fill: var(--muted); }
+    .label { font-size: 13px; font-weight: 600; text-anchor: middle; }
+    .glyph { font-size: 15px; font-weight: 700; text-anchor: middle; dominant-baseline: central; }
+    .node { fill: var(--node); stroke: var(--line); stroke-width: 2; }
+    .rail { stroke: var(--line); stroke-width: 2; }
+    .cap { font-size: 15px; font-weight: 600; text-anchor: middle; opacity: 0; }
+
+    .anim { animation-duration: 12s; animation-iteration-count: infinite; animation-fill-mode: both; }
+
+    /* The ticket card travels between stations. */
+    .card { animation-name: card; animation-timing-function: var(--ease-move); }
+    @keyframes card {
+      0%   { opacity: 0; transform: translate(20px, 60px) scale(0.96); animation-timing-function: var(--ease-out); }
+      4%   { opacity: 1; transform: translate(20px, 60px) scale(1); }
+      8%   { transform: translate(20px, 60px); }
+      15%  { transform: translate(185px, 60px); }
+      20%  { transform: translate(185px, 60px); }
+      27%  { transform: translate(350px, 60px); }
+      40%  { transform: translate(350px, 60px); }
+      47%  { transform: translate(515px, 60px); }
+      54%  { transform: translate(515px, 60px); }
+      60%  { transform: translate(350px, 60px); }
+      66%  { transform: translate(350px, 60px); }
+      72%  { transform: translate(515px, 60px); }
+      80%  { transform: translate(515px, 60px); }
+      88%  { transform: translate(680px, 60px); opacity: 1; }
+      96%  { transform: translate(680px, 60px); opacity: 1; }
+      100% { transform: translate(680px, 60px); opacity: 0; }
+    }
+
+    /* Evidence appears once the worker has built something. */
+    .evidence { animation-name: evidence; animation-timing-function: var(--ease-out); }
+    @keyframes evidence { 0%, 30% { opacity: 0; } 34%, 100% { opacity: 1; } }
+
+    /* Card border turns green on approval. */
+    .approved { animation-name: approved; }
+    @keyframes approved { 0%, 76% { opacity: 0; } 79%, 100% { opacity: 1; } }
+
+    /* Waiting worker wakes when the board offers the ticket. */
+    .wake { animation-name: wake; animation-timing-function: var(--ease-out); transform-box: fill-box; transform-origin: center; }
+    @keyframes wake {
+      0%, 11% { opacity: 0; transform: scale(0.9); }
+      14% { opacity: 1; transform: scale(1.15); }
+      20%, 100% { opacity: 0; transform: scale(1.3); }
+    }
+
+    /* Lease ring around the worker while it holds the claim. */
+    .lease { animation-name: lease; animation-timing-function: linear; transform-box: fill-box; transform-origin: center; }
+    @keyframes lease {
+      0%, 25% { opacity: 0; transform: rotate(0deg); }
+      28% { opacity: 1; }
+      44% { opacity: 1; transform: rotate(360deg); }
+      47% { opacity: 0; transform: rotate(400deg); }
+      60% { opacity: 0; transform: rotate(400deg); }
+      63% { opacity: 1; }
+      70% { opacity: 1; transform: rotate(720deg); }
+      73%, 100% { opacity: 0; transform: rotate(760deg); }
+    }
+
+    /* Reviewer verdicts. */
+    .reject { animation-name: reject; animation-timing-function: var(--ease-out); transform-box: fill-box; transform-origin: center; }
+    @keyframes reject { 0%, 49% { opacity: 0; transform: scale(0.9); } 51%, 57% { opacity: 1; transform: scale(1); } 60%, 100% { opacity: 0; transform: scale(1); } }
+    .approve { animation-name: approve; animation-timing-function: var(--ease-out); transform-box: fill-box; transform-origin: center; }
+    @keyframes approve { 0%, 75% { opacity: 0; transform: scale(0.9); } 77%, 86% { opacity: 1; transform: scale(1); } 90%, 100% { opacity: 0; transform: scale(1); } }
+
+    /* You: the merge. */
+    .merge { animation-name: merge; animation-timing-function: var(--ease-out); transform-box: fill-box; transform-origin: center; }
+    @keyframes merge { 0%, 86% { opacity: 0; transform: scale(0.9); } 90%, 96% { opacity: 1; transform: scale(1.15); } 100% { opacity: 0; transform: scale(1.3); } }
+
+    /* Captions, one per stage. */
+    .c1 { animation-name: c1; } @keyframes c1 { 0% { opacity: 0; } 2%, 7% { opacity: 1; } 9%, 100% { opacity: 0; } }
+    .c2 { animation-name: c2; } @keyframes c2 { 0%, 8% { opacity: 0; } 10%, 19% { opacity: 1; } 21%, 100% { opacity: 0; } }
+    .c3 { animation-name: c3; } @keyframes c3 { 0%, 20% { opacity: 0; } 22%, 39% { opacity: 1; } 41%, 100% { opacity: 0; } }
+    .c4 { animation-name: c4; } @keyframes c4 { 0%, 40% { opacity: 0; } 42%, 49% { opacity: 1; } 51%, 100% { opacity: 0; } }
+    .c5 { animation-name: c5; } @keyframes c5 { 0%, 50% { opacity: 0; } 52%, 65% { opacity: 1; } 67%, 100% { opacity: 0; } }
+    .c6 { animation-name: c6; } @keyframes c6 { 0%, 66% { opacity: 0; } 68%, 81% { opacity: 1; } 83%, 100% { opacity: 0; } }
+    .c7 { animation-name: c7; } @keyframes c7 { 0%, 82% { opacity: 0; } 84%, 97% { opacity: 1; } 100% { opacity: 0; } }
+
+    .static { opacity: 0; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .anim { animation: none; }
+      .card, .cap, .wake, .lease, .reject, .approve, .merge, .approved { opacity: 0; }
+      .static { opacity: 1; }
+    }
+  </style>
+
+  <!-- Rail between stations -->
+  <line class="rail" x1="80" y1="220" x2="740" y2="220"/>
+  <g class="muted" fill="none">
+    <path d="M155 214 l8 6 l-8 6" stroke="var(--line)" stroke-width="2"/>
+    <path d="M320 214 l8 6 l-8 6" stroke="var(--line)" stroke-width="2"/>
+    <path d="M485 214 l8 6 l-8 6" stroke="var(--line)" stroke-width="2"/>
+    <path d="M650 214 l8 6 l-8 6" stroke="var(--line)" stroke-width="2"/>
+  </g>
+
+  <!-- Stations -->
+  <g>
+    <circle class="node" cx="80" cy="220" r="22"/><text class="glyph" x="80" y="220">C</text>
+    <text class="label" x="80" y="262">Coordinator</text>
+
+    <circle class="node" cx="245" cy="220" r="22"/><text class="glyph" x="245" y="220">B</text>
+    <text class="label" x="245" y="262">Board</text>
+
+    <circle class="wake anim" cx="410" cy="220" r="30" fill="none" stroke="var(--accent)" stroke-width="3"/>
+    <circle class="lease anim" cx="410" cy="220" r="30" fill="none" stroke="var(--accent)" stroke-width="3" stroke-dasharray="36 12" stroke-linecap="round"/>
+    <circle class="node" cx="410" cy="220" r="22"/><text class="glyph" x="410" y="220">W</text>
+    <text class="label" x="410" y="262">Worker</text>
+
+    <circle class="node" cx="575" cy="220" r="22"/><text class="glyph" x="575" y="220">R</text>
+    <text class="label" x="575" y="262">Reviewer</text>
+    <g class="reject anim">
+      <circle cx="601" cy="196" r="11" fill="var(--bad)"/>
+      <path d="M596 191 l10 10 M606 191 l-10 10" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+    </g>
+    <g class="approve anim">
+      <circle cx="601" cy="196" r="11" fill="var(--ok)"/>
+      <path d="M595.5 196.5 l4 4 l7.5 -8" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+
+    <circle class="merge anim" cx="740" cy="220" r="30" fill="none" stroke="var(--ok)" stroke-width="3"/>
+    <circle class="node" cx="740" cy="220" r="22"/><text class="glyph" x="740" y="220">Y</text>
+    <text class="label" x="740" y="262">You</text>
+  </g>
+
+  <!-- The ticket card -->
+  <g class="card anim">
+    <rect x="0" y="0" width="120" height="96" rx="10" fill="var(--card)" stroke="var(--line)" stroke-width="1.5"/>
+    <rect class="approved anim" x="0" y="0" width="120" height="96" rx="10" fill="none" stroke="var(--ok)" stroke-width="2.5"/>
+    <text x="12" y="22" font-size="11" class="muted">TK-042</text>
+    <text x="12" y="41" font-size="13" font-weight="600">Add sign-in</text>
+    <g class="evidence anim">
+      <text x="12" y="62" font-size="11" class="muted">commit ✓  files ✓</text>
+      <text x="12" y="80" font-size="11" class="muted">tests ✓</text>
+    </g>
+  </g>
+
+  <!-- Captions -->
+  <text class="cap c1 anim" x="410" y="30">The coordinator turns your intent into a ticket</text>
+  <text class="cap c2 anim" x="410" y="30">The board offers it — the waiting worker wakes</text>
+  <text class="cap c3 anim" x="410" y="30">The worker claims it under a lease and builds</text>
+  <text class="cap c4 anim" x="410" y="30">Evidence goes to an independent reviewer</text>
+  <text class="cap c5 anim" x="410" y="30">Rejected with fixes — back to the same worker</text>
+  <text class="cap c6 anim" x="410" y="30">Resubmitted and approved on evidence</text>
+  <text class="cap c7 anim" x="410" y="30">Ready to merge. The final call is yours.</text>
+  <text class="cap static" x="410" y="30">offer → claim → evidence → independent review → merge</text>
+</svg>

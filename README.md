@@ -31,9 +31,17 @@ gates every change on evidence, and nothing is lost when a chat ends.
 | --- | --- |
 | Chat ends → work vanishes. Who owns what? Where's the proof? | The board keeps the ticket — claim, lease, evidence, review. Chat dies. The board doesn't. |
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/ticket-flow-dark.svg">
+    <img src="docs/media/ticket-flow-light.svg" alt="A ticket moves from coordinator to board to worker, is rejected once by an independent reviewer, fixed, approved, and handed to you to merge" width="820">
+  </picture>
+</p>
+
 ## How a ticket moves
 
-<!-- Replaced by docs/media/ticket-flow.gif (recorded from the real product) when it lands. -->
+<details>
+<summary><b>Step by step, as MCP tool calls</b></summary>
 
 ```mermaid
 sequenceDiagram
@@ -58,6 +66,8 @@ sequenceDiagram
     end
     B-->>You: approved work, ready to merge
 ```
+
+</details>
 
 | Role | Does |
 | --- | --- |
@@ -86,6 +96,7 @@ sequenceDiagram
 | **Ask** | A seat that needs a human asks through the board and keeps waiting without burning turns; your answer wakes it. |
 | **Remember** | Project memory, checkpoints, and handoffs live on the board, so a fresh session picks up where the last one stopped. |
 | **Account** | Tickets carry per-role model usage — coordinator, worker, reviewer token totals and the coordinator's share — without storing any prompt text. |
+| **Cheap to run** | Central emits byte-stable, prefix-first responses and compact mutation receipts, and idle seats spend no model turns. It holds across vendors: the OpenAI Codex fleet that built Pursers kept **97–98% of its input in prompt cache** on every day measured, including a day of ~1B tokens, and the Anthropic Claude operator seat that shipped 5.0.0 ran at **99%**. [Design](docs/cache-friendly-prose.md) · [numbers](docs/evidence/cache-efficiency.md) |
 | **Watch** | The Fleet dashboard shows the ticket funnel, live seats, claims, review pressure, and every project board on one screen. |
 
 Put your most capable model in the coordinator seat and right-sized models in
@@ -139,15 +150,15 @@ parts that are tested but not yet proven against every real host or provider.
 
 ### Packages
 
-| Package | Version | What it is |
-| --- | --- | --- |
-| `pursers` | 5.0.0 | Installs Central, the client, Personal, and the importer |
-| `pursers-central` | 0.1.0 | The board service |
-| `pursers-client` | 0.1.0 | Async Python client |
-| `pursers-personal` | 5.0.0 | One-owner board and MCP App dashboard |
-| `pursers-personal-import` | 5.0.0 | Importer from On Board v4 |
-| `pursers-wait-bridge` | 0.1.0 | Wait bridge and door tooling for seats |
-| `pursers-acp` | 0.1.0 | ACP board assistant for IDEs |
+| Package | What it is |
+| --- | --- |
+| `pursers==5.0.0` | Installs Central, the client, Personal, and the importer |
+| `pursers-central==0.1.0` | The board service |
+| `pursers-client==0.1.0` | Async Python client |
+| `pursers-personal==5.0.0` | One-owner board and MCP App dashboard |
+| `pursers-personal-import==5.0.0` | Importer from On Board v4 |
+| `pursers-wait-bridge==0.1.0` | Wait bridge and door tooling for seats |
+| `pursers-acp==0.1.0` | ACP board assistant for IDEs |
 
 The source tree's coordinated release surfaces currently bind
 `pursers==5.0.0`, `pursers-personal==5.0.0`,
