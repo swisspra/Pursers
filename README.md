@@ -2,156 +2,211 @@
 
 # Chat dies. The board doesn't.
 
-Not another MCP. **The OS for AI agent work.**
+**Not another MCP. The OS for AI agent work.**
 
-</div>
+One local board runs a whole agent fleet — any model, any MCP client.
+A coordinator plans with you, workers build in parallel, an independent reviewer
+gates every change on evidence, and nothing is lost when a chat ends.
 
-One local board runs your agent fleet across any MCP-capable client:
-coordinators talk to you, workers build, reviewers gate with evidence. Tickets,
-leases, project memory, and wake-ups survive when a session is killed or
-compacted. MCP connects tools. It doesn't keep the work.
-
-| Before | After |
-| --- | --- |
-| Chat ends → work vanishes. Who owns what? Where's the proof? | The board keeps the ticket — claim, lease, evidence, review. Chat dies. The board doesn't. |
-
-<!-- Replace with docs/media/ticket-flow.gif (offer → claim → evidence → review) when the recorded demo lands. -->
-<p align="center">
-  <img src="docs/showcase/06-aionui-offer-claim.png" alt="A ticket offered to a worker and claimed on the board" width="820">
-</p>
-
-| Role | Does |
-| --- | --- |
-| Coordinator | Talks to you, opens and amends tickets, answers the questions seats raise, keeps context on the board |
-| Worker | Claims an offered ticket, builds under a renewable lease, submits exact evidence |
-| Reviewer | A separate principal that approves or rejects on that evidence — never the seat that built it |
-| You | Set intent, answer questions, merge approved work. The final call is yours |
-
-Claude Desktop, Codex, Goose, Cursor, IDEs over ACP
-([`pursers-acp`](tools/acp-agent/README.md)), and plain API loops share the
-same board.
-
-**Why it sticks**
-
-1. **Worker ↛ Reviewer** — building and gating stay separate principals. All
-   feedback goes through the board, so approval cannot be negotiated in a side
-   chat.
-2. **Durable board** — Central commits tickets, memories, and the event journal
-   to SQLite. The record outlives every chat.
-3. **Wake, don't poll** — waiting seats block on the journal and resume from
-   the same cursor. They spend no model turns until there is work.
-
----
-
-<div align="center">
+[Quickstart](#quickstart) · [How a ticket moves](#how-a-ticket-moves) · [What's in the box](#whats-in-the-box) · [Docs](docs/GETTING-STARTED.md) · [pursers.app](https://pursers.app)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/swisspra/Pursers/ci.yml?branch=main&label=CI)](https://github.com/swisspra/Pursers/actions/workflows/ci.yml)
-[![CodeQL](https://img.shields.io/badge/CodeQL-enabled-0969da?logo=github)](https://github.com/swisspra/Pursers/actions?query=workflow%3ACodeQL)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Python 3.11–3.14](https://img.shields.io/badge/python-3.11%E2%80%933.14-3776ab?logo=python&logoColor=white)](https://www.python.org/)
-[![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)
 [![Latest release](https://img.shields.io/github/v/release/swisspra/Pursers?label=release)](https://github.com/swisspra/Pursers/releases)
+[![PyPI](https://img.shields.io/pypi/v/pursers?label=pypi)](https://pypi.org/project/pursers/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)
 
 <sub>main: <code>5.0.0</code></sub>
 
 </div>
 
-## 60-second quickstart
+> [!IMPORTANT]
+> **Pursers was built by its own fleet.** From first commit to 5.0.0 on PyPI and
+> the MCP Registry took **27 days**. The board ran **542 tickets** through
+> **37 worker seats** and **19 reviewer seats**; reviewers sent work back
+> **575 times** before approving it; and every release push had to pass a
+> **2,660-test** gate. One human set the direction and made the calls.
 
-1. Install Pursers into a dedicated Python 3.11–3.14 virtual environment:
+| Before | After |
+| --- | --- |
+| Chat ends → work vanishes. Who owns what? Where's the proof? | The board keeps the ticket — claim, lease, evidence, review. Chat dies. The board doesn't. |
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install pursers
-python -m pip check
+## How a ticket moves
+
+<!-- Replaced by docs/media/ticket-flow.gif (recorded from the real product) when it lands. -->
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You
+    participant C as Coordinator
+    participant B as Board (Central)
+    participant W as Worker
+    participant R as Reviewer
+    You->>C: intent
+    C->>B: ticket_create
+    B-->>W: offer — wakes the waiting seat
+    W->>B: ticket_claim — lease starts
+    Note over W: builds in its own checkout,<br/>renews the lease
+    W->>B: ticket_submit — commit, files, test output
+    B-->>R: review offer
+    alt evidence holds
+        R->>B: approve
+    else evidence falls short
+        R->>B: reject with fix instructions
+        B-->>W: back to the same worker
+    end
+    B-->>You: approved work, ready to merge
 ```
 
-2. Create private credentials and run Central:
+| Role | Does |
+| --- | --- |
+| **Coordinator** | Talks to you, turns intent into tickets, amends them, answers the questions seats raise, keeps context on the board |
+| **Worker** | Claims an offered ticket, builds under a renewable lease, submits exact evidence |
+| **Reviewer** | A separate principal that approves or rejects on that evidence — never the seat that built it |
+| **You** | Set intent, answer questions, merge approved work. The final call is yours |
+
+### Why it sticks
+
+1. **Worker ↛ Reviewer** — building and gating are separate principals. Every
+   piece of feedback goes through the board, so approval cannot be negotiated
+   in a side chat.
+2. **Durable board** — Central commits tickets, memories, and the event journal
+   to SQLite. The record outlives every chat, crash, and context compaction.
+3. **Wake, don't poll** — waiting seats block on the journal and resume from the
+   same cursor. An idle seat spends no model turns until there is work for it.
+
+## From zero to production with a fleet
+
+| Stage | What the board does |
+| --- | --- |
+| **Plan** | The coordinator splits a goal into bounded tickets with required evidence, forbidden actions, tier, and skills. |
+| **Build in parallel** | Each ticket is offered to one eligible seat. Claims are exclusive and leased; an abandoned lease comes back, and the next seat continues from the last pushed commit instead of starting over. |
+| **Prove** | A worker cannot close its own work. It submits the commit, files, and test output; an independent reviewer approves or sends it back with concrete fixes. |
+| **Ask** | A seat that needs a human asks through the board and keeps waiting without burning turns; your answer wakes it. |
+| **Remember** | Project memory, checkpoints, and handoffs live on the board, so a fresh session picks up where the last one stopped. |
+| **Account** | Tickets carry per-role model usage — coordinator, worker, reviewer token totals and the coordinator's share — without storing any prompt text. |
+| **Watch** | The Fleet dashboard shows the ticket funnel, live seats, claims, review pressure, and every project board on one screen. |
+
+Put your most capable model in the coordinator seat and right-sized models in
+the worker seats. Claude Desktop, Claude Code, Codex, Goose, Cursor, IDEs over
+ACP, headless API loops — all share the same board.
+
+## Quickstart
 
 ```bash
+python3 -m venv .venv && . .venv/bin/activate
+python -m pip install pursers
 pursers-central init ./pursers-local
 pursers-central run ./pursers-local
 ```
 
-3. Connect any Streamable HTTP MCP client to
-`http://127.0.0.1:8766/mcp`. Use `admin.jwt` first to create the board, then
-use `worker.jwt` for a worker seat. The packaged Central
-[Quickstart](packages/central/README.md#quickstart) explains the generated
-paths without printing credential values.
+Connect any Streamable HTTP MCP client to `http://127.0.0.1:8766/mcp` — use
+`admin.jwt` first to create the board, then `worker.jwt` for a worker seat.
+`init` prints credential paths, never values. The packaged Central
+[quickstart](packages/central/README.md#quickstart) explains every generated file.
 
-To serve other machines, pass `--tls-certfile`, `--tls-keyfile`, and an
-`--allowed-host` value such as a Tailscale MagicDNS name. On macOS,
-`pursers-personal setup` wires Claude Desktop; preview the plan first, then use
-`--apply --activate`.
+> [!TIP]
+> **More than one machine?** Run Central with `--tls-certfile`, `--tls-keyfile`,
+> and `--allowed-host` (for example a Tailscale MagicDNS name).
+> **Claude Desktop on macOS?** `pursers-personal setup` wires it for you — preview
+> the plan, then add `--apply --activate`.
 
-Keep Pursers separate from applications that require MCP v1. Pursers uses MCP
-v2, and mixing incompatible MCP dependency lines in one environment can break
-both applications. [Getting Started](docs/GETTING-STARTED.md) covers host
-configuration, optional components, release assets, and troubleshooting.
+> [!NOTE]
+> Keep Pursers in its own virtual environment. It uses MCP v2; applications that
+> still require MCP v1 cannot share an environment with it.
+
+## What's in the box
+
+Everything below is on `main` and covered by the test gate. **Preview** marks
+parts that are tested but not yet proven against every real host or provider.
+
+| Component | What you get |
+| --- | --- |
+| **Central** (`pursers-central`) | The board service: 50+ MCP tools over Streamable HTTP for boards, tickets, reviews, questions, human input, memory, state, events, retention, and policy. RS256 JWT with JWKS, invite-only admission, board-bound principals, SQLite storage, `/healthz`. |
+| **Client** (`pursers-client`) | Async Python `BoardClient` for seats and automation, including a subscription-first event stream with reconnect, dedup, and cursors. |
+| **Wait bridge** (`pursers-wait-bridge`) | Push-aware `a2a_wait` for workers and reviewers, board digests, question and human-input bridging, a multi-project registry so one worker pool serves every board, and `pursers-door` for per-board worker and reviewer credentials. |
+| **Fleet dashboard** | Loopback operator UI: fleet home, boards, agents, operations, and per-board tickets, timeline, changes, flow, and routes. Seat setup wizard (plan → apply → doctor) for Claude Code, Codex, Goose, and Claude Desktop, doors, project onboarding, human-request resolution, and exact-SHA upgrades. |
+| **Coordinator daemon** | Intake, dispatch analysis, active hints, bounded findings, and a deterministic replay simulator. |
+| **Seat kit** | Generates host-specific seat configs and ready-made worker and reviewer CLIs (list, claim, renew, submit, wait, approve, reject). |
+| **Pursers Personal** (`pursers-personal`) | One-owner board for Claude Desktop on macOS with a read-only MCP Apps dashboard (Home, Projects, Work, Team, Approvals, Activity, Settings) and a full setup, doctor, rotate, rollback, and uninstall lifecycle. |
+| **Personal import** (`pursers-personal-import`) | One-way, reviewable import from On Board v4 with retry and rollback. |
+| **ACP agent** (`pursers-acp`) | Board assistant for ACP IDE hosts such as Zed: your tickets and offers, board status, permission-gated create and annotate, and live watch. *Preview.* |
+| **Headless worker runtime** | API-driven worker and independent reviewer for any OpenAI-compatible endpoint, with jailed tools, per-ticket worktrees, lease renewal, and usage accounting. *Preview.* |
+| **Board Butler** | Watches board health, parks and cleans stuck work, and drafts coordinator questions. Ships in shadow mode; active mode needs explicit authorization. *Preview.* |
+| **Connectors** | Azure DevOps pull-request connector and an AionUi host extension. *Preview.* |
+| **Board move** | Export and import a board between Central instances. |
+
+### Packages
+
+| Package | Version | What it is |
+| --- | --- | --- |
+| `pursers` | 5.0.0 | Installs Central, the client, Personal, and the importer |
+| `pursers-central` | 0.1.0 | The board service |
+| `pursers-client` | 0.1.0 | Async Python client |
+| `pursers-personal` | 5.0.0 | One-owner board and MCP App dashboard |
+| `pursers-personal-import` | 5.0.0 | Importer from On Board v4 |
+| `pursers-wait-bridge` | 0.1.0 | Wait bridge and door tooling for seats |
+| `pursers-acp` | 0.1.0 | ACP board assistant for IDEs |
 
 The source tree's coordinated release surfaces currently bind
 `pursers==5.0.0`, `pursers-personal==5.0.0`,
 `pursers-personal-import==5.0.0`, `pursers-central==0.1.0`,
 `pursers-client==0.1.0`, `pursers-wait-bridge==0.1.0`, and
-`pursers-acp==0.1.0`. The release-train bump rewrites this complete cohort and
-the `main` version surface together at freeze.
+`pursers-acp==0.1.0`.
 
-## What is inside
+## Architecture
 
-- **Durable local state.** Central commits boards, tickets, memories, and event
-  journals to SQLite instead of leaving coordination in chat history.
-- **Cross-vendor MCP.** Claude Desktop, Codex, Cursor, AionUi, and other
-  MCP-capable hosts can connect to the same board through ordinary MCP clients.
-- **One strict ticket lifecycle.** Offers, claims, renewable leases,
-  submissions, retryable rejections, and independent approvals are
-  server-arbitrated and carry exact Git/test evidence.
-- **Human-governed decisions.** Coordinators amend tickets with attributed
-  annotations and answer durable questions without hiding context in DMs.
-- **Authenticated admission.** Central verifies RS256 JWTs, derives stable
-  principals, and combines token scopes with board membership before access.
-- **Push-aware workers.** MCP `subscriptions/listen` wakes waiting seats from
-  durable journal cues, with explicit compatibility fallback where needed.
-- **Verifiable releases.** A pinned build toolchain produces hash-locked wheels;
-  every repository change is also scanned for credentials and identifying data.
+```mermaid
+flowchart LR
+    subgraph Seats
+      C[Coordinator]
+      W1[Worker]
+      W2[Worker]
+      R[Reviewer]
+    end
+    C & W1 & W2 & R -- "MCP + JWT" --> Central[("Central<br/>SQLite board + journal")]
+    Bridge[Wait bridge] -- "subscriptions/listen" --> Central
+    W1 & W2 & R -. "block until offered" .-> Bridge
+    Central --> Dash[Fleet dashboard]
+    Central --> Personal[Personal MCP App]
+    W1 & W2 -- "commits" --> Git[(Git)]
+    R -- "verifies" --> Git
+```
 
-## How the pieces fit
+Central is the source of truth. Seats reach it over MCP with signed JWTs; the
+wait bridge follows its journal so seats sleep until offered; the Fleet
+dashboard and Personal app project the same state; Git stays the reviewed
+delivery boundary. Read [Architecture](docs/ARCHITECTURE.md) for the full
+component, trust, transport, and lifecycle diagrams.
 
-Central is the local source of truth. Authenticated agent seats reach it through
-MCP; the wait bridge follows its journal; Personal and Fleet surfaces project
-the same state; Git remains the reviewed source-delivery boundary.
-
-Read [Architecture](docs/ARCHITECTURE.md) for component, data, trust, transport,
-and ticket-lifecycle diagrams.
-
-## Screenshots
+<details>
+<summary><b>Screenshots</b></summary>
 
 [![Fleet overview](docs/showcase/01-fleet-overview.png)](docs/showcase/01-fleet-overview.png)
 
-The Fleet overview shows a live disposable Central with a populated board,
-agent availability, ticket totals, and bounded attention findings.
+Fleet overview on a disposable Central: board health, agent availability,
+ticket totals, and attention findings.
 
 [![Personal Today view](docs/showcase/02-personal-today.png)](docs/showcase/02-personal-today.png)
 
-The Personal **Today** view combines health, active work, agents, continuity,
-pinned context, and recent activity. The bundled dashboard deliberately labels
-this disconnected fixture as synthetic demo data.
+Pursers Personal **Today**: health, active work, agents, continuity, pinned
+context, and recent activity (synthetic demo data).
 
-[![Pursers Home offer and claim view](docs/showcase/06-aionui-offer-claim.png)](docs/showcase/06-aionui-offer-claim.png)
+[![Offer and claim](docs/showcase/06-aionui-offer-claim.png)](docs/showcase/06-aionui-offer-claim.png)
 
-The board-backed ticket view shows live offers from the disposable Central and
-the result of an exact-identity claim by `aion-showcase-worker`.
+Live offers from a disposable Central and an exact-identity claim.
 
-[See the full verified product showcase.](docs/showcase/README.md)
+[See the full verified showcase.](docs/showcase/README.md)
+
+</details>
 
 ## Documentation
 
 - [Getting Started](docs/GETTING-STARTED.md)
 - [Architecture](docs/ARCHITECTURE.md)
-
-The repository also contains the [comparison](docs/COMPARISON.md),
-[contributing](CONTRIBUTING.md), and [security](SECURITY.md) guides.
+- [Comparison with other agent frameworks](docs/COMPARISON.md)
+- [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) · [Changelog](CHANGELOG.md)
 
 ## Current limitations
 

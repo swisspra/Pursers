@@ -1,6 +1,6 @@
 # Headless worker and reviewer runtime
 
-`pursers-worker` runs one continuously re-arming board seat against an
+`pursers_worker.py` (run as `python tools/worker-runtime/pursers_worker.py CONFIG`) runs one continuously re-arming board seat against an
 OpenAI-compatible chat-completions endpoint. It uses the same JWT seat,
 registry, claim, lease, submission, and independent-review flow as an
 interactive worker. Provision the seat first with `seat_admin`.
