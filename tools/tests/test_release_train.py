@@ -15,7 +15,7 @@ from tools.release_versions import load_versions
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _fixture_repository(tmp_path: Path) -> Path:
+def _fixture_repository(tmp_path: Path, *, distinct: bool = True) -> Path:
     paths = {
         "CHANGELOG.md",
         "tools/release_versions.toml",
@@ -33,7 +33,31 @@ def _fixture_repository(tmp_path: Path) -> Path:
         destination = tmp_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
+    if distinct:
+        _rebase_to_distinct_versions(tmp_path)
     return tmp_path
+
+
+# The released cohort shares version strings (central, client, wait bridge and
+# acp are all 0.1.0; product and import are both 5.0.0). Tests that swap, drift
+# or alpha-bump individual components need every component distinguishable, so
+# the fixture first moves to this synthetic pre-release cohort. That rebase is
+# itself a qualified bump away from shared versions.
+DISTINCT_FIXTURE_VERSIONS = (
+    "product=5.0.0a90",
+    "central=0.1.0a80",
+    "client=0.1.0a70",
+    "import=5.0.0a60",
+    "wait_bridge=0.1.0a50",
+    "acp=0.1.0a40",
+)
+
+
+def _rebase_to_distinct_versions(root: Path) -> None:
+    current = load_versions(root / "tools/release_versions.toml")
+    target = release_train.bumped_versions(current, DISTINCT_FIXTURE_VERSIONS, None)
+    for path, content in release_train.plan_bump(root, current, target).items():
+        path.write_text(content, encoding="utf-8")
 
 
 def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
@@ -135,8 +159,8 @@ def test_acp_bump_updates_its_surfaces_without_rewriting_dependency_versions(
 
     pyproject = planned[root / "tools/acp-agent/pyproject.toml"]
     assert 'version = "0.1.1"' in pyproject
-    assert '"pursers-client==0.1.0a24"' in pyproject
-    assert '"pursers-wait-bridge==0.1.0a17"' in pyproject
+    assert f'"pursers-client=={current.packages["client"]}"' in pyproject
+    assert f'"pursers-wait-bridge=={current.packages["wait_bridge"]}"' in pyproject
     assert 'IMPLEMENTATION_VERSION = "0.1.1"' in planned[
         root / "tools/acp-agent/src/pursers_acp/agent.py"
     ]
@@ -234,7 +258,6 @@ def test_component_only_bump_preserves_whats_new_release_history(
     assert next_central in planned_current
     assert current_central not in planned_current
     assert planned_history == original_history
-    assert current.product in planned_history
 
 
 def test_wait_bridge_only_bump_uses_manifest_derived_cohort_keys(
@@ -297,34 +320,36 @@ def test_next_patch_alpha_rejects_beta_manifest() -> None:
 def test_check_detects_fixture_dependency_drift(tmp_path: Path) -> None:
     root = _fixture_repository(tmp_path)
     manifest = load_versions(root / "tools/release_versions.toml")
+    client = manifest.packages["client"]
     pyproject = root / "tools/wait-bridge/pyproject.toml"
     pyproject.write_text(
         pyproject.read_text().replace(
-            "pursers-client==0.1.0a24",
-            "pursers-client==0.1.0a23",
+            f"pursers-client=={client}",
+            "pursers-client==0.0.1a1",
         )
     )
 
     errors = release_train.check(root, manifest)
 
-    assert any("missing pursers-client==0.1.0a24" in error for error in errors)
+    assert any(f"missing pursers-client=={client}" in error for error in errors)
 
 
 def test_check_detects_central_client_dependency_drift(tmp_path: Path) -> None:
     root = _fixture_repository(tmp_path)
     manifest = load_versions(root / "tools/release_versions.toml")
+    client = manifest.packages["client"]
     pyproject = root / "packages/central/pyproject.toml"
     pyproject.write_text(
         pyproject.read_text().replace(
-            "pursers-client==0.1.0a24",
-            "pursers-client==0.1.0a23",
+            f"pursers-client=={client}",
+            "pursers-client==0.0.1a1",
         )
     )
 
     errors = release_train.check(root, manifest)
 
     assert any(
-        "packages/central/pyproject.toml: missing pursers-client==0.1.0a24" in error
+        f"packages/central/pyproject.toml: missing pursers-client=={client}" in error
         for error in errors
     )
 
@@ -338,16 +363,19 @@ def test_real_tree_is_clean_and_current_bump_has_zero_diff() -> None:
 def test_check_detects_wait_bridge_source_constant_drift(tmp_path: Path) -> None:
     root = _fixture_repository(tmp_path)
     manifest = load_versions(root / "tools/release_versions.toml")
+    wait_bridge = manifest.packages["wait_bridge"]
     source = root / "tools/wait-bridge/pursers_wait_server.py"
     source.write_text(
         source.read_text().replace(
-            'SOURCE_VERSION = "0.1.0a17"', 'SOURCE_VERSION = "0.1.0a16"'
+            f'SOURCE_VERSION = "{wait_bridge}"', 'SOURCE_VERSION = "0.0.1a1"'
         )
     )
 
     errors = release_train.check(root, manifest)
 
-    assert any("SOURCE_VERSION '0.1.0a16' != '0.1.0a17'" in error for error in errors)
+    assert any(
+        f"SOURCE_VERSION '0.0.1a1' != '{wait_bridge}'" in error for error in errors
+    )
 
 
 def test_component_source_lock_check_passes_fresh_and_fails_stale_lock(
@@ -371,3 +399,44 @@ def test_component_source_lock_check_passes_fresh_and_fails_stale_lock(
     assert release_train._component_source_lock_errors(tmp_path, lock) == [
         "component-lock.json: pursers-client source digest mismatch: " + member
     ]
+
+
+def test_bump_of_one_component_leaves_components_sharing_its_version(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_repository(tmp_path, distinct=False)
+    current = load_versions(root / "tools/release_versions.toml")
+    shared = current.packages["central"]
+    assert current.packages["client"] == shared
+    target = release_train.bumped_versions(current, ("central=0.1.1",), None)
+
+    planned = release_train.plan_bump(root, current, target)
+    for path, content in planned.items():
+        path.write_text(content, encoding="utf-8")
+
+    central = (root / "packages/central/pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.1.1"' in central
+    assert f'"pursers-client=={shared}"' in central
+    personal = (root / "packages/personal/pyproject.toml").read_text(encoding="utf-8")
+    assert '"pursers-central==0.1.1"' in personal
+    assert f'"pursers-client=={shared}"' in personal
+    # The component lock is rebuilt from wheels by a separate step.
+    assert [
+        error
+        for error in release_train.check(root, target)
+        if not error.startswith("component-lock.json:")
+    ] == []
+
+
+def test_unqualified_shared_version_is_refused(tmp_path: Path) -> None:
+    root = _fixture_repository(tmp_path, distinct=False)
+    current = load_versions(root / "tools/release_versions.toml")
+    readme = root / "README.md"
+    readme.write_text(
+        readme.read_text(encoding="utf-8")
+        + f"\nSee version {current.packages['central']} for details.\n",
+        encoding="utf-8",
+    )
+    target = release_train.bumped_versions(current, ("central=0.1.1",), None)
+    with pytest.raises(release_train.ReleaseTrainError, match="not qualified"):
+        release_train.plan_bump(root, current, target)

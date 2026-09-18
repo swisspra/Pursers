@@ -17,7 +17,7 @@ import tomllib
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 try:
     from .release_versions import (
@@ -195,25 +195,106 @@ def _replace_versions(
         original = path.read_text(encoding="utf-8")
         editable, history = _version_reference_regions(relative, original)
         updated = editable
-        replacements: dict[str, str] = {}
-        for key in keys:
-            old, new = values[key]
-            if old != new:
-                previous = replacements.setdefault(old, new)
-                if previous != new:
+        changed_olds = {values[key][0] for key in keys if values[key][0] != values[key][1]}
+        for old in sorted(changed_olds):
+            # Components this file references that currently share this exact
+            # version string. When they do not all move to one new version
+            # (including a sharer that stays put), a bare replacement would move
+            # the wrong component, so only package-qualified occurrences change.
+            sharers = [key for key in keys if values[key][0] == old]
+            targets = {values[key][1] for key in sharers}
+            if len(targets) == 1:
+                updated = re.sub(
+                    rf"(?<![\w]){re.escape(old)}(?![\w])",
+                    targets.pop(),
+                    updated,
+                )
+                continue
+            patterns = {
+                key: _qualified_version_pattern(root, relative, key, old)
+                for key in sharers
+            }
+            spans = _qualified_spans(patterns, updated)
+            owners = "/".join(f"{key}->{values[key][1]}" for key in sharers)
+            for match in re.finditer(rf"(?<![\w.]){re.escape(old)}(?![\w])", updated):
+                span_keys = spans.get(match.span(), set())
+                if not span_keys and "product" in sharers:
+                    # Release documents describe a product release; a bare
+                    # product version ("Released · 5.0.0") is the product's.
+                    span_keys = spans[match.span()] = {"product"}
+                if len({values[key][1] for key in span_keys}) != 1:
                     raise ReleaseTrainError(
-                        f"ambiguous replacement in {relative}: {old} -> {previous}/{new}"
+                        f"ambiguous replacement in {relative}: {old} is shared by "
+                        f"{owners}; the occurrence at offset {match.start()} is "
+                        + (
+                            "qualified by more than one of them"
+                            if span_keys
+                            else "not qualified by a package name"
+                        )
                     )
-        for old, new in replacements.items():
-            updated = re.sub(
-                rf"(?<![\w]){re.escape(old)}(?![\w])",
-                new,
-                updated,
-            )
+            for (start, end), span_keys in sorted(spans.items(), reverse=True):
+                new = values[next(iter(span_keys))][1]
+                updated = updated[:start] + new + updated[end:]
         updated += history
         if updated != original:
             planned[path] = updated
     return planned
+
+
+def _key_aliases(root: Path, key: str) -> tuple[str, ...]:
+    if key == "product":
+        aliases = {
+            *_component_aliases(_package_distribution(root, "pursers"), "pursers"),
+            *_component_aliases(_package_distribution(root, "personal"), "personal"),
+            "main:",
+            # Prose such as "version 5.0.0" describes the product release.
+            "version",
+        }
+        return tuple(sorted(aliases, key=len, reverse=True))
+    return _component_aliases(_package_distribution(root, key), key)
+
+
+# Markup and punctuation that may sit between a package name and its version,
+# for example `pursers-central</code></td><td><code>0.1.0` or
+# `"pursers-central": "0.1.0"`. Tags with attributes are deliberately excluded
+# so a match cannot reach across into the next card or table row.
+_QUALIFIER_GAP = r"(?:</?[A-Za-z][\w-]*>|[\s\"':=]){0,12}"
+
+
+def _qualified_version_pattern(
+    root: Path, relative: str, key: str, version: str
+) -> re.Pattern[str]:
+    """Match ``version`` only where a package name for ``key`` qualifies it."""
+    alternatives = "|".join(re.escape(alias) for alias in _key_aliases(root, key))
+    branches = [
+        rf"(?i:(?<![\w-])(?:{alternatives})(?:==|~=|>=|<=|-|_|/|{_QUALIFIER_GAP}))"
+    ]
+    if relative.endswith("pyproject.toml"):
+        project = str(_pyproject(root / relative)["project"]["name"])
+        owners = {"pursers", "personal"} if key == "product" else {key}
+        if any(_package_distribution(root, owner) == project for owner in owners):
+            branches.append(r"(?m:^version\s*=\s*\")")
+    prefix = "|".join(branches)
+    escaped = re.escape(version)
+    followed_by_name = (
+        rf"(?=(?:</?[A-Za-z][\w-]*>|\s){{0,6}}(?i:{alternatives})(?![\w-]))"
+    )
+    return re.compile(
+        rf"(?P<prefix>{prefix}){escaped}(?![\w])"
+        rf"|(?<![\w.]){escaped}(?![\w]){followed_by_name}"
+    )
+
+
+def _qualified_spans(
+    patterns: Mapping[str, re.Pattern[str]], text: str
+) -> dict[tuple[int, int], set[str]]:
+    """Return version spans in ``text`` and the component keys that qualify each."""
+    spans: dict[tuple[int, int], set[str]] = {}
+    for key, pattern in patterns.items():
+        for match in pattern.finditer(text):
+            start = match.end("prefix") if match.group("prefix") is not None else match.start()
+            spans.setdefault((start, match.end()), set()).add(key)
+    return spans
 
 
 def _version_reference_regions(relative: str, text: str) -> tuple[str, str]:
