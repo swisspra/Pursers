@@ -275,6 +275,15 @@ evidence = ["docs/operations/branch-pruning.md"]
 evidence_contains = ["tools/branch_audit.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/stranded_approvals.py"
+kind = "operator-tool"
+source = "tools/stranded_approvals.py"
+state = "delivered"
+channel = "documented stranded-approval audit runbook"
+evidence = ["docs/operations/stranded-approvals.md"]
+evidence_contains = ["tools/stranded_approvals.py"]
+
+[[artifacts]]
 id = "operator-tool:tools/build_home_runtime_wheelhouse.py"
 kind = "operator-tool"
 source = "tools/build_home_runtime_wheelhouse.py"
