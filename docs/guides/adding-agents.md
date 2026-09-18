@@ -52,8 +52,23 @@ authenticate with the same credential still have the same principal.
 ## 1. Create the quickstart instance
 
 Install Pursers in a dedicated virtual environment, then initialize a private
-profile. Choose a free loopback port; this example uses `PORT` rather than the
-default so it cannot collide with another Central.
+profile. First ask the operating system for a currently free loopback port:
+
+```bash
+python3 - <<'PY'
+import socket
+
+with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1])
+PY
+```
+
+Record the printed number and use that same value in every terminal. The
+verified run printed `63821`, so that value is used below. Port selection has
+a small race between releasing the check socket and starting Central; if
+`pursers-central run` reports that the address is already in use, select a new
+port and initialize a new throwaway profile with it.
 
 ```bash
 python3 -m venv /PATH/TO/pursers-venv
@@ -74,9 +89,11 @@ Run Central in its own terminal or process manager. `init` creates
 owner principal. They are useful for the first connection, but they cannot
 provide an independent reviewer.
 
-In another terminal, confirm health without reading a credential:
+In another terminal, define the port again and confirm health without reading
+a credential:
 
 ```bash
+PORT=63821
 curl --fail --silent "http://127.0.0.1:${PORT}/healthz"
 ```
 
