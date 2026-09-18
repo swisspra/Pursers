@@ -56,7 +56,11 @@ the first authenticated client. Do not substitute the older
 The quickstart creates an instance directory with mode `0700`, credential and
 profile files with mode `0600`, a local board named `pursers-local`, and a
 SQLite data directory. It prints file paths, not token values, and refuses to
-replace existing credentials unless the owner explicitly requests rotation.
+replace existing credentials unless the owner explicitly requests a hard
+cutover.
+Use the [issuer-key rotation procedure](operations/issuer-key-rotation.md) for
+overlapping keys and uninterrupted clients. `init --force` is the documented
+hard-cutover alternative and invalidates every old issuer token immediately.
 
 When Central is running, verify its unauthenticated health endpoint:
 

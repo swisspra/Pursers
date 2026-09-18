@@ -12,7 +12,17 @@ from typing import Sequence
 import uvicorn
 
 from . import central
-from .quickstart import QuickstartError, apply_runtime_profile, init_instance
+from .quickstart import (
+    ADMIN_TOKEN_NAME,
+    JWKS_NAME,
+    KEY_NAME,
+    WORKER_TOKEN_NAME,
+    QuickstartError,
+    apply_runtime_profile,
+    init_instance,
+    retire_key,
+    rotate_key,
+)
 from .runtime_health import create_streamable_http_app
 
 
@@ -189,7 +199,11 @@ def _init(argv: Sequence[str]) -> None:
     parser.add_argument("directory", type=Path)
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--board", default="pursers-local")
-    parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="hard cutover: replace credentials immediately; use rotate-key for overlap",
+    )
     args = parser.parse_args(argv)
     try:
         paths = init_instance(
@@ -207,6 +221,83 @@ def _init(argv: Sequence[str]) -> None:
     print(f"admin token: {paths['admin.jwt']}")
     print(f"worker token: {paths['worker.jwt']}")
     print(f"run: pursers-central run {paths['root']}")
+
+
+def _rotate_key(argv: Sequence[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="pursers-central rotate-key",
+        description="Rotate an issuer key while keeping the old key valid",
+    )
+    parser.add_argument("directory", nargs="?", type=Path)
+    parser.add_argument("--key", type=Path)
+    parser.add_argument("--jwks", type=Path)
+    parser.add_argument("--token", action="append", type=Path, default=[])
+    args = parser.parse_args(argv)
+    if args.directory is not None:
+        if args.key is not None or args.jwks is not None or args.token:
+            parser.error("DIR cannot be combined with --key, --jwks, or --token")
+        key_path = args.directory / KEY_NAME
+        jwks_path = args.directory / JWKS_NAME
+        token_paths = [
+            args.directory / ADMIN_TOKEN_NAME,
+            args.directory / WORKER_TOKEN_NAME,
+        ]
+    else:
+        if args.key is None or args.jwks is None or not args.token:
+            parser.error(
+                "generic form requires --key, --jwks, and at least one --token"
+            )
+        key_path = args.key
+        jwks_path = args.jwks
+        token_paths = args.token
+    try:
+        result = rotate_key(key_path, jwks_path, token_paths)
+    except QuickstartError as exc:
+        parser.error(str(exc))
+    print("Pursers Central issuer key rotated with overlap")
+    print(f"signing key: {result['key']}")
+    print(f"retired signing key: {result['retired_key']}")
+    print(f"JWKS: {result['jwks']}")
+    print(f"old kid: {result['old_kid']}")
+    print(f"new kid: {result['new_kid']}")
+    print(f"tokens re-signed: {result['token_count']}")
+
+
+def _retire_key(argv: Sequence[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="pursers-central retire-key",
+        description="Retire an inactive issuer key after clients reconnect",
+    )
+    parser.add_argument("directory", nargs="?", type=Path)
+    parser.add_argument("--key", type=Path)
+    parser.add_argument("--jwks", type=Path)
+    parser.add_argument("--kid", required=True)
+    parser.add_argument("--check-token", action="append", type=Path, default=[])
+    args = parser.parse_args(argv)
+    if args.directory is not None:
+        if args.key is not None or args.jwks is not None:
+            parser.error("DIR cannot be combined with --key or --jwks")
+        key_path = args.directory / KEY_NAME
+        jwks_path = args.directory / JWKS_NAME
+    else:
+        if args.jwks is None:
+            parser.error("generic form requires --jwks")
+        jwks_path = args.jwks
+        key_path = args.key or jwks_path.parent / KEY_NAME
+    try:
+        result = retire_key(
+            key_path,
+            jwks_path,
+            args.kid,
+            check_token_paths=args.check_token,
+        )
+    except QuickstartError as exc:
+        parser.error(str(exc))
+    print("Pursers Central issuer key retired")
+    print(f"JWKS: {result['jwks']}")
+    print(f"retired signing key: {result['retired_key']}")
+    print(f"retired kid: {result['retired_kid']}")
+    print(f"issuer keys remaining: {result['issuer_key_count']}")
 
 
 def _run(argv: Sequence[str]) -> None:
@@ -230,6 +321,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
     if arguments and arguments[0] == "run":
         _run(arguments[1:])
+        return
+    if arguments and arguments[0] == "rotate-key":
+        _rotate_key(arguments[1:])
+        return
+    if arguments and arguments[0] == "retire-key":
+        _retire_key(arguments[1:])
         return
     _serve(arguments)
 

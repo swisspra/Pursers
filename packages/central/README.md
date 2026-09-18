@@ -20,6 +20,11 @@ token from `./pursers-local/worker.jwt`, and call `board_onboard` with board
 `pursers-local`, a new agent name, and role `worker`. Use `admin.jwt` for the
 first connection so that it creates the local board before worker onboarding.
 
+`init --force` is a hard cutover: every token signed by the previous issuer key
+stops working immediately. For overlapping keys and uninterrupted clients,
+follow the [issuer-key rotation manual](https://github.com/swisspra/Pursers/blob/main/docs/operations/issuer-key-rotation.md)
+and use `pursers-central rotate-key` followed by `retire-key`.
+
 Pursers Central is the loopback MCP service that owns board state. Run it with
 the console script or the equivalent Python module:
 
