@@ -6,7 +6,38 @@ seats through a dry-run-first plan, reports bounded submitted results and
 independent review outcomes, and exposes bounded pause, stop, recovery, roster
 controls, standalone seat-group controls, and a board-backed ticket lifecycle.
 
-## Build and install
+## Download and install
+
+Each GitHub Release created by the repository workflow attaches
+`pursers-aionui-0.1.0.zip` next to the product wheels. Download the ZIP and the
+release checksum file, then verify the selected asset:
+
+```sh
+TAG=v5.0.0b3
+AION_ARCHIVE=pursers-aionui-0.1.0.zip
+gh release download "$TAG" --repo OWNER/Pursers \
+  --pattern "$AION_ARCHIVE" --pattern SHA256SUMS.txt
+grep "  $AION_ARCHIVE$" SHA256SUMS.txt | shasum -a 256 -c -
+```
+
+AionUi 2.2.1 has no in-app local-ZIP import. Install the verified archive by
+unpacking it as one extension directory under a dedicated extension parent,
+then start the compatible AionUi/AionCore process with that parent in
+`AIONUI_EXTENSIONS_PATH`:
+
+```sh
+EXTENSIONS=/PATH/TO/isolated-extensions
+mkdir -p "$EXTENSIONS/pursers"
+unzip -q "$AION_ARCHIVE" -d "$EXTENSIONS/pursers"
+AIONUI_EXTENSIONS_PATH="$EXTENSIONS" \
+  /PATH/TO/aioncore --host 127.0.0.1 --port 25999 \
+  --data-dir /PATH/TO/isolated-data --app-version 2.2.1
+```
+
+The same verified ZIP can be registered as the package for a managed AionUi
+Hub entry. Do not unpack it into an existing AionUi data directory by hand.
+
+## Build from source
 
 From the repository root:
 
@@ -14,14 +45,11 @@ From the repository root:
 python tools/aionui-extension/build.py
 ```
 
-Install `dist/pursers-aionui-0.1.0.zip` through a managed AionUi Hub entry. That
-route is external: AionUi 2.2.1 ships no in-app import for a local ZIP, and this
-repository documents no Hub publishing procedure, so use the isolated local host
-below for verification.
+The release workflow performs this build twice and requires the two archives to
+match byte-for-byte before it uploads the first archive.
 
-For an isolated local verification host, unpack the ZIP as one extension
-directory, put only that directory's parent in `AIONUI_EXTENSIONS_PATH`, and
-start AionCore with the host application version it must advertise:
+For an isolated local verification host, start AionCore with the host
+application version it must advertise:
 
 ```sh
 AIONUI_EXTENSIONS_PATH=/PATH/TO/extensions \
@@ -32,8 +60,7 @@ AIONUI_EXTENSIONS_PATH=/PATH/TO/extensions \
 `--app-version` is required. It defaults to AionCore's own version, which the
 loader compares against the manifest `engines.aionui` range, so a bare AionCore
 filters the extension out with `engine.aionui incompatible ... required=^2.2.1
-actual=0.2.1` and serves nothing. Do not unzip it into an existing AionUi data
-directory by hand.
+actual=0.2.1` and serves nothing. Do not use an existing AionUi data directory.
 
 That host is API-only; it serves no HTML shell and no login page. Assets are
 served, authenticated, under `/api/extensions/pursers/assets/webui/`, and a

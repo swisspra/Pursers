@@ -82,6 +82,24 @@ def test_release_workflow_wires_both_paths_and_manifest_wheel_check() -> None:
     assert 'release_publish.py "$TAG" verify-asset' in workflow
 
 
+def test_release_workflow_builds_reproducible_non_wheel_assets() -> None:
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert workflow.count("tools/aionui-extension/build.py") == 2
+    assert workflow.count("tools/build_home_runtime_wheelhouse.py") == 2
+    assert workflow.count("cmp -s") == 3
+    assert "os.utime(path, (timestamp, timestamp), follow_symlinks=False)" in workflow
+    assert 'find "$wheelhouse_name" -print | LC_ALL=C sort' in workflow
+    assert "--format=ustar" in workflow
+    assert "--uid 0 --gid 0 --uname root --gname root" in workflow
+    assert "gzip -n" in workflow
+    assert "pursers-home-runtime-wheelhouse-${VERSION}-linux-x86_64" in workflow
+    assert "dist/*.zip" in workflow
+    assert "dist/*.tar.gz" in workflow
+    assert "dist/*wheelhouse*.json" in workflow
+    assert "./*.whl ./*.zip ./*.tar.gz ./*.json > SHA256SUMS.txt" in workflow
+
+
 def _git(repository: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],

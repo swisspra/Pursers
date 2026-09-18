@@ -85,6 +85,51 @@ The builder fails before dependency resolution when the lock's Python,
 platform, or source-requirements fingerprint is stale. Commit the refreshed
 lock together with the dependency change; never hand-edit its pins or hashes.
 
+## Published AionUi and offline Home artifacts
+
+The GitHub release workflow builds the AionUi ZIP and Linux x86-64 Home runtime
+wheelhouse twice from the exact tag checkout and requires byte-for-byte equality
+before upload. The release contains these non-wheel assets:
+
+- `pursers-aionui-0.1.0.zip`
+- `pursers-home-runtime-wheelhouse-<version>-linux-x86_64.tar.gz`
+- `pursers-home-runtime-wheelhouse-<version>-linux-x86_64.json`
+- `SHA256SUMS.txt`, covering the six wheels and every asset above
+
+Download and verify the offline Home bundle from one release:
+
+```sh
+TAG=v5.0.0b3
+VERSION=${TAG#v}
+HOME_NAME="pursers-home-runtime-wheelhouse-${VERSION}-linux-x86_64"
+gh release download "$TAG" --repo swisspra/Pursers \
+  --pattern "$HOME_NAME.tar.gz" \
+  --pattern "$HOME_NAME.json" \
+  --pattern SHA256SUMS.txt
+grep -E "  (${HOME_NAME}\.tar\.gz|${HOME_NAME}\.json)$" SHA256SUMS.txt \
+  | shasum -a 256 -c -
+tar -xzf "$HOME_NAME.tar.gz"
+cmp "$HOME_NAME/wheelhouse.json" "$HOME_NAME.json"
+(cd "$HOME_NAME" && shasum -a 256 -c SHA256SUMS)
+```
+
+Install the Home client and wait bridge fully offline with CPython 3.12. Pip
+resolves their pinned dependencies only from the extracted wheelhouse:
+
+```sh
+python3.12 -m venv .venv-home
+.venv-home/bin/python -m pip install \
+  --disable-pip-version-check --no-index \
+  --find-links "$HOME_NAME" \
+  "$HOME_NAME"/pursers_client-*.whl \
+  "$HOME_NAME"/pursers_wait_bridge-*.whl
+.venv-home/bin/python -m pip check
+.venv-home/bin/python -c 'import pursers_client, pursers_wait_server'
+```
+
+For AionUi download, checksum verification, and installation, follow
+[`tools/aionui-extension/README.md`](../tools/aionui-extension/README.md#download-and-install).
+
 ## GitHub prerelease handoff
 
 The release workflow validates that the tag is canonical PEP 440 and exactly
@@ -126,7 +171,8 @@ gh release download "$TAG" --repo swisspra/Pursers --dir dist-release
 (cd dist-release && shasum -a 256 -c SHA256SUMS.txt)
 ```
 
-Expected artifacts are the six manifest-bound wheels plus `SHA256SUMS.txt`.
+Expected artifacts are the six manifest-bound wheels, the AionUi ZIP, the Home
+runtime wheelhouse archive and its external manifest, plus `SHA256SUMS.txt`.
 This beta train authorizes no PyPI publication or production cutover. If the
 tag, release state, cohort, or checksum is wrong, stop without installing or
 deploying it. Do not move the tag or replace assets under the same version;
