@@ -173,6 +173,16 @@ BOARD_BUTLER_CONFIG_SCHEMA: dict[str, Any] = {
     "runtime": "shadow-only",
 }
 
+# Coordinators are ineligible for work and review dispatch, so their tier does
+# not affect routing.  Central nevertheless requires tier_max to be 1, 2, or 3;
+# use the least permissive valid value and keep every connection consistent.
+BOARD_BUTLER_CAPABILITIES: dict[str, Any] = {
+    "can_work": False,
+    "can_review": False,
+    "tier_max": 1,
+    "max_parallel": 1,
+}
+
 
 class Outcome(str, Enum):
     MECHANICAL = "MECHANICAL"
@@ -2434,7 +2444,7 @@ class CentralBackend:
             self.args.home_board,
             agent_name=self.args.agent_name,
             role="coordinator",
-            capabilities={"can_work": False, "can_review": False, "tier_max": 0, "max_parallel": 1},
+            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
             allow_takeover=True,
         )
         self.client = await self._context.__aenter__()
@@ -2623,12 +2633,7 @@ class CentralBackend:
             board_id,
             agent_name=self.args.agent_name,
             role="coordinator",
-            capabilities={
-                "can_work": False,
-                "can_review": False,
-                "tier_max": 0,
-                "max_parallel": 1,
-            },
+            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
             allow_takeover=True,
         ) as client:
             for ticket_id in sorted(set(ticket_ids)):
@@ -2649,12 +2654,7 @@ class CentralBackend:
             action.board_id,
             agent_name=self.args.agent_name,
             role="coordinator",
-            capabilities={
-                "can_work": False,
-                "can_review": False,
-                "tier_max": 0,
-                "max_parallel": 1,
-            },
+            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
             allow_takeover=True,
         ) as client:
             if action.kind == "refuse_incapable_target":
@@ -2696,12 +2696,7 @@ class CentralBackend:
             action.board_id,
             agent_name=self.args.agent_name,
             role="coordinator",
-            capabilities={
-                "can_work": False,
-                "can_review": False,
-                "tier_max": 0,
-                "max_parallel": 1,
-            },
+            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
             allow_takeover=True,
         ) as client:
             try:
@@ -2740,12 +2735,7 @@ class CentralBackend:
             board_id,
             agent_name=self.args.agent_name,
             role="coordinator",
-            capabilities={
-                "can_work": False,
-                "can_review": False,
-                "tier_max": 0,
-                "max_parallel": 1,
-            },
+            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
             allow_takeover=True,
         ) as client:
             try:
@@ -2787,12 +2777,7 @@ class CentralBackend:
             action.board_id,
             agent_name=self.args.agent_name,
             role="coordinator",
-            capabilities={
-                "can_work": False,
-                "can_review": False,
-                "tier_max": 0,
-                "max_parallel": 1,
-            },
+            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
             allow_takeover=True,
         ) as client:
             raw = await client.board_state_get(STATE_KEY)
