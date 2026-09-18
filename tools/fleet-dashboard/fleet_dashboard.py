@@ -1539,6 +1539,40 @@ def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def deployment_metadata(source: Path | None = None) -> dict[str, Any]:
+    """Return the immutable checkout revision without exposing repository paths."""
+    repository = (source or Path(__file__)).resolve().parents[2]
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "--verify", "HEAD^{commit}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        ).stdout.strip()
+        if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            raise ValueError("git returned a non-commit revision")
+        dirty = bool(
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=no",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            ).stdout
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {"schema_version": 1, "running_sha": None, "dirty": None}
+    return {"schema_version": 1, "running_sha": revision, "dirty": dirty}
+
+
 def _bounded_evidence_digest(value: Any, label: str) -> str:
     """Digest one bounded state value without exposing its contents."""
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -7522,6 +7556,7 @@ const eventMatches=(e,ticketId,needle)=>matches([ticketId,e.kind,e.status_from,e
 const filterChangeEvents=(events,needle)=>events.filter(e=>eventMatches(e,e.ticket_id,needle));
 let fleetData={},fleetErrors={},centralLabels=[],defaultCentral='default',detailData=null,detailSort='newest',detailTimer=null,filterNeedle='',searchItems=[],searchSelection=0,theme='dark',density='comfortable',goPrefix=false,goTimer=null,lastSuccessAt=null,showStaleAgents=false;
 const sectionStates=new Map(),connectionFailures=new Set(),connectionFailureDetails=new Map();let lastAnnouncement='',connectionWasUnavailable=false;
+async function refreshDeployment(){const host=document.querySelector('#deployment-revision');try{const data=await fetchJson('/api/version'),sha=data.running_sha;if(!sha){host.textContent='revision unavailable';return}host.textContent=`running ${sha.slice(0,12)}${data.dirty?' (dirty)':''}`;host.title=sha}catch(_error){host.textContent='revision unavailable'}}
 const agentStatusRank={busy:0,available:1,stale:2};
 function compareAgents(a,b){return(agentStatusRank[a.pool_status]??3)-(agentStatusRank[b.pool_status]??3)||String(a.agent_name||'').localeCompare(String(b.agent_name||''))}
 function visibleAgents(agents){return agents.filter(a=>showStaleAgents||a.pool_status==='busy'||a.pool_status==='available').sort(compareAgents)}
@@ -7594,7 +7629,7 @@ async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(typeof refr
 async function refreshOverhead(){const r=route();if(!r||r.kind!=='overhead'||refreshPaused())return;const key=`overhead:${r.central}`;try{const data=await fetchJson(`/api/overhead?${apiCentral(r.central)}`);if(route()?.central!==r.central||refreshPaused())return;renderOverhead(data);markConnectionSuccess(key)}catch(e){markConnectionFailure(key,e);if(!document.querySelector('#detail-view').children.length)document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Overhead unavailable for ${esc(r.central)}.</p>`}}
 async function refreshDetail(){const r=route();if(!r||r.kind!=='board'||refreshPaused())return;const key=`detail:${r.central}:${r.board}`;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}?${apiCentral(r.central)}`);const current=route();if(current?.central!==r.central||current?.board!==r.board||refreshPaused())return;detailData=data;renderDetail(data);refreshIntake(current,true);markConnectionSuccess(key)}catch(e){markConnectionFailure(key,e);if(!detailData||detailData.central!==r.central||detailData.board?.board_id!==r.board)document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Board detail unavailable for ${esc(r.central)}.</p>`}}
 function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r||r.kind==='config';if(detailTimer){clearInterval(detailTimer);detailTimer=null}for(const key of [...connectionFailures])if(key.startsWith('detail:')||key.startsWith('overhead:')){connectionFailures.delete(key);connectionFailureDetails.delete(key)}updateConnectionState();if(r?.kind==='board'){if(detailData?.central===r.central&&detailData?.board?.board_id===r.board)renderDetail(detailData);else document.querySelector('#detail-view').innerHTML='<p class="empty">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(r?.kind==='overhead'){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading overhead…</p>';refreshOverhead();detailTimer=setInterval(refreshOverhead,5000)}else if(!r)renderFleet()}
-document.querySelector('#filter').addEventListener('input',e=>{filterNeedle=e.target.value.toLocaleLowerCase();searchSelection=0;const r=route();if(r?.kind==='board'&&detailData)renderDetail(detailData);else if(!r)renderFleet();else renderSearchResults()});document.querySelector('#search-results').addEventListener('click',e=>{const target=e.target.closest('[data-search-index]');if(target){e.preventDefault();jumpSearchResult(Number(target.dataset.searchIndex))}});document.querySelector('#theme-toggle').addEventListener('click',()=>{theme=theme==='dark'?'light':'dark';applyPreferences()});document.querySelector('#density-toggle').addEventListener('click',()=>{density=density==='comfortable'?'compact':'comfortable';applyPreferences()});document.querySelector('#help-toggle').addEventListener('click',()=>document.querySelector('#help-overlay').showModal());document.querySelector('#help-close').addEventListener('click',()=>{document.querySelector('#help-overlay').close();document.querySelector('#help-toggle').focus()});document.addEventListener('keydown',handleDashboardKeydown);window.addEventListener('hashchange',syncRoute);applyPreferences();loadCentrals().then(()=>{refreshFleet();syncRoute();if(typeof syncConfigRoute==='function')syncConfigRoute()}).catch(e=>{document.querySelector('#state').textContent='Startup failed';announceState('Startup failed');markConnectionFailure('startup')});setInterval(refreshFleet,5000);
+document.querySelector('#filter').addEventListener('input',e=>{filterNeedle=e.target.value.toLocaleLowerCase();searchSelection=0;const r=route();if(r?.kind==='board'&&detailData)renderDetail(detailData);else if(!r)renderFleet();else renderSearchResults()});document.querySelector('#search-results').addEventListener('click',e=>{const target=e.target.closest('[data-search-index]');if(target){e.preventDefault();jumpSearchResult(Number(target.dataset.searchIndex))}});document.querySelector('#theme-toggle').addEventListener('click',()=>{theme=theme==='dark'?'light':'dark';applyPreferences()});document.querySelector('#density-toggle').addEventListener('click',()=>{density=density==='comfortable'?'compact':'comfortable';applyPreferences()});document.querySelector('#help-toggle').addEventListener('click',()=>document.querySelector('#help-overlay').showModal());document.querySelector('#help-close').addEventListener('click',()=>{document.querySelector('#help-overlay').close();document.querySelector('#help-toggle').focus()});document.addEventListener('keydown',handleDashboardKeydown);window.addEventListener('hashchange',syncRoute);applyPreferences();refreshDeployment();loadCentrals().then(()=>{refreshFleet();syncRoute();if(typeof syncConfigRoute==='function')syncConfigRoute()}).catch(e=>{document.querySelector('#state').textContent='Startup failed';announceState('Startup failed');markConnectionFailure('startup')});setInterval(refreshFleet,5000);
 </script></body></html>"""
 
 HTML = (
@@ -7665,7 +7700,7 @@ HTML = (
     )
     .replace(
         "Live boards and shared agent pool</p>",
-        'Live boards and per-central agent pools · <a href="#/config">Coordinator config</a></p>',
+        'Live boards and per-central agent pools · <a href="#/config">Coordinator config</a> · <span id="deployment-revision">revision loading…</span></p>',
     )
     .replace(
         '<section id="detail-view" hidden></section></main>',
@@ -8265,6 +8300,7 @@ def make_handler(
     seat_manager: SeatConfigManager | None = None,
     evidence_trace: EvidenceTrace | None = None,
     butler_manager: ButlerSettingsManager | None = None,
+    deployment: dict[str, Any] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     selected_stats_path = (
         bridge_stats_path() if stats_path is None else Path(stats_path)
@@ -8273,6 +8309,7 @@ def make_handler(
     seats = seat_manager or SeatConfigManager()
     butlers = butler_manager or ButlerSettingsManager(_default_butler_secrets_dir())
     project_operation_lock = threading.RLock()
+    deployed_revision = deployment_metadata() if deployment is None else dict(deployment)
 
     def requested_central(path: str) -> str | None:
         values = parse_qs(urlsplit(path).query, keep_blank_values=True).get("central")
@@ -8555,6 +8592,13 @@ def make_handler(
             self._prepare_evidence("GET", route)
             if route == "/":
                 self._send(200, "text/html; charset=utf-8", HTML.encode("utf-8"))
+                return
+            if route == "/api/version":
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(deployed_revision),
+                )
                 return
             if route == "/api/centrals":
                 labels_method = getattr(cache, "labels", None)

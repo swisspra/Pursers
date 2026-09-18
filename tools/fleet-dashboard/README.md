@@ -249,6 +249,55 @@ The server refuses non-loopback binding. It never returns tokens to the browser
 or writes them to logs. Central TLS verification follows
 `pursers_client.BoardClient` behavior.
 
+### Repository-owned LaunchAgent
+
+The supported macOS service entry point is
+`tools/fleet-dashboard/launch.sh`. It runs the dashboard from the checkout named
+by `PURSERS_FLEET_REPO` and refuses runtime or state directories inside that
+checkout. Copy `com.pursers.fleet-dashboard.plist.template` to the user's
+LaunchAgents directory, replace every `/PATH/TO/...` placeholder, and keep the
+token, runtime, state, and log paths outside the repository. Validate and load
+the operator-owned copy:
+
+```bash
+plutil -lint /PATH/TO/Library/LaunchAgents/com.pursers.fleet-dashboard.plist
+launchctl bootstrap "gui/$(id -u)" /PATH/TO/Library/LaunchAgents/com.pursers.fleet-dashboard.plist
+```
+
+For multi-central operation, set `PURSERS_FLEET_CENTRALS` in the installed
+plist and remove the single-central URL, token, and home-board variables. The
+launcher also accepts optional `PURSERS_FLEET_DOORS_KEYS_DIR`,
+`PURSERS_FLEET_JWKS_PATH`, and `PURSERS_FLEET_EVIDENCE_TRACE_CONFIG` paths.
+
+Upgrade the dedicated, clean checkout to an exact commit from `origin/main`
+and restart the loaded service with one command. The script fetches main,
+rejects a dirty checkout or a SHA outside main's history, records both SHAs in
+the external state directory, and restores the checkout if restart fails:
+
+```bash
+PURSERS_FLEET_REPO=/PATH/TO/Pursers \
+PURSERS_FLEET_STATE_DIR=/PATH/TO/private/fleet-dashboard-state \
+  /PATH/TO/Pursers/tools/fleet-dashboard/upgrade.sh 0123456789abcdef0123456789abcdef01234567
+```
+
+`GET /api/version` and the page header expose the full running SHA (the header
+shows its first 12 characters) plus dirty-checkout state. Compare it with the
+current remote main without printing service environment or credentials:
+
+```bash
+curl --fail --silent http://127.0.0.1:8899/api/version
+git -C /PATH/TO/Pursers ls-remote origin refs/heads/main
+```
+
+Rollback uses the same command with the prior full SHA printed by the upgrade
+and saved at `/PATH/TO/private/fleet-dashboard-state/deployments/previous-sha`.
+The old commit must remain in `origin/main` history.
+
+Tailscale Serve remains an operator-owned reverse proxy: `/pursersfleet` and
+`/api` may proxy to `http://127.0.0.1:8899`, but the dashboard itself stays
+loopback-only. Upgrades do not rewrite or restart Tailscale Serve; the stable
+loopback port keeps the proxy configuration independent of checkout changes.
+
 The dashboard uses one persistent, serialized Central session per board. Its
 identity must be in the reserved `fleet-dashboard-session-*` namespace and has
 explicit `can_work=false` and `can_review=false` capabilities. A restart may
