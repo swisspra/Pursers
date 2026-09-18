@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,8 +48,46 @@ def _relative(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+_TRACKED_CACHE: dict[Path, frozenset[str] | None] = {}
+
+
+def _tracked_files(root: Path) -> frozenset[str] | None:
+    """Return the git-tracked paths under root, or None outside a work tree.
+
+    Only a tracked file can be delivered. Walking the filesystem instead lets
+    anything a build step leaves in the checkout count as an artifact: CI
+    creates a venv at .ci/isolated-wheel-imports and each of its files failed
+    as an unregistered operator tool. The git top-level must be root itself,
+    so a fixture that happens to sit inside another repository is still
+    walked in full rather than silently losing its files.
+    """
+    if root not in _TRACKED_CACHE:
+        tracked: frozenset[str] | None = None
+        try:
+            top = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            if top and Path(top).resolve() == root:
+                listed = subprocess.run(
+                    ["git", "-C", str(root), "ls-files", "-z"],
+                    capture_output=True, check=True,
+                ).stdout
+                tracked = frozenset(
+                    entry.decode("utf-8") for entry in listed.split(b"\0") if entry
+                )
+        except (OSError, subprocess.CalledProcessError):
+            tracked = None
+        _TRACKED_CACHE[root] = tracked
+    return _TRACKED_CACHE[root]
+
+
 def _ignored(path: Path, root: Path) -> bool:
-    return any(part in IGNORED_PARTS for part in path.relative_to(root).parts)
+    relative = path.relative_to(root)
+    if any(part in IGNORED_PARTS for part in relative.parts):
+        return True
+    tracked = _tracked_files(root)
+    return tracked is not None and relative.as_posix() not in tracked
 
 
 def discover_artifacts(root: Path) -> dict[str, Artifact]:

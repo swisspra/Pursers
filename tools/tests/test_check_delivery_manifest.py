@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -224,6 +226,55 @@ def test_extensionless_operator_tool_cannot_be_smuggled(tmp_path: Path) -> None:
     assert any(
         "unregistered artifact: operator-tool:services/ops-console/reconcile "
         "(services/ops-console/reconcile)" in failure
+        for failure in failures
+    )
+
+
+def _git(root: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        },
+    )
+
+
+def test_untracked_build_output_in_a_work_tree_is_not_an_artifact(
+    tmp_path: Path,
+) -> None:
+    # CI creates .ci/isolated-wheel-imports inside the checkout; its pip, idna
+    # and Activate.ps1 each failed as an unregistered operator tool on main.
+    root = _base_repository(tmp_path)
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+    venv_tool = root / ".ci/isolated-wheel-imports/bin/pip"
+    venv_tool.parent.mkdir(parents=True)
+    venv_tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    venv_tool.chmod(0o755)
+
+    assert check_delivery_manifest.validate(root) == []
+
+
+def test_tracked_tool_in_a_work_tree_is_still_an_artifact(tmp_path: Path) -> None:
+    root = _base_repository(tmp_path)
+    tool = root / "services/ops-console/reconcile"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+
+    failures = check_delivery_manifest.validate(root)
+
+    assert any(
+        "unregistered artifact: operator-tool:services/ops-console/reconcile"
+        in failure
         for failure in failures
     )
 

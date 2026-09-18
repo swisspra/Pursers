@@ -220,8 +220,10 @@ def process_use_state(
     if tree_active is None or tree_active:
         return tree_active, tree_reason
 
+    # BSD options stay undashed: Linux procps warns on stderr about "-axo",
+    # and any stderr here fails closed, so every candidate read as unknown.
     process_list = runner(
-        ["/bin/ps", "eww", "-axo", "pid=,command="],
+        ["/bin/ps", "axeww", "-o", "pid=,command="],
         check=False,
         capture_output=True,
         text=True,
