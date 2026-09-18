@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -399,6 +400,9 @@ def test_provider_validation_has_four_fixed_outcomes(opener: Any, outcome: str) 
     [
         "http://provider.example.invalid/v1",
         "https://169.254.169.254/v1",
+        "https://2851995905/v1",
+        "https://0xA9FE0101/v1",
+        "https://0251.0376.0001.0001/v1",
         "https://[fe80::1]/v1",
         "https://[::ffff:169.254.169.254]/v1",
     ],
@@ -425,6 +429,141 @@ def test_provider_validation_refuses_unsafe_endpoint_without_request(
     }
     assert requests == 0
     assert secret not in json.dumps(result.as_dict())
+
+
+@pytest.mark.parametrize("resolved_host", ["169.254.1.1", "fe80::1"])
+def test_provider_validation_refuses_dns_link_local_without_request_or_key(
+    resolved_host: str,
+) -> None:
+    secret = "sentinel-dns-refusal-6471"
+    requests: list[urllib.request.Request] = []
+    family = socket.AF_INET6 if ":" in resolved_host else socket.AF_INET
+
+    def resolver(
+        _host: str, port: int, _family: int, _socktype: int
+    ) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        sockaddr: tuple[Any, ...]
+        if family == socket.AF_INET6:
+            sockaddr = (resolved_host, port, 0, 0)
+        else:
+            sockaddr = (resolved_host, port)
+        return [(family, socket.SOCK_STREAM, 6, "", sockaddr)]
+
+    def opener(request: urllib.request.Request, **_kwargs: object) -> Response:
+        requests.append(request)
+        return Response({"data": [{"id": "Model/Exact-1"}]})
+
+    result = butler_settings.validate_provider(
+        provider_request(endpoint="https://metadata.example/v1"),
+        secret,
+        opener=opener,
+        resolver=resolver,
+    )
+
+    assert result.as_dict() == {
+        "outcome": "unreachable",
+        "message": "The endpoint is not permitted.",
+        "http_status": None,
+    }
+    assert requests == []
+    assert secret not in json.dumps(result.as_dict())
+
+
+def test_provider_validation_fails_closed_when_dns_resolution_fails() -> None:
+    secret = "sentinel-resolution-refusal-6471"
+    requests: list[urllib.request.Request] = []
+
+    def resolver(*_args: object) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        raise socket.gaierror("unavailable")
+
+    def opener(request: urllib.request.Request, **_kwargs: object) -> Response:
+        requests.append(request)
+        return Response({"data": [{"id": "Model/Exact-1"}]})
+
+    result = butler_settings.validate_provider(
+        provider_request(), secret, opener=opener, resolver=resolver
+    )
+
+    assert result.as_dict() == {
+        "outcome": "unreachable",
+        "message": "The endpoint is not permitted.",
+        "http_status": None,
+    }
+    assert requests == []
+    assert secret not in json.dumps(result.as_dict())
+
+
+def test_provider_validation_refuses_http_localhost_resolving_non_loopback() -> None:
+    requests: list[urllib.request.Request] = []
+
+    def resolver(
+        _host: str, port: int, _family: int, _socktype: int
+    ) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("203.0.113.7", port))
+        ]
+
+    def opener(request: urllib.request.Request, **_kwargs: object) -> Response:
+        requests.append(request)
+        return Response({"data": [{"id": "Model/Exact-1"}]})
+
+    result = butler_settings.validate_provider(
+        provider_request(endpoint="http://localhost/v1"),
+        "sentinel-http-resolution-6471",
+        opener=opener,
+        resolver=resolver,
+    )
+
+    assert result.as_dict() == {
+        "outcome": "unreachable",
+        "message": "The endpoint is not permitted.",
+        "http_status": None,
+    }
+    assert requests == []
+
+
+def test_provider_validation_pins_request_to_validated_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = [
+        (
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            6,
+            "",
+            ("203.0.113.7", 443),
+        )
+    ]
+    pinned: list[tuple[str, tuple[Any, ...]]] = []
+
+    def resolver(
+        _host: str, _port: int, _family: int, _socktype: int
+    ) -> list[tuple[int, int, int, str, tuple[Any, ...]]]:
+        return resolved
+
+    def pinned_opener(
+        validation_url: str, addresses: tuple[Any, ...]
+    ) -> Any:
+        pinned.append((validation_url, addresses))
+        return lambda *_args, **_kwargs: Response(
+            {"data": [{"id": "Model/Exact-1"}]}
+        )
+
+    monkeypatch.setattr(butler_settings, "_pinned_opener", pinned_opener)
+
+    result = butler_settings.validate_provider(
+        provider_request(endpoint="https://provider.example/v1"),
+        "sentinel-pinned-6471",
+        resolver=resolver,
+    )
+
+    assert result.outcome == "reachable"
+    assert pinned == [
+        (
+            "https://provider.example/v1/models",
+            tuple(resolved),
+        )
+    ]
 
 
 def test_provider_validation_refuses_cross_origin_redirect_before_key_leaves_origin(

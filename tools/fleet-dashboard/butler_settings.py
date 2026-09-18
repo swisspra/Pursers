@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import copy
 import fcntl
+from functools import partial
+import http.client
 import ipaddress
 import json
 import os
 import re
 import shlex
 import signal
+import socket
 import stat
 import subprocess
 import threading
@@ -17,10 +20,17 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import (
+    HTTPHandler,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 
 MAX_KEY_BYTES = 8_192
@@ -34,6 +44,7 @@ DRAFT_PROTOCOL = "pursers_json_v1"
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 _SECRET_HEADER = re.compile(r"(?:authorization|api[-_]?key|token|secret|cookie)", re.I)
 _MANAGED_KEY_REFERENCE = re.compile(r"^file:([A-Za-z0-9._-]{1,160}\.key)$")
+_AddressInfo = tuple[int, int, int, str, tuple[Any, ...]]
 
 
 class ButlerSettingsError(ValueError):
@@ -89,6 +100,20 @@ def validate_endpoint(value: Any) -> str:
         address = ipaddress.ip_address(address_text)
     except ValueError:
         address = None
+    if address is None:
+        try:
+            numeric = socket.getaddrinfo(
+                hostname,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+                0,
+                socket.SOCK_STREAM,
+                0,
+                socket.AI_NUMERICHOST,
+            )
+        except socket.gaierror:
+            numeric = []
+        if numeric:
+            address = ipaddress.ip_address(str(numeric[0][4][0]).split("%", 1)[0])
     effective_address = (
         address.ipv4_mapped
         if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped
@@ -102,6 +127,120 @@ def validate_endpoint(value: Any) -> str:
     if parsed.scheme == "http" and not loopback:
         raise ButlerSettingsError("endpoint must use https unless it is loopback")
     return endpoint
+
+
+def _resolve_endpoint(
+    endpoint: str,
+    resolver: Callable[..., Sequence[_AddressInfo]] = socket.getaddrinfo,
+) -> tuple[_AddressInfo, ...]:
+    parsed = urlsplit(endpoint)
+    hostname = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        resolved = tuple(resolver(hostname, port, 0, socket.SOCK_STREAM))
+    except OSError as exc:
+        raise ButlerSettingsError("endpoint host could not be resolved") from exc
+    if not resolved:
+        raise ButlerSettingsError("endpoint host could not be resolved")
+    for family, _socktype, _proto, _canonname, sockaddr in resolved:
+        if family not in {socket.AF_INET, socket.AF_INET6} or not sockaddr:
+            raise ButlerSettingsError("endpoint host resolved unexpectedly")
+        try:
+            address = ipaddress.ip_address(str(sockaddr[0]).split("%", 1)[0])
+        except ValueError as exc:
+            raise ButlerSettingsError("endpoint host resolved unexpectedly") from exc
+        effective = (
+            address.ipv4_mapped
+            if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped
+            else address
+        )
+        if effective.is_link_local:
+            raise ButlerSettingsError("endpoint must not use a link-local address")
+        if parsed.scheme == "http" and not effective.is_loopback:
+            raise ButlerSettingsError("endpoint must use https unless it is loopback")
+    return resolved
+
+
+def _connect_resolved(
+    resolved: tuple[_AddressInfo, ...],
+    timeout: float | object,
+    source_address: tuple[str, int] | None,
+) -> socket.socket:
+    last_error: OSError | None = None
+    for family, socktype, proto, _canonname, sockaddr in resolved:
+        candidate = socket.socket(family, socktype, proto)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                candidate.settimeout(timeout)
+            if source_address:
+                candidate.bind(source_address)
+            candidate.connect(sockaddr)
+            return candidate
+        except OSError as exc:
+            last_error = exc
+            candidate.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError("no validated endpoint addresses")
+
+
+class _PinnedConnectionMixin:
+    def __init__(
+        self,
+        host: str,
+        *,
+        resolved: tuple[_AddressInfo, ...],
+        **kwargs: Any,
+    ) -> None:
+        self._validated_addresses = resolved
+        super().__init__(host, **kwargs)
+
+    def _create_connection(
+        self,
+        _address: tuple[str, int],
+        timeout: float | object,
+        source_address: tuple[str, int] | None,
+    ) -> socket.socket:
+        return _connect_resolved(
+            self._validated_addresses, timeout, source_address
+        )
+
+
+class _PinnedHTTPConnection(_PinnedConnectionMixin, http.client.HTTPConnection):
+    pass
+
+
+class _PinnedHTTPSConnection(_PinnedConnectionMixin, http.client.HTTPSConnection):
+    pass
+
+
+class _PinnedHTTPHandler(HTTPHandler):
+    def __init__(self, resolved: tuple[_AddressInfo, ...]) -> None:
+        super().__init__()
+        self._connection = partial(_PinnedHTTPConnection, resolved=resolved)
+
+    def http_open(self, request: Request) -> Any:
+        return self.do_open(self._connection, request)
+
+
+class _PinnedHTTPSHandler(HTTPSHandler):
+    def __init__(self, resolved: tuple[_AddressInfo, ...]) -> None:
+        super().__init__()
+        self._connection = partial(_PinnedHTTPSConnection, resolved=resolved)
+
+    def https_open(self, request: Request) -> Any:
+        return self.do_open(self._connection, request, context=self._context)
+
+
+def _pinned_opener(
+    validation_url: str, resolved: tuple[_AddressInfo, ...]
+) -> Callable[..., Any]:
+    return build_opener(
+        ProxyHandler({}),
+        _SameOriginRedirectHandler(validation_url),
+        _PinnedHTTPHandler(resolved),
+        _PinnedHTTPSHandler(resolved),
+    ).open
 
 
 def _url_origin(value: str) -> tuple[str, str, int]:
@@ -386,6 +525,7 @@ def validate_provider(
     api_key: str,
     *,
     opener: Callable[..., Any] | None = None,
+    resolver: Callable[..., Sequence[_AddressInfo]] | None = None,
     timeout_s: float = 5.0,
 ) -> ValidationResult:
     """Make one bounded call and return only a fixed, key-free outcome."""
@@ -428,6 +568,9 @@ def validate_provider(
             endpoint.rstrip("/") + "/",
             validation_path.lstrip("/"),
         )
+        resolved: tuple[_AddressInfo, ...] | None = None
+        if opener is None or resolver is not None:
+            resolved = _resolve_endpoint(endpoint, resolver or socket.getaddrinfo)
         headers = {"Accept": "application/json", **extra_headers}
         if api_key:
             headers[key_header] = f"{key_prefix} {api_key}".strip()
@@ -437,9 +580,8 @@ def validate_provider(
     try:
         open_request = opener
         if open_request is None:
-            open_request = build_opener(
-                _SameOriginRedirectHandler(validation_url)
-            ).open
+            assert resolved is not None
+            open_request = _pinned_opener(validation_url, resolved)
         with open_request(request, timeout=timeout_s) as response:
             geturl = getattr(response, "geturl", None)
             final_url = geturl() if callable(geturl) else validation_url
