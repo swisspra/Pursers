@@ -47,7 +47,7 @@ def test_release_tag_must_be_canonical_and_match_manifest(tag: str) -> None:
         release_version_from_tag(tag)
 
 
-def test_six_wheel_cohort_matches_manifest_versions() -> None:
+def test_seven_wheel_cohort_matches_manifest_versions() -> None:
     assert set(expected_wheel_filenames()) == {
         "pursers-5.0.0b2-py3-none-any.whl",
         "pursers_central-0.1.0a31-py3-none-any.whl",
@@ -55,6 +55,7 @@ def test_six_wheel_cohort_matches_manifest_versions() -> None:
         "pursers_personal-5.0.0b2-py3-none-any.whl",
         "pursers_personal_import-5.0.0a3-py3-none-any.whl",
         "pursers_wait_bridge-0.1.0a17-py3-none-any.whl",
+        "pursers_acp-0.1.0-py3-none-any.whl",
     }
 
 
@@ -76,6 +77,7 @@ def test_release_workflow_wires_both_paths_and_manifest_wheel_check() -> None:
     assert 'release_publish.py "$TAG" edit' in workflow
     assert "release_version_from_tag" in workflow
     assert "expected_wheel_filenames" in workflow
+    assert "tools/acp-agent" in workflow
     assert "--prerelease=false" not in workflow
     assert "ref: refs/tags/${{ steps.release.outputs.tag }}" in workflow
     assert 'release_publish.py "$TAG" verify-checkout' in workflow

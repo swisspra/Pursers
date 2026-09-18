@@ -68,8 +68,10 @@ evidence_contains = ["tools/wait-bridge"]
 id = "python-distribution:pursers-acp"
 kind = "python-distribution"
 source = "tools/acp-agent/pyproject.toml"
-state = "exempt"
-reason = "Declared and tested, but absent from release_versions.toml and every publish workflow; PyPI returned 404 in TK-5f4211667ac2 fix1 at 11f1bdcc669630da6f103e70384211bc08f3b89c."
+state = "delivered"
+channel = "PyPI trusted-publishing workflow"
+evidence = ["tools/release_versions.toml", ".github/workflows/publish-pypi.yml"]
+evidence_contains = ["acp = \"0.1.0\"", "tools/acp-agent"]
 
 [[artifacts]]
 id = "python-console-script:pursers-central:pursers-central"
@@ -106,8 +108,10 @@ id = "python-console-script:pursers-acp:pursers-acp"
 kind = "python-console-script"
 source = "tools/acp-agent/src/pursers_acp/agent.py"
 entry_point = "pursers_acp.agent:main"
-state = "exempt"
-reason = "The pursers-acp command belongs to an unpublished distribution that has no checked-in publish or installation channel."
+state = "delivered"
+channel = "pursers-acp console command installed by the PyPI wheel"
+evidence = ["tools/acp-agent/pyproject.toml", "tools/release_versions.toml", ".github/workflows/publish-pypi.yml"]
+evidence_contains = ["pursers-acp = \"pursers_acp.agent:main\"", "acp = \"0.1.0\"", "tools/acp-agent"]
 
 [[artifacts]]
 id = "python-console-script:pursers-wait-bridge:pursers-wait-bridge"

@@ -48,6 +48,7 @@ DISTRIBUTION_MAP: dict[str, str] = {
     "personal": "pursers-personal",
     "import": "pursers-personal-import",
     "wait_bridge": "pursers-wait-bridge",
+    "acp": "pursers-acp",
 }
 
 HOST_PROCESS_NAMES: dict[str, str] = {

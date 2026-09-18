@@ -44,6 +44,7 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "packages/personal/tests/test_apps_contract.py",
         "packages/personal/src/pursers_personal/resources/dashboard.html",
         "packages/pursers/pyproject.toml",
+        "tools/acp-agent/pyproject.toml",
         "tools/dashboard-ui/src/dashboard.ts",
         "tools/seat-kit/README.md",
     ),
@@ -60,6 +61,7 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "packages/personal/src/pursers_personal/apps_server.py",
         "packages/personal/tests/test_apps_contract.py",
         "packages/pursers/pyproject.toml",
+        "tools/acp-agent/pyproject.toml",
         "tools/seat-kit/README.md",
         "tools/wait-bridge/pyproject.toml",
         "tools/wait-bridge/tests/test_seat_admin.py",
@@ -74,9 +76,17 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
     "wait_bridge": (
         "tools/fleet-dashboard/tests/test_fleet_dashboard.py",
         "tools/fleet-dashboard/tests/test_seat_config.py",
+        "tools/acp-agent/pyproject.toml",
         "tools/seat-kit/README.md",
         "tools/wait-bridge/pursers_wait_server.py",
         "tools/wait-bridge/pyproject.toml",
+    ),
+    "acp": (
+        "tools/acp-agent/pyproject.toml",
+        "tools/acp-agent/README.md",
+        "tools/acp-agent/src/pursers_acp/agent.py",
+        "tools/acp-agent/pursers/agent.json",
+        "tools/acp-agent/tests/test_registry.py",
     ),
 }
 
@@ -194,7 +204,11 @@ def _replace_versions(
                         f"ambiguous replacement in {relative}: {old} -> {previous}/{new}"
                     )
         for old, new in replacements.items():
-            updated = updated.replace(old, new)
+            updated = re.sub(
+                rf"(?<![\w]){re.escape(old)}(?![\w])",
+                new,
+                updated,
+            )
         updated += history
         if updated != original:
             planned[path] = updated
@@ -217,6 +231,7 @@ def _package_distribution(root: Path, key: str) -> str:
     candidates = (
         root / "packages" / key / "pyproject.toml",
         root / "tools" / key.replace("_", "-") / "pyproject.toml",
+        root / "tools" / f"{key}-agent" / "pyproject.toml",
     )
     for candidate in candidates:
         if candidate.is_file():
@@ -316,8 +331,9 @@ def _release_summary(versions: ReleaseVersions) -> str:
         f"`pursers-client=={package['client']}`, "
         f"`pursers-personal-import=={package['import']}`,\n"
         f"`pursers-personal=={package['personal']}`, "
-        f"`pursers=={package['pursers']}`, and\n"
-        f"`pursers-wait-bridge=={package['wait_bridge']}`.\n"
+        f"`pursers=={package['pursers']}`,\n"
+        f"`pursers-wait-bridge=={package['wait_bridge']}`, and\n"
+        f"`pursers-acp=={package['acp']}`.\n"
     )
 
 
@@ -458,6 +474,7 @@ def check(root: Path, versions: ReleaseVersions) -> list[str]:
         "packages/personal/pyproject.toml": ("pursers-personal", "personal"),
         "packages/import/pyproject.toml": ("pursers-personal-import", "import"),
         "tools/wait-bridge/pyproject.toml": ("pursers-wait-bridge", "wait_bridge"),
+        "tools/acp-agent/pyproject.toml": ("pursers-acp", "acp"),
     }
     for relative, (name, key) in projects.items():
         document = _pyproject(root / relative)
@@ -469,12 +486,14 @@ def check(root: Path, versions: ReleaseVersions) -> list[str]:
         "packages/central/pyproject.toml": ("client",),
         "packages/personal/pyproject.toml": ("central", "client"),
         "tools/wait-bridge/pyproject.toml": ("client",),
+        "tools/acp-agent/pyproject.toml": ("client", "personal", "wait_bridge"),
     }
     distributions = {
         "central": "pursers-central",
         "client": "pursers-client",
         "personal": "pursers-personal",
         "import": "pursers-personal-import",
+        "wait_bridge": "pursers-wait-bridge",
     }
     for relative, keys in dependencies.items():
         actual = set(_pyproject(root / relative)["project"].get("dependencies", []))

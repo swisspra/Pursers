@@ -18,6 +18,7 @@ PACKAGE_KEYS = (
     "personal",
     "import",
     "wait_bridge",
+    "acp",
 )
 TOOLCHAIN_KEYS = ("build", "setuptools", "wheel", "packaging", "pyproject-hooks")
 WHEEL_DISTRIBUTIONS = {
@@ -27,6 +28,7 @@ WHEEL_DISTRIBUTIONS = {
     "personal": "pursers-personal",
     "import": "pursers-personal-import",
     "wait_bridge": "pursers-wait-bridge",
+    "acp": "pursers-acp",
 }
 
 

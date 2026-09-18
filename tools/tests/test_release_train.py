@@ -48,6 +48,7 @@ def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
             "client=0.1.0a25",
             "import=5.0.0a4",
             "wait_bridge=0.1.0a18",
+            "acp=0.1.1",
         ),
         None,
     )
@@ -66,6 +67,20 @@ def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
     ]
     assert 'SOURCE_VERSION = "0.1.0a18"' in planned[
         root / "tools/wait-bridge/pursers_wait_server.py"
+    ]
+    assert 'version = "0.1.1"' in planned[root / "tools/acp-agent/pyproject.toml"]
+    assert '"pursers-client==0.1.0a25"' in planned[
+        root / "tools/acp-agent/pyproject.toml"
+    ]
+    assert '"pursers-personal==5.0.0a27"' in planned[
+        root / "tools/acp-agent/pyproject.toml"
+    ]
+    assert '"pursers-wait-bridge==0.1.0a18"' in planned[
+        root / "tools/acp-agent/pyproject.toml"
+    ]
+    assert "pursers-acp==0.1.1" in planned[root / "tools/acp-agent/README.md"]
+    assert 'IMPLEMENTATION_VERSION = "0.1.1"' in planned[
+        root / "tools/acp-agent/src/pursers_acp/agent.py"
     ]
     assert "## [5.0.0a27] - " in planned[root / "CHANGELOG.md"]
     assert "5.0.0a27" not in (root / "packages/pursers/pyproject.toml").read_text()
@@ -106,6 +121,26 @@ def test_component_only_bump_rewrites_and_checks_every_cohort_document(
             for relative in release_train.COHORT_VERSION_FILES
         )
     }
+
+
+def test_acp_bump_updates_its_surfaces_without_rewriting_dependency_versions(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_repository(tmp_path)
+    current = load_versions(root / "tools/release_versions.toml")
+    target = release_train.bumped_versions(current, ("acp=0.1.1",), None)
+
+    planned = release_train.plan_bump(root, current, target)
+
+    pyproject = planned[root / "tools/acp-agent/pyproject.toml"]
+    assert 'version = "0.1.1"' in pyproject
+    assert '"pursers-client==0.1.0a24"' in pyproject
+    assert '"pursers-wait-bridge==0.1.0a17"' in pyproject
+    assert 'IMPLEMENTATION_VERSION = "0.1.1"' in planned[
+        root / "tools/acp-agent/src/pursers_acp/agent.py"
+    ]
+    assert '"version": "0.1.1"' in planned[root / "tools/acp-agent/pursers/agent.json"]
+    assert "pursers-acp==0.1.1" in planned[root / "tools/acp-agent/README.md"]
 
 
 @pytest.mark.parametrize("relative", release_train.COHORT_VERSION_FILES)
@@ -208,6 +243,7 @@ def test_next_patch_alpha_advances_every_component() -> None:
             "personal": "5.0.0a26",
             "import": "5.0.0a3",
             "wait_bridge": "0.1.0a16",
+            "acp": "0.1.0a1",
         },
     )
     target = release_train.bumped_versions(current, (), "patch-alpha")
@@ -219,6 +255,7 @@ def test_next_patch_alpha_advances_every_component() -> None:
         "personal": "5.0.0a27",
         "import": "5.0.0a4",
         "wait_bridge": "0.1.0a17",
+        "acp": "0.1.0a2",
     }
 
 

@@ -755,13 +755,15 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         <article class="card"><b>0.1.0a24</b><small>pursers-client</small></article>
         <article class="card"><b>5.0.0a3</b><small>pursers-personal-import</small></article>
         <article class="card"><b>0.1.0a17</b><small>pursers-wait-bridge</small></article>
+        <article class="card"><b>0.1.0</b><small>pursers-acp · เตรียมสำหรับ beta train ถัดไป</small></article>
       </div>
 
       <div class="detail-grid">
         <article class="card">
           <h3>ติดตั้งจาก PyPI</h3>
           <pre><code>pip install pursers
-uvx pursers-wait-bridge</code></pre>
+uvx pursers-wait-bridge
+uvx --from "pursers-acp==0.1.0" pursers-acp --project /PATH/TO/PROJECT</code></pre>
           <p>ชุด released นี้ pin Central <code>0.1.0a31</code>, Client <code>0.1.0a24</code> และ Personal <code>5.0.0b2</code> แบบ exact dependency; ตรวจ manifest ก่อนติดตั้ง</p>
         </article>
         <article class="card">
@@ -862,8 +864,8 @@ uvx pursers-wait-bridge</code></pre>
         <li><code>packages/personal/src/pursers_personal/apps_server.py</code> — pure-read <code>fleet_snapshot</code>, bounded per-board reads และ pool grouping</li>
         <li><code>tools/dashboard-ui/src/dashboard.ts</code> — Fleet tab, totals, project/pool tables, seat chips และ Roster fields</li>
         <li><code>tools/regenerate_component_lock.py</code> และ <code>component-lock.json</code> — pinned build toolchain, deterministic epoch และ SHA-256 component/member/view lock</li>
-        <li><code>.github/workflows/publish-pypi.yml</code> — Trusted Publishing ผ่าน OIDC สำหรับ distribution ทั้งหก</li>
-        <li><code>packages/*/pyproject.toml</code> และ <code>tools/wait-bridge/pyproject.toml</code> — เวอร์ชันและ exact dependency pins ของชุด released ปัจจุบัน</li>
+        <li><code>.github/workflows/publish-pypi.yml</code> — Trusted Publishing ผ่าน OIDC สำหรับ distribution ทั้งเจ็ดใน beta train ถัดไป</li>
+        <li><code>packages/*/pyproject.toml</code>, <code>tools/wait-bridge/pyproject.toml</code> และ <code>tools/acp-agent/pyproject.toml</code> — เวอร์ชันและ exact dependency pins ของ release train</li>
       </ul>
     </section>
   </main>

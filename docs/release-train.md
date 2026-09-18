@@ -88,7 +88,7 @@ lock together with the dependency change; never hand-edit its pins or hashes.
 ## GitHub prerelease handoff
 
 The release workflow validates that the tag is canonical PEP 440 and exactly
-matches `tools/release_versions.toml`. It also requires the six wheel filenames
+matches `tools/release_versions.toml`. It also requires the seven wheel filenames
 to match the manifest versions before it creates `SHA256SUMS.txt`. Alpha, beta,
 and release-candidate tags use `--prerelease --latest=false` on both the create
 and existing-release paths. Stable tags remain the latest release.
