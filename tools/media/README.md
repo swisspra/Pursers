@@ -76,7 +76,10 @@ generated principal identifiers are deliberately excluded from stdout.
 
 The checked-in files were captured from Ego Lite Chromium at a 1200 × 750
 viewport by taking PNG frames of the real Fleet page during each scripted
-delay. The exact browser capture calls were:
+delay. The hero sequence keeps one chronological frame for each visible real
+state: offered, claimed with its active lease, submitted with evidence,
+reviewing with the review lease, and approved. The exact browser capture calls
+were:
 
 ```text
 page.cdp("Emulation.setDeviceMetricsOverride", {width:1200,height:750,deviceScaleFactor:1,mobile:false})
@@ -86,15 +89,15 @@ page.screenshot({path:"/PATH/TO/FRAMES/frame-NNN.png"})
 The frame sequences were encoded with FFmpeg using these exact flags:
 
 ```sh
-ffmpeg -y -framerate 2 -i frame-%03d.png \
+ffmpeg -y -framerate 0.5 -i frame-%03d.png \
   -vf "fps=12,scale=1200:-2:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3" \
   -loop 0 ticket-flow.gif
 
-ffmpeg -y -framerate 2 -i frame-%03d.png \
+ffmpeg -y -framerate 0.5 -i frame-%03d.png \
   -vf "fps=24,scale=1200:-2:flags=lanczos,format=yuv420p" \
   -c:v libx264 -movflags +faststart -an ticket-flow.mp4
 
-ffmpeg -y -framerate 2 -i frame-%03d.png \
+ffmpeg -y -framerate 0.5 -i frame-%03d.png \
   -vf "fps=24,scale=1200:-2:flags=lanczos" \
   -c:v libvpx-vp9 -crf 36 -b:v 0 -an ticket-flow.webm
 ```
