@@ -6541,7 +6541,8 @@ def test_import_review_pairs_shared_codex_connectors_and_ignores_auxiliary(
     assert mappings["codex-worker"]["board_connector_name"] == "pursers-dev"
     assert mappings["codex-worker"]["token_env_var"] == "ONBOARD_CENTRAL_TOKEN"
     assert mappings["codex-reviewer"]["board_connector_name"] == "pursers-review"
-    assert mappings["codex-reviewer"]["token_env_var"] == "PURSERS_REVIEW_TOKEN"
+    # File-backed HTTP auth no longer retains the obsolete per-seat raw-token env.
+    assert mappings["codex-reviewer"]["token_env_var"] == "ONBOARD_CENTRAL_TOKEN"
     assert all(row["zero_diff"] for row in mappings.values())
 
 

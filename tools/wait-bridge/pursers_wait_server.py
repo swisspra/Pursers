@@ -206,6 +206,7 @@ _RAW_WAIT_MODE = os.environ.get("PURSERS_WAIT_MODE", "push").strip().lower()
 WAIT_MODE = _RAW_WAIT_MODE if _RAW_WAIT_MODE in {"poll", "push"} else "push"
 SEAT_ROLES = frozenset({"worker", "reviewer", "orchestrator", "coordinator"})
 CONNECTOR_TOKEN_ENV = "PURSERS_BOARD_CONNECTOR_TOKEN"
+CONNECTOR_TOKEN_SHA256_ENV = "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256"
 
 # --- wait policy (v4-parity constants; see a2a_wait.py) --------------------
 
@@ -1375,16 +1376,26 @@ class BoardJoinFailure(ToolError):
 def _split_identity_failure() -> BoardJoinFailure | None:
     if os.environ.get("PURSERS_REQUIRE_TOKEN_MATCH", "").strip() != "1":
         return None
+    connector_fingerprint = os.environ.get(CONNECTOR_TOKEN_SHA256_ENV, "").strip()
     connector_token = os.environ.get(CONNECTOR_TOKEN_ENV, "")
-    if not connector_token:
+    if not connector_fingerprint and not connector_token:
         return BoardJoinFailure(
             "configuration",
             "connector token not visible to the bridge process; "
             "see Codex env forwarding",
         )
-    if not CENTRAL_TOKEN or not hmac.compare_digest(
-        connector_token, CENTRAL_TOKEN
-    ):
+    if connector_fingerprint:
+        bridge_fingerprint = hashlib.sha256(CENTRAL_TOKEN.encode("utf-8")).hexdigest()
+        tokens_match = bool(CENTRAL_TOKEN) and hmac.compare_digest(
+            connector_fingerprint.lower().encode("utf-8"),
+            bridge_fingerprint.encode("ascii"),
+        )
+    else:
+        # Compatibility fallback for managed configs generated before fingerprinting.
+        tokens_match = bool(CENTRAL_TOKEN) and hmac.compare_digest(
+            connector_token, CENTRAL_TOKEN
+        )
+    if not tokens_match:
         return BoardJoinFailure(
             "configuration",
             "split identity: wait bridge and board connector tokens differ",

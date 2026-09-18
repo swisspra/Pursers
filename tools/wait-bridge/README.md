@@ -213,16 +213,20 @@ reviewer seat, whose join also requires `board:review`. Reviewer filtering ignor
 ticket-created/claimed noise and wakes on submissions, resubmissions, and
 review-lease changes.
 
-Codex- and Goose-managed seats set `PURSERS_REQUIRE_TOKEN_MATCH=1` and copy the
-seat token file value into the bridge's private host-config env block. Their
-launcher compares that explicit value with the token file used by the bridge
-and refuses startup when they differ. A missing connector value reports
-`connector token not visible to the bridge process; see Codex env forwarding`;
+Codex- and Goose-managed seats set `PURSERS_REQUIRE_TOKEN_MATCH=1` and store
+only the seat token's SHA-256 fingerprint in the bridge's private host-config
+env block. Their launcher exports `PURSERS_BOARD_CONNECTOR_TOKEN_SHA256`; the
+bridge compares it in constant time with the fingerprint of the token file it
+uses and refuses startup when they differ. For one release, the bridge also
+accepts the legacy raw `PURSERS_BOARD_CONNECTOR_TOKEN` when no fingerprint is
+present; a configured fingerprint always wins. A missing connector value
+reports `connector token not visible to the bridge process; see Codex env forwarding`;
 a present mismatch reports `split identity`. Token values are never included
 in errors or logs. Doctor also launches the exact managed command and env block,
 opens an MCP session, calls `project_registry_get`, and compares the connector
-and bridge principals at Central. Regenerate the seat configuration and restart
-the host after changing either token source.
+and bridge principals at Central. Existing managed configs must be regenerated
+through the Fleet Dashboard and the host restarted to replace the raw literal;
+repeat that after changing either token source.
 
 An explicit identity is joined when its call starts. Joins are stateless and
 idempotent; the bridge deliberately keeps no mutable join cache and does not
