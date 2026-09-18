@@ -16,9 +16,9 @@ the current official documentation on 2026-09-19:
 
 - [Claude Code MCP](https://code.claude.com/docs/en/mcp)
 - [Codex MCP](https://developers.openai.com/codex/mcp)
-- [Cursor MCP](https://cursor.com/docs/context/model-context-protocol)
+- [Cursor MCP](https://cursor.com/docs/mcp)
 - [goose configuration](https://github.com/aaif-goose/goose/blob/main/documentation/docs/guides/config-files.md)
-- [Claude Desktop remote MCP](https://support.anthropic.com/en/articles/11503834-building-custom-connectors-via-remote-mcp-servers)
+- [Claude Desktop remote MCP](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
 - [Zed external agents](https://zed.dev/docs/ai/external-agents)
 - [`mcp-remote` header files](https://github.com/punkpeye/mcp-remote#custom-headers)
 - [MCP Apps client support](https://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/)
@@ -636,6 +636,16 @@ The example assumes the ticket is assigned to this authenticated identity and
 that its contract accepts the supplied submission fields. Read the ticket and
 replace the summary, file list, and notes with its required evidence. A plain
 Python loop has no MCP Apps renderer.
+
+There is no `pursers-wait-bridge` object to add to this program: the shipped
+bridge is an MCP stdio server, while a plain `BoardClient` process is not an MCP
+host. This direct-Python bridge path is therefore **not verified on this
+release** because no packaged API connects the two. Use `BoardClient.events()`
+for the same push subscription in a Python loop, persist every value passed to
+its `cursor_callback`, and resume with that value as `from_cursor`. If you need
+the bridge's `a2a_wait` tool specifically, add the bridge to one of the MCP
+hosts above and keep the Python process for board mutations. Do not start a
+second process that polls `board_status` or `ticket_list`.
 
 Verification on this release: `pursers-client` completed `board_onboard`,
 `board_status`, `ticket_claim`, and `ticket_submit` against both a disposable
