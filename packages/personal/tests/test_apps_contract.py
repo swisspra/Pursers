@@ -81,23 +81,20 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
 
     readme = (root / "README.md").read_text(encoding="utf-8")
     normalized_readme = " ".join(readme.split())
-    assert "Possessing this package does not authorize installing or activating it" in normalized_readme
-    assert "operator test manifest may authorize `HOST_PROOF_ONLY`" in normalized_readme
-    assert "dedicated isolated account or VM" in normalized_readme
-    assert "`release_status=DO_NOT_PUBLISH`" in normalized_readme
-    assert "`supported_hosts=[]`" in normalized_readme
-    assert "never authorizes ordinary use, publication, or a supported-Host claim" in normalized_readme
-    assert "official release manifest" in normalized_readme
-    assert "identifies this exact wheel by filename and SHA-256" in normalized_readme
-    assert "lists the exact Host product, version, and build" in normalized_readme
-    assert "If neither matching external attestation exists, do not install or activate" in normalized_readme
-    assert "never permits ordinary use" in normalized_readme
-    assert "does not declare the current release status" in normalized_readme
-    assert "claim support for any Host" in normalized_readme
-    assert "This wheel is an isolated host-proof candidate" not in readme
-    assert "The candidate remains" not in readme
-    for forbidden in ("uv tool install", "--apply", "--activate"):
-        assert forbidden not in readme
+    assert "pursers-personal setup --project /PATH/TO/PROJECT --apply --activate" in normalized_readme
+    assert "`--activate` (which requires `--apply`)" in normalized_readme
+    assert "binds only to `127.0.0.1`" in normalized_readme
+    assert "does not provide pinned loopback TLS" in normalized_readme
+    assert "do not run it on a shared or untrusted machine" in normalized_readme
+    for stale in (
+        "Possessing this package does not authorize",
+        "DO_NOT_PUBLISH",
+        "HOST_PROOF_ONLY",
+        "Preview",
+        "alpha",
+        "uv tool install",
+    ):
+        assert stale not in readme
 
 
 def test_dashboard_work_state_synthetic_ticket_harness() -> None:

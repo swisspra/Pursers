@@ -631,5 +631,5 @@ prefix = "main: <code>"
 [[version_surfaces]]
 path = "packages/personal/README.md"
 version_key = "product"
-prefix = "# On Board Personal Preview "
+prefix = "# Pursers Personal "
 reject_other_product_versions = true

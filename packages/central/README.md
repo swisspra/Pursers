@@ -62,6 +62,30 @@ curl --fail --silent http://127.0.0.1:8766/healthz
 
 A healthy response has `"status":"ok"` and `"store_backend":"sqlite"`.
 
+## Serving other machines
+
+Central binds loopback by default. To serve agents on other machines, for
+example over a Tailscale tailnet, supply a TLS certificate and key and allow
+the exact host name clients will use:
+
+```bash
+pursers-central \
+  --host 0.0.0.0 \
+  --port 8766 \
+  --data-dir /PATH/TO/private/central-data \
+  --tls-certfile /PATH/TO/private/central.crt \
+  --tls-keyfile /PATH/TO/private/central.key \
+  --allowed-host central.example.ts.net
+```
+
+`--allowed-host` may be repeated, or set as the comma-separated
+`ONBOARD_CENTRAL_ALLOWED_HOSTS`; the TLS paths may also come from
+`ONBOARD_CENTRAL_TLS_CERTFILE` and `ONBOARD_CENTRAL_TLS_KEYFILE`. The
+certificate and key must be supplied together. Remote clients connect to
+`https://central.example.ts.net:8766/mcp` with tokens issued for the configured
+`CENTRAL_JWT_AUDIENCE`; clients that do not already trust the certificate's
+issuer need its CA file.
+
 ## Tool response views
 
 Central keeps complete tickets, memories, and journal events in its SQLite

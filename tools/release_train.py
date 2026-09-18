@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "tools/release_versions.toml"
 VERSION_FILES: dict[str, tuple[str, ...]] = {
     "product": (
+        "packages/personal/README.md",
         "packages/personal/pyproject.toml",
         "packages/personal/src/pursers_personal/__init__.py",
         "packages/personal/tests/test_apps_contract.py",

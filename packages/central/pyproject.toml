@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pursers-central"
 version = "0.1.0a31"
-description = "Central multi-board On Board MCP service"
+description = "Pursers Central: the multi-board MCP service that owns board state"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"

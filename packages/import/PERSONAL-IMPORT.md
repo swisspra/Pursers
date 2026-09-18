@@ -1,8 +1,7 @@
-# On Board Personal Import 5.0.0a3
+# Pursers Personal Import 5.0.0a3
 
-Status: **DO NOT PUBLISH**. This is an unpublished alpha component intended for
-later integration into `onboard-personal`. It does not modify or replace the
-stable On Board v4 command.
+`pursers-personal-import` is a copy-only importer from On Board v4 into Pursers
+Personal. It does not modify or replace the On Board v4 command or its data.
 
 The importer copies one local v4 `.agent-mem` board into a new, empty Personal
 Central data root. It requires an explicit owner principal and owner agent; it
@@ -28,7 +27,7 @@ unbound for later review.
   synthetic write fence; these hashes are intentionally different.
 - Source symlinks, hard links, special entries, duplicate JSON keys, duplicate
   memory or ticket identifiers, and malformed record shapes fail closed.
-- The alpha accepts at most 100,000 tree entries, 64 MiB per regular file, and
+- The importer accepts at most 100,000 tree entries, 64 MiB per regular file, and
   256 MiB of regular-file payload per tree. Oversized inputs fail before
   installation; these are explicit compatibility limits, not truncation.
 - The Central target must be absent or an empty private directory. Import into
@@ -52,7 +51,7 @@ Use the canonical Homebrew Cellar directory, not the `opt` symlink:
 ```sh
 STABLE_INSTALL="$(brew --cellar onboard-memory)/4.0.4"
 
-onboard-personal-import import /path/to/project/.agent-mem /path/to/new-central-data \
+pursers-personal-import import /path/to/project/.agent-mem /path/to/new-central-data \
   --run-dir /path/to/private-import-run \
   --board-id personal-board \
   --owner-principal-id personal-owner \
@@ -60,10 +59,10 @@ onboard-personal-import import /path/to/project/.agent-mem /path/to/new-central-
   --stable-install-root "$STABLE_INSTALL" \
   --confirm-central-stopped
 
-onboard-personal-import retry /path/to/private-import-run \
+pursers-personal-import retry /path/to/private-import-run \
   --confirm-central-stopped
 
-onboard-personal-import status /path/to/private-import-run \
+pursers-personal-import status /path/to/private-import-run \
   --confirm-central-stopped
 
 pursers-personal-import archive-backfill /path/to/project/.agent-mem/archive.json \
@@ -73,15 +72,15 @@ pursers-personal-import archive-backfill /path/to/project/.agent-mem/archive.jso
   --redact-secrets-record ARCHIVE-record-key \
   --confirm-central-stopped
 
-onboard-personal-import decide /path/to/private-import-run \
+pursers-personal-import decide /path/to/private-import-run \
   --policy /path/to/POLICY-signed.json
 
-onboard-personal-import review /path/to/private-import-run \
+pursers-personal-import review /path/to/private-import-run \
   --decisions /path/to/private-decisions.json \
   --bindings /path/to/private-bindings.json \
   --confirm-central-stopped
 
-onboard-personal-import rollback /path/to/private-import-run \
+pursers-personal-import rollback /path/to/private-import-run \
   --confirm-central-stopped
 ```
 
@@ -139,5 +138,4 @@ be group- or other-writable. State, receipts, backups, worksheets, and
 quarantine remain private under the run directory.
 
 The runtime uses only the Python standard library. Building the distribution
-requires the build dependencies declared in `pyproject.toml`. Nothing in this
-alpha is published or installed by its preparation workflow.
+requires the build dependencies declared in `pyproject.toml`.
