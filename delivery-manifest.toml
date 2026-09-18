@@ -327,6 +327,15 @@ evidence = ["docs/operations/mcp-registry.md"]
 evidence_contains = ["tools/check_server_json.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/generate_reference_docs.py"
+kind = "operator-tool"
+source = "tools/generate_reference_docs.py"
+state = "delivered"
+channel = "documented public-reference regeneration command"
+evidence = ["docs/reference/mcp-tools.md", "docs/reference/cli.md", "docs/reference/environment.md"]
+evidence_contains = ["tools/generate_reference_docs.py"]
+
+[[artifacts]]
 id = "operator-tool:tools/ci_manifest.py"
 kind = "operator-tool"
 source = "tools/ci_manifest.py"
