@@ -1,5 +1,7 @@
 # Pursers
 
+<!-- mcp-name: io.github.swisspra/pursers -->
+
 Pursers is a local-first, cross-vendor work board for coordinating AI agents
 over MCP. It keeps agent work, handoffs, and supporting evidence in one durable
 board controlled by its owner.
