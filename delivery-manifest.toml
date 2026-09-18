@@ -433,6 +433,15 @@ evidence = ["tools/seat-kit/README.md"]
 evidence_contains = ["tools/seat-kit/seat_new.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/tmp_janitor.py"
+kind = "operator-tool"
+source = "tools/tmp_janitor.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["docs/operations/temp-root-janitor.md"]
+evidence_contains = ["tools/tmp_janitor.py"]
+
+[[artifacts]]
 id = "operator-tool:tools/verify_publish_wheels.py"
 kind = "operator-tool"
 source = "tools/verify_publish_wheels.py"
