@@ -30,6 +30,71 @@ def _git(*args: str, cwd: Path) -> str:
     ).stdout.strip()
 
 
+def _write_executable(path: Path, source: str) -> None:
+    path.write_text(source, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _upgrade_fixture(
+    tmp_path: Path, *, dependency_changed: bool
+) -> tuple[Path, Path, Path, dict[str, str], str, str]:
+    origin = tmp_path / "origin.git"
+    operator = tmp_path / "operator"
+    checkout = tmp_path / "fleet"
+    _git("init", "--bare", "-q", str(origin), cwd=tmp_path)
+    _git("clone", "-q", str(origin), str(operator), cwd=tmp_path)
+    _git("config", "user.email", "test@example.invalid", cwd=operator)
+    _git("config", "user.name", "Test", cwd=operator)
+    for package in ("client", "central"):
+        manifest = operator / "packages" / package / "pyproject.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('[project]\nversion = "1"\n', encoding="utf-8")
+    (operator / "revision").write_text("one\n", encoding="utf-8")
+    _git("add", ".", cwd=operator)
+    _git("commit", "-qm", "one", cwd=operator)
+    _git("branch", "-M", "main", cwd=operator)
+    _git("push", "-qu", "origin", "main", cwd=operator)
+    first = _git("rev-parse", "HEAD", cwd=operator)
+    _git("clone", "-q", "--branch", "main", str(origin), str(checkout), cwd=tmp_path)
+
+    (operator / "revision").write_text("two\n", encoding="utf-8")
+    if dependency_changed:
+        (operator / "packages" / "client" / "pyproject.toml").write_text(
+            '[project]\nversion = "2"\n', encoding="utf-8"
+        )
+    _git("commit", "-qam", "two", cwd=operator)
+    _git("push", "-q", "origin", "main", cwd=operator)
+    second = _git("rev-parse", "HEAD", cwd=operator)
+
+    events = tmp_path / "events"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(
+        fake_bin / "launchctl",
+        '#!/bin/sh\nprintf "launchctl:%s\\n" "$*" >>"$EVENTS"\nexit 0\n',
+    )
+    _write_executable(
+        fake_bin / "uv",
+        '#!/bin/sh\nprintf "uv:%s\\n" "$*" >>"$EVENTS"\nexit "${UV_EXIT:-0}"\n',
+    )
+    fake_python = fake_bin / "python"
+    _write_executable(
+        fake_python,
+        '#!/bin/sh\nprintf "python:%s\\n" "$*" >>"$EVENTS"\n'
+        'exit "${PYTHON_EXIT:-0}"\n',
+    )
+    state = tmp_path / "state"
+    environment = {
+        **os.environ,
+        "EVENTS": str(events),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "PURSERS_FLEET_PYTHON": str(fake_python),
+        "PURSERS_FLEET_REPO": str(checkout),
+        "PURSERS_FLEET_STATE_DIR": str(state),
+    }
+    return checkout, state, events, environment, first, second
+
+
 def test_deployment_metadata_reports_exact_git_revision(tmp_path: Path) -> None:
     repository = tmp_path / "repo"
     source = repository / "tools" / "fleet-dashboard" / "fleet_dashboard.py"
@@ -114,42 +179,97 @@ def test_launcher_keeps_runtime_and_state_outside_checkout(tmp_path: Path) -> No
     ]
 
 
-def test_upgrade_moves_clean_checkout_and_records_rollback_sha(tmp_path: Path) -> None:
-    origin = tmp_path / "origin.git"
-    operator = tmp_path / "operator"
-    checkout = tmp_path / "fleet"
-    _git("init", "--bare", "-q", str(origin), cwd=tmp_path)
-    _git("clone", "-q", str(origin), str(operator), cwd=tmp_path)
-    _git("config", "user.email", "test@example.invalid", cwd=operator)
-    _git("config", "user.name", "Test", cwd=operator)
-    (operator / "revision").write_text("one\n", encoding="utf-8")
-    _git("add", ".", cwd=operator)
-    _git("commit", "-qm", "one", cwd=operator)
-    _git("branch", "-M", "main", cwd=operator)
-    _git("push", "-qu", "origin", "main", cwd=operator)
-    first = _git("rev-parse", "HEAD", cwd=operator)
-    _git("clone", "-q", "--branch", "main", str(origin), str(checkout), cwd=tmp_path)
-    (operator / "revision").write_text("two\n", encoding="utf-8")
-    _git("commit", "-qam", "two", cwd=operator)
-    _git("push", "-q", "origin", "main", cwd=operator)
-    second = _git("rev-parse", "HEAD", cwd=operator)
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    launchctl = fake_bin / "launchctl"
-    launchctl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    launchctl.chmod(0o755)
-    state = tmp_path / "state"
-    environment = {
-        **os.environ,
-        "PATH": f"{fake_bin}:{os.environ['PATH']}",
-        "PURSERS_FLEET_REPO": str(checkout),
-        "PURSERS_FLEET_STATE_DIR": str(state),
-    }
+def test_upgrade_without_dependency_change_skips_reinstall(tmp_path: Path) -> None:
+    checkout, state, events, environment, first, second = _upgrade_fixture(
+        tmp_path, dependency_changed=False
+    )
     subprocess.run(["/bin/sh", str(UPGRADER), second], check=True, env=environment)
     assert _git("rev-parse", "HEAD", cwd=checkout) == second
     assert (state / "deployments" / "previous-sha").read_text().strip() == first
     assert (state / "deployments" / "current-sha").read_text().strip() == second
+    actions = events.read_text(encoding="utf-8").splitlines()
+    assert not any(action.startswith("uv:") for action in actions)
+    assert any(action.startswith("python:-c ") for action in actions)
+    assert any(action.startswith("launchctl:kickstart -k ") for action in actions)
+
+
+def test_upgrade_reinstalls_changed_dependencies_before_restart(tmp_path: Path) -> None:
+    checkout, _, events, environment, _, second = _upgrade_fixture(
+        tmp_path, dependency_changed=True
+    )
+    subprocess.run(["/bin/sh", str(UPGRADER), second], check=True, env=environment)
+    assert _git("rev-parse", "HEAD", cwd=checkout) == second
+    actions = events.read_text(encoding="utf-8").splitlines()
+    reinstall = next(i for i, action in enumerate(actions) if action.startswith("uv:"))
+    probe = next(i for i, action in enumerate(actions) if action.startswith("python:-c "))
+    restart = next(
+        i
+        for i, action in enumerate(actions)
+        if action.startswith("launchctl:kickstart -k ")
+    )
+    assert reinstall < probe < restart
+    assert f"--python {environment['PURSERS_FLEET_PYTHON']}" in actions[reinstall]
+    assert f"-e {checkout / 'packages' / 'client'}" in actions[reinstall]
+    assert f"-e {checkout / 'packages' / 'central'}" in actions[reinstall]
+
+
+def test_upgrade_falls_back_to_selected_interpreter_pip(tmp_path: Path) -> None:
+    checkout, _, events, environment, _, second = _upgrade_fixture(
+        tmp_path, dependency_changed=True
+    )
+    fake_bin = Path(environment["PURSERS_FLEET_PYTHON"]).parent
+    (fake_bin / "uv").unlink()
+    environment["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+    subprocess.run(["/bin/sh", str(UPGRADER), second], check=True, env=environment)
+    assert _git("rev-parse", "HEAD", cwd=checkout) == second
+    actions = events.read_text(encoding="utf-8").splitlines()
+    install = next(
+        i for i, action in enumerate(actions) if action.startswith("python:-m pip install ")
+    )
+    probe = next(i for i, action in enumerate(actions) if action.startswith("python:-c "))
+    restart = next(
+        i
+        for i, action in enumerate(actions)
+        if action.startswith("launchctl:kickstart -k ")
+    )
+    assert install < probe < restart
+
+
+def test_upgrade_reinstall_failure_restores_checkout_without_restart(
+    tmp_path: Path,
+) -> None:
+    checkout, state, events, environment, first, second = _upgrade_fixture(
+        tmp_path, dependency_changed=True
+    )
+    environment["UV_EXIT"] = "1"
+    result = subprocess.run(
+        ["/bin/sh", str(UPGRADER), second], check=False, env=environment
+    )
+    assert result.returncode == 69
+    assert _git("rev-parse", "HEAD", cwd=checkout) == first
+    assert (state / "deployments" / "current-sha").read_text().strip() == first
+    actions = events.read_text(encoding="utf-8").splitlines()
+    assert any(action.startswith("uv:") for action in actions)
+    assert not any(action.startswith("python:") for action in actions)
+    assert not any(action.startswith("launchctl:kickstart -k ") for action in actions)
+
+
+def test_upgrade_import_probe_failure_restores_checkout_without_restart(
+    tmp_path: Path,
+) -> None:
+    checkout, state, events, environment, first, second = _upgrade_fixture(
+        tmp_path, dependency_changed=False
+    )
+    environment["PYTHON_EXIT"] = "1"
+    result = subprocess.run(
+        ["/bin/sh", str(UPGRADER), second], check=False, env=environment
+    )
+    assert result.returncode == 69
+    assert _git("rev-parse", "HEAD", cwd=checkout) == first
+    assert (state / "deployments" / "current-sha").read_text().strip() == first
+    actions = events.read_text(encoding="utf-8").splitlines()
+    assert any(action.startswith("python:-c ") for action in actions)
+    assert not any(action.startswith("launchctl:kickstart -k ") for action in actions)
 
 
 def test_launchagent_template_uses_repository_launcher_and_external_paths() -> None:

@@ -274,11 +274,28 @@ launcher also accepts optional `PURSERS_FLEET_DOORS_KEYS_DIR`,
 Upgrade the dedicated, clean checkout to an exact commit from `origin/main`
 and restart the loaded service with one command. The script fetches main,
 rejects a dirty checkout or a SHA outside main's history, records both SHAs in
-the external state directory, and restores the checkout if restart fails:
+the external state directory, and restores the checkout if dependency setup,
+the import probe, or restart fails. The supported installation uses a dedicated
+virtual environment with editable Client and Central installs from this
+checkout:
+
+```bash
+uv venv /PATH/TO/private/fleet-dashboard-venv
+uv pip install --python /PATH/TO/private/fleet-dashboard-venv/bin/python \
+  -e /PATH/TO/Pursers/packages/client \
+  -e /PATH/TO/Pursers/packages/central
+```
+
+Editable installs keep package code aligned with the detached checkout. A
+pyproject dependency change still requires package installation, so the
+upgrader compares both package manifests between revisions and reinstalls them
+before restart. It prefers `uv` and falls back to the selected interpreter's
+`pip`, then verifies that the interpreter imports Client, Central, and MCP.
 
 ```bash
 PURSERS_FLEET_REPO=/PATH/TO/Pursers \
 PURSERS_FLEET_STATE_DIR=/PATH/TO/private/fleet-dashboard-state \
+PURSERS_FLEET_PYTHON=/PATH/TO/private/fleet-dashboard-venv/bin/python \
   /PATH/TO/Pursers/tools/fleet-dashboard/upgrade.sh 0123456789abcdef0123456789abcdef01234567
 ```
 

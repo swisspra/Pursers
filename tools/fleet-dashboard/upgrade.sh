@@ -4,9 +4,10 @@ set -eu
 
 : "${PURSERS_FLEET_REPO:?set PURSERS_FLEET_REPO}"
 : "${PURSERS_FLEET_STATE_DIR:?set PURSERS_FLEET_STATE_DIR}"
+: "${PURSERS_FLEET_PYTHON:?set PURSERS_FLEET_PYTHON}"
 
 if [ "$#" -ne 1 ]; then
-  echo "usage: PURSERS_FLEET_REPO=/PATH/TO/CLONE PURSERS_FLEET_STATE_DIR=/PATH/TO/STATE $0 <40-hex-origin-main-sha>" >&2
+  echo "usage: PURSERS_FLEET_REPO=/PATH/TO/CLONE PURSERS_FLEET_STATE_DIR=/PATH/TO/STATE PURSERS_FLEET_PYTHON=/PATH/TO/PYTHON $0 <40-hex-origin-main-sha>" >&2
   exit 64
 fi
 target=$1
@@ -41,10 +42,38 @@ mv "$deployments/previous-sha.tmp" "$deployments/previous-sha"
 printf '%s\n' "$target" >"$deployments/current-sha.tmp"
 mv "$deployments/current-sha.tmp" "$deployments/current-sha"
 
-if ! launchctl kickstart -k "$job"; then
+restore_previous() {
   git -C "$repo" checkout --detach "$previous"
   printf '%s\n' "$previous" >"$deployments/current-sha.tmp"
   mv "$deployments/current-sha.tmp" "$deployments/current-sha"
+}
+
+if ! git -C "$repo" diff --quiet "$previous" "$target" -- \
+  packages/client/pyproject.toml packages/central/pyproject.toml; then
+  if command -v uv >/dev/null 2>&1; then
+    if ! uv pip install --python "$PURSERS_FLEET_PYTHON" \
+      -e "$repo/packages/client" -e "$repo/packages/central"; then
+      restore_previous
+      echo "dependency reinstall failed; checkout restored to $previous" >&2
+      exit 69
+    fi
+  elif ! "$PURSERS_FLEET_PYTHON" -m pip install \
+    -e "$repo/packages/client" -e "$repo/packages/central"; then
+    restore_previous
+    echo "dependency reinstall failed; checkout restored to $previous" >&2
+    exit 69
+  fi
+fi
+
+if ! (cd "$repo" && "$PURSERS_FLEET_PYTHON" -c \
+  'import pursers_client, pursers_central, mcp'); then
+  restore_previous
+  echo "dependency import probe failed; checkout restored to $previous" >&2
+  exit 69
+fi
+
+if ! launchctl kickstart -k "$job"; then
+  restore_previous
   echo "restart failed; checkout restored to $previous" >&2
   exit 69
 fi
