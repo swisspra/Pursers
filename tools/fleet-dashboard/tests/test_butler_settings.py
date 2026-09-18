@@ -566,6 +566,90 @@ def test_provider_validation_pins_request_to_validated_addresses(
     ]
 
 
+@pytest.mark.parametrize(
+    ("connection_class", "port", "use_tls"),
+    [
+        (butler_settings._PinnedHTTPConnection, 80, False),
+        (butler_settings._PinnedHTTPSConnection, 443, True),
+    ],
+)
+def test_pinned_connection_uses_validated_address_without_second_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    connection_class: type[Any],
+    port: int,
+    use_tls: bool,
+) -> None:
+    connected: list[tuple[Any, ...]] = []
+    resolution_attempts: list[tuple[str, int]] = []
+    server_names: list[str] = []
+
+    class FakeSocket:
+        def settimeout(self, _timeout: object) -> None:
+            return
+
+        def bind(self, _source_address: tuple[str, int]) -> None:
+            return
+
+        def connect(self, sockaddr: tuple[Any, ...]) -> None:
+            connected.append(sockaddr)
+
+        def setsockopt(self, *_args: object) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    class FakeContext:
+        def wrap_socket(
+            self, sock: FakeSocket, *, server_hostname: str
+        ) -> FakeSocket:
+            server_names.append(server_hostname)
+            return sock
+
+    def rebound_resolver(
+        host: str,
+        requested_port: int,
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        resolution_attempts.append((host, requested_port))
+        return [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                ("169.254.1.1", requested_port),
+            )
+        ]
+
+    monkeypatch.setattr(butler_settings.socket, "getaddrinfo", rebound_resolver)
+    monkeypatch.setattr(
+        butler_settings.socket,
+        "socket",
+        lambda *_args, **_kwargs: FakeSocket(),
+    )
+    resolved = (
+        (
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+            6,
+            "",
+            ("203.0.113.7", port),
+        ),
+    )
+    kwargs: dict[str, Any] = {"resolved": resolved}
+    if use_tls:
+        kwargs["context"] = FakeContext()
+    connection = connection_class("provider.example", port=port, **kwargs)
+
+    connection.connect()
+
+    assert resolution_attempts == []
+    assert connected == [("203.0.113.7", port)]
+    assert server_names == (["provider.example"] if use_tls else [])
+
+
 def test_provider_validation_refuses_cross_origin_redirect_before_key_leaves_origin(
 ) -> None:
     secret = "sentinel-redirect-refusal-6471"

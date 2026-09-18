@@ -194,8 +194,12 @@ class _PinnedConnectionMixin:
     ) -> None:
         self._validated_addresses = resolved
         super().__init__(host, **kwargs)
+        # HTTPConnection.__init__ deliberately installs socket.create_connection
+        # on the instance.  Replace that callback after the stdlib initializer so
+        # connect() cannot re-resolve the hostname and bypass the validated set.
+        self._create_connection = self._create_validated_connection
 
-    def _create_connection(
+    def _create_validated_connection(
         self,
         _address: tuple[str, int],
         timeout: float | object,
