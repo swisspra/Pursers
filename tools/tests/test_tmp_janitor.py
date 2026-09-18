@@ -37,6 +37,30 @@ def idle_runner(command: list[str], **_kwargs: object) -> SimpleNamespace:
     raise AssertionError(command)
 
 
+def only_process(pid: int):
+    """Run the real probes, but let the process scan see only one pid.
+
+    The janitor scans every process on the machine. A seat running these same
+    tests concurrently owns holder processes that also qualify, and whichever
+    the scan meets first becomes the reason, so the pid assertion failed
+    intermittently. The real ps still runs; only foreign rows are dropped.
+    """
+
+    def runner(command: list[str], **kwargs: object):
+        result = subprocess.run(command, **kwargs)
+        if command[0] == "/bin/ps":
+            rows = [
+                line for line in result.stdout.splitlines()
+                if line.lstrip().split(" ", 1)[0] == str(pid)
+            ]
+            result = subprocess.CompletedProcess(
+                result.args, result.returncode, "\n".join(rows) + "\n", result.stderr
+            )
+        return result
+
+    return runner
+
+
 def make_old(path: Path, *, seconds: int = 7_200) -> None:
     timestamp = time.time() - seconds
     for current in [*path.rglob("*"), path]:
@@ -230,7 +254,7 @@ def test_live_temp_environment_refuses_dormant_directory() -> None:
         assert holder.stdout is not None
         assert holder.stdout.readline().strip() == "ready"
         result = tmp_janitor.inspect_candidate(
-            candidate, older_than_seconds=3_600
+            candidate, older_than_seconds=3_600, runner=only_process(holder.pid)
         )
     finally:
         holder.terminate()
@@ -273,7 +297,10 @@ def test_delete_refuses_live_relative_temp_environment(
         assert holder.stdout is not None
         assert holder.stdout.readline().strip() == "ready"
         assert tmp_janitor.run(
-            [candidate], older_than_seconds=3_600, delete=True
+            [candidate],
+            older_than_seconds=3_600,
+            delete=True,
+            runner=only_process(holder.pid),
         ) == 0
         assert candidate.is_dir()
         output = capsys.readouterr().out
