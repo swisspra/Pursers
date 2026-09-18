@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import io
 import json
 import logging
@@ -19,7 +20,10 @@ from unittest.mock import patch
 import httpx2
 import jwt
 import uvicorn
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from jwt.algorithms import RSAAlgorithm
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +70,42 @@ def _jwt_fixture(root: Path, audience: str) -> tuple[Path, str]:
         headers={"kid": "runtime-health-test"},
     )
     return jwks, token
+
+
+def _tls_fixture(root: Path) -> tuple[Path, Path]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(minutes=10))
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [
+                    x509.DNSName("localhost"),
+                    x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                ]
+            ),
+            critical=False,
+        )
+        .sign(private_key, hashes.SHA256())
+    )
+    cert_path = root / "throwaway-cert.pem"
+    key_path = root / "throwaway-key.pem"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return cert_path, key_path
 
 
 def _fd_count() -> int | None:
@@ -216,6 +256,8 @@ class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
         *,
         allowed_hosts: tuple[str, ...],
         host_header: str,
+        origin_header: str | None = None,
+        use_tls: bool = False,
     ) -> httpx2.Response:
         temp_dir = tempfile.TemporaryDirectory(dir=PACKAGE_ROOT)
         root = Path(temp_dir.name)
@@ -224,7 +266,8 @@ class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
         listener.bind(("127.0.0.1", 0))
         listener.listen(32)
         port = int(listener.getsockname()[1])
-        audience = f"http://127.0.0.1:{port}/mcp"
+        scheme = "https" if use_tls else "http"
+        audience = f"{scheme}://127.0.0.1:{port}/mcp"
         jwks, token = _jwt_fixture(root, audience)
         environment = patch.dict(
             os.environ,
@@ -247,6 +290,13 @@ class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
             host="127.0.0.1",
             allowed_hosts=allowed_hosts,
         )
+        tls_options: dict[str, str] = {}
+        if use_tls:
+            cert_path, key_path = _tls_fixture(root)
+            tls_options = {
+                "ssl_certfile": str(cert_path),
+                "ssl_keyfile": str(key_path),
+            }
         server = uvicorn.Server(
             uvicorn.Config(
                 app,
@@ -254,6 +304,7 @@ class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
                 port=port,
                 log_level="error",
                 access_log=False,
+                **tls_options,
             )
         )
         thread = threading.Thread(
@@ -267,14 +318,20 @@ class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
             while not server.started and time.monotonic() < deadline:
                 await asyncio.sleep(0.01)
             self.assertTrue(server.started)
-            async with httpx2.AsyncClient(trust_env=False) as client:
+            async with httpx2.AsyncClient(
+                trust_env=False,
+                verify=not use_tls,
+            ) as client:
+                headers = {
+                    "Accept": "application/json, text/event-stream",
+                    "Authorization": _authorization(token),
+                    "Host": host_header.format(port=port),
+                }
+                if origin_header is not None:
+                    headers["Origin"] = origin_header.format(port=port)
                 return await client.post(
                     audience,
-                    headers={
-                        "Accept": "application/json, text/event-stream",
-                        "Authorization": _authorization(token),
-                        "Host": host_header,
-                    },
+                    headers=headers,
                     json={
                         "jsonrpc": "2.0",
                         "id": 1,
@@ -311,6 +368,23 @@ class RuntimeHostAllowlistNetworkTests(unittest.IsolatedAsyncioTestCase):
         response = await self._initialize(
             allowed_hosts=("central.example",),
             host_header="central.example:443",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_configured_host_and_origin_are_accepted(self) -> None:
+        response = await self._initialize(
+            allowed_hosts=("central.example",),
+            host_header="central.example:443",
+            origin_header="https://central.example:443",
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+
+    async def test_https_serving_with_throwaway_self_signed_certificate(self) -> None:
+        response = await self._initialize(
+            allowed_hosts=(),
+            host_header="127.0.0.1:{port}",
+            origin_header="https://127.0.0.1:{port}",
+            use_tls=True,
         )
         self.assertEqual(response.status_code, 200, response.text)
 

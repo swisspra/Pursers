@@ -4,6 +4,42 @@ The coordinator observes every active board in the home board's
 `project_registry`. Phase 2 adds atomic assignment while
 leaving worker claim, submission, and independent review paths unchanged.
 
+## Simulate the dispatch policy
+
+`simulate.py` replays visible Central journal history through the coordinator's
+dispatch policy. It produces a Markdown report of dispatches, starvation, seat
+load, and policy decisions without mutating a board. A live capture requires a
+capability scoped exactly to `board:read`; the tool reads it from the named
+environment variable and never prints it.
+
+Capture sanitized replay input and write the report separately:
+
+```sh
+PYTHONPATH=packages/client/src \
+ONBOARD_CENTRAL_TOKEN="$(</PATH/TO/READ_ONLY_TOKEN)" \
+python3 tools/coordinator/simulate.py \
+  --central-url https://127.0.0.1:8766/mcp \
+  --home-board pursers \
+  --history-output /PATH/TO/history.json \
+  --output /PATH/TO/report.md
+```
+
+For a deterministic offline replay, omit the token and Central URL and consume
+the captured history:
+
+```sh
+PYTHONPATH=packages/client/src \
+python3 tools/coordinator/simulate.py \
+  --history-input /PATH/TO/history.json \
+  --output /PATH/TO/report.md
+```
+
+The replay accepts custom normal and critical starvation thresholds through
+`--normal-starvation-seconds` and `--critical-starvation-seconds`. Captured
+history is intentionally reduced to the credential-free fields needed by the
+policy, but it can still contain operational metadata and should be handled as
+internal evidence.
+
 ## Modes and kill switch
 
 `--mode shadow` is the default. It computes the same decisions as active mode

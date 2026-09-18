@@ -23,6 +23,9 @@ LOOPBACK_ALLOWED_ORIGINS = (
     "http://127.0.0.1:*",
     "http://localhost:*",
     "http://[::1]:*",
+    "https://127.0.0.1:*",
+    "https://localhost:*",
+    "https://[::1]:*",
 )
 
 
@@ -218,6 +221,7 @@ def create_streamable_http_app(
 ) -> Any:
     """Create the production-shaped stateless app with guarded healthz."""
     host_patterns = list(LOOPBACK_ALLOWED_HOSTS)
+    origin_patterns = list(LOOPBACK_ALLOWED_ORIGINS)
     for allowed_host in allowed_hosts:
         candidate = allowed_host.strip()
         if (
@@ -234,10 +238,17 @@ def create_streamable_http_app(
         for pattern in (candidate, f"{candidate}:*"):
             if pattern not in host_patterns:
                 host_patterns.append(pattern)
+        for scheme in ("http", "https"):
+            for pattern in (
+                f"{scheme}://{candidate}",
+                f"{scheme}://{candidate}:*",
+            ):
+                if pattern not in origin_patterns:
+                    origin_patterns.append(pattern)
     transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=host_patterns,
-        allowed_origins=list(LOOPBACK_ALLOWED_ORIGINS),
+        allowed_origins=origin_patterns,
     )
     app = mcp.streamable_http_app(
         streamable_http_path="/mcp",

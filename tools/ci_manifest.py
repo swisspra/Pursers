@@ -366,7 +366,11 @@ def run_seat_suites(root: Path, suites: Sequence[Suite] = SUITES) -> None:
         command = [sys.executable, "-m", "pytest", "-q", pytest_target(suite)]
         if suite.path == "tools/tests":
             command.extend(
-                ["-k", "not test_integration_files_manifest_matches_the_tree"]
+                [
+                    "-k",
+                    "not test_integration_files_manifest_matches_the_tree "
+                    "and not test_real_tree_is_clean_and_current_bump_has_zero_diff",
+                ]
             )
         completed = subprocess.run(
             command,
@@ -396,6 +400,7 @@ def print_seat_digest_report(root: Path, base_ref: str) -> None:
     print(f"integration_digest_stale_files={list(state.stale_files)}")
     print(f"integration_listed_files_changed={changed_listed}")
     print("integration_digest_test=reported_separately_not_run_as_a_suite_test")
+    print("component_lock_test=reported_separately_not_run_as_a_suite_test")
     print("release_gate_command=python3 tools/ci_manifest.py run")
     print(
         "release_gate_owner=operator_at_merge; worker seats must not regenerate "
