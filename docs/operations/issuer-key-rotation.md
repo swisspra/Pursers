@@ -76,8 +76,9 @@ rmdir /PATH/TO/private/issuer-rotation-backup
 
 For an issuer whose files live outside the quickstart layout, name the current
 private key, JWKS, and every token file explicitly. A token file may contain a
-bare JWT or one `Authorization: Bearer JWT` header; the command preserves that
-format.
+bare JWT or a multi-header file with exactly one `Authorization: Bearer JWT`
+line. The command re-signs only that JWT and preserves every other header, the
+line order, line endings, and the trailing newline.
 
 ```bash
 pursers-central rotate-key \

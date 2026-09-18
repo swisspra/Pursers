@@ -1555,7 +1555,7 @@ def deployment_metadata(source: Path | None = None) -> dict[str, Any]:
             check=True,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=GIT_TIMEOUT_SECONDS,
         ).stdout.strip()
         if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
             raise ValueError("git returned a non-commit revision")
@@ -1572,7 +1572,7 @@ def deployment_metadata(source: Path | None = None) -> dict[str, Any]:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=2,
+                timeout=GIT_TIMEOUT_SECONDS,
             ).stdout
         )
     except (OSError, subprocess.SubprocessError, ValueError):

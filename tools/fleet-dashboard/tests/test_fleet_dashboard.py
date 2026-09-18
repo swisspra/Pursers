@@ -55,6 +55,53 @@ def registry(projects: dict) -> dict:
     return {"state": {"value": json.dumps({"schema_version": 1, "projects": projects})}}
 
 
+def test_version_endpoint_caches_slow_startup_git_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "a" * 40
+    calls: list[tuple[list[str], int | float | None]] = []
+
+    def slow_git(
+        command: list[str], **kwargs: object
+    ) -> SimpleNamespace:
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, (int, float))
+        calls.append((command, timeout))
+        if len(calls) > 2:
+            raise subprocess.TimeoutExpired(command, timeout)
+        assert timeout == dashboard.GIT_TIMEOUT_SECONDS
+        stdout = revision + "\n" if "rev-parse" in command else ""
+        return SimpleNamespace(stdout=stdout)
+
+    monkeypatch.setattr(dashboard.subprocess, "run", slow_git)
+
+    class Cache:
+        pass
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/api/version"
+    try:
+        with urllib.request.urlopen(url) as response:
+            first = json.load(response)
+        with urllib.request.urlopen(url) as response:
+            second = json.load(response)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert first == second == {
+        "schema_version": 1,
+        "running_sha": revision,
+        "dirty": False,
+    }
+    assert len(calls) == 2
+
+
 def test_registry_includes_home_and_excludes_paused_projects() -> None:
     result = dashboard.parse_project_registry(
         registry(
