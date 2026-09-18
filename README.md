@@ -216,6 +216,7 @@ Live offers from a disposable Central and an exact-identity claim.
 
 - [Getting Started](docs/GETTING-STARTED.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Rotating the issuer key without downtime](docs/operations/issuer-key-rotation.md)
 - [Comparison with other agent frameworks](docs/COMPARISON.md)
 - [Contributing](CONTRIBUTING.md) · [Security policy](SECURITY.md) · [Changelog](CHANGELOG.md)
 
