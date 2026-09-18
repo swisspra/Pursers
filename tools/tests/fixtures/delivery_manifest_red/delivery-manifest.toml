@@ -1,0 +1,14 @@
+schema_version = 1
+
+[[artifacts]]
+id = "web-surface:website/index.html"
+kind = "web-surface"
+source = "website/index.html"
+state = "exempt"
+reason = "Fixture page intentionally has no delivery channel."
+
+[[version_surfaces]]
+path = "website/index.html"
+version_key = "product"
+prefix = "Beta v"
+reject_other_product_versions = true

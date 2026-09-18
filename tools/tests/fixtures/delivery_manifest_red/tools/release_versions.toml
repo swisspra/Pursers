@@ -1,0 +1,4 @@
+schema_version = 1
+product = "5.0.0b2"
+
+[packages]
