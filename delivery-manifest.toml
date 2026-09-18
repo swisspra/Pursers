@@ -453,6 +453,15 @@ evidence = [".github/workflows/release.yml"]
 evidence_contains = ["tools/release_notes.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/deterministic_tar.py"
+kind = "operator-tool"
+source = "tools/deterministic_tar.py"
+state = "delivered"
+channel = "GitHub release workflow"
+evidence = [".github/workflows/release.yml"]
+evidence_contains = ["tools/deterministic_tar.py"]
+
+[[artifacts]]
 id = "operator-tool:tools/release_publish.py"
 kind = "operator-tool"
 source = "tools/release_publish.py"

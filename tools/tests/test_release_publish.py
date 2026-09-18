@@ -101,10 +101,8 @@ def test_release_workflow_builds_reproducible_non_wheel_assets() -> None:
     assert workflow.count("tools/build_home_runtime_wheelhouse.py") == 2
     assert workflow.count("cmp -s") == 3
     assert "os.utime(path, (timestamp, timestamp), follow_symlinks=False)" in workflow
-    assert 'find "$wheelhouse_name" -print | LC_ALL=C sort' in workflow
-    assert "--format=ustar" in workflow
-    assert "--uid 0 --gid 0 --uname root --gname root" in workflow
-    assert "gzip -n" in workflow
+    assert "python tools/deterministic_tar.py" in workflow
+    assert "tar --" not in workflow
     assert "pursers-home-runtime-wheelhouse-${VERSION}-linux-x86_64" in workflow
     assert "dist/*.zip" in workflow
     assert "dist/*.tar.gz" in workflow
@@ -331,3 +329,37 @@ def test_current_whats_new_versions_match_release_manifest() -> None:
     mentioned = set(re.findall(r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?", current_release))
     assert mentioned and mentioned <= manifest_versions
     assert "2026-09-18" in current_release
+
+
+def test_deterministic_tar_is_byte_stable_and_lists_each_member_once(
+    tmp_path: Path,
+) -> None:
+    import tarfile
+
+    from tools.deterministic_tar import write_archive
+
+    tree = tmp_path / "src" / "wheelhouse"
+    (tree / "wheels").mkdir(parents=True)
+    (tree / "wheels" / "b.whl").write_bytes(b"b")
+    (tree / "wheels" / "a.whl").write_bytes(b"a")
+    (tree / "wheelhouse.json").write_text("{}", encoding="utf-8")
+    first = tmp_path / "first.tar.gz"
+    second = tmp_path / "second.tar.gz"
+    write_archive(tmp_path / "src", "wheelhouse", first, 315532800)
+    os.utime(tree / "wheelhouse.json", (1, 1))
+    write_archive(tmp_path / "src", "wheelhouse", second, 315532800)
+
+    assert first.read_bytes() == second.read_bytes()
+    with tarfile.open(first) as archive:
+        members = archive.getmembers()
+    names = [member.name for member in members]
+    assert names == [
+        "wheelhouse",
+        "wheelhouse/wheelhouse.json",
+        "wheelhouse/wheels",
+        "wheelhouse/wheels/a.whl",
+        "wheelhouse/wheels/b.whl",
+    ]
+    assert {(m.uid, m.gid, m.uname, m.gname, m.mtime) for m in members} == {
+        (0, 0, "root", "root", 315532800)
+    }

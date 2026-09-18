@@ -161,12 +161,8 @@ jobs:
           for path in (wheelhouse, *sorted(wheelhouse.rglob("*"))):
               os.utime(path, (timestamp, timestamp), follow_symlinks=False)
           PY
-            members="$root/$wheelhouse_name.members"
-            (cd "$root" && find "$wheelhouse_name" -print | LC_ALL=C sort > "$members")
-            tar --format=ustar \
-              --uid 0 --gid 0 --uname root --gname root \
-              -C "$root" -cf - -T "$members" \
-              | gzip -n > "$root/$wheelhouse_name.tar.gz"
+            python tools/deterministic_tar.py \
+              "$root" "$wheelhouse_name" "$root/$wheelhouse_name.tar.gz"
           done
           cmp -s \
             "$artifact_a/$wheelhouse_name.tar.gz" \
