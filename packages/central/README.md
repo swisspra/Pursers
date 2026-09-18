@@ -2,6 +2,24 @@
 
 <!-- mcp-name: io.github.swisspra/pursers -->
 
+## Quickstart
+
+Install the packaged service, create private local credentials, and start it:
+
+```bash
+python -m pip install pursers-central
+pursers-central init ./pursers-local
+pursers-central run ./pursers-local
+```
+
+`init` creates a signing key, JWKS, admin token, board-bound worker token, and
+`profile.env` with mode `0600`; it prints paths, never credential values. It
+refuses to replace credential files unless you pass `--force`. Configure a
+Streamable HTTP MCP client for `http://127.0.0.1:8766/mcp`, loading its Bearer
+token from `./pursers-local/worker.jwt`, and call `board_onboard` with board
+`pursers-local`, a new agent name, and role `worker`. Use `admin.jwt` for the
+first connection so that it creates the local board before worker onboarding.
+
 Pursers Central is the loopback MCP service that owns board state. Run it with
 the console script or the equivalent Python module:
 

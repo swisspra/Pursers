@@ -7,10 +7,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Sequence
 
 import uvicorn
 
 from . import central
+from .quickstart import QuickstartError, apply_runtime_profile, init_instance
 from .runtime_health import create_streamable_http_app
 
 
@@ -44,7 +46,7 @@ def _acquire_data_lock(
     return lock
 
 
-def main() -> None:
+def _serve(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run On Board Central")
     parser.add_argument("--host", default=_env("ONBOARD_CENTRAL_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(_env("ONBOARD_CENTRAL_PORT", "8766")))
@@ -87,7 +89,11 @@ def main() -> None:
     )
     parser.add_argument("--advance-generation", metavar="BOARD_ID")
     parser.add_argument("--expect-generation-sha256", metavar="HEX")
-    args = parser.parse_args()
+    parser.epilog = (
+        "For a local first run: pursers-central init DIR, then "
+        "pursers-central run DIR."
+    )
+    args = parser.parse_args(argv)
     if args.data_dir is None:
         parser.error(
             "--data-dir/--data-root or ONBOARD_CENTRAL_DATA_DIR is required"
@@ -173,6 +179,59 @@ def main() -> None:
             )
     finally:
         lock.__exit__(*sys.exc_info())
+
+
+def _init(argv: Sequence[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="pursers-central init",
+        description="Create a private local Central profile and credentials",
+    )
+    parser.add_argument("directory", type=Path)
+    parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--board", default="pursers-local")
+    parser.add_argument("--force", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        paths = init_instance(
+            args.directory,
+            port=args.port,
+            board_id=args.board,
+            force=args.force,
+        )
+    except QuickstartError as exc:
+        parser.error(str(exc))
+    print(f"Pursers Central quickstart initialized: {paths['root']}")
+    print(f"profile: {paths['profile.env']}")
+    print(f"signing key: {paths['signing-key.pem']}")
+    print(f"JWKS: {paths['jwks.json']}")
+    print(f"admin token: {paths['admin.jwt']}")
+    print(f"worker token: {paths['worker.jwt']}")
+    print(f"run: pursers-central run {paths['root']}")
+
+
+def _run(argv: Sequence[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="pursers-central run",
+        description="Run Central from a generated quickstart profile",
+    )
+    parser.add_argument("directory", type=Path)
+    args, remaining = parser.parse_known_args(argv)
+    try:
+        apply_runtime_profile(args.directory)
+    except QuickstartError as exc:
+        parser.error(str(exc))
+    _serve(remaining)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "init":
+        _init(arguments[1:])
+        return
+    if arguments and arguments[0] == "run":
+        _run(arguments[1:])
+        return
+    _serve(arguments)
 
 
 if __name__ == "__main__":
