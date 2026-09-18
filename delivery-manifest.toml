@@ -184,7 +184,7 @@ kind = "web-surface"
 source = "tools/fleet-dashboard/fleet_dashboard.py"
 state = "delivered"
 channel = "repository-owned LaunchAgent launcher and exact-SHA upgrade command"
-evidence = ["tools/fleet-dashboard/README.md", "tools/fleet-dashboard/launch.sh", "tools/fleet-dashboard/upgrade.sh", "tools/fleet-dashboard/com.pursers.fleet-dashboard.plist.template"]
+evidence = ["tools/fleet-dashboard/README.md", "tools/fleet-dashboard/launch.sh", "tools/fleet-dashboard/upgrade.sh", "tools/fleet-dashboard/com.pursers.fleet-dashboard.plist.template", "docs/guides/fleet-dashboard.md", "docs/guides/img/fleet-home.png", "docs/guides/img/fleet-work.png", "docs/guides/img/fleet-board.png", "docs/guides/img/fleet-settings.png", "docs/guides/img/fleet-config.png"]
 evidence_contains = ["GET /api/version", "launchctl kickstart", "com.pursers.fleet-dashboard"]
 
 [[artifacts]]
