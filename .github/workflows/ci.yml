@@ -98,15 +98,17 @@ jobs:
           set -euo pipefail
           test -n "${PIP_FIND_LINKS:-}"
           test -n "${UV_FIND_LINKS:-}"
-          python -m venv .ci/isolated-wheel-imports
-          env -u PYTHONPATH .ci/isolated-wheel-imports/bin/python -m pip install \
+          # Outside the checkout: files a step leaves in the tree are seen by
+          # repository-wide checks in CI but never locally.
+          python -m venv "$RUNNER_TEMP/isolated-wheel-imports"
+          env -u PYTHONPATH "$RUNNER_TEMP/isolated-wheel-imports/bin/python" -m pip install \
             --disable-pip-version-check --no-input \
             .ci/wheels/pursers_central-*.whl \
             .ci/wheels/pursers_client-*.whl \
             .ci/wheels/pursers_personal-*.whl \
             .ci/wheels/pursers_wait_bridge-*.whl \
             .ci/wheels/pursers_acp-*.whl
-          env -u PYTHONPATH .ci/isolated-wheel-imports/bin/python - <<'PY'
+          env -u PYTHONPATH "$RUNNER_TEMP/isolated-wheel-imports/bin/python" - <<'PY'
           import importlib.metadata as metadata
           import tomllib
           import pursers_central.central

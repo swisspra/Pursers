@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -144,17 +145,23 @@ def test_acp_bump_updates_its_surfaces_without_rewriting_dependency_versions(
 
 
 def test_acp_only_bump_preserves_delivery_manifest_validation(tmp_path: Path) -> None:
+    # Copy only tracked files. A whole-tree copy also takes whatever a build
+    # step left in the checkout (CI creates .ci/isolated-wheel-imports), and
+    # the copy is not a git work tree, so the checker would count those files
+    # as unregistered artifacts on CI and nowhere else.
     root = tmp_path / "repository"
-    shutil.copytree(
-        ROOT,
-        root,
-        ignore=shutil.ignore_patterns(
-            ".git",
-            ".pytest_cache",
-            "__pycache__",
-            "*.pyc",
-        ),
-    )
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z"],
+        capture_output=True, check=True,
+    ).stdout.split(b"\0")
+    for entry in filter(None, tracked):
+        relative = entry.decode("utf-8")
+        source = ROOT / relative
+        if not source.is_file() and not source.is_symlink():
+            continue
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination, follow_symlinks=False)
     current = load_versions(root / "tools/release_versions.toml")
     target = release_train.bumped_versions(current, ("acp=0.1.1",), None)
 
