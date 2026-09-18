@@ -42,6 +42,7 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 MANAGED_COMMENT = "# pursers-managed; edit through the fleet dashboard"
 DEFAULT_REGISTRY_BOARD = "pursers"
+CONNECTOR_TOKEN_SHA256_ENV = "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256"
 CAPABILITY_ENV = {
     "tier_max": "PURSERS_TIER_MAX",
     "skills": "PURSERS_SKILLS",
@@ -535,12 +536,14 @@ def _extract_env_token_references(
     vars_: list[str] = []
     if desired.host in {"codex", "codex-cli"}:
         doc = inspection.get("document", {})
-        bearer_var = (
-            doc.get("mcp_servers", {})
-            .get(desired.http_connector_name, {})
-            .get("bearer_token_env_var")
+        board_server = doc.get("mcp_servers", {}).get(
+            desired.http_connector_name, {}
         )
-        vars_.append(bearer_var or desired.token_env_var)
+        bearer_var = board_server.get("bearer_token_env_var")
+        if bearer_var:
+            vars_.append(bearer_var)
+        elif not board_server.get("http_headers_helper"):
+            vars_.append(desired.token_env_var)
 
     text = inspection.get("text", "")
     if isinstance(text, str) and text:
@@ -548,7 +551,7 @@ def _extract_env_token_references(
             r"^\s*([A-Za-z_][A-Za-z0-9_]*TOKEN[A-Za-z0-9_]*)\s*:", text, re.M
         ):
             var_name = m.group(1).strip()
-            if not var_name.endswith("_FILE"):
+            if not var_name.endswith(("_FILE", "_SHA256", "_MATCH")):
                 vars_.append(var_name)
 
     doc = inspection.get("document", {})
@@ -558,7 +561,12 @@ def _extract_env_token_references(
                 env = srv.get("env", {})
                 if isinstance(env, dict):
                     for k in env:
-                        if "TOKEN" in k and not k.endswith("_FILE"):
+                        if (
+                            "TOKEN" in k
+                            and not k.endswith("_FILE")
+                            and not k.endswith("_SHA256")
+                            and not k.endswith("_MATCH")
+                        ):
                             vars_.append(k)
 
     seen: set[str] = set()
@@ -916,15 +924,18 @@ def discover_managed_seats(
                         if board_name == connector or not isinstance(board_server, dict):
                             continue
                         headers = board_server.get("env_http_headers", {})
+                        bearer_var = board_server.get("bearer_token_env_var")
+                        headers_helper = board_server.get("http_headers_helper")
                         if (
                             board_server.get("url") == central_url
                             and isinstance(headers, dict)
                             and headers.get("ONBOARD_BOARD_ID") == home_board
-                            and isinstance(board_server.get("bearer_token_env_var"), str)
-                        ):
-                            matches.append(
-                                (board_name, board_server["bearer_token_env_var"])
+                            and (
+                                isinstance(bearer_var, str)
+                                or isinstance(headers_helper, str)
                             )
+                        ):
+                            matches.append((board_name, bearer_var))
                     default_board = (
                         "pursers-review" if role == "reviewer" else "pursers-dev"
                     )
@@ -1197,18 +1208,30 @@ def _remove_toml_tables(text: str, names: set[str]) -> str:
     return "".join(kept).rstrip() + "\n"
 
 
-def _bridge_shell_args(
-    token_env_var: str = "ONBOARD_CENTRAL_TOKEN",
-) -> list[str]:
-    if not ENV_NAME.fullmatch(token_env_var):
-        raise ValueError("token env var must be a safe identifier")
+def _bridge_shell_args() -> list[str]:
     script = (
-        f'connector_token=${{{token_env_var}-}}; '
+        f'connector_token_sha256=${{{CONNECTOR_TOKEN_SHA256_ENV}-}}; '
         'token=$(tr -d "\\r\\n" < "$ONBOARD_CENTRAL_TOKEN_FILE"); '
-        'export PURSERS_BOARD_CONNECTOR_TOKEN="$connector_token"; '
+        f'export {CONNECTOR_TOKEN_SHA256_ENV}="$connector_token_sha256"; '
         'export ONBOARD_CENTRAL_TOKEN="$token"; exec "$PURSERS_BRIDGE_COMMAND"'
     )
     return ["-c", script]
+
+
+def _connector_token_fingerprint(token_file: str | Path) -> str:
+    token = _read_token_literal(token_file)
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _codex_http_headers_helper(desired: DesiredSeat) -> str:
+    code = (
+        "import json,sys; from pathlib import Path; "
+        "token=Path(sys.argv[1]).read_text(encoding='utf-8').strip(); "
+        "print(json.dumps({'Authorization':'Bearer '+token},separators=(',',':')))"
+    )
+    return shlex.join(
+        [str(_seat_python(desired.bridge_command)), "-c", code, desired.token_file]
+    )
 
 
 class CodexAdapter(FileAdapter):
@@ -1244,11 +1267,13 @@ class CodexAdapter(FileAdapter):
             for line in prefix.splitlines(keepends=True)
             if line.strip() != MANAGED_COMMENT
         )
-        connector_token = _read_token_literal(desired.token_file)
+        connector_token_fingerprint = _connector_token_fingerprint(
+            desired.token_file
+        )
         block = f"""
 [{f'mcp_servers.{name}'}]
 command = "/bin/sh"
-args = {_toml_array(_bridge_shell_args(desired.token_env_var))}
+args = {_toml_array(_bridge_shell_args())}
 tool_timeout_sec = {desired.profile.host_timeout_s}
 
 [{f'mcp_servers.{name}.env'}]
@@ -1268,12 +1293,12 @@ PURSERS_PROVIDER = {_toml_string(desired.provider or '')}
 PURSERS_BOARDS = {_toml_string(desired.boards or '')}
 PURSERS_HOME_BOARD = {_toml_string(desired.home_board)}
 PURSERS_REQUIRE_TOKEN_MATCH = "1"
-{desired.token_env_var} = {_toml_string(connector_token)}
+{CONNECTOR_TOKEN_SHA256_ENV} = {_toml_string(connector_token_fingerprint)}
 {f'SSL_CERT_FILE = {_toml_string(desired.ca_file)}' if desired.ca_file else ''}
 
 [mcp_servers.{board_name}]
 url = {_toml_string(desired.central_url)}
-bearer_token_env_var = {_toml_string(desired.token_env_var)}
+http_headers_helper = {_toml_string(_codex_http_headers_helper(desired))}
 
 [mcp_servers.{board_name}.env_http_headers]
 ONBOARD_BOARD_ID = {_toml_string(desired.anchor_board)}
@@ -1308,7 +1333,7 @@ def _yaml_quote(value: str) -> str:
 
 def _goose_block(desired: DesiredSeat) -> list[str]:
     name = desired.connector_name
-    connector_token = _read_token_literal(desired.token_file)
+    connector_token_fingerprint = _connector_token_fingerprint(desired.token_file)
     return [
         f"  {name}:\n",
         f"    {MANAGED_COMMENT}\n",
@@ -1320,7 +1345,7 @@ def _goose_block(desired: DesiredSeat) -> list[str]:
         "    args:\n",
         *[
             f"      - {_yaml_quote(item)}\n"
-            for item in _bridge_shell_args(desired.token_env_var)
+            for item in _bridge_shell_args()
         ],
         "    envs:\n",
         f"      PURSERS_BRIDGE_COMMAND: {_yaml_quote(desired.bridge_command)}\n",
@@ -1331,7 +1356,10 @@ def _goose_block(desired: DesiredSeat) -> list[str]:
         "      PURSERS_HOST: goose\n",
         f"      PURSERS_ROLE: {_yaml_quote(desired.role)}\n",
         "      PURSERS_REQUIRE_TOKEN_MATCH: \"1\"\n",
-        f"      {desired.token_env_var}: {_yaml_quote(connector_token)}\n",
+        (
+            f"      {CONNECTOR_TOKEN_SHA256_ENV}: "
+            f"{_yaml_quote(connector_token_fingerprint)}\n"
+        ),
         *[
             f"      {name}: {_yaml_quote(value)}\n"
             for name, value in capability_env(desired).items()
@@ -1525,7 +1553,7 @@ def _bridge_json(desired: DesiredSeat) -> dict[str, Any]:
         env["SSL_CERT_FILE"] = desired.ca_file
     return {
         "command": "/bin/sh",
-        "args": _bridge_shell_args(desired.token_env_var),
+        "args": _bridge_shell_args(),
         "env": env,
     }
 
@@ -2017,14 +2045,14 @@ def _host_launch_spec(
     raise ValueError(f"runtime bridge probe is unsupported for {desired.host}")
 
 
-def _configured_connector_token(
+def _configured_connector_fingerprint(
     desired: DesiredSeat, inspection: dict[str, Any]
 ) -> str | None:
     try:
         _command, _args, env = _host_launch_spec(desired, inspection)
     except ValueError:
         return None
-    value = env.get(desired.token_env_var)
+    value = env.get(CONNECTOR_TOKEN_SHA256_ENV)
     return value if value else None
 
 
@@ -2447,38 +2475,52 @@ class Doctor:
                     ).strip()
                 except OSError:
                     bridge_token = ""
-                configured_token = _configured_connector_token(desired, inspection)
+                configured_fingerprint = _configured_connector_fingerprint(
+                    desired, inspection
+                )
+                bridge_fingerprint = hashlib.sha256(
+                    bridge_token.encode("utf-8")
+                ).hexdigest()
                 literal_ok = bool(
                     bridge_token
-                    and configured_token
-                    and hmac.compare_digest(bridge_token, configured_token)
+                    and configured_fingerprint
+                    and hmac.compare_digest(
+                        bridge_fingerprint, configured_fingerprint.lower()
+                    )
                 )
-                status, connector_token, source = _env_value(
-                    desired.token_env_var, self.runner
+                identity_ok = literal_ok
+                identity_source = "managed-fingerprint"
+                source = "managed-config"
+                connector_env_vars = _extract_env_token_references(
+                    desired, inspection
                 )
-                identity_ok = False
-                identity_source = "Central"
-                if status == "PASS" and bridge_token and connector_token:
-                    try:
-                        bridge_principal, connector_principal = self.identity_probe(
-                            desired, bridge_token, connector_token, 5.0
-                        )
-                        identity_ok = hmac.compare_digest(
-                            bridge_principal, connector_principal
-                        )
-                    except Exception:
-                        identity_ok = False
+                if desired.host in {"codex", "codex-cli"} and connector_env_vars:
+                    status, connector_token, source = _env_value(
+                        connector_env_vars[0], self.runner
+                    )
+                    identity_ok = False
+                    identity_source = "Central"
+                    if status == "PASS" and bridge_token and connector_token:
+                        try:
+                            bridge_principal, connector_principal = self.identity_probe(
+                                desired, bridge_token, connector_token, 5.0
+                            )
+                            identity_ok = hmac.compare_digest(
+                                bridge_principal, connector_principal
+                            )
+                        except Exception:
+                            identity_ok = False
                 rows.append(
                     self._check(
                         desired,
                         "split-identity",
                         "PASS" if literal_ok and identity_ok else "FAIL",
                         (
-                            f"one Central principal; config literal matches token file; "
+                            f"one identity; config fingerprint matches token file; "
                             f"source={source}; check={identity_source}"
                             if literal_ok and identity_ok
-                            else "split identity: token file, managed literal, or connector "
-                            f"principal differs; source={source}"
+                            else "split identity: token file, managed fingerprint, or "
+                            f"connector principal differs; source={source}"
                         ),
                     )
                 )

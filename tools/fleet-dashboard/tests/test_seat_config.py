@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import shlex
 import stat
 import subprocess
 import sys
@@ -131,10 +133,17 @@ def test_codex_plan_apply_inspect_backup_and_idempotency(tmp_path: Path) -> None
 
     assert document["features"]["web_search"] is True
     assert document["mcp_servers"][target.connector_name]["tool_timeout_sec"] == 620
-    assert (
-        document["mcp_servers"]["pursers-dev"]["bearer_token_env_var"]
-        == "ONBOARD_CENTRAL_TOKEN"
+    board = document["mcp_servers"]["pursers-dev"]
+    assert "bearer_token_env_var" not in board
+    helper = subprocess.run(
+        shlex.split(board["http_headers_helper"]),
+        check=True,
+        text=True,
+        capture_output=True,
     )
+    assert json.loads(helper.stdout) == {
+        "Authorization": "Bearer header.synthetic.signature"
+    }
     assert (
         document["mcp_servers"][target.connector_name]["env"]
         ["ONBOARD_CENTRAL_TOKEN_FILE"]
@@ -149,14 +158,15 @@ def test_codex_plan_apply_inspect_backup_and_idempotency(tmp_path: Path) -> None
         ["PURSERS_REQUIRE_TOKEN_MATCH"]
         == "1"
     )
-    assert (
-        document["mcp_servers"][target.connector_name]["env"]
-        [target.token_env_var]
-        == "header.synthetic.signature"
-    )
-    assert "PURSERS_BOARD_CONNECTOR_TOKEN" in document[
+    wait_env = document["mcp_servers"][target.connector_name]["env"]
+    assert target.token_env_var not in wait_env
+    assert wait_env["PURSERS_BOARD_CONNECTOR_TOKEN_SHA256"] == hashlib.sha256(
+        b"header.synthetic.signature"
+    ).hexdigest()
+    assert "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256" in document[
         "mcp_servers"
     ][target.connector_name]["args"][1]
+    assert "header.synthetic.signature" not in config.read_text()
     assert "# keep this comment" in config.read_text()
     assert len(result.backups) == 1
     assert Path(result.backups[0]).read_text().startswith("# keep this comment")
@@ -248,9 +258,21 @@ def test_codex_worker_and_reviewer_connectors_coexist_and_match_independently(
         assert wait["env"]["ONBOARD_AGENT_NAME"] == target.name
         assert wait["env"]["PURSERS_ROLE"] == target.role
         assert wait["env"]["PURSERS_REQUIRE_TOKEN_MATCH"] == "1"
-        assert wait["env"][target.token_env_var] == Path(target.token_file).read_text()
-        assert board["bearer_token_env_var"] == target.token_env_var
-        assert f"${{{target.token_env_var}-}}" in wait["args"][1]
+        assert target.token_env_var not in wait["env"]
+        assert wait["env"]["PURSERS_BOARD_CONNECTOR_TOKEN_SHA256"] == hashlib.sha256(
+            Path(target.token_file).read_bytes()
+        ).hexdigest()
+        assert "bearer_token_env_var" not in board
+        helper = subprocess.run(
+            shlex.split(board["http_headers_helper"]),
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert json.loads(helper.stdout)["Authorization"] == (
+            "Bearer " + Path(target.token_file).read_text()
+        )
+        assert "${PURSERS_BOARD_CONNECTOR_TOKEN_SHA256-}" in wait["args"][1]
 
     doctor = seat_config.Doctor(
         pypi_fetcher=lambda: "0.1.0a17",
@@ -259,11 +281,9 @@ def test_codex_worker_and_reviewer_connectors_coexist_and_match_independently(
             "mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}
         },
     )
-    monkeypatch.setenv("PURSERS_WORKER_TOKEN", worker_token)
+    monkeypatch.setenv("PURSERS_WORKER_TOKEN", "wrong.worker.token")
     monkeypatch.setenv("PURSERS_REVIEW_TOKEN", "wrong.review.token")
-    assert seat_config._extract_env_token_references(
-        reviewer, adapter.inspect()
-    ) == ["PURSERS_REVIEW_TOKEN"]
+    assert seat_config._extract_env_token_references(reviewer, adapter.inspect()) == []
     assert next(row for row in doctor.run(worker) if row.check == "config").status == "PASS"
     assert next(row for row in doctor.run(worker) if row.check == "role").status == "PASS"
     assert next(row for row in doctor.run(reviewer) if row.check == "config").status == "PASS"
@@ -271,28 +291,13 @@ def test_codex_worker_and_reviewer_connectors_coexist_and_match_independently(
     worker_row = next(
         row for row in doctor.run(worker) if row.check == "split-identity"
     )
-    reviewer_env_row = next(
-        row for row in doctor.run(reviewer) if row.check == "token-env"
-    )
     reviewer_row = next(
         row for row in doctor.run(reviewer) if row.check == "split-identity"
     )
     assert worker_row.status == "PASS"
-    assert reviewer_env_row.status == "PASS"
-    assert "PURSERS_REVIEW_TOKEN" in reviewer_env_row.message
-    assert "PURSERS_WORKER_TOKEN" not in reviewer_env_row.message
-    assert reviewer_row.status == "FAIL"
-
-    monkeypatch.setenv("PURSERS_WORKER_TOKEN", "wrong.worker.token")
-    monkeypatch.setenv("PURSERS_REVIEW_TOKEN", review_token)
-    worker_row = next(
-        row for row in doctor.run(worker) if row.check == "split-identity"
-    )
-    reviewer_row = next(
-        row for row in doctor.run(reviewer) if row.check == "split-identity"
-    )
-    assert worker_row.status == "FAIL"
     assert reviewer_row.status == "PASS"
+    assert not any(row.check == "token-env" for row in doctor.run(worker))
+    assert not any(row.check == "token-env" for row in doctor.run(reviewer))
     assert adapter.inspect()["document"]["features"]["web_search"] is True
 
 
@@ -347,7 +352,9 @@ def test_goose_upgrade_preserves_clone_and_extra_files(tmp_path: Path) -> None:
     assert f"  {target.connector_name}:" in text
     assert "    timeout: 300" in text
     assert "      PURSERS_REQUIRE_TOKEN_MATCH: \"1\"" in text
-    assert "      ONBOARD_CENTRAL_TOKEN: \"header.synthetic.signature\"" in text
+    assert "      ONBOARD_CENTRAL_TOKEN: \"header.synthetic.signature\"" not in text
+    assert "      PURSERS_BOARD_CONNECTOR_TOKEN_SHA256:" in text
+    assert "header.synthetic.signature" not in text
     assert (clone / "keep.txt").read_text() == "clone"
     assert (seat / "operator-note.txt").read_text() == "keep"
     assert sys.executable in (seat / "bin/board.sh").read_text()
@@ -1099,7 +1106,7 @@ def test_bridge_installer_stale_shim_and_pypi(tmp_path: Path) -> None:
     assert bridge_warn.status == "WARN"
 
 
-def test_doctor_bearer_env_var_missing_vs_defined(
+def test_codex_headers_helper_removes_raw_token_env_dependency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = desired(tmp_path, "codex")
@@ -1109,93 +1116,42 @@ def test_doctor_bearer_env_var_missing_vs_defined(
     command.parent.mkdir(parents=True)
     command.write_text("#!/bin/sh\n")
     command.chmod(0o755)
-    seat_config.CodexAdapter(target.config_path).apply(
-        seat_config.CodexAdapter(target.config_path).plan(target)
+    adapter = seat_config.CodexAdapter(target.config_path)
+    adapter.apply(adapter.plan(target))
+    monkeypatch.delenv(target.token_env_var, raising=False)
+
+    document = adapter.inspect()["document"]
+    board = document["mcp_servers"][target.http_connector_name]
+    assert "bearer_token_env_var" not in board
+    wait_env = document["mcp_servers"][target.connector_name]["env"]
+    assert target.token_env_var not in wait_env
+    assert "part1.part2.part3" not in Path(target.config_path).read_text()
+    result = subprocess.run(
+        shlex.split(board["http_headers_helper"]),
+        check=True,
+        text=True,
+        capture_output=True,
     )
+    assert json.loads(result.stdout) == {
+        "Authorization": "Bearer part1.part2.part3"
+    }
 
-    monkeypatch.setenv("SHELL", "/missing/configured-shell")
-    shell_calls: list[list[str]] = []
-    which_calls: list[str] = []
-
-    def which_with_bash(command: str):
-        which_calls.append(command)
-        return "/fake/bash" if command == "bash" else None
-
-    monkeypatch.setattr(seat_config.shutil, "which", which_with_bash)
-
-    # 1. Variable is unset and the detected login shell reports it unset.
-    monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN", raising=False)
-
-    def run_missing(command, **_kwargs):
-        if command[0] == "ps":
-            return subprocess.CompletedProcess(command, 0, "", "")
-        if command[0] == "/fake/bash":
-            shell_calls.append(command)
-            return subprocess.CompletedProcess(command, 0, "", "")
-        return subprocess.CompletedProcess(command, 0, "0.1.0a17\n", "")
-
-    doc = seat_config.Doctor(
-        runner=run_missing,
-        pypi_fetcher=lambda: "0.1.0a17",
-        live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
-    )
-    rows = doc.run(target)
-    env_check = next(r for r in rows if r.check == "token-env")
-    assert env_check.status == "FAIL"
-    assert "'ONBOARD_CENTRAL_TOKEN' is not defined" in env_check.message
-    assert "source=login-shell (/fake/bash)" in env_check.message
-    assert which_calls[-3:] == ["/missing/configured-shell", "zsh", "bash"]
-
-    # 2. Process environment wins without invoking a shell.
-    before = len(shell_calls)
-    before_which = len(which_calls)
-    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "valid-token")
-    rows_pass = doc.run(target)
-    env_pass = next(r for r in rows_pass if r.check == "token-env")
-    assert env_pass.status == "PASS"
-    assert "source=process" in env_pass.message
-    assert len(shell_calls) == before
-    assert len(which_calls) == before_which
-
-    # 3. Variable unset in process env, but set in detected login shell.
-    monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN", raising=False)
-
-    def run_shell_defined(command, **_kwargs):
-        if command[0] == "ps":
-            return subprocess.CompletedProcess(command, 0, "", "")
-        if command[0] == "/fake/bash":
-            return subprocess.CompletedProcess(command, 0, "set", "")
-        return subprocess.CompletedProcess(command, 0, "0.1.0a17\n", "")
-
-    doc_shell = seat_config.Doctor(
-        runner=run_shell_defined,
-        pypi_fetcher=lambda: "0.1.0a17",
-        live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
-    )
-    rows_shell = doc_shell.run(target)
-    env_shell = next(r for r in rows_shell if r.check == "token-env")
-    assert env_shell.status == "PASS"
-    assert "source=login-shell (/fake/bash)" in env_shell.message
-
-    # 4. No supported shell is inspectable, so absence is not a hard failure.
-    monkeypatch.setattr(seat_config.shutil, "which", lambda _command: None)
-    doc_no_shell = seat_config.Doctor(
-        runner=run_missing,
+    rows = seat_config.Doctor(
+        runner=hermetic_doctor_runner,
+        runtime_probe=lambda _d, _i, _t: (True, "stub ok"),
         pypi_fetcher=lambda: "0.1.0a17",
         live_probe=lambda _d, _t: {
             "mode": "push",
             "registry_boards": ["pursers"],
             "skipped_boards": {},
         },
-    )
-    rows_no_shell = doc_no_shell.run(target)
-    env_no_shell = next(r for r in rows_no_shell if r.check == "token-env")
-    assert env_no_shell.status == "WARN"
-    assert "cannot inspect login shell" in env_no_shell.message
+    ).run(target)
+    assert not any(row.check == "token-env" for row in rows)
+    assert next(row for row in rows if row.check == "split-identity").status == "PASS"
 
 
 @pytest.mark.parametrize("role", ["worker", "reviewer"])
-def test_doctor_reports_split_identity_fail_and_shared_token_pass(
+def test_doctor_ignores_obsolete_raw_env_when_fingerprint_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
 ) -> None:
     target = desired(tmp_path, "codex", role=role)
@@ -1217,13 +1173,6 @@ def test_doctor_reports_split_identity_fail_and_shared_token_pass(
     )
 
     monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "different.token.value")
-    failed = next(
-        row for row in doctor.run(target) if row.check == "split-identity"
-    )
-    assert failed.status == "FAIL"
-    assert "split identity" in failed.message
-
-    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", token)
     passed = next(
         row for row in doctor.run(target) if row.check == "split-identity"
     )
@@ -1231,7 +1180,7 @@ def test_doctor_reports_split_identity_fail_and_shared_token_pass(
     assert token not in passed.message
 
 
-def test_doctor_compares_central_principals_and_managed_literal(
+def test_doctor_compares_token_file_and_managed_fingerprint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = desired(tmp_path, "codex")
@@ -1244,7 +1193,7 @@ def test_doctor_compares_central_principals_and_managed_literal(
     command.chmod(0o755)
     adapter = seat_config.CodexAdapter(target.config_path)
     adapter.apply(adapter.plan(target))
-    monkeypatch.setenv(target.token_env_var, "connector.part.token")
+    monkeypatch.setenv(target.token_env_var, "obsolete.connector.token")
     calls: list[tuple[str, str]] = []
 
     def identity_probe(_desired, bridge_token, connector_token, _timeout):
@@ -1264,25 +1213,21 @@ def test_doctor_compares_central_principals_and_managed_literal(
         row for row in doctor.run(target) if row.check == "split-identity"
     )
     assert passed.status == "PASS"
-    assert calls == [(token, "connector.part.token")]
+    assert calls == []
     assert token not in passed.message
 
-    document = tomllib.loads(Path(target.config_path).read_text())
-    document["mcp_servers"][target.connector_name]["env"][target.token_env_var] = (
-        "stale.literal.token"
-    )
     Path(target.config_path).write_text(
         "\n".join(
             [
                 f'[mcp_servers.{target.connector_name}]',
                 'command = "/bin/sh"',
-                f'args = {json.dumps(seat_config._bridge_shell_args(target.token_env_var))}',
+                f'args = {json.dumps(seat_config._bridge_shell_args())}',
                 "tool_timeout_sec = 620",
                 "",
                 f'[mcp_servers.{target.connector_name}.env]',
                 f'PURSERS_BRIDGE_COMMAND = {json.dumps(target.bridge_command)}',
                 f'ONBOARD_CENTRAL_TOKEN_FILE = {json.dumps(target.token_file)}',
-                f'{target.token_env_var} = "stale.literal.token"',
+                'PURSERS_BOARD_CONNECTOR_TOKEN_SHA256 = "' + "0" * 64 + '"',
                 'PURSERS_REQUIRE_TOKEN_MATCH = "1"',
                 "",
             ]
@@ -1292,6 +1237,36 @@ def test_doctor_compares_central_principals_and_managed_literal(
         row for row in doctor.run(target) if row.check == "split-identity"
     )
     assert failed.status == "FAIL"
+
+
+def test_goose_doctor_uses_fingerprint_without_raw_token_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = desired(tmp_path, "goose")
+    Path(target.ca_file).write_text("ca")
+    command = Path(target.bridge_command)
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o755)
+    adapter = seat_config.GooseAdapter(target.config_path)
+    adapter.apply(adapter.plan(target))
+    monkeypatch.delenv(target.token_env_var, raising=False)
+
+    rows = seat_config.Doctor(
+        runner=hermetic_doctor_runner,
+        runtime_probe=lambda _d, _i, _t: (True, "stub ok"),
+        pypi_fetcher=lambda: "0.1.0a17",
+        live_probe=lambda _d, _t: {
+            "mode": "push",
+            "registry_boards": ["pursers"],
+            "skipped_boards": {},
+        },
+    ).run(target)
+
+    split = next(row for row in rows if row.check == "split-identity")
+    assert split.status == "PASS"
+    assert "managed-fingerprint" in split.message
+    assert not any(row.check == "token-env" for row in rows)
 
 
 def test_default_identity_probe_validates_both_tokens_with_central(
@@ -1374,8 +1349,9 @@ def test_doctor_runtime_probe_launches_host_env_block_only(
         "        raise RuntimeError('inherited env reached stub')\n"
         "    if os.environ.get('ONBOARD_CENTRAL_TOKEN') != 'header.synthetic.signature':\n"
         "        raise RuntimeError('file token missing')\n"
-        "    if os.environ.get('PURSERS_BOARD_CONNECTOR_TOKEN') != 'header.synthetic.signature':\n"
-        "        raise RuntimeError('connector token missing')\n"
+        "    expected = '" + hashlib.sha256(b"header.synthetic.signature").hexdigest() + "'\n"
+        "    if os.environ.get('PURSERS_BOARD_CONNECTOR_TOKEN_SHA256') != expected:\n"
+        "        raise RuntimeError('connector fingerprint missing')\n"
         f"    Path({str(marker)!r}).write_text(json.dumps(sorted(os.environ)))\n"
         "    return {'ok': True}\n"
         "server.run(transport='stdio')\n"
@@ -1392,7 +1368,8 @@ def test_doctor_runtime_probe_launches_host_env_block_only(
     assert "joins Central" in message
     observed = json.loads(marker.read_text())
     assert "SHOULD_NOT_REACH_PROBE" not in observed
-    assert target.token_env_var in observed
+    assert "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256" in observed
+    assert "PURSERS_BOARD_CONNECTOR_TOKEN" not in observed
 
 
 def test_doctor_token_file_validation_and_redaction(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import socket
 import sys
@@ -38,23 +39,40 @@ class _UnauthorizedHandler(BaseHTTPRequestHandler):
 
 
 class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_split_identity_refuses_start_and_matching_token_passes(self) -> None:
+    async def test_fingerprint_mismatch_refuses_start_and_match_passes(self) -> None:
         connection = wait_server.DeferredBoardConnection(
             wait_server.BridgeStats(Path(tempfile.gettempdir()) / "unused.json")
         )
+        expected = hashlib.sha256(wait_server.CENTRAL_TOKEN.encode("utf-8")).hexdigest()
         with patch.dict(
             os.environ,
             {
                 "PURSERS_REQUIRE_TOKEN_MATCH": "1",
+                "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256": "0" * 64,
+                "PURSERS_BOARD_CONNECTOR_TOKEN": wait_server.CENTRAL_TOKEN,
+            },
+        ):
+            with self.assertRaisesRegex(
+                wait_server.BoardJoinFailure, "split identity"
+            ) as raised:
+                await connection.client()
+            self.assertNotIn(wait_server.CENTRAL_TOKEN, str(raised.exception))
+        with patch.dict(
+            os.environ,
+            {
+                "PURSERS_REQUIRE_TOKEN_MATCH": "1",
+                "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256": expected,
                 "PURSERS_BOARD_CONNECTOR_TOKEN": "different-token",
             },
         ):
-            with self.assertRaisesRegex(wait_server.BoardJoinFailure, "split identity"):
-                await connection.client()
+            self.assertIsNone(wait_server._split_identity_failure())
+
+    async def test_raw_token_fallback_remains_compatible(self) -> None:
         with patch.dict(
             os.environ,
             {
                 "PURSERS_REQUIRE_TOKEN_MATCH": "1",
+                "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256": "",
                 "PURSERS_BOARD_CONNECTOR_TOKEN": wait_server.CENTRAL_TOKEN,
             },
         ):
@@ -65,6 +83,7 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
             os.environ,
             {
                 "PURSERS_REQUIRE_TOKEN_MATCH": "1",
+                "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256": "",
                 "PURSERS_BOARD_CONNECTOR_TOKEN": "",
             },
         ):
