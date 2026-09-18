@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import fcntl
+import ipaddress
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 MAX_KEY_BYTES = 8_192
@@ -68,6 +69,10 @@ def validate_endpoint(value: Any) -> str:
     endpoint = _text(value, "endpoint", MAX_ENDPOINT_CHARS).rstrip("/")
     parsed = urlsplit(endpoint)
     hostname = (parsed.hostname or "").casefold()
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ButlerSettingsError("endpoint contains an invalid port") from exc
     if (
         parsed.scheme not in {"http", "https"}
         or not hostname
@@ -79,9 +84,55 @@ def validate_endpoint(value: Any) -> str:
         raise ButlerSettingsError(
             "endpoint must be an http(s) URL without credentials, query, or fragment"
         )
-    if parsed.scheme == "http" and hostname not in {"127.0.0.1", "localhost", "::1"}:
+    address_text = hostname.replace("%25", "%").split("%", 1)[0]
+    try:
+        address = ipaddress.ip_address(address_text)
+    except ValueError:
+        address = None
+    effective_address = (
+        address.ipv4_mapped
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped
+        else address
+    )
+    if effective_address is not None and effective_address.is_link_local:
+        raise ButlerSettingsError("endpoint must not use a link-local address")
+    loopback = hostname == "localhost" or bool(
+        effective_address and effective_address.is_loopback
+    )
+    if parsed.scheme == "http" and not loopback:
         raise ButlerSettingsError("endpoint must use https unless it is loopback")
     return endpoint
+
+
+def _url_origin(value: str) -> tuple[str, str, int]:
+    parsed = urlsplit(value)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return parsed.scheme.casefold(), (parsed.hostname or "").casefold(), port
+
+
+class _SameOriginRedirectHandler(HTTPRedirectHandler):
+    """Follow validation redirects only while they stay on the original origin."""
+
+    def __init__(self, validation_url: str) -> None:
+        super().__init__()
+        self._origin = _url_origin(validation_url)
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Mapping[str, str],
+        newurl: str,
+    ) -> Request | None:
+        try:
+            allowed = validate_endpoint(newurl)
+        except ButlerSettingsError as exc:
+            raise URLError("redirect refused") from exc
+        if _url_origin(allowed) != self._origin:
+            raise URLError("redirect refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def validate_headers(value: Any) -> dict[str, str]:
@@ -100,6 +151,8 @@ def validate_headers(value: Any) -> dict[str, str]:
             )
         name = raw_name.strip()
         folded = name.casefold()
+        if folded == "host":
+            raise ButlerSettingsError("extra_headers must not set Host")
         if folded in lowered:
             raise ButlerSettingsError("extra_headers names must be unique")
         lowered.add(folded)
@@ -127,6 +180,8 @@ def validate_request(value: Any) -> dict[str, Any]:
     key_header = _text(value["key_header"], "key_header", 128)
     if not _HEADER_NAME.fullmatch(key_header):
         raise ButlerSettingsError("key_header is invalid")
+    if key_header.casefold() == "host":
+        raise ButlerSettingsError("key_header must not be Host")
     key_prefix = _text(value["key_prefix"], "key_prefix", 80, allow_empty=True)
     validation_path = _text(
         value["validation_path"], "validation_path", 500, allow_empty=True
@@ -330,21 +385,66 @@ def validate_provider(
     settings: Mapping[str, Any],
     api_key: str,
     *,
-    opener: Callable[..., Any] = urlopen,
+    opener: Callable[..., Any] | None = None,
     timeout_s: float = 5.0,
 ) -> ValidationResult:
     """Make one bounded call and return only a fixed, key-free outcome."""
-    validation_url = urljoin(
-        str(settings["endpoint"]).rstrip("/") + "/",
-        str(settings["validation_path"]).lstrip("/"),
-    )
-    headers = {"Accept": "application/json", **dict(settings["extra_headers"])}
-    if api_key:
-        prefix = str(settings["key_prefix"])
-        headers[str(settings["key_header"])] = f"{prefix} {api_key}".strip()
-    request = Request(validation_url, headers=headers, method="GET")
     try:
-        with opener(request, timeout=timeout_s) as response:
+        endpoint = validate_endpoint(settings["endpoint"])
+        extra_headers = validate_headers(settings["extra_headers"])
+        key_header = _text(settings["key_header"], "key_header", 128)
+        if not _HEADER_NAME.fullmatch(key_header):
+            raise ButlerSettingsError("key_header is invalid")
+        if key_header.casefold() == "host":
+            raise ButlerSettingsError("key_header must not be Host")
+        if key_header.casefold() in {name.casefold() for name in extra_headers}:
+            raise ButlerSettingsError("key_header must not duplicate extra_headers")
+        key_prefix = _text(
+            settings["key_prefix"], "key_prefix", 80, allow_empty=True
+        )
+        model = _text(settings["model"], "model", MAX_MODEL_CHARS)
+        if not isinstance(api_key, str) or len(api_key.encode("utf-8")) > MAX_KEY_BYTES:
+            raise ButlerSettingsError("api_key is invalid")
+        if api_key != api_key.strip() or any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in api_key
+        ):
+            raise ButlerSettingsError("api_key is invalid")
+        validation_path = _text(
+            settings["validation_path"],
+            "validation_path",
+            500,
+            allow_empty=True,
+        ) or DEFAULT_VALIDATION_PATH
+        parsed_path = urlsplit(validation_path)
+        if (
+            parsed_path.scheme
+            or parsed_path.netloc
+            or parsed_path.query
+            or parsed_path.fragment
+        ):
+            raise ButlerSettingsError("validation_path must be a relative URL path")
+        validation_url = urljoin(
+            endpoint.rstrip("/") + "/",
+            validation_path.lstrip("/"),
+        )
+        headers = {"Accept": "application/json", **extra_headers}
+        if api_key:
+            headers[key_header] = f"{key_prefix} {api_key}".strip()
+        request = Request(validation_url, headers=headers, method="GET")
+    except (ButlerSettingsError, KeyError, TypeError, ValueError):
+        return ValidationResult("unreachable", "The endpoint is not permitted.")
+    try:
+        open_request = opener
+        if open_request is None:
+            open_request = build_opener(
+                _SameOriginRedirectHandler(validation_url)
+            ).open
+        with open_request(request, timeout=timeout_s) as response:
+            geturl = getattr(response, "geturl", None)
+            final_url = geturl() if callable(geturl) else validation_url
+            if _url_origin(final_url) != _url_origin(validation_url):
+                return ValidationResult("unreachable", "The endpoint is not permitted.")
             status = int(getattr(response, "status", 200))
             payload = response.read(1_000_001)
     except HTTPError as exc:
@@ -367,7 +467,7 @@ def validate_provider(
         return ValidationResult(
             "wrong_model", "The selected model was not present in the validation response.", status
         )
-    if str(settings["model"]) not in _model_ids(document):
+    if model not in _model_ids(document):
         return ValidationResult(
             "wrong_model", "The selected model was not present in the validation response.", status
         )
@@ -381,7 +481,7 @@ class ButlerSettingsManager:
         self,
         root: str | Path,
         *,
-        opener: Callable[..., Any] = urlopen,
+        opener: Callable[..., Any] | None = None,
         now: Callable[[], datetime] | None = None,
         runtime_path: str | Path | None = None,
         kill_path: str | Path | None = None,
@@ -716,8 +816,11 @@ class ButlerSettingsManager:
         config = config_payload.get("config")
         if not isinstance(config, Mapping):
             raise ButlerSettingsError("coordinator config is unavailable")
-        api_key = clean["api_key"] or self._read_key(current.get("key_location"))
-        reject_readable_credential(clean, api_key)
+        stored_key = self._read_key(current.get("key_location"))
+        for credential in (clean["api_key"], stored_key):
+            reject_readable_credential(clean, credential)
+        same_endpoint = clean["endpoint"] == current.get("endpoint")
+        api_key = clean["api_key"] or (stored_key if same_endpoint else "")
         validation = validate_provider(clean, api_key, opener=self.opener)
         if validation.outcome != "reachable":
             return {
@@ -731,8 +834,10 @@ class ButlerSettingsManager:
             if clean["api_key"]:
                 new_key_path = self._write_key(central, clean["api_key"])
                 key_ref = self._reference(new_key_path)
-            else:
+            elif same_endpoint:
                 key_ref = current.get("key_location") if old_key_path is not None else None
+            else:
+                key_ref = None
             updated = copy.deepcopy(dict(config))
             updated.pop("updated_at", None)
             updated.pop("updated_by", None)
@@ -771,11 +876,7 @@ class ButlerSettingsManager:
                 if new_key_path is not None:
                     new_key_path.unlink(missing_ok=True)
                 raise
-            if (
-                new_key_path is not None
-                and old_key_path is not None
-                and old_key_path != new_key_path
-            ):
+            if old_key_path is not None and key_ref != current.get("key_location"):
                 old_key_path.unlink(missing_ok=True)
             timestamp = self.now()
             if timestamp.tzinfo is None:

@@ -394,6 +394,119 @@ def test_provider_validation_has_four_fixed_outcomes(opener: Any, outcome: str) 
     assert "not-returned" not in json.dumps(result.as_dict())
 
 
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://provider.example.invalid/v1",
+        "https://169.254.169.254/v1",
+        "https://[fe80::1]/v1",
+        "https://[::ffff:169.254.169.254]/v1",
+    ],
+)
+def test_provider_validation_refuses_unsafe_endpoint_without_request(
+    endpoint: str,
+) -> None:
+    secret = "sentinel-policy-refusal-6471"
+    requests = 0
+
+    def opener(*_args: object, **_kwargs: object) -> Response:
+        nonlocal requests
+        requests += 1
+        return Response({"data": [{"id": "Model/Exact-1"}]})
+
+    settings = provider_request(endpoint="https://provider.example.invalid/v1")
+    settings["endpoint"] = endpoint
+    result = butler_settings.validate_provider(settings, secret, opener=opener)
+
+    assert result.as_dict() == {
+        "outcome": "unreachable",
+        "message": "The endpoint is not permitted.",
+        "http_status": None,
+    }
+    assert requests == 0
+    assert secret not in json.dumps(result.as_dict())
+
+
+def test_provider_validation_refuses_cross_origin_redirect_before_key_leaves_origin(
+) -> None:
+    secret = "sentinel-redirect-refusal-6471"
+    redirected_requests: list[str | None] = []
+
+    class RedirectTarget(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            redirected_requests.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), RedirectTarget)
+
+    class RedirectSource(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header(
+                "Location", f"http://127.0.0.1:{target.server_port}/models"
+            )
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    source = ThreadingHTTPServer(("127.0.0.1", 0), RedirectSource)
+    threads = [
+        threading.Thread(target=target.serve_forever, daemon=True),
+        threading.Thread(target=source.serve_forever, daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        result = butler_settings.validate_provider(
+            provider_request(
+                endpoint=f"http://127.0.0.1:{source.server_port}",
+                validation_path="redirect",
+            ),
+            secret,
+        )
+    finally:
+        source.shutdown()
+        target.shutdown()
+        source.server_close()
+        target.server_close()
+        for thread in threads:
+            thread.join(timeout=2)
+
+    assert result.outcome == "unreachable"
+    assert redirected_requests == []
+    assert secret not in json.dumps(result.as_dict())
+
+
+def test_extra_headers_cannot_set_host_or_override_custom_key_header() -> None:
+    with pytest.raises(
+        butler_settings.ButlerSettingsError, match="extra_headers must not set Host"
+    ):
+        butler_settings.validate_request(
+            provider_request(extra_headers={"hOsT": "provider.example.invalid"})
+        )
+
+    with pytest.raises(
+        butler_settings.ButlerSettingsError, match="key_header must not be Host"
+    ):
+        butler_settings.validate_request(provider_request(key_header="HOST"))
+
+    with pytest.raises(
+        butler_settings.ButlerSettingsError,
+        match="key_header must not duplicate extra_headers",
+    ):
+        butler_settings.validate_request(
+            provider_request(
+                key_header="X-Credential",
+                extra_headers={"x-credential": "replacement"},
+            )
+        )
+
+
 def test_save_writes_0600_key_and_restart_resolves_new_provider(tmp_path: Path) -> None:
     secret = "".join(("sk", "-restart-only-", "91f25d"))
     seen: dict[str, Any] = {}
@@ -478,6 +591,54 @@ def test_save_writes_0600_key_and_restart_resolves_new_provider(tmp_path: Path) 
     assert runtime.request_headers()["Authorization"] == f"Bearer {secret}"
     assert secret not in repr(runtime)
     assert secret not in json.dumps(effective.as_finding())
+
+
+def test_endpoint_change_never_reuses_stored_key(tmp_path: Path) -> None:
+    secret = "sentinel-endpoint-binding-6471"
+    authorizations: list[str | None] = []
+    state = {
+        "config": coordinator_config(),
+        "expected_sha256": "a" * 64,
+    }
+
+    def opener(request: urllib.request.Request, **_kwargs: object) -> Response:
+        authorizations.append(request.get_header("Authorization"))
+        return Response({"data": [{"id": "Model/Exact-1"}]})
+
+    def save_config(value: dict[str, Any], _expected: str | None) -> dict[str, Any]:
+        state["config"] = value
+        state["expected_sha256"] = "b" * 64
+        return dict(state)
+
+    secrets_dir = tmp_path / "private-keys"
+    manager = butler_settings.ButlerSettingsManager(secrets_dir, opener=opener)
+    first = manager.save(
+        state,
+        provider_request(api_key=secret),
+        "sandbox",
+        save_config,
+    )
+    old_key = secrets_dir / first["key_location"].removeprefix("file:")
+    changed = manager.save(
+        state,
+        provider_request(
+            endpoint="https://other-provider.example.invalid/v1",
+            api_key="",
+            expected_sha256="b" * 64,
+        ),
+        "sandbox",
+        save_config,
+    )
+
+    assert authorizations == [f"Bearer {secret}", None]
+    assert changed["saved"] is True
+    assert changed["key_present"] is False
+    assert changed["key_location"] is None
+    assert old_key.exists() is False
+    provider = state["config"]["board_butler"]["global"]["drafting"]
+    assert provider["endpoint_ref"] == "https://other-provider.example.invalid/v1"
+    assert provider["key_ref"] is None
+    assert secret not in json.dumps(changed)
 
 
 def test_save_then_next_cycle_uses_custom_non_vendor_draft_contract(
@@ -763,6 +924,67 @@ def test_http_api_never_returns_key_or_persists_it_to_board_or_repo(
         for raw in tracked
         if raw and (REPO_ROOT / raw.decode()).is_file()
     )
+
+
+def test_butler_save_route_rejects_cross_origin_before_validation(
+    tmp_path: Path,
+) -> None:
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            if value not in {None, "default"}:
+                raise KeyError(value)
+            return "default"
+
+        def get_config(self, _central: str | None = None) -> dict[str, Any]:
+            return {
+                "config": coordinator_config(),
+                "expected_sha256": "a" * 64,
+                "central": "default",
+            }
+
+        def save_config(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            pytest.fail("cross-origin request must not save settings")
+
+    validation_calls = 0
+
+    def opener(*_args: object, **_kwargs: object) -> Response:
+        nonlocal validation_calls
+        validation_calls += 1
+        return Response({"data": [{"id": "Model/Exact-1"}]})
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(
+            Cache(),
+            butler_manager=butler_settings.ButlerSettingsManager(
+                tmp_path / "secrets", opener=opener
+            ),
+        ),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        request = urllib.request.Request(
+            base + "/api/butler?central=default",
+            data=json.dumps(provider_request()).encode(),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "https://attacker.example.invalid",
+            },
+        )
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request)
+        response = caught.value.read()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert caught.value.code == 403
+    assert json.loads(response) == {"error": "same-origin request required"}
+    assert validation_calls == 0
 
 
 @pytest.mark.parametrize(
