@@ -23,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONHASHSEED: "0"
+      UV_VERSION: "0.12.16"
     steps:
       - name: Resolve release tag
         id: release
@@ -64,7 +65,8 @@ jobs:
           PY
           )
           python -m pip install --disable-pip-version-check --no-input \
-            "${build_toolchain[@]}"
+            "${build_toolchain[@]}" "uv==$UV_VERSION"
+          test "$(uv --version | awk '{print $1, $2}')" = "uv $UV_VERSION"
           python - <<'PY' >> "$GITHUB_ENV"
           from tools.regenerate_component_lock import SOURCE_DATE_EPOCH
 
@@ -116,7 +118,71 @@ jobs:
               )
           print("release_wheels=" + ",".join(sorted(actual)))
           PY
-          (cd dist && sha256sum -- ./*.whl > SHA256SUMS.txt)
+
+      - name: Build deterministic AionUi and Home runtime artifacts
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          artifact_a="$RUNNER_TEMP/release-artifacts-a"
+          artifact_b="$RUNNER_TEMP/release-artifacts-b"
+          mkdir -p "$artifact_a" "$artifact_b"
+
+          aion_archive="$(python - <<'PY'
+          import json
+
+          with open("tools/aionui-extension/aion-extension.json") as stream:
+              version = json.load(stream)["version"]
+          print(f"pursers-aionui-{version}.zip")
+          PY
+          )"
+          python tools/aionui-extension/build.py \
+            --output "$artifact_a/$aion_archive"
+          python tools/aionui-extension/build.py \
+            --output "$artifact_b/$aion_archive"
+          cmp -s "$artifact_a/$aion_archive" "$artifact_b/$aion_archive"
+          cp "$artifact_a/$aion_archive" dist/
+
+          wheelhouse_name="pursers-home-runtime-wheelhouse-${VERSION}-linux-x86_64"
+          python tools/build_home_runtime_wheelhouse.py \
+            --python "$(command -v python)" \
+            --output "$artifact_a/$wheelhouse_name"
+          python tools/build_home_runtime_wheelhouse.py \
+            --python "$(command -v python)" \
+            --output "$artifact_b/$wheelhouse_name"
+          for root in "$artifact_a" "$artifact_b"; do
+            python - "$root/$wheelhouse_name" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          wheelhouse = Path(sys.argv[1])
+          timestamp = int(os.environ["SOURCE_DATE_EPOCH"])
+          for path in (wheelhouse, *sorted(wheelhouse.rglob("*"))):
+              os.utime(path, (timestamp, timestamp), follow_symlinks=False)
+          PY
+            members="$root/$wheelhouse_name.members"
+            (cd "$root" && find "$wheelhouse_name" -print | LC_ALL=C sort > "$members")
+            tar --format=ustar \
+              --uid 0 --gid 0 --uname root --gname root \
+              -C "$root" -cf - -T "$members" \
+              | gzip -n > "$root/$wheelhouse_name.tar.gz"
+          done
+          cmp -s \
+            "$artifact_a/$wheelhouse_name.tar.gz" \
+            "$artifact_b/$wheelhouse_name.tar.gz"
+          cmp -s \
+            "$artifact_a/$wheelhouse_name/wheelhouse.json" \
+            "$artifact_b/$wheelhouse_name/wheelhouse.json"
+          cp "$artifact_a/$wheelhouse_name.tar.gz" dist/
+          cp \
+            "$artifact_a/$wheelhouse_name/wheelhouse.json" \
+            "dist/$wheelhouse_name.json"
+
+          (cd dist && sha256sum -- \
+            ./*.whl ./*.zip ./*.tar.gz ./*.json > SHA256SUMS.txt)
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+          find dist -maxdepth 1 -type f -print | sort
 
       - name: Extract non-empty CHANGELOG notes
         run: |
@@ -131,7 +197,13 @@ jobs:
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          assets=(dist/*.whl dist/SHA256SUMS.txt)
+          assets=(
+            dist/*.whl
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*wheelhouse*.json
+            dist/SHA256SUMS.txt
+          )
           if gh release view "$TAG" >/dev/null 2>&1; then
             mapfile -t release_flags < <(python tools/release_publish.py "$TAG" edit)
             declare -A uploaded=()

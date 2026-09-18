@@ -146,8 +146,10 @@ evidence_contains = ["packages/personal/src/pursers_personal/resources/dashboard
 id = "host-extension:pursers"
 kind = "host-extension"
 source = "tools/aionui-extension/aion-extension.json"
-state = "exempt"
-reason = "The deterministic extension ZIP has no checked-in release or installation channel; the GitHub release workflow uploads wheels only."
+state = "delivered"
+channel = "deterministic ZIP attached by the GitHub release workflow"
+evidence = [".github/workflows/release.yml", "tools/aionui-extension/README.md"]
+evidence_contains = ["tools/aionui-extension/build.py", "pursers-aionui-0.1.0.zip", "AIONUI_EXTENSIONS_PATH"]
 
 [[artifacts]]
 id = "web-surface:packages/personal/src/pursers_personal/resources/dashboard.html"
@@ -171,8 +173,10 @@ evidence_contains = ["dashboard-entry.html", "packages/personal/src/pursers_pers
 id = "web-surface:tools/aionui-extension/webui/index.html"
 kind = "web-surface"
 source = "tools/aionui-extension/webui/index.html"
-state = "exempt"
-reason = "This surface is inside the undelivered AionUi extension ZIP and therefore has no independent user delivery channel."
+state = "delivered"
+channel = "packaged in the deterministic AionUi ZIP attached by the GitHub release workflow"
+evidence = [".github/workflows/release.yml", "tools/aionui-extension/README.md", "tools/aionui-extension/build.py"]
+evidence_contains = ["webui/index.html", "pursers-aionui-0.1.0.zip", "AIONUI_EXTENSIONS_PATH"]
 
 [[artifacts]]
 id = "web-surface:fleet-dashboard"
@@ -187,15 +191,19 @@ evidence_contains = ["GET /api/version", "launchctl kickstart", "com.pursers.fle
 id = "release-artifact:aionui-extension-zip"
 kind = "release-artifact"
 source = "tools/aionui-extension/build.py"
-state = "exempt"
-reason = "The release workflow does not build or upload pursers-aionui-0.1.0.zip, as recorded by the release-artifact audit."
+state = "delivered"
+channel = "deterministic ZIP and checksum attached by the GitHub release workflow"
+evidence = [".github/workflows/release.yml", "tools/aionui-extension/README.md"]
+evidence_contains = ["tools/aionui-extension/build.py", "cmp -s", "SHA256SUMS.txt"]
 
 [[artifacts]]
 id = "release-artifact:home-runtime-wheelhouse"
 kind = "release-artifact"
 source = "tools/build_home_runtime_wheelhouse.py"
-state = "exempt"
-reason = "The release workflow does not build or upload the Home runtime wheelhouse archive and manifest."
+state = "delivered"
+channel = "deterministic archive, external manifest, and checksum attached by the GitHub release workflow"
+evidence = [".github/workflows/release.yml", "docs/release-train.md"]
+evidence_contains = ["tools/build_home_runtime_wheelhouse.py", "wheelhouse.json", "linux-x86_64.tar.gz", "SHA256SUMS.txt"]
 
 # Source-invoked operator tools have a delivery channel only when a checked-in
 # operator/developer runbook names the command. Undocumented tools are explicit
