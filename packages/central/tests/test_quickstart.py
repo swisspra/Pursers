@@ -331,6 +331,96 @@ def test_rotate_and_retire_key_preserve_identity_formats_and_door_keys(
         )
 
 
+def test_rotate_key_preserves_multi_header_file_bytes(tmp_path: Path) -> None:
+    root = tmp_path / "instance"
+    paths = init_instance(root)
+    old_token = paths["admin.jwt"].read_text(encoding="utf-8").strip()
+    before = b"ONBOARD_BOARD_ID: pursers\r\nAuthorization: Bearer "
+    after = b"\r\nX-Custom: keep  two spaces\n"
+    paths["admin.jwt"].write_bytes(before + old_token.encode() + after)
+    os.chmod(paths["admin.jwt"], 0o600)
+
+    result = rotate_key(
+        paths["signing-key.pem"], paths["jwks.json"], [paths["admin.jwt"]]
+    )
+
+    rewritten = paths["admin.jwt"].read_bytes()
+    assert rewritten.startswith(before)
+    assert rewritten.endswith(after)
+    rotated = rewritten[len(before) : -len(after)].decode("utf-8")
+    assert _jwt_kid(rotated) == result["new_kid"]
+    assert rotated != old_token
+    assert _mode(paths["admin.jwt"]) == 0o600
+
+
+@pytest.mark.parametrize(
+    ("headers", "message"),
+    [
+        (
+            "Authorization: Bearer {token}\nAuthorization: Bearer {token}\n",
+            "exactly one Authorization",
+        ),
+        ("ONBOARD_BOARD_ID: pursers\nX-Other: value\n", "exactly one Authorization"),
+    ],
+)
+def test_rotate_key_refuses_invalid_multi_header_authorization_count(
+    tmp_path: Path, headers: str, message: str
+) -> None:
+    root = tmp_path / "instance"
+    paths = init_instance(root)
+    token = paths["admin.jwt"].read_text(encoding="utf-8").strip()
+    paths["admin.jwt"].write_text(headers.format(token=token), encoding="utf-8")
+    os.chmod(paths["admin.jwt"], 0o600)
+    protected = {
+        path: path.read_bytes()
+        for path in (
+            paths["signing-key.pem"],
+            paths["jwks.json"],
+            paths["admin.jwt"],
+        )
+    }
+
+    with pytest.raises(QuickstartError, match=message):
+        rotate_key(
+            paths["signing-key.pem"], paths["jwks.json"], [paths["admin.jwt"]]
+        )
+
+    assert {path: path.read_bytes() for path in protected} == protected
+    assert not tuple(root.glob("signing-key.*.retired.pem"))
+
+
+def test_retire_key_check_token_reads_multi_header_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "instance"
+    paths = init_instance(root)
+    old_token = paths["admin.jwt"].read_text(encoding="utf-8").strip()
+    old_kid = _jwt_kid(old_token)
+    checked = root / "worker.headers"
+    checked.write_text(
+        "ONBOARD_BOARD_ID: pursers\n"
+        f"Authorization: Bearer {old_token}\n"
+        "X-Other: unchanged\n",
+        encoding="utf-8",
+    )
+    os.chmod(checked, 0o600)
+    rotate_key(paths["signing-key.pem"], paths["jwks.json"], [paths["admin.jwt"]])
+
+    with pytest.raises(SystemExit) as captured:
+        central_main(
+            [
+                "retire-key",
+                str(root),
+                "--kid",
+                old_kid,
+                "--check-token",
+                str(checked),
+            ]
+        )
+    assert captured.value.code == 2
+    assert "still uses" in capsys.readouterr().err
+
+
 def test_rotate_key_failure_restores_every_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

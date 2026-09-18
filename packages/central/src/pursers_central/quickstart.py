@@ -33,6 +33,10 @@ MANAGED_FILES = (
 )
 BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 KID_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$")
+HEADER_LINE_RE = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+:[^\r\n]*")
+AUTHORIZATION_BEARER_RE = re.compile(
+    rb"(?i)^authorization:[ \t]*bearer[ \t]+(?P<token>[^ \t\r\n]+)[ \t]*$"
+)
 PROFILE_KEYS = frozenset(
     {
         "ONBOARD_CENTRAL_HOST",
@@ -262,22 +266,60 @@ def _retired_key_path(key_path: Path, kid: str) -> Path:
     return key_path.with_name(f"{key_path.stem}.{kid}.retired{key_path.suffix}")
 
 
-def _read_token_file(path: Path) -> tuple[str, bool, bool]:
+def _read_token_file(path: Path) -> tuple[str, bytes, bytes]:
     content = _regular_file(path, label="token file")
     try:
-        text = content.decode("utf-8")
+        content.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise QuickstartError(f"token file is not UTF-8: {path}") from exc
-    trailing_newline = text.endswith("\n")
-    body = text[:-1] if trailing_newline else text
-    if "\n" in body or "\r" in body:
-        raise QuickstartError(f"token file must contain exactly one token: {path}")
-    prefix = "Authorization: Bearer "
-    header_format = body.startswith(prefix)
-    token = body[len(prefix) :] if header_format else body
-    if not token:
+
+    lines = content.splitlines(keepends=True)
+    if not lines:
         raise QuickstartError(f"token file is empty: {path}")
-    return token, header_format, trailing_newline
+
+    def line_body(line: bytes) -> bytes:
+        if line.endswith(b"\r\n"):
+            return line[:-2]
+        if line.endswith((b"\r", b"\n")):
+            return line[:-1]
+        return line
+
+    first_body = line_body(lines[0])
+    header_format = len(lines) > 1 or b":" in first_body
+    if not header_format:
+        if not first_body:
+            raise QuickstartError(f"token file is empty: {path}")
+        return first_body.decode("utf-8"), b"", lines[0][len(first_body) :]
+
+    authorization_lines: list[tuple[int, bytes]] = []
+    offset = 0
+    for line in lines:
+        body = line_body(line)
+        if HEADER_LINE_RE.fullmatch(body) is None:
+            raise QuickstartError(
+                f"token header file lines must use Name: value format: {path}"
+            )
+        name = body.split(b":", 1)[0]
+        if name.lower() == b"authorization":
+            authorization_lines.append((offset, body))
+        offset += len(line)
+    if len(authorization_lines) != 1:
+        raise QuickstartError(
+            f"token header file must contain exactly one Authorization header: {path}"
+        )
+    line_offset, authorization = authorization_lines[0]
+    match = AUTHORIZATION_BEARER_RE.fullmatch(authorization)
+    if match is None:
+        raise QuickstartError(
+            f"token header file Authorization header must use Bearer: {path}"
+        )
+    token_start = line_offset + match.start("token")
+    token_end = line_offset + match.end("token")
+    return (
+        match.group("token").decode("utf-8"),
+        content[:token_start],
+        content[token_end:],
+    )
 
 
 def _token_kid(token: str, *, path: Path) -> str:
@@ -326,7 +368,7 @@ def rotate_key(
     now = int(time.time())
     rewritten: dict[Path, bytes] = {}
     for token_path in token_paths:
-        token, header_format, trailing_newline = _read_token_file(token_path)
+        token, before_token, after_token = _read_token_file(token_path)
         token_kid = _token_kid(token, path=token_path)
         if token_kid not in {old_kid, new_kid}:
             raise QuickstartError(
@@ -369,10 +411,7 @@ def rotate_key(
         rotated = jwt.encode(
             claims, new_key, algorithm="RS256", headers={"kid": new_kid}
         )
-        rendered = ("Authorization: Bearer " if header_format else "") + rotated
-        if trailing_newline:
-            rendered += "\n"
-        rewritten[token_path] = rendered.encode("utf-8")
+        rewritten[token_path] = before_token + rotated.encode("utf-8") + after_token
 
     writes = {
         retired_path: old_pem,
