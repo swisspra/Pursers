@@ -934,6 +934,15 @@ def _wait_bridge_environment(
     tier = capabilities.get("tier_max")
     if isinstance(tier, int) and not isinstance(tier, bool) and tier in {1, 2, 3}:
         environment["PURSERS_TIER_MAX"] = str(tier)
+    # The bridge stamps these onto the seat's capabilities; without them every
+    # IDE seat joins with model and provider null. The joined identity wins,
+    # the agent's own environment is the fallback.
+    for env_name, field in (("PURSERS_MODEL", "model"), ("PURSERS_PROVIDER", "provider")):
+        value = capabilities.get(field)
+        if not (isinstance(value, str) and value.strip()):
+            value = os.environ.get(env_name, "")
+        if value.strip():
+            environment[env_name] = value.strip()
     return environment
 
 

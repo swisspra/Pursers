@@ -713,3 +713,40 @@ async def _end_to_end_create_against_in_process_central(
             assert fetched["ticket"]["created_by_principal_id"] == principal.principal_id
         finally:
             await client.close()
+
+
+def _bridge_profile() -> SimpleNamespace:
+    return SimpleNamespace(central_url="https://127.0.0.1:1/mcp", board_id="pursers")
+
+
+def test_wait_bridge_environment_forwards_model_and_provider_from_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PURSERS_MODEL", "env-model")
+    identity = {
+        "agent_name": "ide-seat",
+        "role": "worker",
+        "capabilities": {"model": "joined-model", "provider": "joined-provider"},
+    }
+
+    environment = agent_module._wait_bridge_environment(
+        _bridge_profile(), "not-a-real-token", identity
+    )
+
+    assert environment["PURSERS_MODEL"] == "joined-model"
+    assert environment["PURSERS_PROVIDER"] == "joined-provider"
+
+
+def test_wait_bridge_environment_falls_back_to_agent_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PURSERS_MODEL", " env-model ")
+    monkeypatch.delenv("PURSERS_PROVIDER", raising=False)
+    identity = {"agent_name": "ide-seat", "role": "worker", "capabilities": {"model": None}}
+
+    environment = agent_module._wait_bridge_environment(
+        _bridge_profile(), "not-a-real-token", identity
+    )
+
+    assert environment["PURSERS_MODEL"] == "env-model"
+    assert "PURSERS_PROVIDER" not in environment
