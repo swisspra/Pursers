@@ -23,6 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONHASHSEED: "0"
+      UV_VERSION: "0.12.16"
     steps:
       - name: Resolve release tag
         id: release
@@ -64,7 +65,8 @@ jobs:
           PY
           )
           python -m pip install --disable-pip-version-check --no-input \
-            "${build_toolchain[@]}"
+            "${build_toolchain[@]}" "uv==$UV_VERSION"
+          test "$(uv --version | awk '{print $1, $2}')" = "uv $UV_VERSION"
           python - <<'PY' >> "$GITHUB_ENV"
           from tools.regenerate_component_lock import SOURCE_DATE_EPOCH
 

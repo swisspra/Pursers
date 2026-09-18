@@ -85,6 +85,12 @@ def test_release_workflow_wires_both_paths_and_manifest_wheel_check() -> None:
 def test_release_workflow_builds_reproducible_non_wheel_assets() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 
+    assert 'UV_VERSION: "0.12.16"' in workflow
+    assert '"uv==$UV_VERSION"' in workflow
+    assert (
+        'test "$(uv --version | awk \'{print $1, $2}\')" = "uv $UV_VERSION"'
+        in workflow
+    )
     assert workflow.count("tools/aionui-extension/build.py") == 2
     assert workflow.count("tools/build_home_runtime_wheelhouse.py") == 2
     assert workflow.count("cmp -s") == 3
