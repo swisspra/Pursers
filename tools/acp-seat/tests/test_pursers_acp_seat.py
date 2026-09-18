@@ -431,8 +431,12 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                         "can_review": False,
                         "tier_max": 2,
                         "max_parallel": 1,
+                        "model": "Model/Exact-1.0",
+                        "provider": "Provider/Exact",
                     },
                 )
+                assert joined["capabilities"]["model"] == "Model/Exact-1.0"
+                assert joined["capabilities"]["provider"] == "Provider/Exact"
                 await call(
                     admin,
                     "ticket_create",
@@ -872,6 +876,99 @@ def test_isolated_agent_env_uses_scratch_home_and_explicit_allowlist(
         'user.name ACP "Worker"',
         "user.email acp-worker@example.invalid",
     ]
+
+
+def test_central_board_onboards_with_explicit_model_and_provider() -> None:
+    calls: dict[str, object] = {}
+
+    class RecordingClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            calls["constructor"] = kwargs
+
+        async def __aenter__(self) -> "RecordingClient":
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def board_onboard(self, **kwargs: object) -> dict[str, object]:
+            calls["onboard"] = kwargs
+            return {
+                "agent_name": "acp-seat",
+                "role": "worker",
+                "agent_id": "AI-expected",
+                "principal_id": "PR-expected",
+            }
+
+    config = SimpleNamespace(
+        central_url="https://central.example/mcp",
+        board_id="pursers",
+        agent_name="acp-seat",
+        expected_agent_id="AI-expected",
+        expected_principal_id="PR-expected",
+    )
+    with (
+        patch.object(seat, "BoardClient", RecordingClient),
+        patch.dict(
+            os.environ,
+            {
+                "PURSERS_MODEL": "Model/Exact-1.0",
+                "PURSERS_PROVIDER": "Provider/Exact",
+            },
+        ),
+    ):
+        board = seat.CentralBoard(config, "not-a-real-token")
+        asyncio.run(board.__aenter__())
+
+    expected = {
+        "can_work": True,
+        "can_review": False,
+        "tier_max": 2,
+        "max_parallel": 1,
+        "model": "Model/Exact-1.0",
+        "provider": "Provider/Exact",
+    }
+    assert calls["constructor"]["capabilities"] == expected
+    assert calls["onboard"]["capabilities"] == expected
+
+
+def test_central_board_keeps_unknown_model_and_provider_undeclared() -> None:
+    calls: dict[str, object] = {}
+
+    class RecordingClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            calls["capabilities"] = kwargs["capabilities"]
+
+        async def __aenter__(self) -> "RecordingClient":
+            return self
+
+        async def board_onboard(self, **kwargs: object) -> dict[str, object]:
+            calls["onboard"] = kwargs
+            return {
+                "agent_name": "acp-seat",
+                "role": "worker",
+                "agent_id": "AI-expected",
+                "principal_id": "PR-expected",
+            }
+
+    config = SimpleNamespace(
+        central_url="https://central.example/mcp",
+        board_id="pursers",
+        agent_name="acp-seat",
+        expected_agent_id="AI-expected",
+        expected_principal_id="PR-expected",
+    )
+    with (
+        patch.object(seat, "BoardClient", RecordingClient),
+        patch.dict(os.environ, {}, clear=True),
+    ):
+        board = seat.CentralBoard(config, "not-a-real-token")
+        asyncio.run(board.__aenter__())
+
+    assert "model" not in calls["capabilities"]
+    assert "provider" not in calls["capabilities"]
+    assert "model" not in calls["onboard"]["capabilities"]
+    assert "provider" not in calls["onboard"]["capabilities"]
 
 
 def test_sandbox_profile_allows_lexical_and_real_interpreter_prefixes(

@@ -1070,18 +1070,27 @@ class CentralBoard:
 
         self.config = config
         self.wait_bridge = wait_bridge
+        capabilities: dict[str, Any] = {
+            "can_work": True,
+            "can_review": False,
+            "tier_max": 2,
+            "max_parallel": 1,
+        }
+        for env_name, field in (
+            ("PURSERS_MODEL", "model"),
+            ("PURSERS_PROVIDER", "provider"),
+        ):
+            value = os.environ.get(env_name, "").strip()
+            if value:
+                capabilities[field] = value
+        self.capabilities = capabilities
         self.client = BoardClient(
             config.central_url,
             token,
             config.board_id,
             agent_name=config.agent_name,
             role="worker",
-            capabilities={
-                "can_work": True,
-                "can_review": False,
-                "tier_max": 2,
-                "max_parallel": 1,
-            },
+            capabilities=self.capabilities,
             allow_takeover=True,
         )
         self.agent_id = ""
@@ -1092,12 +1101,7 @@ class CentralBoard:
         await self.client.__aenter__()
         joined = await self.client.board_onboard(
             role="worker",
-            capabilities={
-                "can_work": True,
-                "can_review": False,
-                "tier_max": 2,
-                "max_parallel": 1,
-            },
+            capabilities=self.capabilities,
             allow_takeover=True,
             task_focus="ACP seat runtime",
         )
