@@ -71,7 +71,7 @@ source = "tools/acp-agent/pyproject.toml"
 state = "delivered"
 channel = "PyPI trusted-publishing workflow"
 evidence = ["tools/release_versions.toml", ".github/workflows/publish-pypi.yml"]
-evidence_contains = ["acp = \"0.1.0\"", "tools/acp-agent"]
+evidence_contains = ["acp = \"", "tools/acp-agent"]
 
 [[artifacts]]
 id = "python-console-script:pursers-central:pursers-central"
@@ -111,7 +111,7 @@ entry_point = "pursers_acp.agent:main"
 state = "delivered"
 channel = "pursers-acp console command installed by the PyPI wheel"
 evidence = ["tools/acp-agent/pyproject.toml", "tools/release_versions.toml", ".github/workflows/publish-pypi.yml"]
-evidence_contains = ["pursers-acp = \"pursers_acp.agent:main\"", "acp = \"0.1.0\"", "tools/acp-agent"]
+evidence_contains = ["pursers-acp = \"pursers_acp.agent:main\"", "acp = \"", "tools/acp-agent"]
 
 [[artifacts]]
 id = "python-console-script:pursers-wait-bridge:pursers-wait-bridge"

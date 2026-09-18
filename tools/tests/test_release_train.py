@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tools import release_train
+from tools import check_delivery_manifest, release_train
 from tools.release_versions import load_versions
 
 
@@ -141,6 +141,28 @@ def test_acp_bump_updates_its_surfaces_without_rewriting_dependency_versions(
     ]
     assert '"version": "0.1.1"' in planned[root / "tools/acp-agent/pursers/agent.json"]
     assert "pursers-acp==0.1.1" in planned[root / "tools/acp-agent/README.md"]
+
+
+def test_acp_only_bump_preserves_delivery_manifest_validation(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    shutil.copytree(
+        ROOT,
+        root,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".pytest_cache",
+            "__pycache__",
+            "*.pyc",
+        ),
+    )
+    current = load_versions(root / "tools/release_versions.toml")
+    target = release_train.bumped_versions(current, ("acp=0.1.1",), None)
+
+    planned = release_train.plan_bump(root, current, target)
+    for path, content in planned.items():
+        path.write_text(content, encoding="utf-8")
+
+    assert check_delivery_manifest.validate(root) == []
 
 
 @pytest.mark.parametrize("relative", release_train.COHORT_VERSION_FILES)
