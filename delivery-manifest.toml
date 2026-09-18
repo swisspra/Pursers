@@ -337,6 +337,15 @@ evidence = [".github/workflows/ci.yml", "CONTRIBUTING.md"]
 evidence_contains = ["tools/ci_manifest.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/regenerate_integration_manifest.py"
+kind = "operator-tool"
+source = "tools/regenerate_integration_manifest.py"
+state = "delivered"
+channel = "documented operator merge procedure"
+evidence = ["docs/operations/untracked-runtime-dependencies.md"]
+evidence_contains = ["tools/regenerate_integration_manifest.py"]
+
+[[artifacts]]
 id = "operator-tool:tools/coordinator/coordinator.py"
 kind = "operator-tool"
 source = "tools/coordinator/coordinator.py"
@@ -349,8 +358,10 @@ evidence_contains = ["tools/coordinator/coordinator.py"]
 id = "operator-tool:tools/coordinator/simulate.py"
 kind = "operator-tool"
 source = "tools/coordinator/simulate.py"
-state = "exempt"
-reason = "Simulation helper has no packaged entry point or checked-in operator runbook that delivers it to an operator."
+state = "delivered"
+channel = "checked-in coordinator operator runbook"
+evidence = ["tools/coordinator/README.md"]
+evidence_contains = ["tools/coordinator/simulate.py", "--history-input"]
 
 [[artifacts]]
 id = "operator-tool:tools/fleet-dashboard/fleet_dashboard.py"
@@ -599,15 +610,19 @@ evidence_contains = ["PURSERS_FLEET_REPO", "com.pursers.fleet-dashboard", "Repos
 id = "external:legacy-tls-server"
 kind = "external-dependency"
 source = "external"
-state = "exempt"
-reason = "The predecessor TLS server is operator-local and absent from the repository; current packaged Central intentionally serves loopback HTTP."
+state = "delivered"
+channel = "packaged pursers-central runtime and deployment runbook"
+evidence = ["packages/central/src/pursers_central/pursers_central_runtime.py", "docs/deployment-transport.md"]
+evidence_contains = ["--ssl-certfile", "CENTRAL_ALLOWED_HOSTS"]
 
 [[artifacts]]
 id = "external:merge-gate-regenerator"
 kind = "external-dependency"
 source = "external"
-state = "exempt"
-reason = "The operator-side merge-gate regeneration wrapper is not tracked, so CI cannot inspect or deliver the exact invoked wrapper."
+state = "delivered"
+channel = "tracked operator command and merge runbook"
+evidence = ["tools/regenerate_integration_manifest.py", "docs/operations/untracked-runtime-dependencies.md"]
+evidence_contains = ["regenerate_integration_manifest.py", "already current"]
 
 [[version_surfaces]]
 path = "README.md"

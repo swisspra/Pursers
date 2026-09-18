@@ -151,9 +151,9 @@ def test_runtime_enables_tls_and_extra_hosts_only_when_explicitly_configured(
                 "pursers-central",
                 "--data-dir",
                 str(tmp_path / "central-data"),
-                "--tls-certfile",
+                "--ssl-certfile",
                 str(cert),
-                "--tls-keyfile",
+                "--ssl-keyfile",
                 str(key),
                 "--allowed-host",
                 "central.example",
@@ -205,3 +205,14 @@ def test_runtime_rejects_incomplete_tls_configuration(tmp_path: Path) -> None:
         runtime.main()
 
     assert error.value.code == 2
+
+
+def test_legacy_allowed_hosts_environment_is_supported() -> None:
+    with patch.dict(
+        os.environ,
+        {"CENTRAL_ALLOWED_HOSTS": "central.example, proxy.example"},
+        clear=True,
+    ):
+        assert runtime._env_hosts(
+            "ONBOARD_CENTRAL_ALLOWED_HOSTS", "CENTRAL_ALLOWED_HOSTS"
+        ) == ("central.example", "proxy.example")

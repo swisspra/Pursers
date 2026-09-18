@@ -69,7 +69,7 @@ Each row has exactly one disposition:
 | F02 | Fleet `supervise.sh`, 4,067 bytes / 122 lines | Restarts one-shot seats, applies crash-loop backoff, and cleans bounded scratch directories. Loss drains the active development fleet as seats exit. | Coordinator supervision observes work but does not launch these local processes. | **SHOULD BE TRACKED** — restart and cleanup policy needs review and tests. |
 | F03 | Fleet `status.sh`, 798 bytes / 22 lines | Reports local process/log state for the roster. Loss does not stop product or development, but removes the only compact local view. | Board status reports authoritative board state, not local processes or log health. | **SHOULD BE TRACKED** — small operator diagnostic with no private data requirement. |
 | F04 | Current TLS Central launcher, 6,309 bytes / 167 lines | Configures and serves the live Central listener and binds it to private trust inputs and persistent state. Loss stops the product listener. | The tracked Central runtime now provides TLS and a guarded Host allowlist on `main` after `TK-152f512e1695`; the live service still uses this external launcher until operator cutover. | **SHOULD BE PRODUCT** — this requirement is now satisfied in source; retire the one-machine shim after cutover rather than copying it into the repository. |
-| F05 | Integration-manifest digest regenerator, 1,665 bytes / 53 lines | Rewrites digests while asserting the path set and order are unchanged. Every merge that changes a hashed file depends on it; loss blocks the mandated merge procedure, while a bug can silently corrupt the gate. | `tools/ci_manifest.py` validates but deliberately does not regenerate. No equivalent writer is tracked. | **SHOULD BE TRACKED** — release-owned merge tooling must be reviewed and tested even though workers must not run it. |
+| F05 | Integration-manifest digest regenerator, 1,665 bytes / 53 lines | Rewrites digests while asserting the path set and order are unchanged. Every merge that changes a hashed file depends on it; loss blocks the mandated merge procedure, while a bug can silently corrupt the gate. | `tools/regenerate_integration_manifest.py` is now the reviewed writer; `tools/ci_manifest.py` remains the independent validator. | **TRACKED** — the release-owned merge command is reviewed and tested, while execution remains operator-only. |
 | F06 | Dashboard attention acknowledger, 1,636 bytes / 54 lines | Bulk-acknowledges selected attention records. Loss does not stop the system; it removes an operator shortcut. | The tracked dashboard can acknowledge records interactively, but there is no tracked equivalent for the bounded bulk operation. | **SHOULD BE TRACKED** — it mutates operational state and should not be an unreviewed cache script. |
 | F07 | Browser201 capture script, 7,785 bytes / 176 lines | Drives a real browser and emits the operator-owned Browser201 evidence set. Loss blocks exact reproduction of that acceptance evidence. | The tracked Home acceptance harness shares primitives but does not reproduce this exact capture. | **SHOULD BE TRACKED** — acceptance evidence generation must be repeatable and reviewable. |
 | F08 | Fleet redesign capture script, 4,339 bytes / 112 lines | Captures the Fleet candidate at operator-selected viewports. Loss blocks reproduction of those visual acceptance artifacts, not product runtime. | General browser-test machinery exists, but this recipe does not. | **SHOULD BE TRACKED** — it is a release/acceptance recipe, not machine-private state. |
@@ -87,6 +87,28 @@ launcher, five cache-resident operator scripts, and two launch-job definitions.
 The process/startup sweep added F12-F16. Ephemeral test worktrees, ordinary logs,
 and per-run browser profiles were observed but excluded because no running or
 merge-time dependency pointed to their contents.
+
+## Operator merge-gate regeneration
+
+Run these commands only in the final merge checkout. Worker branches must leave
+both generated artifacts untouched. When a merge changes anything under
+`packages/`, first rebuild `component-lock.json` from an empty wheel directory.
+Then regenerate the integration manifest. Run the manifest command a second
+time: because `component-lock.json` is itself one of the hashed paths, the
+second run must report `already current` and proves the sequence is stable.
+
+```sh
+python3 tools/regenerate_component_lock.py \
+  --wheel-dir /PATH/TO/EMPTY/WHEEL-DIRECTORY
+python3 tools/regenerate_integration_manifest.py
+python3 tools/regenerate_integration_manifest.py
+python3 tools/ci_manifest.py run
+```
+
+For a merge that does not change `packages/`, omit only the component-lock
+command. The regenerator preserves the manifest's exact path set, sorts rows,
+fails on malformed, duplicate, missing, or repository-escaping inputs, and
+does not rewrite an already-current file.
 
 ## What fails first if the machine is lost
 
@@ -113,14 +135,11 @@ restart. F05 blocks the next affected merge rather than the current runtime.
 
 ## The first source fix
 
-F05 is the first incorrectly untracked item to fix. The data and trust material
-rank above it for outage recovery, but are correctly local by nature; F04 now has
-a tracked replacement on `main` and needs an operator cutover, not another source
-implementation. The manifest regenerator is different: it is executable policy
-on the critical path of every affected merge, it writes the artifact that the gate
-trusts, and it has no review or CI. Move it into tracked operator tooling, add tests
-for unchanged path set/order, missing inputs, deterministic output, and
-candidate-only changes, and keep execution release-owned.
+F05 was the first incorrectly untracked item to fix. The data and trust material
+rank above it for outage recovery, but are correctly local by nature; F04 has a
+tracked replacement and needs an operator cutover, not another source
+implementation. The reviewed regenerator now covers the critical merge path and
+keeps execution release-owned.
 
 After F05, track sanitized fleet and launch-job templates, fold the three capture
 recipes into the acceptance harness, and either productize or retire the active

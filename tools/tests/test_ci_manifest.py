@@ -138,7 +138,9 @@ def test_seat_suite_report_runs_every_suite_and_keeps_digest_test_separate(
 
     assert len(calls) == 2
     assert calls[0][-2:] == [
-        "-k", "not test_integration_files_manifest_matches_the_tree"
+        "-k",
+        "not test_integration_files_manifest_matches_the_tree "
+        "and not test_real_tree_is_clean_and_current_bump_has_zero_diff",
     ]
     assert "-k" not in calls[1]
 

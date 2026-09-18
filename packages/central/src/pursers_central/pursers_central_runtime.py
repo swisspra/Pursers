@@ -19,8 +19,15 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value if value not in (None, "") else default
 
 
-def _env_hosts(name: str) -> tuple[str, ...]:
-    value = _env(name)
+def _env_first(*names: str) -> str | None:
+    for name in names:
+        if (value := _env(name)) is not None:
+            return value
+    return None
+
+
+def _env_hosts(*names: str) -> tuple[str, ...]:
+    value = _env_first(*names)
     if value is None:
         return ()
     return tuple(host.strip() for host in value.split(",") if host.strip())
@@ -51,15 +58,21 @@ def main() -> None:
         default=_env("ONBOARD_CENTRAL_LOG_LEVEL", "info"),
     )
     parser.add_argument(
-        "--tls-certfile",
+        "--tls-certfile", "--ssl-certfile",
+        dest="tls_certfile",
         type=Path,
-        default=_env("ONBOARD_CENTRAL_TLS_CERTFILE"),
+        default=_env_first(
+            "ONBOARD_CENTRAL_TLS_CERTFILE", "ONBOARD_CENTRAL_SSL_CERTFILE"
+        ),
         help="TLS certificate supplied by the operator (requires --tls-keyfile)",
     )
     parser.add_argument(
-        "--tls-keyfile",
+        "--tls-keyfile", "--ssl-keyfile",
+        dest="tls_keyfile",
         type=Path,
-        default=_env("ONBOARD_CENTRAL_TLS_KEYFILE"),
+        default=_env_first(
+            "ONBOARD_CENTRAL_TLS_KEYFILE", "ONBOARD_CENTRAL_SSL_KEYFILE"
+        ),
         help="TLS private key supplied by the operator (requires --tls-certfile)",
     )
     parser.add_argument(
@@ -91,7 +104,8 @@ def main() -> None:
             "environment variables) must be supplied together"
         )
     allowed_hosts = tuple(
-        args.allowed_host or _env_hosts("ONBOARD_CENTRAL_ALLOWED_HOSTS")
+        args.allowed_host
+        or _env_hosts("ONBOARD_CENTRAL_ALLOWED_HOSTS", "CENTRAL_ALLOWED_HOSTS")
     )
 
     os.environ["CENTRAL_AUTH_MODE"] = "jwt"

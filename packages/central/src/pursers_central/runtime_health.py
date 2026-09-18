@@ -13,9 +13,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from mcp.server.transport_security import TransportSecuritySettings
+from mcp.server.transport_security import (
+    TransportSecurityMiddleware,
+    TransportSecuritySettings,
+)
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 MACHINE_LOGGER_NAME = "pursers_central.machine"
 LOOPBACK_ALLOWED_HOSTS = ("127.0.0.1:*", "localhost:*", "[::1]:*")
@@ -23,7 +27,40 @@ LOOPBACK_ALLOWED_ORIGINS = (
     "http://127.0.0.1:*",
     "http://localhost:*",
     "http://[::1]:*",
+    "https://127.0.0.1:*",
+    "https://localhost:*",
+    "https://[::1]:*",
 )
+
+
+class CentralTransportSecurityMiddleware:
+    """Apply the Central Host/Origin policy to every HTTP route."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        settings: TransportSecuritySettings,
+    ) -> None:
+        self.app = app
+        self.validator = TransportSecurityMiddleware(settings)
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if scope["type"] == "http":
+            request = Request(scope, receive=receive)
+            refusal = await self.validator.validate_request(request)
+            if refusal is not None:
+                response = Response(
+                    "Invalid Host or Origin header",
+                    status_code=421,
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 def _machine_logger() -> logging.Logger:
@@ -218,6 +255,7 @@ def create_streamable_http_app(
 ) -> Any:
     """Create the production-shaped stateless app with guarded healthz."""
     host_patterns = list(LOOPBACK_ALLOWED_HOSTS)
+    origin_patterns = list(LOOPBACK_ALLOWED_ORIGINS)
     for allowed_host in allowed_hosts:
         candidate = allowed_host.strip()
         if (
@@ -234,10 +272,17 @@ def create_streamable_http_app(
         for pattern in (candidate, f"{candidate}:*"):
             if pattern not in host_patterns:
                 host_patterns.append(pattern)
+        for scheme in ("http", "https"):
+            for pattern in (
+                f"{scheme}://{candidate}",
+                f"{scheme}://{candidate}:*",
+            ):
+                if pattern not in origin_patterns:
+                    origin_patterns.append(pattern)
     transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=host_patterns,
-        allowed_origins=list(LOOPBACK_ALLOWED_ORIGINS),
+        allowed_origins=origin_patterns,
     )
     app = mcp.streamable_http_app(
         streamable_http_path="/mcp",
@@ -245,9 +290,10 @@ def create_streamable_http_app(
         host=host,
         transport_security=transport_security,
     )
-    return install_health_route(
+    app = install_health_route(
         app,
         service,
         service.diagnostics,
         extra_payload=extra_payload,
     )
+    return CentralTransportSecurityMiddleware(app, transport_security)
