@@ -78,10 +78,28 @@ jobs:
           set -euo pipefail
           python tools/verify_publish_wheels.py --wheel-dir dist
 
+      # PyPI refuses to let a trusted publisher create a new project, so the
+      # first pursers-acp upload fails until a pending publisher exists. Upload
+      # it separately so it can never block the dependencies that `pursers`
+      # pins (v5.0.0 left pursers published without them).
+      - name: Hold pursers-acp for its own upload
+        run: |
+          set -euo pipefail
+          mkdir dist-acp
+          mv dist/pursers_acp-*.whl dist-acp/
+          ls -l dist dist-acp
+
       - name: Publish to PyPI (Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true
+
+      - name: Publish pursers-acp to PyPI (Trusted Publishing)
+        continue-on-error: true
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-acp
           skip-existing: true
 
   publish-wait-bridge:
