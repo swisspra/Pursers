@@ -33,6 +33,17 @@ DRAFT_PROTOCOL = "pursers_json_v1"
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 _SECRET_HEADER = re.compile(r"(?:authorization|api[-_]?key|token|secret|cookie)", re.I)
 _MANAGED_KEY_REFERENCE = re.compile(r"^file:([A-Za-z0-9._-]{1,160}\.key)$")
+_ALLOWED_ENDPOINT_HOSTS = frozenset(
+    {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+        "api.deepseek.com",
+        "dashscope-intl.aliyuncs.com",
+        "openrouter.ai",
+        "resource-name.openai.azure.com",
+    }
+)
 
 
 class ButlerSettingsError(ValueError):
@@ -81,6 +92,8 @@ def validate_endpoint(value: Any) -> str:
         )
     if parsed.scheme == "http" and hostname not in {"127.0.0.1", "localhost", "::1"}:
         raise ButlerSettingsError("endpoint must use https unless it is loopback")
+    if hostname not in _ALLOWED_ENDPOINT_HOSTS:
+        raise ButlerSettingsError("endpoint host is not allowed")
     return endpoint
 
 
