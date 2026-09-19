@@ -678,6 +678,24 @@ evidence = ["tools/worker-runtime/README.md"]
 evidence_contains = ["tools/worker-runtime/pursers_worker.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/zed/check_registry.py"
+kind = "operator-tool"
+source = "tools/zed/check_registry.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["docs/zed/research/05-publishing.md"]
+evidence_contains = ["python3 tools/zed/check_registry.py", "--export-repo", "--scratch"]
+
+[[artifacts]]
+id = "operator-tool:tools/zed/export_extension.py"
+kind = "operator-tool"
+source = "tools/zed/export_extension.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["docs/zed/research/05-publishing.md"]
+evidence_contains = ["tools/zed/export_extension.py", "--source", "--commit", "--output"]
+
+[[artifacts]]
 id = "external:fleet-dashboard-launcher"
 kind = "external-dependency"
 source = "external"
