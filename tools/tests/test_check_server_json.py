@@ -16,6 +16,7 @@ def _fixture_repository(tmp_path: Path) -> Path:
         "server.json",
         "tools/release_versions.toml",
         check_server_json.CENTRAL_PYPROJECT,
+        check_server_json.CLIENT_PYPROJECT,
         *check_server_json.MARKER_READMES,
     ):
         source = ROOT / relative
@@ -40,12 +41,19 @@ def test_check_rejects_top_level_and_package_version_drift(tmp_path: Path) -> No
         if package["identifier"] == "pursers-central"
     )
     central["version"] = "8.8.8"
+    client = next(
+        package
+        for package in document["packages"]
+        if package["identifier"] == "pursers-client"
+    )
+    client["version"] = "7.7.7"
     path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
 
     failures = check_server_json.check(root)
 
     assert "does not match product" in "\n".join(failures)
     assert "does not match central" in "\n".join(failures)
+    assert "does not match client" in "\n".join(failures)
 
 
 def test_check_rejects_missing_or_mismatched_markers(tmp_path: Path) -> None:
@@ -80,6 +88,10 @@ def test_check_rejects_unpublished_central_readme(tmp_path: Path) -> None:
 
 def test_central_wheel_publishes_exactly_one_marker() -> None:
     assert check_server_json.build_and_check_central_wheel(ROOT) == []
+
+
+def test_client_wheel_publishes_exactly_one_marker() -> None:
+    assert check_server_json.build_and_check_client_wheel(ROOT) == []
 
 
 def test_wheel_check_rejects_wrong_name_missing_and_duplicate_markers(
@@ -154,3 +166,32 @@ def test_check_rejects_https_transport_for_http_packaged_runtime(
     failures = check_server_json.check(root)
 
     assert any("transport URL must equal" in failure for failure in failures)
+
+
+def test_check_rejects_client_launch_contract_drift(tmp_path: Path) -> None:
+    root = _fixture_repository(tmp_path)
+    path = root / "server.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    client = next(
+        package
+        for package in document["packages"]
+        if package["identifier"] == "pursers-client"
+    )
+    client["transport"] = {"type": "streamable-http", "url": "http://localhost"}
+    client["runtimeArguments"][0]["value"] = "pursers-client==9.9.9"
+    client["packageArguments"] = [
+        item
+        for item in client["packageArguments"]
+        if item.get("name") != "--token-file"
+    ]
+    client["environmentVariables"] = [
+        {"name": "PURSERS_TOKEN", "isRequired": True, "isSecret": True}
+    ]
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+    rendered = "\n".join(check_server_json.check(root))
+
+    assert "transport must be exactly stdio" in rendered
+    assert "runtimeArguments must pin --from" in rendered
+    assert "named package arguments must equal" in rendered
+    assert "credentials are supplied only through --token-file" in rendered
