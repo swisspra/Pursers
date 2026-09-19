@@ -301,6 +301,7 @@ This release includes `pursers-central==0.1.0a28`,
   coordinator-hosted, and capability-implicit identities excluded;
   subscription-loss recovery waits with jittered backoff capped at 60
   seconds.
+- **Central:** re-offer human-resolved work to the requesting seat before normal dispatch.
 - **AionUi extension:** v0.1 under `tools/aionui-extension` with Worker and
   Reviewer presets, a Join tab that stores a door through the wait bridge,
   environment-free stdio MCP registration through AionUi's local API, and
