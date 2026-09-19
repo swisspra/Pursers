@@ -372,7 +372,48 @@ operator's `/Applications/Zed.app` was never changed. In that isolated copy,
 the unavoidable GUI step is `zed: install dev extension`, followed by choosing
 the scratch fixture directory.
 
-<!-- DEV_INSTALL_EVIDENCE -->
+The first isolated run reached that picker with the fixture selected and the
+`Open` button enabled. The operator later approved that click for scratch Zed
+profiles. On the resumed run, however, the host's native-capture service could
+not acquire any macOS CG window (`cgWindowNotFound`), including for unrelated
+running apps, so no GUI click is claimed here.
+
+The resumed proof instead exercised the exact post-build state transition in
+`install_dev_extension`: place the compiled `extension.wasm` in the source
+directory, create `extensions/installed/<id>` as a symlink to that directory,
+and let the running host's installed-directory watcher rebuild and reload.
+This is a source-equivalent fallback, not evidence that Zed exposes a
+supported non-GUI install command. The isolated host emitted these literal
+lines immediately after the symlink was created:
+
+```text
+2026-09-20T01:04:25+07:00 INFO  [extension_host] rebuilt extension index in 1.55575ms
+2026-09-20T01:04:25+07:00 INFO  [extension_host] extensions updated. loading 1, reloading 0, unloading 0
+```
+
+The resulting isolated index tied that load to this fixture rather than the
+built-in extension that Zed installs on first launch:
+
+```json
+"pursers-hello-zed": {
+  "manifest": {
+    "id": "pursers-hello-zed",
+    "name": "Pursers Hello Zed",
+    "version": "0.0.1",
+    "lib": { "kind": "Rust", "version": null }
+  },
+  "dev": true
+}
+```
+
+The installed entry was a symlink from
+`/PATH/TO/ISOLATED/ZED-DATA/extensions/installed/pursers-hello-zed` to the
+scratch fixture. The `lib.version` index field remains `null` because the
+fallback did not run Zed's builder; the WASM itself is the successful
+API-0.7.0 component identified above, and the host reported no load error.
+For a normal developer workflow, use the documented command-palette action
+and picker, which runs the builder before creating the same symlink and
+reload.
 
 Sources: [CLI reference](https://zed.dev/docs/reference/cli#--user-data-dir-dir),
 [path derivation](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/crates/paths/src/paths.rs),
