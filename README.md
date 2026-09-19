@@ -229,6 +229,7 @@ Live offers from a disposable Central and an exact-identity claim.
 - [Run a multi-agent fleet](docs/guides/running-a-fleet.md) — coordinator, workers, reviewer, end to end
 - [Fleet dashboard and Board Butler](docs/guides/fleet-dashboard.md) — install, every page, seat wizard, doors
 - [Troubleshooting and FAQ](docs/guides/troubleshooting.md) — real error messages mapped to fixes
+- Reference: [MCP tools](docs/reference/mcp-tools.md) · [CLI](docs/reference/cli.md) · [environment variables](docs/reference/environment.md) — generated from code
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security guide](docs/guides/security.md) — trust model, credentials, remote access, leak response
 - [Rotating the issuer key without downtime](docs/operations/issuer-key-rotation.md)
