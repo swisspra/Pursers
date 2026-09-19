@@ -443,6 +443,12 @@ class PursersACPAgent:
             return
         if request_id is None:
             return
+        # PersonalBoardSurface owns AnyIO/MCP context managers. Enter and exit
+        # those contexts in the run-loop task; AnyIO cancel scopes cannot be
+        # closed from the short-lived request task used for prompt concurrency.
+        if method in {"initialize", "authenticate"}:
+            await self._request(request_id, method, params)
+            return
         if method == "session/prompt":
             session = self.sessions.get(params.get("sessionId"))
             if session is not None:

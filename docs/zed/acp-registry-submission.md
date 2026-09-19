@@ -56,6 +56,30 @@ and `/answer`. Mutating `/create` and `/answer` requests use Zed's native
 `session/request_permission`; only `allow_once` executes the prepared board
 action. `/watch` publishes ACP plan updates while the subscription is active.
 
+## Zed-compatible stdio verification
+
+On 2026-09-20, the source agent was launched as a stdio subprocess and driven
+with the same ACP request sequence used by Zed 1.20.2 against a throwaway JWT
+Central on an ephemeral loopback port. The process exited successfully after
+the client closed stdin. These are the literal relevant transcript lines; the
+board and tool-call identifiers belong only to that disposable run:
+
+```text
+initialize={"id": 1, "jsonrpc": "2.0", "result": {"agentCapabilities": {"promptCapabilities": {}}, "agentInfo": {"name": "pursers-acp", "title": "Pursers Board Assistant", "version": "0.1.0"}, "authMethods": [{"description": "Use the selected existing human Personal profile", "id": "pursers-personal-profile", "name": "Use Pursers Personal", "type": "agent"}], "protocolVersion": 1}}
+available_commands=["board", "create", "watch", "evidence", "answer"]
+board_message="Board project-0ae4f4d4e6317a64daca56de\n\nReview policy: strict\nLatest event: 1\nYour active tickets: 0\nYour current offers: 0"
+board_result={"stopReason": "end_turn"}
+request_permission={"method": "session/request_permission", "options": [{"kind": "allow_once", "name": "Allow once", "optionId": "allow-once"}, {"kind": "reject_once", "name": "Reject", "optionId": "reject-once"}], "rawInput": {"board_id": "project-0ae4f4d4e6317a64daca56de", "operation": "ticket_create", "params": {"agent_name": "personal-acp-transcript", "description": "Permission evidence", "required_fields": ["observations"], "scope": "interactive-no-send", "target_url": "project-0ae4f4d4e6317a64daca56de", "title": "Transcript", "unassigned": true}}}
+create_result={"stopReason": "end_turn"}
+```
+
+GUI verification pending — operator, morning. The host GUI session was locked,
+so the new-thread menu entry and rendered permission dialog were not inspected
+in-window. Coordinator decision `AN-000000001221` explicitly accepts the pinned
+Zed 1.20.2 protocol evidence, current protocol tests, and this literal stdio
+transcript for this prepared submission; it does not claim that the pending
+in-window checks passed.
+
 ## Operator procedure
 
 Do this only after the release owner confirms that `0.1.0` is still the

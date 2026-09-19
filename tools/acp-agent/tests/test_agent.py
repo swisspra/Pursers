@@ -231,6 +231,31 @@ async def _conformance_honest_capabilities_and_read_intents(tmp_path: Path) -> N
     assert board.closed
 
 
+def test_board_transport_is_opened_and_closed_by_run_loop_task() -> None:
+    asyncio.run(_board_transport_is_opened_and_closed_by_run_loop_task())
+
+
+async def _board_transport_is_opened_and_closed_by_run_loop_task() -> None:
+    opened_by: asyncio.Task[object] | None = None
+
+    class TaskBoundBoard(FakeBoard):
+        async def close(self) -> None:
+            assert asyncio.current_task() is opened_by
+            await super().close()
+
+    bound_board = TaskBoundBoard()
+
+    def bound_factory() -> TaskBoundBoard:
+        nonlocal opened_by
+        opened_by = asyncio.current_task()
+        return bound_board
+
+    client = FakeACPClient(PursersACPAgent(bound_factory))
+    await client.initialize()
+    await client.close()
+    assert bound_board.closed
+
+
 def test_five_slash_commands_are_executable_and_writes_request_permission(
     tmp_path: Path,
 ) -> None:
