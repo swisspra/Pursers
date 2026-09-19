@@ -8,6 +8,7 @@ import pytest
 from tools.zed.check_registry import (
     RegistryCheckError,
     pr_body,
+    require_no_git_lfs,
     registry_stanza,
     write_operator_artifacts,
 )
@@ -106,6 +107,16 @@ def test_registry_stanza_rejects_non_registry_semver(version: str) -> None:
 def test_registry_stanza_rejects_invalid_id() -> None:
     with pytest.raises(RegistryCheckError, match="invalid extension ID"):
         registry_stanza("Pursers MCP", "0.1.0")
+
+
+def test_git_lfs_filter_is_rejected(tmp_path: Path) -> None:
+    repo = tmp_path / "export"
+    repo.mkdir()
+    _git(repo, "init", "--initial-branch=main")
+    (repo / ".gitattributes").write_text("*.wasm filter=lfs diff=lfs\n", encoding="utf-8")
+
+    with pytest.raises(RegistryCheckError, match="Git LFS filter"):
+        require_no_git_lfs(repo)
 
 
 def test_registry_stanza_is_exact() -> None:

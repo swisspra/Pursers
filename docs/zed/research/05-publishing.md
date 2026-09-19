@@ -411,7 +411,7 @@ adds the export as a local submodule while retaining the final HTTPS URL in
 `pnpm build`, `pnpm test`, the registry's `src/lib/validation.js` functions, and
 `pnpm sort-extensions`. It verifies sorting with `git diff --exit-code` and prints
 literal command output followed by `REGISTRY_CHECK PASS` or `REGISTRY_CHECK FAIL`.
-It never pushes the scratch clone.
+It also rejects Git LFS metadata in the export. It never pushes the scratch clone.
 
 The registry CI's `zed-extension` packager is a separate platform-specific binary.
 When the binary pinned by the inspected registry commit is available for the current

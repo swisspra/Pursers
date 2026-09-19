@@ -70,6 +70,23 @@ def load_manifest(export_repo: Path) -> dict[str, object]:
         return tomllib.load(handle)
 
 
+def require_no_git_lfs(export_repo: Path) -> None:
+    attributes = export_repo / ".gitattributes"
+    if attributes.is_file() and re.search(
+        r"(?:^|\s)filter\s*=\s*lfs(?:\s|$)",
+        attributes.read_text(encoding="utf-8"),
+        flags=re.MULTILINE,
+    ):
+        raise RegistryCheckError("Git LFS filter found in exported .gitattributes")
+    git_dir_raw = _run(["git", "rev-parse", "--git-dir"], cwd=export_repo).stdout.strip()
+    git_dir = Path(git_dir_raw)
+    if not git_dir.is_absolute():
+        git_dir = export_repo / git_dir
+    if (git_dir / "lfs").exists():
+        raise RegistryCheckError("Git LFS object directory found in exported repository")
+    print("NO_LFS PASS", flush=True)
+
+
 def registry_stanza(extension_id: str, version: str) -> str:
     if not EXTENSION_ID.fullmatch(extension_id):
         raise RegistryCheckError(f"invalid extension ID: {extension_id!r}")
@@ -208,6 +225,7 @@ def check_registry(
     if not (export_repo / "LICENSE").is_file():
         raise RegistryCheckError("exported repository must contain LICENSE at root")
 
+    require_no_git_lfs(export_repo)
     manifest = load_manifest(export_repo)
     manifest_id = manifest.get("id")
     version = manifest.get("version")
