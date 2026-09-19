@@ -1,0 +1,10 @@
+id = "pursers-mcp"
+name = "Pursers MCP"
+version = "0.1.0"
+schema_version = 1
+authors = ["Pursers fixture <fixture@invalid>"]
+description = "Minimal context-server fixture for launch-tool validation."
+repository = "https://github.com/swisspra/pursers-zed"
+
+[context_servers.pursers]
+name = "Pursers"

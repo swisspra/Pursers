@@ -352,93 +352,97 @@ Do not start this checklist until the wrapper has one MCP server, an accepted li
 English user-facing copy, and successful manual testing as a Zed dev extension at the
 exact commit being submitted.
 
-### 1. Freeze and verify the source commit
+### 1. Export the exact Pursers commit
 
-In the recommended dedicated repository:
-
-```sh
-git clone https://github.com/swisspra/pursers-zed.git
-cd pursers-zed
-git fetch origin <EXTENSION_BRANCH>
-git checkout <PURSERS_ZED_COMMIT_SHA>
-test "$(git rev-parse HEAD)" = "<PURSERS_ZED_COMMIT_SHA>"
-git branch -r --contains "<PURSERS_ZED_COMMIT_SHA>"
-test -f extension.toml
-test -f LICENSE
-```
-
-Replace the placeholder consistently with the full 40-character commit SHA. The
-`git branch -r --contains` output must show a public remote branch; a commit
-available only through a pull-request ref is not eligible. Confirm that manifest
-`id`, `version`, server declaration, repository URL, and license contents are final.
-
-For the monorepo alternative, run the same checks against
-`https://github.com/swisspra/Pursers.git`, replace the two file checks with
-`<PATH_TO_ZED_EXTENSION>/extension.toml` and
-`<PATH_TO_ZED_EXTENSION>/LICENSE`, and use the full Pursers commit SHA.
-
-### 2. Test the exact source
+Run the exporter from a clean Pursers checkout. Use empty paths outside that checkout
+for the standalone repository and registry scratch clone:
 
 ```sh
-cargo test
-cargo build --release --target wasm32-wasip2
+PURSERS=/PATH/TO/Pursers
+PURSERS_COMMIT=$(git -C "$PURSERS" rev-parse --verify HEAD^{commit})
+EXPORT=/PATH/TO/empty/pursers-zed
+REGISTRY_SCRATCH=/PATH/TO/empty/zed-extensions-check
+
+python3 "$PURSERS/tools/zed/export_extension.py" \
+  --source "$PURSERS" \
+  --commit "$PURSERS_COMMIT" \
+  --output "$EXPORT"
 ```
 
-Install that directory with `zed: install dev extension`, start the one declared MCP
-server, exercise a read operation and a permission-gated write operation, restart
-Zed, and verify denied download/process capabilities fail with actionable guidance.
-Manual dev-extension testing is a publishing prerequisite; the Rust commands are the
-minimum source checks, not a substitute. Source:
+The command uses `git subtree split` without changing the source checkout. It prints
+the exact Pursers commit, standalone history commit, deterministic tree hash, and
+tree listing. It refuses a non-empty output directory and refuses an export without
+`LICENSE` at its root. Repeating it for the same source commit in another empty
+directory must print the same `EXPORT_COMMIT` and `EXPORT_TREE`.
+
+### 2. Test the exact exported source
+
+```sh
+git -C "$EXPORT" status --short
+git -C "$EXPORT" log --oneline --decorate
+test -f "$EXPORT/extension.toml"
+test -f "$EXPORT/LICENSE"
+(cd "$EXPORT" && cargo test)
+(cd "$EXPORT" && cargo build --release --target wasm32-wasip2)
+```
+
+Install `$EXPORT` with `zed: install dev extension`, start the declared MCP server,
+exercise a read operation and a permission-gated write operation, restart Zed, and
+verify denied download/process capabilities fail with actionable guidance. Manual
+dev-extension testing remains a publishing prerequisite; the commands are not a
+substitute. Source:
 [`prerequisites.md` at `916fc2b8...`](https://github.com/zed-industries/zed/blob/916fc2b8cb3a815cbef4a3b40e13081be72036b6/docs/src/extensions/publishing/prerequisites.md)
 and
 [`developing-extensions.md` at `916fc2b8...`](https://github.com/zed-industries/zed/blob/916fc2b8cb3a815cbef4a3b40e13081be72036b6/docs/src/extensions/developing-extensions.md).
 
-### 3. Add the exact submodule commit to a personal fork
+### 3. Run the registry's local checks in scratch
 
 ```sh
-git clone https://github.com/<GITHUB_USER>/extensions.git
-cd extensions
+cd "$PURSERS"
+python3 tools/zed/check_registry.py \
+  --export-repo "$EXPORT" \
+  --scratch "$REGISTRY_SCRATCH" \
+  --artifacts-dir dist/zed-registry
+```
+
+The checker shallow-fetches the pinned registry commit into the empty scratch path,
+adds the export as a local submodule while retaining the final HTTPS URL in
+`.gitmodules`, adds the exact stanza, and runs `pnpm install --frozen-lockfile`,
+`pnpm build`, `pnpm test`, the registry's `src/lib/validation.js` functions, and
+`pnpm sort-extensions`. It verifies sorting with `git diff --exit-code` and prints
+literal command output followed by `REGISTRY_CHECK PASS` or `REGISTRY_CHECK FAIL`.
+It also rejects Git LFS metadata in the export. It never pushes the scratch clone.
+
+The registry CI's `zed-extension` packager is a separate platform-specific binary.
+When the binary pinned by the inspected registry commit is available for the current
+host, add `--zed-extension-cli /PATH/TO/zed-extension` to run that package step too.
+Without it the checker prints `PACKAGE SKIP`; do not describe that as a package pass.
+The official pull request CI still runs the pinned packager and no-LFS check. Sources:
+[`ci.yml` at `21cd47e...`](https://github.com/zed-industries/extensions/blob/21cd47e741cd80e0c1c574da0e00bec103c6e94d/.github/workflows/ci.yml)
+and
+[`publishing-guide.md` at `916fc2b8...`](https://github.com/zed-industries/zed/blob/916fc2b8cb3a815cbef4a3b40e13081be72036b6/docs/src/extensions/publishing/publishing-guide.md).
+
+### 4. Publish the standalone repository, then prepare one registry PR
+
+After the operator creates `swisspra/pursers-zed`, push the exported `main` branch
+there. Verify the exact full commit is reachable from a public branch before using it
+as the registry gitlink:
+
+```sh
+git -C "$EXPORT" remote add origin https://github.com/swisspra/pursers-zed.git
+git -C "$EXPORT" push -u origin main
+EXPORT_COMMIT=$(git -C "$EXPORT" rev-parse --verify HEAD^{commit})
+git -C "$EXPORT" branch -r --contains "$EXPORT_COMMIT"
+
+git clone https://github.com/<GITHUB_USER>/extensions.git /PATH/TO/extensions
+cd /PATH/TO/extensions
 git remote add upstream https://github.com/zed-industries/extensions.git
 git fetch upstream main
 git checkout -b add-pursers-mcp upstream/main
-git submodule init
-git submodule update
 git submodule add https://github.com/swisspra/pursers-zed.git extensions/pursers-mcp
-git -C extensions/pursers-mcp fetch origin <EXTENSION_BRANCH>
-git -C extensions/pursers-mcp checkout <PURSERS_ZED_COMMIT_SHA>
-test "$(git -C extensions/pursers-mcp rev-parse HEAD)" = "<PURSERS_ZED_COMMIT_SHA>"
-git -C extensions/pursers-mcp branch -r --contains "<PURSERS_ZED_COMMIT_SHA>"
-git add .gitmodules extensions/pursers-mcp
-```
-
-For the monorepo alternative, change only the submodule URL to
-`https://github.com/swisspra/Pursers.git` and use `<PURSERS_COMMIT_SHA>`.
-
-### 4. Add the registry stanza
-
-Recommended dedicated repository:
-
-```toml
-[pursers-mcp]
-submodule = "extensions/pursers-mcp"
-version = "<EXTENSION_VERSION>"
-```
-
-Monorepo alternative:
-
-```toml
-[pursers-mcp]
-submodule = "extensions/pursers-mcp"
-path = "<PATH_TO_ZED_EXTENSION>"
-version = "<EXTENSION_VERSION>"
-```
-
-`<EXTENSION_VERSION>` must be the exact unprefixed `major.minor.patch` from the
-selected commit's `extension.toml`.
-
-### 5. Sort and run the registry's local checks
-
-```sh
+test "$(git -C extensions/pursers-mcp rev-parse HEAD)" = "$EXPORT_COMMIT"
+git -C extensions/pursers-mcp branch -r --contains "$EXPORT_COMMIT"
+cat "$PURSERS/dist/zed-registry/extensions.toml" >> extensions.toml
 pnpm install --frozen-lockfile
 pnpm sort-extensions
 pnpm build
@@ -449,28 +453,26 @@ git status --short
 ```
 
 Confirm the diff contains exactly one new gitlink, one `.gitmodules` section, and one
-`extensions.toml` section. Confirm no unrelated extension version changed. The PR CI
-will run the pinned packager and the no-LFS check. Sources:
-[`ci.yml` at `21cd47e...`](https://github.com/zed-industries/extensions/blob/21cd47e741cd80e0c1c574da0e00bec103c6e94d/.github/workflows/ci.yml)
-and
-[`publishing-guide.md` at `916fc2b8...`](https://github.com/zed-industries/zed/blob/916fc2b8cb3a815cbef4a3b40e13081be72036b6/docs/src/extensions/publishing/publishing-guide.md).
+`extensions.toml` section, with no unrelated version change. The generated
+`dist/zed-registry/extensions.toml` reads the exact version from the export's
+`extension.toml`; `dist/zed-registry/PR_BODY.md` contains the short PR body.
 
-### 6. Commit, push the fork branch, and open one PR
+### 5. Commit, push the fork branch, and open one PR
 
 ```sh
+git add .gitmodules extensions.toml extensions/pursers-mcp
 git commit -m "Add Pursers MCP extension"
 git push -u origin add-pursers-mcp
 ```
 
-Open a pull request from that branch to `zed-industries/extensions:main`. State the
-exact source commit and version, how the server is installed or discovered, what
-commands it launches, what network/download behavior it has, the dev-extension test
-result, and why it does not overlap an existing extension. Keep this as the only
-extension changed by the PR, monitor CI, and answer maintainer feedback within three
-weeks. Source:
+Open one pull request to `zed-industries/extensions:main`, using
+`$PURSERS/dist/zed-registry/PR_BODY.md` as the starting body. Add the exact manual
+dev-extension result and any download/capability behavior that the generated short
+body cannot know. Keep this as the only extension changed by the PR, monitor CI, and
+answer maintainer feedback within three weeks. Source:
 [`publishing-guide.md` at `916fc2b8...`](https://github.com/zed-industries/zed/blob/916fc2b8cb3a815cbef4a3b40e13081be72036b6/docs/src/extensions/publishing/publishing-guide.md).
 
-### 7. Updating after acceptance
+### 6. Updating after acceptance
 
 Publish the new wrapper commit on a public branch, bump `version` in its
 `extension.toml`, then update both the submodule pointer and registry version in one
