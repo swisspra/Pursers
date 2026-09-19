@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 
@@ -94,6 +95,20 @@ class HumanInputTests(unittest.IsolatedAsyncioTestCase):
             message=message, kind="decision", **extra,
         )
 
+    async def activate_dispatch_workers(self) -> dict[str, str]:
+        agent_ids: dict[str, str] = {}
+        for principal in (self.worker, self.other):
+            self.principal = principal
+            joined = await self.call(
+                "board_join", agent_name=principal.canonical,
+                capabilities={"can_work": True, "can_review": False},
+                allow_takeover=True,
+            )
+            agent_id = joined.structured_content["agent_id"]
+            agent_ids[principal.canonical] = agent_id
+            self.service.register_listener("pursers", agent_id)
+        return agent_ids
+
     async def test_request_releases_lease_and_excludes_claim_and_dispatch(self) -> None:
         await self.claimed_ticket()
         result = (await self.request()).structured_content
@@ -146,17 +161,8 @@ class HumanInputTests(unittest.IsolatedAsyncioTestCase):
             resolved["ticket"]["human_request"]["resolution"]["action"], "accept"
         )
 
-    async def test_reopen_dispatches_to_an_alternative_worker(self) -> None:
-        for principal in (self.worker, self.other):
-            self.principal = principal
-            joined = await self.call(
-                "board_join", agent_name=principal.canonical,
-                capabilities={"can_work": True, "can_review": False},
-                allow_takeover=True,
-            )
-            self.service.register_listener(
-                "pursers", joined.structured_content["agent_id"]
-            )
+    async def test_reopen_reoffers_to_asker_and_exposes_resolution(self) -> None:
+        await self.activate_dispatch_workers()
         self.principal = self.admin
         await self.call(
             "ticket_create", ticket_id="TK-redispatch", agent_name="admin-agent",
@@ -174,11 +180,88 @@ class HumanInputTests(unittest.IsolatedAsyncioTestCase):
             await self.call(
                 "ticket_human_resolve", ticket_id="TK-redispatch",
                 agent_name="admin-agent", request_id=requested["request_id"],
-                action="accept", content="continue",
+                action="accept", content="continue", note="Operator approved",
             )
         ).structured_content
         self.assertEqual(resolved["ticket"]["status"], "open")
         self.assertIsNotNone(resolved["dispatch_event"])
+        self.assertEqual(resolved["dispatch_event"]["offered_agent_name"], "worker")
+
+        self.principal = self.worker
+        fetched = (
+            await self.call("ticket_get", ticket_id="TK-redispatch")
+        ).structured_content["ticket"]
+        resolution = fetched["human_request"]["resolution"]
+        self.assertEqual(resolution["action"], "accept")
+        self.assertEqual(resolution["content"], "continue")
+        self.assertEqual(resolution["note"], "Operator approved")
+
+    async def test_reoffer_falls_back_after_asker_offer_expires(self) -> None:
+        await self.activate_dispatch_workers()
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=10,
+        )
+        await self.claimed_ticket("TK-expire")
+        requested = (await self.request("TK-expire")).structured_content
+        base_time = central.time.time()
+        self.principal = self.admin
+        with patch.object(central.time, "time", return_value=base_time):
+            resolved = (
+                await self.call(
+                    "ticket_human_resolve", ticket_id="TK-expire",
+                    agent_name="admin-agent", request_id=requested["request_id"],
+                    action="accept", content="continue",
+                )
+            ).structured_content
+        self.assertEqual(resolved["dispatch_event"]["offered_agent_name"], "worker")
+
+        with patch.object(central.time, "time", return_value=base_time + 20):
+            await self.call("board_reap")
+            fallback = (
+                await self.call("ticket_get", ticket_id="TK-expire")
+            ).structured_content["ticket"]
+        self.assertEqual(fallback["work_offer"]["agent_name"], "other")
+
+    async def test_reopen_falls_back_when_asker_is_retired(self) -> None:
+        agent_ids = await self.activate_dispatch_workers()
+        await self.claimed_ticket("TK-retired")
+        requested = (await self.request("TK-retired")).structured_content
+        self.principal = self.admin
+        await self.call(
+            "agent_retire", agent_name="admin-agent",
+            target_agent_id=agent_ids["worker"],
+        )
+        resolved = (
+            await self.call(
+                "ticket_human_resolve", ticket_id="TK-retired",
+                agent_name="admin-agent", request_id=requested["request_id"],
+                action="accept", content="continue",
+            )
+        ).structured_content
+        self.assertEqual(resolved["dispatch_event"]["offered_agent_name"], "other")
+
+    async def test_reopen_without_human_release_reason_keeps_normal_dispatch(self) -> None:
+        await self.activate_dispatch_workers()
+        await self.claimed_ticket("TK-other-reopen")
+        requested = (await self.request("TK-other-reopen")).structured_content
+
+        def replace_release_reason(document: dict[str, Any]) -> None:
+            document["tickets"]["TK-other-reopen"]["last_release_reason"] = (
+                "explicit unclaim"
+            )
+
+        self.service.mutate(
+            "pursers", replace_release_reason, require_generation=False
+        )
+        self.principal = self.admin
+        resolved = (
+            await self.call(
+                "ticket_human_resolve", ticket_id="TK-other-reopen",
+                agent_name="admin-agent", request_id=requested["request_id"],
+                action="accept", content="continue",
+            )
+        ).structured_content
         self.assertEqual(resolved["dispatch_event"]["offered_agent_name"], "other")
 
     async def test_decline_can_park_or_cancel_and_cancel_action_is_reaskable(self) -> None:

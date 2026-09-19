@@ -4095,6 +4095,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     def dispatch_ticket(
         document: dict[str, Any], ticket: dict[str, Any], now: float, kind: str,
+        *, preferred_agent_id: str | None = None,
     ) -> dict[str, Any] | None:
         wanted_status = "open" if kind == "work" else "submitted"
         if ticket.get("status") != wanted_status:
@@ -4191,7 +4192,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if policy.get("second_opinion", True) else None
         )
         alternatives = [pair for pair in candidates if pair[0].get("agent_id") != avoid]
-        if alternatives:
+        preferred_candidate = any(
+            pair[0].get("agent_id") == preferred_agent_id for pair in candidates
+        )
+        if alternatives and not preferred_candidate:
             candidates = alternatives
         if not candidates:
             if kind == "work" and ticket.get("assigned_to_agent_id"):
@@ -4248,6 +4252,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             }
         candidates.sort(
             key=lambda pair: (
+                0 if pair[0].get("agent_id") == preferred_agent_id else 1,
                 0
                 if service.agent_has_active_listener(
                     str(document["board_id"]), str(pair[0]["agent_id"])
@@ -9773,7 +9778,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "state": "reopened", "at": iso_at(now),
                     "reason": "human_input_resolved",
                 }
-                dispatch_event = dispatch_ticket(document, ticket, now, "work")
+                preferred_agent_id = (
+                    asked_id
+                    if ticket.get("last_release_reason") == "human input requested"
+                    and isinstance(asked_id, str)
+                    else None
+                )
+                dispatch_event = dispatch_ticket(
+                    document, ticket, now, "work",
+                    preferred_agent_id=preferred_agent_id,
+                )
             elif action == "decline" and disposition == "cancel":
                 new_status = "canceled"
                 ticket["status"] = "canceled"
