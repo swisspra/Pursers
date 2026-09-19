@@ -161,7 +161,7 @@ Sources: [manifest and nested entry structs](https://github.com/zed-industries/z
 [capability enum](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/crates/extension/src/capabilities.rs),
 [snippet docs](https://zed.dev/docs/extensions/snippets),
 [debugger docs](https://zed.dev/docs/extensions/debugger-extensions),
-[slash-command removal](https://zed.dev/docs/extensions/slash-commands),
+[slash-command removal at the pinned 1.20.2 commit](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/docs/src/extensions/slash-commands.md),
 and [agent-server deprecation](https://zed.dev/docs/extensions/agent-servers).
 
 ### `process:exec` matching rules
@@ -374,25 +374,71 @@ the scratch fixture directory.
 
 The first isolated run reached that picker with the fixture selected and the
 `Open` button enabled. The operator later approved that click for scratch Zed
-profiles. On the resumed run, however, the host's native-capture service could
+profiles. On the resumed runs, however, the host's native-capture service could
 not acquire any macOS CG window (`cgWindowNotFound`), including for unrelated
 running apps, so no GUI click is claimed here.
 
-The resumed proof instead exercised the exact post-build state transition in
-`install_dev_extension`: place the compiled `extension.wasm` in the source
-directory, create `extensions/installed/<id>` as a symlink to that directory,
-and let the running host's installed-directory watcher rebuild and reload.
-This is a source-equivalent fallback, not evidence that Zed exposes a
-supported non-GUI install command. The isolated host emitted these literal
-lines immediately after the symlink was created:
+To distinguish successful WASM initialization from mere index discovery, a
+transient proof variant registered a Markdown language server and returned a
+unique, harmless marker command from the guest method:
 
-```text
-2026-09-20T01:04:25+07:00 INFO  [extension_host] rebuilt extension index in 1.55575ms
-2026-09-20T01:04:25+07:00 INFO  [extension_host] extensions updated. loading 1, reloading 0, unloading 0
+```toml
+[language_servers.pursers-hello-proof]
+languages = ["Markdown"]
 ```
 
-The resulting isolated index tied that load to this fixture rather than the
-built-in extension that Zed installs on first launch:
+```rust
+fn language_server_command(
+    &mut self,
+    _language_server_id: &zed::LanguageServerId,
+    _worktree: &zed::Worktree,
+) -> zed::Result<zed::Command> {
+    Ok(zed::Command {
+        command: "/usr/bin/touch".to_string(),
+        args: vec!["/PATH/UNDER/HOME/.cache/zed-r1/pursers-hello-wasm-init-ok".to_string()],
+        env: Default::default(),
+    })
+}
+```
+
+That variant built successfully for `wasm32-wasip2`; its component was 217988
+bytes with SHA-256
+`a1bddfc1c155186d10fbdc2d606e51bbccd8bbce1f559de5c23a8d704007e440`.
+Because native capture was unavailable, the resumed proof exercised the exact
+post-build state transition in `install_dev_extension`: place the compiled
+`extension.wasm` in the source directory, create
+`extensions/installed/<id>` as a symlink to that directory, and let the
+running host's installed-directory watcher rebuild and reload. This is a
+source-equivalent fallback, not evidence that Zed exposes a supported non-GUI
+install command.
+
+The isolated host first discovered the fixture, then registered its language
+server only after `WasmExtension::load` completed. Opening a Markdown file with
+`session.trust_all_worktrees = true` invoked the guest method and produced
+these literal log lines:
+
+```text
+2026-09-20T01:22:15+07:00 INFO  [extension_host] extensions updated. loading 2, reloading 0, unloading 0
+2026-09-20T01:22:43+07:00 INFO  [project::lsp_store] Worktree "/PATH/UNDER/HOME/.cache/zed-r1/proof.md" is trusted, starting language server pursers-hello-proof
+2026-09-20T01:22:43+07:00 INFO  [lsp] starting language server process. binary path: "/usr/bin/touch", working directory: "/PATH/UNDER/HOME/.cache/zed-r1", args: ["/PATH/UNDER/HOME/.cache/zed-r1/pursers-hello-wasm-init-ok"]
+```
+
+The marker appeared at the same timestamp:
+
+```text
+path=/PATH/UNDER/HOME/.cache/zed-r1/pursers-hello-wasm-init-ok size=0 mtime=2026-09-20T01:22:43+0700
+```
+
+Indexing alone cannot produce that command or marker: the command is returned
+by the guest's `language_server_command` export. At the pinned commit, Zed
+registers extension language servers only after the async load has compiled,
+instantiated, and called `init-extension`; only then can the host invoke this
+guest export. This is therefore positive evidence of successful WASM
+instantiation and initialization, rather than an inference from the absence
+of an error.
+
+The resulting isolated index also tied the load to this fixture rather than
+the built-in extension that Zed installs on first launch:
 
 ```json
 "pursers-hello-zed": {
@@ -409,16 +455,15 @@ built-in extension that Zed installs on first launch:
 The installed entry was a symlink from
 `/PATH/TO/ISOLATED/ZED-DATA/extensions/installed/pursers-hello-zed` to the
 scratch fixture. The `lib.version` index field remains `null` because the
-fallback did not run Zed's builder; the WASM itself is the successful
-API-0.7.0 component identified above, and the host reported no load error.
-For a normal developer workflow, use the documented command-palette action
-and picker, which runs the builder before creating the same symlink and
-reload.
+fallback did not run Zed's builder. For a normal developer workflow, use the
+documented command-palette action and picker, which runs the builder before
+creating the same symlink and reload.
 
 Sources: [CLI reference](https://zed.dev/docs/reference/cli#--user-data-dir-dir),
 [path derivation](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/crates/paths/src/paths.rs),
 [documented dev-install action](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/docs/src/extensions/developing-extensions.md#developing-an-extension-locally),
-and [installer implementation](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/crates/extension_host/src/extension_host.rs#L1092-L1173).
+[installer implementation](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/crates/extension_host/src/extension_host.rs#L1092-L1173),
+and [post-load registration](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/crates/extension_host/src/extension_host.rs#L1625-L1662).
 
 ## Sandbox, network, processes, files, and limits
 
