@@ -83,7 +83,7 @@ TOOL_SCOPES: dict[str, str] = {
     "lease_renew": "`board:write` for work or `board:review` for review, with the current lease",
     "board_reap": "`board:write`",
     "ticket_submit": "`board:write` and the current work lease",
-    "ticket_cancel": "`board:write` or `board:review`; creator/executor/reviewer checks apply",
+    "ticket_cancel": "`board:write`; creator/executor/reviewer checks apply",
     "dispatch_my_offers": "`board:read` for the caller-owned seat",
     "ticket_list": "`board:read`; server-side visibility filters still apply",
     "ticket_review_claim": "`board:review` and a live review offer or assignment",
@@ -305,6 +305,28 @@ ENV_MEANINGS: dict[str, str] = {
     "USER": "User name passed to Personal setup subprocesses.",
 }
 
+# The Client reads these names only to report ignored legacy overrides while a
+# profile supplies its identity. Other components still use the variables as
+# runtime configuration, so their rows must not share the Client wording.
+ENV_COMPONENT_OVERRIDES: dict[tuple[str, str], tuple[str, str]] = {
+    ("Client", "ONBOARD_AGENT_NAME"): (
+        "ignored",
+        "Legacy override detection only; profile-backed Client identity wins and doctor reports the variable as ignored.",
+    ),
+    ("Client", "ONBOARD_BOARD_ID"): (
+        "ignored",
+        "Legacy override detection only; the profile-backed board wins and doctor reports the variable as ignored.",
+    ),
+    ("Client", "ONBOARD_CENTRAL_TOKEN"): (
+        "ignored",
+        "Legacy override detection only; the profile-backed credential wins and doctor reports the variable as ignored.",
+    ),
+    ("Client", "ONBOARD_CENTRAL_URL"): (
+        "ignored",
+        "Legacy override detection only; the profile-backed Central endpoint wins and doctor reports the variable as ignored.",
+    ),
+}
+
 
 def _tool_names() -> set[str]:
     return {name for _heading, names in TOOL_GROUPS for name in names}
@@ -393,6 +415,40 @@ def _direct_response_fields() -> dict[str, str]:
     return fields
 
 
+def _direct_required_scopes() -> dict[str, tuple[str, ...]]:
+    """Return unconditional literal ``require_scope`` calls in tool bodies."""
+    source = ROOT / "packages/central/src/pursers_central/central.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    scopes: dict[str, tuple[str, ...]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        decorated = any(
+            isinstance(item, ast.Call)
+            and isinstance(item.func, ast.Name)
+            and item.func.id == "tool"
+            for item in node.decorator_list
+        )
+        if not decorated:
+            continue
+        direct: list[str] = []
+        for statement in node.body:
+            if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+                continue
+            call = statement.value
+            if (
+                isinstance(call.func, ast.Name)
+                and call.func.id == "require_scope"
+                and len(call.args) >= 2
+                and isinstance(call.args[1], ast.Constant)
+                and isinstance(call.args[1].value, str)
+            ):
+                direct.append(call.args[1].value)
+        if direct:
+            scopes[node.name] = tuple(dict.fromkeys(direct))
+    return scopes
+
+
 def render_mcp_tools() -> str:
     tools = _load_central_tools()
     by_name = {tool.name: tool for tool in tools}
@@ -404,6 +460,14 @@ def render_mcp_tools() -> str:
         )
     if set(TOOL_SCOPES) != expected:
         raise ValueError("scope metadata does not exactly cover the Central registry")
+    for name, scopes in _direct_required_scopes().items():
+        if name not in TOOL_SCOPES:
+            continue
+        missing = [scope for scope in scopes if f"`{scope}`" not in TOOL_SCOPES[name]]
+        if missing:
+            raise ValueError(
+                f"scope metadata for {name} omits unconditional authorization: {missing}"
+            )
     source_fields = _direct_response_fields()
     lines = [
         "# Central MCP tools",
@@ -588,6 +652,21 @@ def _server_json_environment() -> set[str]:
     return {item["name"] for item in packages[0]["environmentVariables"]}
 
 
+def _environment_rows(
+    inventory: Mapping[str, set[str]],
+) -> list[tuple[str, str, str, str]]:
+    rows: list[tuple[str, str, str, str]] = []
+    for name in sorted(set().union(*inventory.values())):
+        for component, names in inventory.items():
+            if name not in names:
+                continue
+            default, meaning = ENV_COMPONENT_OVERRIDES.get(
+                (component, name), (ENV_DEFAULTS[name], ENV_MEANINGS[name])
+            )
+            rows.append((name, component, default, meaning))
+    return rows
+
+
 def render_environment() -> str:
     inventory = _environment_inventory()
     all_names = set().union(*inventory.values())
@@ -608,9 +687,8 @@ def render_environment() -> str:
         "| Variable | Components | Default | Meaning |",
         "|---|---|---|---|",
     ]
-    for name in sorted(all_names):
-        components = ", ".join(component for component, names in inventory.items() if name in names)
-        lines.append(f"| `{name}` | {components} | {ENV_DEFAULTS[name]} | {ENV_MEANINGS[name]} |")
+    for name, component, default, meaning in _environment_rows(inventory):
+        lines.append(f"| `{name}` | {component} | {default} | {meaning} |")
     lines.extend([
         "",
         "## Central registry cross-check",

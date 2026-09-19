@@ -21,8 +21,10 @@ Unset means the component applies its documented default or requires an explicit
 | `LC_ALL` | ACP | inherited | Locale override passed to Personal setup subprocesses. |
 | `LC_CTYPE` | ACP | inherited | Character-type locale passed to Personal setup subprocesses. |
 | `ONBOARD_AGENT_INSTANCE` | Wait bridge | unset | Optional suffix used to distinguish repeated instances of one seat name. |
-| `ONBOARD_AGENT_NAME` | Client, Wait bridge | `pursers-wait-bridge` | Seat identity advertised to Central. |
-| `ONBOARD_BOARD_ID` | Client, Wait bridge | `pursers` | Home board used when a command does not receive an explicit board. |
+| `ONBOARD_AGENT_NAME` | Client | ignored | Legacy override detection only; profile-backed Client identity wins and doctor reports the variable as ignored. |
+| `ONBOARD_AGENT_NAME` | Wait bridge | `pursers-wait-bridge` | Seat identity advertised to Central. |
+| `ONBOARD_BOARD_ID` | Client | ignored | Legacy override detection only; the profile-backed board wins and doctor reports the variable as ignored. |
+| `ONBOARD_BOARD_ID` | Wait bridge | `pursers` | Home board used when a command does not receive an explicit board. |
 | `ONBOARD_CENTRAL_ALLOWED_HOSTS` | Central | unset | Comma-separated extra accepted bare HTTP Host names. |
 | `ONBOARD_CENTRAL_DATA_DIR` | Central | unset; required unless supplied by CLI | Private Central SQLite data directory. |
 | `ONBOARD_CENTRAL_HOST` | Central | `127.0.0.1` | Loopback address used by the packaged Central runtime. |
@@ -32,10 +34,13 @@ Unset means the component applies its documented default or requires an explicit
 | `ONBOARD_CENTRAL_SSL_KEYFILE` | Central | unset | Legacy alias for the TLS private-key path. |
 | `ONBOARD_CENTRAL_TLS_CERTFILE` | Central | unset | TLS certificate path; requires the matching key setting. |
 | `ONBOARD_CENTRAL_TLS_KEYFILE` | Central | unset | TLS private-key path; keep this file private. |
-| `ONBOARD_CENTRAL_TOKEN` | Client, Wait bridge | unset | Bearer credential value. Prefer the file setting for persistent configuration. |
+| `ONBOARD_CENTRAL_TOKEN` | Client | ignored | Legacy override detection only; the profile-backed credential wins and doctor reports the variable as ignored. |
+| `ONBOARD_CENTRAL_TOKEN` | Wait bridge | unset | Bearer credential value. Prefer the file setting for persistent configuration. |
 | `ONBOARD_CENTRAL_TOKEN_FILE` | Wait bridge | unset | Private file containing the Central bearer credential. |
-| `ONBOARD_CENTRAL_URL` | Client, Wait bridge | `http://127.0.0.1:8766/mcp` | Central MCP endpoint. |
-| `ONBOARD_PERSONAL_PROFILE` | Client, Personal | unset | Explicit Personal profile JSON selected ahead of project discovery. |
+| `ONBOARD_CENTRAL_URL` | Client | ignored | Legacy override detection only; the profile-backed Central endpoint wins and doctor reports the variable as ignored. |
+| `ONBOARD_CENTRAL_URL` | Wait bridge | `http://127.0.0.1:8766/mcp` | Central MCP endpoint. |
+| `ONBOARD_PERSONAL_PROFILE` | Client | unset | Explicit Personal profile JSON selected ahead of project discovery. |
+| `ONBOARD_PERSONAL_PROFILE` | Personal | unset | Explicit Personal profile JSON selected ahead of project discovery. |
 | `ONBOARD_TOKEN_FILE` | Wait bridge | unset | Compatibility token-file setting used by seat and registry administration commands. |
 | `PATH` | ACP | operating-system default | Executable search path passed to local ACP child processes. |
 | `PROJECT_REGISTRY_FILE` | Wait bridge | unset | Project-registry JSON file used by the registry seeder. |
@@ -53,9 +58,13 @@ Unset means the component applies its documented default or requires an explicit
 | `PURSERS_HOST` | Wait bridge | `codex` | Named host profile used for wait timeouts and capability provenance. |
 | `PURSERS_HOST_TIMEOUT_S` | Wait bridge | named-host timeout | Explicit host-response timeout override in seconds. |
 | `PURSERS_KEEPALIVE_IDLE_LIMIT_S` | Wait bridge | three claim-TTL periods | Maximum idle duration for automatic lease keepalive. |
-| `PURSERS_LEGACY_TOOLS` | Central, Client, Wait bridge | `0` / unset | Set to `1` to expose deprecated compatibility tools. |
-| `PURSERS_MODEL` | Wait bridge, ACP | unset | Model name recorded with seat capabilities and usage. |
-| `PURSERS_PROVIDER` | Wait bridge, ACP | unset | Model provider recorded with seat capabilities and usage. |
+| `PURSERS_LEGACY_TOOLS` | Central | `0` / unset | Set to `1` to expose deprecated compatibility tools. |
+| `PURSERS_LEGACY_TOOLS` | Client | `0` / unset | Set to `1` to expose deprecated compatibility tools. |
+| `PURSERS_LEGACY_TOOLS` | Wait bridge | `0` / unset | Set to `1` to expose deprecated compatibility tools. |
+| `PURSERS_MODEL` | Wait bridge | unset | Model name recorded with seat capabilities and usage. |
+| `PURSERS_MODEL` | ACP | unset | Model name recorded with seat capabilities and usage. |
+| `PURSERS_PROVIDER` | Wait bridge | unset | Model provider recorded with seat capabilities and usage. |
+| `PURSERS_PROVIDER` | ACP | unset | Model provider recorded with seat capabilities and usage. |
 | `PURSERS_REQUEST_STATE_KEY_FILE` | Wait bridge | state directory/request-state.keys | Restart-safe MCP request-state keyring for the bridge. |
 | `PURSERS_REQUIRE_TOKEN_MATCH` | Wait bridge | unset | Set to `1` to require connector/bridge credential matching. |
 | `PURSERS_ROLE` | Wait bridge | door role or unset | Seat role advertised during onboarding. |

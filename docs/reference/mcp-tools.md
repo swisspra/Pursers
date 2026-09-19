@@ -380,7 +380,7 @@ Response fields: `ok, ticket, event, dispatch_event, release_events, implicitly_
 
 Cancel a live ticket as its creator, current executor, or a reviewer.
 
-Required authorization: `board:write` or `board:review`; creator/executor/reviewer checks apply.
+Required authorization: `board:write`; creator/executor/reviewer checks apply.
 
 | Argument | Type | Presence | Default |
 |---|---|---|---|
