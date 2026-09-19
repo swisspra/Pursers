@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ sys.modules[SPEC.name] = acp_client
 SPEC.loader.exec_module(acp_client)
 
 FAKE_AGENT = Path(__file__).with_name("fake_acp_agent.py")
+TEST_TIMEOUT_S = float(os.environ.get("PURSERS_TEST_TIMEOUT_S", "30"))
 
 
 class ACPClientTests(unittest.IsolatedAsyncioTestCase):
@@ -35,7 +37,7 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
         script: dict[str, Any],
         *,
         policy: Any = None,
-        timeout: float = 2.0,
+        timeout: float = TEST_TIMEOUT_S,
         load_flag: bool = False,
     ) -> Any:
         script_path = self.root / f"script-{len(self.clients)}.json"

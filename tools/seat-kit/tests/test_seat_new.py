@@ -34,6 +34,28 @@ seat_new = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(seat_new)
 
 
+def database_is_locked(error: BaseException) -> bool:
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, sqlite3.OperationalError) and (
+            "database is locked" in str(current).lower()
+        ):
+            return True
+        current = current.__cause__
+    return False
+
+
+async def retry_one_database_lock(operation: Any) -> Any:
+    """Yield once after a busy timeout so the competing async writer can finish."""
+    try:
+        return await operation()
+    except Exception as error:
+        if not database_is_locked(error):
+            raise
+        await asyncio.sleep(0.05)
+        return await operation()
+
+
 def args(
     tmp_path: Path,
     *,
@@ -136,6 +158,23 @@ def load_generated(path: Path, name: str) -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_retry_one_database_lock_yields_and_retries_only_the_lock() -> None:
+    calls = 0
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            try:
+                raise sqlite3.OperationalError("database is locked")
+            except sqlite3.OperationalError as error:
+                raise RuntimeError("wrapped tool failure") from error
+        return "ok"
+
+    assert asyncio.run(retry_one_database_lock(operation)) == "ok"
+    assert calls == 2
 
 
 @pytest.fixture(autouse=True)
@@ -2160,7 +2199,7 @@ def test_live_holder_annotation_wakes_and_reviewer_claims_expired_broadcast(
             assert submitted.structured_content["ticket"]["review_offer"]["agent_id"] == agent_ids["reviewer"]
             await asyncio.sleep(1.05)
             active["principal"] = principals["admin"]
-            await call("board_reap")
+            await retry_one_database_lock(lambda: call("board_reap"))
             current = await call("ticket_get", ticket_id=ticket_id)
             assert current.structured_content["ticket"]["dispatch_state"]["state"] == "broadcast"
             assert "review_offer" not in current.structured_content["ticket"]

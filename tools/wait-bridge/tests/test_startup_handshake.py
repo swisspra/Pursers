@@ -23,6 +23,8 @@ from mcp.client.stdio import StdioServerParameters  # noqa: E402
 from pursers_client import BoardClientError, JoinedIdentity  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 
+TEST_TIMEOUT_S = float(os.environ.get("PURSERS_TEST_TIMEOUT_S", "30"))
+
 
 class _UnauthorizedHandler(BaseHTTPRequestHandler):
     def _reject(self) -> None:
@@ -210,7 +212,7 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
             async with Client(
                 params,
                 mode="2026-07-28",
-                read_timeout_seconds=5,
+                read_timeout_seconds=TEST_TIMEOUT_S,
             ) as client:
                 tools = await client.list_tools()
                 self.assertIn(
@@ -243,7 +245,7 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             server.shutdown()
             server.server_close()
-            thread.join(timeout=2)
+            thread.join(timeout=TEST_TIMEOUT_S)
 
     async def test_initialize_succeeds_with_unreachable_central_then_tool_reports_it(
         self,

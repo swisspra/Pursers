@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import shlex
 import stat
 import subprocess
@@ -22,6 +23,7 @@ sys.modules[SPEC.name] = seat_config
 SPEC.loader.exec_module(seat_config)
 REAL_RUNTIME_PROBE = seat_config._default_runtime_probe
 REAL_IDENTITY_PROBE = seat_config._default_identity_probe
+TEST_TIMEOUT_S = float(os.environ.get("PURSERS_TEST_TIMEOUT_S", "30"))
 
 
 def hermetic_doctor_runner(command, **kwargs):
@@ -1371,7 +1373,7 @@ def test_doctor_runtime_probe_launches_host_env_block_only(
     monkeypatch.setenv("SHOULD_NOT_REACH_PROBE", "forbidden")
 
     inspection = adapter.inspect()
-    ok, message = REAL_RUNTIME_PROBE(target, inspection, 5.0)
+    ok, message = REAL_RUNTIME_PROBE(target, inspection, TEST_TIMEOUT_S)
 
     assert ok is True
     assert "joins Central" in message

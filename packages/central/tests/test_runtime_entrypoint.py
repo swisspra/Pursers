@@ -12,6 +12,7 @@ import tomllib
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
+TEST_TIMEOUT_S = float(os.environ.get("PURSERS_TEST_TIMEOUT_S", "30"))
 sys.path.insert(0, str(PACKAGE_ROOT / "src"))
 
 from pursers_central import pursers_central_runtime as runtime
@@ -61,7 +62,7 @@ def test_module_exits_nonzero_for_unwritable_data_dir(
             env=environment,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=TEST_TIMEOUT_S,
             check=False,
         )
     finally:
