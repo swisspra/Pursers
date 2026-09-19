@@ -396,17 +396,21 @@ def test_bump_of_one_component_leaves_components_sharing_its_version(
     current = load_versions(root / "tools/release_versions.toml")
     shared = current.packages["central"]
     assert current.packages["client"] == shared
-    target = release_train.bumped_versions(current, ("central=0.1.1",), None)
+    # A version the cohort does not already use, so the assertions below stay
+    # meaningful whichever release the repository is on.
+    moved = "0.9.9"
+    assert shared != moved
+    target = release_train.bumped_versions(current, (f"central={moved}",), None)
 
     planned = release_train.plan_bump(root, current, target)
     for path, content in planned.items():
         path.write_text(content, encoding="utf-8")
 
     central = (root / "packages/central/pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.1.1"' in central
+    assert f'version = "{moved}"' in central
     assert f'"pursers-client=={shared}"' in central
     personal = (root / "packages/personal/pyproject.toml").read_text(encoding="utf-8")
-    assert '"pursers-central==0.1.1"' in personal
+    assert f'"pursers-central=={moved}"' in personal
     assert f'"pursers-client=={shared}"' in personal
     # The component lock is rebuilt from wheels by a separate step.
     assert [
@@ -425,6 +429,8 @@ def test_unqualified_shared_version_is_refused(tmp_path: Path) -> None:
         + f"\nSee version {current.packages['central']} for details.\n",
         encoding="utf-8",
     )
-    target = release_train.bumped_versions(current, ("central=0.1.1",), None)
+    # A version the cohort does not already use, so the bump is a real change
+    # whichever release the repository is on.
+    target = release_train.bumped_versions(current, ("central=0.9.9",), None)
     with pytest.raises(release_train.ReleaseTrainError, match="not qualified"):
         release_train.plan_bump(root, current, target)

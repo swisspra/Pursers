@@ -51,10 +51,10 @@ def test_release_tag_must_be_canonical_and_match_manifest(tag: str) -> None:
 
 def test_seven_wheel_cohort_matches_manifest_versions() -> None:
     assert set(expected_wheel_filenames()) == {
-        "pursers-5.0.1-py3-none-any.whl",
+        "pursers-5.0.2-py3-none-any.whl",
         "pursers_central-0.1.1-py3-none-any.whl",
-        "pursers_client-0.1.0-py3-none-any.whl",
-        "pursers_personal-5.0.1-py3-none-any.whl",
+        "pursers_client-0.1.1-py3-none-any.whl",
+        "pursers_personal-5.0.2-py3-none-any.whl",
         "pursers_personal_import-5.0.0-py3-none-any.whl",
         "pursers_wait_bridge-0.1.0-py3-none-any.whl",
         "pursers_acp-0.1.0-py3-none-any.whl",
