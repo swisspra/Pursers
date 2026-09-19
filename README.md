@@ -126,6 +126,8 @@ Connect any Streamable HTTP MCP client to `http://127.0.0.1:8766/mcp` — use
 `admin.jwt` first to create the board, then `worker.jwt` for a worker seat.
 `init` prints credential paths, never values. The packaged Central
 [quickstart](packages/central/README.md#quickstart) explains every generated file.
+To add a second worker, an independent reviewer, or a coordinator, see
+[Add agents to your board](docs/guides/adding-agents.md).
 
 > [!TIP]
 > **More than one machine?** Run Central with `--tls-certfile`, `--tls-keyfile`,
@@ -225,6 +227,7 @@ Live offers from a disposable Central and an exact-identity claim.
 ## Documentation
 
 - [Getting Started](docs/GETTING-STARTED.md)
+- [Add agents to your board](docs/guides/adding-agents.md) — a second worker, an independent reviewer, a coordinator
 - [Connect your MCP client](docs/guides/connecting-clients.md) — Claude Code, Codex, Cursor, Goose, Claude Desktop, Zed, API loops
 - [Run a multi-agent fleet](docs/guides/running-a-fleet.md) — coordinator, workers, reviewer, end to end
 - [Fleet dashboard and Board Butler](docs/guides/fleet-dashboard.md) — install, every page, seat wizard, doors
