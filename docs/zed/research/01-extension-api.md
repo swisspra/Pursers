@@ -359,24 +359,34 @@ both a scratch home and a scratch data directory:
 export HOME=/PATH/UNDER/HOME/.cache/zed-r1/zed-home
 export TMPDIR=/PATH/UNDER/HOME/.cache/zed-r1/tmp
 export PATH=/PATH/TO/RUSTUP/bin:/usr/bin:/bin:/usr/sbin:/sbin
+export ZED_STATELESS=1
 
-/Applications/Zed.app/Contents/MacOS/zed \
+/PATH/UNDER/HOME/.cache/zed-r1/Pursers-Zed-R1.app/Contents/MacOS/zed \
   --user-data-dir /PATH/UNDER/HOME/.cache/zed-r1/zed-profile \
   /PATH/UNDER/HOME/.cache/zed-r1/hello-zed-extension
 ```
 
-When concurrent Zed test instances already exist, macOS can route the stock
-bundle identifier to an existing process. For this proof only, an ad-hoc-signed
-scratch copy of the installed app was given a unique bundle identifier; the
-operator's `/Applications/Zed.app` was never changed. In that isolated copy,
-the unavoidable GUI step is `zed: install dev extension`, followed by choosing
-the scratch fixture directory.
+This is the complete isolation recipe used by the proof. `HOME` isolates
+home-derived logs and support paths, `TMPDIR` keeps temporary files below the
+seat's own home cache, and `--user-data-dir` isolates the database, settings,
+extension index, installed extensions, staging, and work directories.
+`ZED_STATELESS=1` bypasses the stable build's per-user single-instance
+handshake, which would otherwise route the scratch launch to an already
+running operator instance. The ad-hoc-signed scratch app copy used the unique
+bundle ID `dev.zed.Zed.worker9.r1`; the operator's `/Applications/Zed.app` was
+never changed. In that isolated copy, the unavoidable GUI step is
+`zed: install dev extension`, followed by choosing the scratch fixture
+directory.
 
 The first isolated run reached that picker with the fixture selected and the
 `Open` button enabled. The operator later approved that click for scratch Zed
 profiles. On the resumed runs, however, the host's native-capture service could
 not acquire any macOS CG window (`cgWindowNotFound`), including for unrelated
-running apps, so no GUI click is claimed here.
+running apps, so no GUI click is claimed here. **GUI verification pending —
+operator, morning:** the operator will exercise the supported picker once in
+phase 3 against the finished `pursers-mcp` extension. For R1, operator decision
+`AN-000000001213` explicitly accepted the isolated non-GUI core-path proof plus
+the functional WASM hook below.
 
 To distinguish successful WASM initialization from mere index discovery, a
 transient proof variant registered a Markdown language server and returned a
@@ -461,6 +471,7 @@ creating the same symlink and reload.
 
 Sources: [CLI reference](https://zed.dev/docs/reference/cli#--user-data-dir-dir),
 [path derivation](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/crates/paths/src/paths.rs),
+[single-instance bypass and stable-channel guard](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/crates/zed/src/main.rs#L360-L381),
 [documented dev-install action](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/docs/src/extensions/developing-extensions.md#developing-an-extension-locally),
 [installer implementation](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/crates/extension_host/src/extension_host.rs#L1092-L1173),
 and [post-load registration](https://github.com/zed-industries/zed/blob/7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f/crates/extension_host/src/extension_host.rs#L1625-L1662).
