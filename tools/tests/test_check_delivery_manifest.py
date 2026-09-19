@@ -39,6 +39,29 @@ def test_repository_delivery_manifest_is_current() -> None:
     assert check_delivery_manifest.validate(ROOT) == []
 
 
+def test_discovers_checked_in_demo_media(tmp_path: Path) -> None:
+    root = tmp_path
+    media = root / "docs" / "media"
+    media.mkdir(parents=True)
+    (media / "flow.gif").write_bytes(b"GIF89a")
+    (media / "flow.mp4").write_bytes(b"media")
+    (media / "flow.webm").write_bytes(b"media")
+    (media / "README.md").write_text("not an artifact", encoding="utf-8")
+
+    discovered = check_delivery_manifest.discover_artifacts(root)
+
+    assert discovered["media:docs/media/flow.gif"] == check_delivery_manifest.Artifact(
+        "media:docs/media/flow.gif", "media", "docs/media/flow.gif"
+    )
+    assert discovered["media:docs/media/flow.mp4"] == check_delivery_manifest.Artifact(
+        "media:docs/media/flow.mp4", "media", "docs/media/flow.mp4"
+    )
+    assert discovered["media:docs/media/flow.webm"] == check_delivery_manifest.Artifact(
+        "media:docs/media/flow.webm", "media", "docs/media/flow.webm"
+    )
+    assert "media:docs/media/README.md" not in discovered
+
+
 def test_red_fixture_proves_unregistered_artifact_and_b1_version_fail() -> None:
     failures = check_delivery_manifest.validate(RED_FIXTURE)
 
