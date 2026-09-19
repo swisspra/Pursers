@@ -56,6 +56,21 @@ The destination must be new or empty. The generator creates:
 - `AGENTS.md` and `.goosehints`: identical identity, loop, and governance rules
 - the optional repository clone
 
+Before onboarding an existing fleet, check every seat folder for identity
+drift:
+
+```sh
+python3 tools/seat-kit/seat_new.py check /PATH/TO/Pursers-Mong1/*
+```
+
+`check` is read-only. It compares the folder-derived identity with the title,
+identity declaration, and `board_onboard` name in `AGENTS.md`, the connection
+name in `START.md`, and `ONBOARD_AGENT_NAME` in `.codex/config.toml`. It reads
+the configured token's JWT payload without printing the token and reports
+shared `sub` values as information. Identity mismatches, missing seat files,
+and unreadable token metadata produce a non-zero exit. Directories with none of
+the three seat identity files are skipped.
+
 Use `--upgrade` to regenerate those four managed files in an existing seat.
 Every other file is preserved. An upgrade fetches the repository clone and
 fast-forwards it only when it is clean, already on the remote default branch,
