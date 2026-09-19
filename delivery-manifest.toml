@@ -516,6 +516,15 @@ evidence = ["README.md", "docs/media/ticket-flow-light.svg", "docs/media/ticket-
 evidence_contains = ["docs/media/ticket-flow-light.svg"]
 
 [[artifacts]]
+id = "operator-tool:tools/media/cache_hit_svg.py"
+kind = "operator-tool"
+source = "tools/media/cache_hit_svg.py"
+state = "delivered"
+channel = "README animated prompt-cache chart"
+evidence = ["README.md", "docs/media/cache-hit-light.svg", "docs/media/cache-hit-dark.svg"]
+evidence_contains = ["docs/media/cache-hit-light.svg"]
+
+[[artifacts]]
 id = "operator-tool:tools/deterministic_tar.py"
 kind = "operator-tool"
 source = "tools/deterministic_tar.py"

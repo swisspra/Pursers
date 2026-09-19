@@ -109,6 +109,13 @@ sequenceDiagram
 | **Cheap to run** | Central emits byte-stable, prefix-first responses and compact mutation receipts, and idle seats spend no model turns. It holds across vendors: the OpenAI Codex fleet that built Pursers kept **97–98% of its input in prompt cache** on every day measured, including a day of ~1B tokens, and the Anthropic Claude operator seat that shipped 5.0.0 ran at **99%**. [Design](docs/cache-friendly-prose.md) · [numbers](docs/evidence/cache-efficiency.md) |
 | **Watch** | The Fleet dashboard shows the ticket funnel, live seats, claims, review pressure, and every project board on one screen. |
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/media/cache-hit-dark.svg">
+    <img src="docs/media/cache-hit-light.svg" alt="Prompt-cache hit rate while the fleet built Pursers: OpenAI Codex fleet 97.6%, 97.5% and 97.2% on three days, Anthropic Claude operator seat 98.8%; only 1 to 3% of input was paid at full price" width="820">
+  </picture>
+</p>
+
 Put your most capable model in the coordinator seat and right-sized models in
 the worker seats. Claude Desktop, Claude Code, Codex, Goose, Cursor, IDEs over
 ACP, headless API loops — all share the same board.

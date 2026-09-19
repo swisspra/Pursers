@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 350" width="820" height="350" role="img" aria-labelledby="t d">
+  <title id="t">Prompt-cache hit rate while the fleet built Pursers</title>
+  <desc id="d">Share of input tokens served from prompt cache: OpenAI Codex fleet, 13 Aug · 294M tokens: 97.6%; OpenAI Codex fleet, 14 Aug · 210M tokens: 97.5%; OpenAI Codex fleet, 15 Aug · 998M tokens: 97.2%; Anthropic Claude, operator seat · shipped 5.0.0: 98.8%.</desc>
+  <style>
+    :root { --fg: #f0f6fc; --muted: #9198a1; --track: #212830; --line: #3d444d; --cached: #3fb950; --paid: #d29922; --ease-out: cubic-bezier(0.23, 1, 0.32, 1); }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; fill: var(--fg); }
+    .muted { fill: var(--muted); }
+    .anim { animation-duration: 10s; animation-iteration-count: infinite; animation-fill-mode: both; }
+    .fill { transform-box: fill-box; transform-origin: left center; }
+    .cap { font-size: 15px; font-weight: 600; opacity: 0; }
+
+    /* The whole chart fades out at the end so the reset is never seen. */
+    .scene { animation-name: scene; }
+    @keyframes scene { 0% { opacity: 0; } 3%, 93% { opacity: 1; } 99%, 100% { opacity: 0; } }
+
+    /* Each bar fills to its cache share, one after another. */
+    .f0 { animation-name: f0, dim; }
+    @keyframes f0 { 0%, 6% { transform: scaleX(0); animation-timing-function: var(--ease-out); } 22%, 100% { transform: scaleX(1); } }
+    .p0 { animation-name: p0; }
+    @keyframes p0 { 0%, 16% { opacity: 0; transform: translateX(-8px); animation-timing-function: var(--ease-out); } 22%, 100% { opacity: 1; transform: translateX(0); } }
+    .f1 { animation-name: f1, dim; }
+    @keyframes f1 { 0%, 9% { transform: scaleX(0); animation-timing-function: var(--ease-out); } 25%, 100% { transform: scaleX(1); } }
+    .p1 { animation-name: p1; }
+    @keyframes p1 { 0%, 19% { opacity: 0; transform: translateX(-8px); animation-timing-function: var(--ease-out); } 25%, 100% { opacity: 1; transform: translateX(0); } }
+    .f2 { animation-name: f2, dim; }
+    @keyframes f2 { 0%, 12% { transform: scaleX(0); animation-timing-function: var(--ease-out); } 28%, 100% { transform: scaleX(1); } }
+    .p2 { animation-name: p2; }
+    @keyframes p2 { 0%, 22% { opacity: 0; transform: translateX(-8px); animation-timing-function: var(--ease-out); } 28%, 100% { opacity: 1; transform: translateX(0); } }
+    .f3 { animation-name: f3, dim; }
+    @keyframes f3 { 0%, 15% { transform: scaleX(0); animation-timing-function: var(--ease-out); } 31%, 100% { transform: scaleX(1); } }
+    .p3 { animation-name: p3; }
+    @keyframes p3 { 0%, 25% { opacity: 0; transform: translateX(-8px); animation-timing-function: var(--ease-out); } 31%, 100% { opacity: 1; transform: translateX(0); } }
+
+    /* Then the small slice paid at full price is called out. */
+    .paid { animation-name: paid; }
+    @keyframes dim { 0%, 46% { opacity: 1; } 52%, 100% { opacity: 0.4; } }
+    @keyframes paid { 0%, 46% { opacity: 0; } 50%, 100% { opacity: 1; } }
+    .c1 { animation-name: c1; } @keyframes c1 { 0%, 2% { opacity: 0; } 5%, 43% { opacity: 1; } 46%, 100% { opacity: 0; } }
+    .c2 { animation-name: c2; } @keyframes c2 { 0%, 47% { opacity: 0; } 50%, 93% { opacity: 1; } 97%, 100% { opacity: 0; } }
+
+    .static { opacity: 0; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .anim { animation: none; }
+      .cap { opacity: 0; }
+      .static { opacity: 1; }
+    }
+  </style>
+
+  <g class="scene anim">
+  <text x="20" y="34" font-size="19" font-weight="700">Prompt-cache hit rate while the fleet built Pursers</text>
+  <text class="cap c1 anim" x="20" y="62">97–99% of every prompt was served from cache.</text>
+  <text class="cap c2 anim" x="20" y="62">Only <tspan fill="var(--paid)">1–3%</tspan> of input was paid at full price. Across vendors.</text>
+  <text class="cap static" x="20" y="62">97–99% of input served from cache; only 1–3% paid at full price.</text>
+
+  <text x="20" y="108" font-size="13" font-weight="600">OpenAI Codex fleet</text>
+  <text x="20" y="125" font-size="11" class="muted">13 Aug · 294M tokens</text>
+  <rect x="250" y="104" width="460" height="18" rx="4" fill="var(--track)"/>
+  <rect class="paid anim" x="699.0" y="104" width="11.0" height="18" rx="2" fill="var(--paid)"/>
+  <rect class="fill f0 anim" x="250" y="104" width="449.0" height="18" rx="4" fill="var(--cached)"/>
+  <text class="pct p0 anim" x="726" y="118" font-size="17" font-weight="700">97.6%</text>
+  <text x="20" y="158" font-size="13" font-weight="600">OpenAI Codex fleet</text>
+  <text x="20" y="175" font-size="11" class="muted">14 Aug · 210M tokens</text>
+  <rect x="250" y="154" width="460" height="18" rx="4" fill="var(--track)"/>
+  <rect class="paid anim" x="698.5" y="154" width="11.5" height="18" rx="2" fill="var(--paid)"/>
+  <rect class="fill f1 anim" x="250" y="154" width="448.5" height="18" rx="4" fill="var(--cached)"/>
+  <text class="pct p1 anim" x="726" y="168" font-size="17" font-weight="700">97.5%</text>
+  <text x="20" y="208" font-size="13" font-weight="600">OpenAI Codex fleet</text>
+  <text x="20" y="225" font-size="11" class="muted">15 Aug · 998M tokens</text>
+  <rect x="250" y="204" width="460" height="18" rx="4" fill="var(--track)"/>
+  <rect class="paid anim" x="697.1" y="204" width="12.9" height="18" rx="2" fill="var(--paid)"/>
+  <rect class="fill f2 anim" x="250" y="204" width="447.1" height="18" rx="4" fill="var(--cached)"/>
+  <text class="pct p2 anim" x="726" y="218" font-size="17" font-weight="700">97.2%</text>
+  <text x="20" y="278" font-size="13" font-weight="600">Anthropic Claude</text>
+  <text x="20" y="295" font-size="11" class="muted">operator seat · shipped 5.0.0</text>
+  <rect x="250" y="274" width="460" height="18" rx="4" fill="var(--track)"/>
+  <rect class="paid anim" x="704.5" y="274" width="5.5" height="18" rx="2" fill="var(--paid)"/>
+  <rect class="fill f3 anim" x="250" y="274" width="454.5" height="18" rx="4" fill="var(--cached)"/>
+  <text class="pct p3 anim" x="726" y="288" font-size="17" font-weight="700">98.8%</text>
+
+  <line x1="20" y1="254" x2="800" y2="254" stroke="var(--line)" stroke-dasharray="3 5"/>
+  <line x1="20" y1="318" x2="800" y2="318" stroke="var(--line)"/>
+  <rect x="20" y="334" width="12" height="12" rx="2" fill="var(--cached)"/>
+  <text x="38" y="345" font-size="12" class="muted">cached input</text>
+  <rect x="130" y="334" width="12" height="12" rx="2" fill="var(--paid)"/>
+  <text x="148" y="345" font-size="12" class="muted">uncached input</text>
+  <text x="800" y="345" font-size="12" class="muted" text-anchor="end">Provider dashboards · docs/evidence/cache-efficiency.md</text>
+  </g>
+</svg>
