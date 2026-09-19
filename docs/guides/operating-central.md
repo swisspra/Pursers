@@ -422,17 +422,52 @@ then
   exit 1
 fi
 
-test -f /PATH/TO/VENV/pyvenv.cfg
-install -d -m 700 /PATH/TO/QUARANTINE
-mv /PATH/TO/VENV /PATH/TO/QUARANTINE/pursers-venv.old
+VENV=/PATH/TO/VENV
+INSTANCE=/PATH/TO/INSTANCE
+BACKUP=/PATH/TO/BACKUP
+QUARANTINE=/PATH/TO/QUARANTINE
+
+[ -f "$VENV/pyvenv.cfg" ] || {
+  echo "$VENV is not a Python virtual environment; uninstall aborted" >&2
+  exit 1
+}
+venv_path=$(cd "$VENV" && pwd -P) || exit 1
+instance_path=$(cd "$INSTANCE" && pwd -P) || exit 1
+backup_path=$(cd "$BACKUP" && pwd -P) || exit 1
+case "$venv_path" in
+  "$instance_path"|"$backup_path")
+    echo "The virtual environment must not be the instance or backup; uninstall aborted" >&2
+    exit 1
+    ;;
+esac
+
+install -d -m 700 "$QUARANTINE"
+mv "$VENV" "$QUARANTINE/pursers-venv.old"
 ```
 
 On Linux, remove the explicit virtual-environment directory only after the
 same check:
 
 ```sh
-test -f /PATH/TO/VENV/pyvenv.cfg
-rm -r -- /PATH/TO/VENV
+VENV=/PATH/TO/VENV
+INSTANCE=/PATH/TO/INSTANCE
+BACKUP=/PATH/TO/BACKUP
+
+[ -f "$VENV/pyvenv.cfg" ] || {
+  echo "$VENV is not a Python virtual environment; uninstall aborted" >&2
+  exit 1
+}
+venv_path=$(cd "$VENV" && pwd -P) || exit 1
+instance_path=$(cd "$INSTANCE" && pwd -P) || exit 1
+backup_path=$(cd "$BACKUP" && pwd -P) || exit 1
+case "$venv_path" in
+  "$instance_path"|"$backup_path")
+    echo "The virtual environment must not be the instance or backup; uninstall aborted" >&2
+    exit 1
+    ;;
+esac
+
+rm -r -- "$VENV"
 ```
 
 Removing the virtual environment does not remove the instance data.
