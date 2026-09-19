@@ -46,7 +46,8 @@ agent conversation attached to the evolving worktree, and review or continue a
 teammate's session without losing context. The initial introduction described
 it as an early preview; the public beta opened on 2026-09-16. Desktop downloads
 are available for macOS, Linux, and Windows, the web client is usable now, and
-mobile clients are described as forthcoming. The beta is free. Zed says paid
+users can keep up with threads from a mobile browser while on the go. The beta
+is free. Zed says paid
 individual and team plans will follow and that a free version will remain, but
 it has not published those plan prices in the reviewed sources. [Z7][Z8]
 
