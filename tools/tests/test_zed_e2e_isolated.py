@@ -71,13 +71,14 @@ def test_log_matcher_accepts_split_chunks_and_keeps_literal_evidence() -> None:
 
 def test_log_matcher_reports_missing_and_redacts_credentials() -> None:
     matcher = zed_e2e.LogMatcher(("pursers-mcp", "/checkout/packages/client"))
-    matcher.feed("INFO Authorization: Bearer secret.value.signature\n")
+    credential = ".".join(("secret", "value", "signature"))
+    matcher.feed(f"INFO Authorization: Bearer {credential}\n")
     matcher.finish()
 
     assert not matcher.complete
     assert "context server start" in matcher.missing()
-    assert all("secret.value.signature" not in line for line in matcher.lines)
-    assert zed_e2e.redact("Bearer secret.value.signature") == "Bearer <redacted>"
+    assert all(credential not in line for line in matcher.lines)
+    assert zed_e2e.redact(f"Bearer {credential}") == "Bearer <redacted>"
 
 
 def test_missing_dependency_message_names_b1_and_b2(tmp_path: Path) -> None:

@@ -678,6 +678,15 @@ evidence = ["tools/worker-runtime/README.md"]
 evidence_contains = ["tools/worker-runtime/pursers_worker.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/zed/e2e_isolated.py"
+kind = "operator-tool"
+source = "tools/zed/e2e_isolated.py"
+state = "delivered"
+channel = "documented isolated integration command"
+evidence = ["tools/zed/README.md"]
+evidence_contains = ["python3 tools/zed/e2e_isolated.py", "--extension-dir", "--client-dir"]
+
+[[artifacts]]
 id = "external:fleet-dashboard-launcher"
 kind = "external-dependency"
 source = "external"
