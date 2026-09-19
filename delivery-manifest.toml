@@ -715,6 +715,15 @@ evidence = ["docs/zed/research/05-publishing.md"]
 evidence_contains = ["tools/zed/export_extension.py", "--source", "--commit", "--output"]
 
 [[artifacts]]
+id = "operator-tool:tools/zed/e2e_isolated.py"
+kind = "operator-tool"
+source = "tools/zed/e2e_isolated.py"
+state = "delivered"
+channel = "documented isolated integration command"
+evidence = ["tools/zed/README.md"]
+evidence_contains = ["python3 tools/zed/e2e_isolated.py", "--extension-dir", "--client-dir"]
+
+[[artifacts]]
 id = "external:fleet-dashboard-launcher"
 kind = "external-dependency"
 source = "external"
