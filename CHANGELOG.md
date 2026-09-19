@@ -7,6 +7,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.2] - 2026-09-20
+
+This release includes `pursers-central==0.1.1`,
+`pursers-client==0.1.1`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.0.2`, `pursers==5.0.2`,
+`pursers-wait-bridge==0.1.0`, and
+`pursers-acp==0.1.0`.
+
+### Added
+
+- Zed: run a Pursers board from Zed's Agent Panel. `pursers-client` ships a new
+  `pursers-mcp` stdio MCP server that relays to Central, reads its credential
+  from a token file (re-read after an issuer-key rotation), speaks the MCP
+  revision Zed negotiates, exposes a curated tool set, and adds five prompts —
+  `board`, `create`, `watch`, `evidence`, `answer`. A Zed extension at
+  `integrations/zed/pursers-mcp` launches it through `uvx` and configures it in
+  Zed's native context-server modal. See [Use Pursers from Zed](docs/guides/zed.md).
+- MCP Registry: `server.json` now also lists the `pursers-mcp` stdio server, so
+  MCP clients can discover it alongside Central.
+- ACP: `pursers-acp` advertises the same five commands, reports configuration
+  and authentication problems as agent messages, and carries a prepared entry
+  for the ACP Registry.
+- Fleet: `seat-kit check` catches seat identity drift (AGENTS.md vs START.md vs
+  folder) before a seat onboards under another seat's name.
+- Operator tooling: `tools/zed/e2e_isolated.py` proves the whole chain in an
+  isolated Zed profile; `tools/zed/export_extension.py` and
+  `tools/zed/check_registry.py` produce and validate the registry submission.
+- Research: `docs/zed/research/01–07` — Zed's extension API, context servers,
+  ACP, UI limits and UX design, publishing rules, prior art, and the AI
+  landscape including Zed's Delta.
+
 ## [5.0.1] - 2026-09-19
 
 This release includes `pursers-central==0.1.1`,

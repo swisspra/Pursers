@@ -25,10 +25,10 @@ Optional fields:
 - `uvx_path`: another uvx executable path or command name.
 - `package_spec`: another package version or a local `pursers-client` checkout for development.
 
-The release default is `pursers-client==0.1.0`. The launched command is:
+The release default is `pursers-client==0.1.1`. The launched command is:
 
 ```text
-uvx --from pursers-client==0.1.0 pursers-mcp --central-url URL --board BOARD_ID --token-file PATH [--ca-file PATH]
+uvx --from pursers-client==0.1.1 pursers-mcp --central-url URL --board BOARD_ID --token-file PATH [--ca-file PATH]
 ```
 
 ## Verify
