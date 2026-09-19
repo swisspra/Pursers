@@ -51,8 +51,10 @@ class BoardSurface(Protocol):
     async def my_tickets(self) -> list[JSON]: ...
     async def my_offers(self) -> list[JSON]: ...
     async def board_status(self) -> JSON: ...
+    async def ticket_evidence(self, ticket_id: str) -> JSON: ...
     def create_action(self, title: str, description: str) -> JSON: ...
     def annotate_action(self, ticket_id: str, text: str) -> JSON: ...
+    async def answer_action(self, ticket_id: str, text: str) -> JSON: ...
     async def mutate(self, action: JSON) -> JSON: ...
     def watch(
         self, cursor: int | None, cancel: asyncio.Event
@@ -246,6 +248,9 @@ class PersonalBoardSurface:
             )
         }
 
+    async def ticket_evidence(self, ticket_id: str) -> JSON:
+        return await self._call("ticket_get", {"ticket_id": ticket_id})
+
     def create_action(self, title: str, description: str) -> JSON:
         return {
             "operation": "ticket_create",
@@ -273,11 +278,39 @@ class PersonalBoardSurface:
             },
         }
 
+    async def answer_action(self, ticket_id: str, text: str) -> JSON:
+        result = await self.ticket_evidence(ticket_id)
+        ticket = result.get("ticket")
+        if not isinstance(ticket, Mapping):
+            raise ValueError(f"ticket {ticket_id} was not found")
+        request = ticket.get("human_request")
+        if not isinstance(request, Mapping) or request.get("resolution") is not None:
+            raise ValueError(f"ticket {ticket_id} has no pending human request")
+        request_id = request.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise ValueError(f"ticket {ticket_id} has an invalid human request")
+        return {
+            "operation": "ticket_human_resolve",
+            "board_id": self.board_id,
+            "params": {
+                "agent_name": self.agent_name,
+                "ticket_id": ticket_id,
+                "request_id": request_id,
+                "action": "accept",
+                "content": _parse_answer_content(text),
+                "disposition": "reopen",
+            },
+        }
+
     async def mutate(self, action: JSON) -> JSON:
         if action.get("board_id") != self.board_id:
             raise PermissionError("mutation board differs from the approved board")
         operation = action.get("operation")
-        if operation not in {"ticket_create", "ticket_annotate"}:
+        if operation not in {
+            "ticket_create",
+            "ticket_annotate",
+            "ticket_human_resolve",
+        }:
             raise PermissionError("unsupported mutation")
         params = action.get("params")
         if not isinstance(params, dict):
@@ -560,6 +593,13 @@ class PursersACPAgent:
         self.sessions[session_id] = Session(
             cwd=cwd, mcp_stop=mcp_stop, mcp_task=mcp_task
         )
+        await self._update(
+            session_id,
+            {
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": _available_commands(),
+            },
+        )
         await self._result(request_id, {"sessionId": session_id})
 
     async def _prompt(self, request_id: Any, params: JSON) -> None:
@@ -582,6 +622,13 @@ class PursersACPAgent:
                 stop = await self._dispatch(session_id, session, text)
             except PromptCancelled:
                 stop = "cancelled"
+            except Exception as exc:
+                await self._message(
+                    session_id,
+                    "Pursers could not complete this command. "
+                    f"Check the selected Personal profile and board access: {_bounded(str(exc), 500)}",
+                )
+                stop = "end_turn"
             if session.cancel.is_set():
                 stop = "cancelled"
             await self._result(request_id, {"stopReason": stop})
@@ -628,17 +675,20 @@ class PursersACPAgent:
             rows = await self._run_cancelable(session, self.board.my_offers)
             await self._message(session_id, _format_offers(rows))
             return "end_turn"
-        if lowered == "board status":
-            status = await self._run_cancelable(session, self.board.board_status)
-            await self._message(
-                session_id,
-                "Board status\n\n```json\n"
-                + json.dumps(status, sort_keys=True, indent=2)
-                + "\n```",
+        if lowered in {"board status", "/board"}:
+            status, tickets, offers = await self._run_cancelable(
+                session,
+                lambda: asyncio.gather(
+                    self.board.board_status(),
+                    self.board.my_tickets(),
+                    self.board.my_offers(),
+                ),
             )
+            await self._message(session_id, _format_board(status, tickets, offers))
             return "end_turn"
-        if lowered.startswith("create ticket "):
-            title, description = _parse_create(normalized[14:])
+        if lowered.startswith(("create ticket ", "/create ")):
+            offset = 14 if lowered.startswith("create ticket ") else 8
+            title, description = _parse_create(normalized[offset:])
             action = self.board.create_action(title, description)
             return await self._mutation(session_id, session, action)
         if lowered.startswith("annotate "):
@@ -648,22 +698,48 @@ class PursersACPAgent:
                 return "end_turn"
             action = self.board.annotate_action(ticket_id, annotation)
             return await self._mutation(session_id, session, action)
-        if lowered.startswith("watch "):
-            board_id = normalized[6:].strip()
+        if lowered.startswith("/evidence "):
+            ticket_id = normalized[10:].strip()
+            if not ticket_id.startswith("TK-") or " " in ticket_id:
+                await self._message(session_id, "Usage: /evidence TK-…")
+                return "end_turn"
+            evidence = await self._run_cancelable(
+                session, lambda: self.board.ticket_evidence(ticket_id)
+            )
+            await self._message(session_id, _format_evidence(evidence))
+            return "end_turn"
+        if lowered.startswith("/answer "):
+            ticket_id, separator, answer = normalized[8:].partition(" ")
+            if not separator or not ticket_id.startswith("TK-") or not answer:
+                await self._message(session_id, "Usage: /answer TK-… <JSON-or-text>")
+                return "end_turn"
+            action = await self._run_cancelable(
+                session, lambda: self.board.answer_action(ticket_id, answer)
+            )
+            return await self._mutation(session_id, session, action)
+        if lowered == "/watch" or lowered.startswith(("/watch ", "watch ")):
+            if lowered == "/watch":
+                board_id = self.board.board_id
+            else:
+                board_id = normalized.split(" ", 1)[1].strip()
             if board_id != self.board.board_id:
                 await self._message(
                     session_id,
                     f"This profile is bound to {self.board.board_id}; refusing cross-board watch.",
                 )
                 return "refusal"
-            async with aclosing(
-                self.board.watch(session.cursors.get(board_id), session.cancel)
-            ) as events:
-                async for cursor, event in events:
-                    session.cursors[board_id] = cursor
-                    await self._message(session_id, _format_event(event))
-                    if session.cancel.is_set():
-                        break
+            await self._plan(session_id, board_id, "in_progress")
+            try:
+                async with aclosing(
+                    self.board.watch(session.cursors.get(board_id), session.cancel)
+                ) as events:
+                    async for cursor, event in events:
+                        session.cursors[board_id] = cursor
+                        await self._message(session_id, _format_event(event))
+                        if session.cancel.is_set():
+                            break
+            finally:
+                await self._plan(session_id, board_id, "completed")
             return "cancelled" if session.cancel.is_set() else "end_turn"
         await self._message(session_id, _help())
         return "end_turn"
@@ -795,6 +871,21 @@ class PursersACPAgent:
             },
         )
 
+    async def _plan(self, session_id: str, board_id: str, status: str) -> None:
+        await self._update(
+            session_id,
+            {
+                "sessionUpdate": "plan",
+                "entries": [
+                    {
+                        "content": f"Watch {board_id} for board events and seat questions",
+                        "priority": "high",
+                        "status": status,
+                    }
+                ],
+            },
+        )
+
     async def _update(self, session_id: str, update: JSON) -> None:
         await self._send(
             {
@@ -852,6 +943,13 @@ def _parse_create(value: str) -> tuple[str, str]:
     raise ValueError("Usage: create ticket <title> :: <description>")
 
 
+def _parse_answer_content(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
 def _bounded(value: str, limit: int) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
@@ -884,6 +982,53 @@ def _format_offers(rows: list[JSON]) -> str:
     return "\n".join(lines)
 
 
+def _format_board(status: JSON, tickets: list[JSON], offers: list[JSON]) -> str:
+    lines = [
+        f"Board {status.get('board_id', '?')}",
+        "",
+        f"Review policy: {status.get('review_policy', '?')}",
+        f"Latest event: {status.get('latest_seq', '?')}",
+        f"Your active tickets: {len(tickets)}",
+        f"Your current offers: {len(offers)}",
+    ]
+    if tickets:
+        lines.extend(["", _format_tickets(tickets)])
+    if offers:
+        lines.extend(["", _format_offers(offers)])
+    return "\n".join(lines)
+
+
+def _format_evidence(result: JSON) -> str:
+    ticket = result.get("ticket")
+    if not isinstance(ticket, Mapping):
+        raise TypeError("ticket evidence response did not contain a ticket")
+    lines = [
+        f"Evidence for {ticket.get('ticket_id', '?')}",
+        "",
+        f"Status: {ticket.get('status', '?')}",
+        f"Summary: {_bounded(str(ticket.get('summary') or '(none)'), 500)}",
+        f"Files: {json.dumps(ticket.get('files_changed') or [], sort_keys=True)}",
+        f"Review: {ticket.get('review_verdict') or 'not reviewed'}",
+    ]
+    notes = ticket.get("notes")
+    if isinstance(notes, str):
+        selected = [
+            line
+            for line in notes.splitlines()
+            if line.startswith(
+                (
+                    "branch_and_commit:",
+                    "files_changed:",
+                    "test_output:",
+                    "test-output:",
+                )
+            )
+        ][:12]
+        if selected:
+            lines.extend(["", "Submitted evidence", *selected])
+    return "\n".join(lines)
+
+
 def _format_event(event: JSON) -> str:
     selected = {
         key: event.get(key)
@@ -897,16 +1042,48 @@ def _mutation_summary(action: JSON, result: JSON) -> str:
     if action.get("operation") == "ticket_create":
         ticket = result.get("ticket", {})
         return f"Created ticket {ticket.get('ticket_id', '(unknown)')}."
+    if action.get("operation") == "ticket_human_resolve":
+        return f"Answered the pending request on {action['params']['ticket_id']}."
     annotation = result.get("annotation", {})
     return f"Added annotation {annotation.get('annotation_id', '(recorded)')}."
+
+
+def _available_commands() -> list[JSON]:
+    return [
+        {
+            "name": "board",
+            "description": "Show this Personal profile's board summary and work",
+        },
+        {
+            "name": "create",
+            "description": "Preview and create a ticket after native permission",
+            "input": {"hint": "Title :: Description"},
+        },
+        {
+            "name": "watch",
+            "description": "Watch the configured board until this turn is cancelled",
+        },
+        {
+            "name": "evidence",
+            "description": "Show bounded submission and review evidence for a ticket",
+            "input": {"hint": "TK-…"},
+        },
+        {
+            "name": "answer",
+            "description": "Answer a pending human request after native permission",
+            "input": {"hint": "TK-… <JSON-or-text>"},
+        },
+    ]
 
 
 def _help() -> str:
     return (
         "Pursers board commands:\n"
-        "- my tickets\n- my offers\n- board status\n"
-        "- create ticket <title> :: <description>\n"
-        "- annotate TK-… <text>\n- watch <board> (cancel to stop)"
+        "- /board\n- /create <title> :: <description>\n"
+        "- /watch (cancel to stop)\n- /evidence TK-…\n"
+        "- /answer TK-… <JSON-or-text>\n\n"
+        "Legacy text commands remain supported: my tickets, my offers, board status, "
+        "create ticket, annotate, and watch <board>."
     )
 
 
