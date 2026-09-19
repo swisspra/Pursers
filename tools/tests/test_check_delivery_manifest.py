@@ -62,6 +62,26 @@ def test_discovers_checked_in_demo_media(tmp_path: Path) -> None:
     assert "media:docs/media/README.md" not in discovered
 
 
+def test_discovers_zed_extension_manifest(tmp_path: Path) -> None:
+    root = _base_repository(tmp_path)
+    manifest = root / "integrations/zed/example/extension.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        'id = "example-mcp"\nname = "Example"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+
+    discovered = check_delivery_manifest.discover_artifacts(root)
+
+    assert discovered["zed-extension:example-mcp"] == (
+        check_delivery_manifest.Artifact(
+            "zed-extension:example-mcp",
+            "zed-extension",
+            "integrations/zed/example/extension.toml",
+        )
+    )
+
+
 def test_red_fixture_proves_unregistered_artifact_and_b1_version_fail() -> None:
     failures = check_delivery_manifest.validate(RED_FIXTURE)
 

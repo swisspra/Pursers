@@ -1,0 +1,15 @@
+id = "pursers-mcp"
+name = "Pursers"
+description = "Connect Zed to a Pursers board through its MCP server"
+version = "0.1.0"
+schema_version = 1
+authors = ["Swisspra"]
+repository = "https://github.com/swisspra/pursers-zed"
+
+# `uvx_path` may intentionally select another executable, so Zed must ask the
+# user before either the lookup probe or the server command can run it.
+capabilities = [
+  { kind = "process:exec", command = "*", args = ["**"] },
+]
+
+[context_servers.pursers]

@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Pursers settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["central_url", "board_id", "token_file"],
+  "properties": {
+    "central_url": {
+      "type": "string",
+      "minLength": 1,
+      "description": "URL of the Pursers Central MCP endpoint."
+    },
+    "board_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Board the MCP server should connect to."
+    },
+    "token_file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to the worker JWT file. The token itself never belongs in Zed settings."
+    },
+    "ca_file": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional CA certificate file for a TLS Central endpoint."
+    },
+    "uvx_path": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional uvx executable path or command name."
+    },
+    "package_spec": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional package version or local project path passed to uvx --from."
+    }
+  }
+}

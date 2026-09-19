@@ -1,0 +1,5 @@
+{
+  "central_url": "http://127.0.0.1:8766/mcp",
+  "board_id": "pursers-local",
+  "token_file": "/PATH/TO/PURSERS/worker.jwt"
+}
