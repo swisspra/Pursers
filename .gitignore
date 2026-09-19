@@ -3,6 +3,8 @@ __pycache__/
 .pytest_cache/
 .venv/
 .fresh-venv*/
+# CI build scratch (isolated wheel venvs, release checks) created inside the checkout
+/.ci/
 *.egg-info/
 build/
 dist/
