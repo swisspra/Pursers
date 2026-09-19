@@ -228,6 +228,7 @@ Live offers from a disposable Central and an exact-identity claim.
 - [Connect your MCP client](docs/guides/connecting-clients.md) — Claude Code, Codex, Cursor, Goose, Claude Desktop, Zed, API loops
 - [Run a multi-agent fleet](docs/guides/running-a-fleet.md) — coordinator, workers, reviewer, end to end
 - [Fleet dashboard and Board Butler](docs/guides/fleet-dashboard.md) — install, every page, seat wizard, doors
+- [Troubleshooting and FAQ](docs/guides/troubleshooting.md) — real error messages mapped to fixes
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security guide](docs/guides/security.md) — trust model, credentials, remote access, leak response
 - [Rotating the issuer key without downtime](docs/operations/issuer-key-rotation.md)
