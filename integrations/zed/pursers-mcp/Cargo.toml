@@ -1,0 +1,21 @@
+[package]
+name = "pursers-mcp-zed"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+zed_extension_api = "=0.7.0"
+
+[lints.rust]
+future_incompatible = "warn"
+nonstandard_style = "deny"
+
+[lints.clippy]
+all = "deny"
+perf = "deny"

@@ -152,6 +152,15 @@ evidence = [".github/workflows/release.yml", "tools/aionui-extension/README.md"]
 evidence_contains = ["tools/aionui-extension/build.py", "pursers-aionui-0.1.0.zip", "AIONUI_EXTENSIONS_PATH"]
 
 [[artifacts]]
+id = "zed-extension:pursers-mcp"
+kind = "zed-extension"
+source = "integrations/zed/pursers-mcp/extension.toml"
+state = "delivered"
+channel = "documented Zed dev-extension install and dedicated-repository handoff"
+evidence = ["integrations/zed/pursers-mcp/README.md"]
+evidence_contains = ["cargo test --locked", "wasm32-wasip2", "zed: install dev extension"]
+
+[[artifacts]]
 id = "web-surface:packages/personal/src/pursers_personal/resources/dashboard.html"
 kind = "web-surface"
 source = "packages/personal/src/pursers_personal/resources/dashboard.html"

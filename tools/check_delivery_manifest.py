@@ -198,6 +198,21 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
         if isinstance(name, str) and name:
             add(f"host-extension:{name}", "host-extension", path)
 
+    for path in sorted(root.rglob("extension.toml")):
+        relative_parts = path.relative_to(root).parts
+        if (
+            _ignored(path, root)
+            or relative_parts[0] in NON_PRODUCT_CONTENT_ROOTS
+        ):
+            continue
+        try:
+            document = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise ValueError(f"cannot inspect {path}: {exc}") from exc
+        extension_id = document.get("id")
+        if isinstance(extension_id, str) and extension_id:
+            add(f"zed-extension:{extension_id}", "zed-extension", path)
+
     for path in sorted(root.rglob("*.html")):
         relative_parts = path.relative_to(root).parts
         if (
