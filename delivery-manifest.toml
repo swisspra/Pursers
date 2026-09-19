@@ -84,6 +84,16 @@ evidence = ["packages/central/pyproject.toml", ".github/workflows/publish-pypi.y
 evidence_contains = ["pursers-central", "packages/central", "pursers-central rotate-key"]
 
 [[artifacts]]
+id = "python-console-script:pursers-client:pursers-mcp"
+kind = "python-console-script"
+source = "packages/client/src/pursers_client/mcp_proxy.py"
+entry_point = "pursers_client.mcp_proxy:main"
+state = "delivered"
+channel = "pursers-mcp console command installed by the pursers-client PyPI wheel"
+evidence = ["packages/client/pyproject.toml", ".github/workflows/publish-pypi.yml"]
+evidence_contains = ["pursers-mcp = \"pursers_client.mcp_proxy:main\"", "packages/client"]
+
+[[artifacts]]
 id = "python-console-script:pursers-personal-import:pursers-personal-import"
 kind = "python-console-script"
 source = "packages/import/personal_import.py"
