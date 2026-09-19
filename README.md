@@ -225,6 +225,8 @@ Live offers from a disposable Central and an exact-identity claim.
 ## Documentation
 
 - [Getting Started](docs/GETTING-STARTED.md)
+- [Connect your MCP client](docs/guides/connecting-clients.md) — Claude Code, Codex, Cursor, Goose, Claude Desktop, Zed, API loops
+- [Run a multi-agent fleet](docs/guides/running-a-fleet.md) — coordinator, workers, reviewer, end to end
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security guide](docs/guides/security.md) — trust model, credentials, remote access, leak response
 - [Rotating the issuer key without downtime](docs/operations/issuer-key-rotation.md)
