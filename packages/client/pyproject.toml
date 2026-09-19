@@ -16,6 +16,9 @@ dependencies = [
   "cryptography>=44,<51",
 ]
 
+[project.scripts]
+pursers-mcp = "pursers_client.mcp_proxy:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["pursers_client*"]
