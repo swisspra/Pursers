@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.1] - 2026-09-19
+
+This release includes `pursers-central==0.1.1`,
+`pursers-client==0.1.0`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.0.1`, `pursers==5.0.1`,
+`pursers-wait-bridge==0.1.0`, and
+`pursers-acp==0.1.0`.
+
+### Added
+
+- Central: add `pursers-central rotate-key` and `pursers-central retire-key`
+  for zero-downtime issuer key rotation. `rotate-key` publishes a new signing
+  key next to the old one and re-signs the given token files in place,
+  including multi-header files such as `mcp-remote --header-file` inputs;
+  `retire-key` removes the old key only after every `--check-token` file
+  verifies against the new one. Central re-reads the JWKS on every request, so
+  neither step needs a restart.
+- Documentation: add the Add agents, Connect your MCP client, Run a
+  multi-agent fleet, Operate Central, Fleet dashboard and Board Butler,
+  Security, and Troubleshooting guides, the issuer key rotation manual, and
+  generated MCP tool, CLI, and environment references that tests keep in step
+  with the code.
+- README: rebuild it as a landing page with the recorded ticket-flow and
+  wake-don't-poll demos, an animated ticket lifecycle in light and dark
+  variants, and measured prompt-cache efficiency.
+
+### Fixed
+
+- Fleet dashboard: report the running revision even when the machine is under
+  heavy load, instead of returning `null` when `git` is slow.
+- Release workflow: publish `pursers-acp` in its own step so a failed upload
+  of that package cannot stop the pinned dependencies from reaching PyPI.
+
 ## [5.0.0] - 2026-09-18
 
 This release includes `pursers-central==0.1.0`,

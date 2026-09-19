@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "5.0.0",
+  "product_version": "5.0.1",
   "build_toolchain": {
     "build": "1.3.0",
     "setuptools": "80.9.0",
@@ -10,14 +10,14 @@
   },
   "components": {
     "pursers-central": {
-      "version": "0.1.0",
-      "wheel_sha256": "4f12b76b91e7161346464a7d4a05396c311b93d6fc9c59213f160d7ef4097493",
+      "version": "0.1.1",
+      "wheel_sha256": "7322b0a23c22d69613192404c50f65d8ada14ad617dfda8e1bc4b7cd314dbe99",
       "members": {
-        "pursers_central-0.1.0.dist-info/METADATA": "9a43d300288dbea50feb6cffeeedf821d148f29ff0b0ea6533ac91fc30fee457",
-        "pursers_central-0.1.0.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
-        "pursers_central-0.1.0.dist-info/entry_points.txt": "1ae83629668ca4cbed9de309e64ec2541178c1766cdaab1342ed38e45ed7bd64",
-        "pursers_central-0.1.0.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
-        "pursers_central-0.1.0.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
+        "pursers_central-0.1.1.dist-info/METADATA": "0b56e5e5e2188c3714c26a0eea77a11d2c2553833d673dc5937cec852845c04a",
+        "pursers_central-0.1.1.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
+        "pursers_central-0.1.1.dist-info/entry_points.txt": "1ae83629668ca4cbed9de309e64ec2541178c1766cdaab1342ed38e45ed7bd64",
+        "pursers_central-0.1.1.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "pursers_central-0.1.1.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
         "pursers_central/__init__.py": "0d67dcb332978fe4c7d7b4615f882272ca763cdb065586743fa772f4f4e008a1",
         "pursers_central/__main__.py": "8bd9f3325a7cbe104d4dca914351cf417eff40812a9972b68b64c783f03ed7de",
         "pursers_central/central.py": "655b56eb28e7b1fabfb75f10aab93ca9aee05c758621166e7d10a406b9d10de9",
@@ -55,6 +55,6 @@
   "view": {
     "resource": "pursers_personal/resources/dashboard.html",
     "size_bytes": 337978,
-    "sha256": "e8273e230d17e33e96f979d00afd1343b529d694b68e0bc3a63298195f0b8d5b"
+    "sha256": "bbe3898e3024b2a771dcdba53e36dc42d7d73eb6b9f1d84533047273e00e1684"
   }
 }
