@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import html
 import importlib.util
 import io
 import json
@@ -319,17 +318,12 @@ def test_generator_writes_dispatch_capabilities_and_offer_guidance(tmp_path: Pat
     assert "this ticket was offered to another seat; wait for your own offer" in generated_py
 
 
-def test_reviewer_checklist_matches_both_generated_hints_and_docs(tmp_path: Path) -> None:
+def test_reviewer_checklist_matches_both_generated_hints(tmp_path: Path) -> None:
     reviewer = seat_new.generate(args(tmp_path, role="reviewer"))
     checklist = seat_new.HARD_VERIFY_CHECKLIST
 
     assert checklist in (reviewer / "AGENTS.md").read_text(encoding="utf-8")
     assert checklist in (reviewer / ".goosehints").read_text(encoding="utf-8")
-    for name in ("manual-en.html", "manual-th.html"):
-        rendered_source = html.unescape(
-            (ROOT.parents[1] / "docs-local" / name).read_text(encoding="utf-8")
-        )
-        assert checklist in rendered_source
 
 
 def test_generated_directives_explain_holder_wakes_and_claimable_broadcasts(

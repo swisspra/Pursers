@@ -7,11 +7,14 @@ from tools import generate_reference_docs
 
 def test_reference_docs_match_generated_output() -> None:
     generated = generate_reference_docs.generated_documents()
-    assert set(generated) == {
+    expected_paths = {
         Path("docs/reference/mcp-tools.md"),
-        Path("docs/reference/cli.md"),
         Path("docs/reference/environment.md"),
     }
+    # cli.md is literal argparse output, checked on the CI interpreter only.
+    if generate_reference_docs.cli_reference_python_matches():
+        expected_paths.add(Path("docs/reference/cli.md"))
+    assert set(generated) == expected_paths
     for relative, expected in generated.items():
         actual = (generate_reference_docs.ROOT / relative).read_text(encoding="utf-8")
         assert actual == expected, (

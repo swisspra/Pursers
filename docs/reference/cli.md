@@ -20,11 +20,11 @@ options:
   -h, --help            show this help message and exit
   --host HOST
   --port PORT
-  --data-dir, --data-root DATA_DIR
+  --data-dir DATA_DIR, --data-root DATA_DIR
   --log-level {critical,error,warning,info,debug,trace}
-  --tls-certfile, --ssl-certfile TLS_CERTFILE
+  --tls-certfile TLS_CERTFILE, --ssl-certfile TLS_CERTFILE
                         TLS certificate supplied by the operator (requires --tls-keyfile)
-  --tls-keyfile, --ssl-keyfile TLS_KEYFILE
+  --tls-keyfile TLS_KEYFILE, --ssl-keyfile TLS_KEYFILE
                         TLS private key supplied by the operator (requires --tls-certfile)
   --allowed-host HOST   additional bare Host name; repeat the flag or set the comma-separated
                         ONBOARD_CENTRAL_ALLOWED_HOSTS value
@@ -316,9 +316,9 @@ options:
 ### `pursers-personal-import import --help`
 
 ```text
-usage: pursers-personal-import import [-h] --run-dir RUN_DIR --board-id BOARD_ID
-                                      --owner-principal-id OWNER_PRINCIPAL_ID --owner-agent-name OWNER_AGENT_NAME
-                                      --stable-install-root STABLE_INSTALL_ROOT [--confirm-central-stopped]
+usage: pursers-personal-import import [-h] --run-dir RUN_DIR --board-id BOARD_ID --owner-principal-id
+                                      OWNER_PRINCIPAL_ID --owner-agent-name OWNER_AGENT_NAME --stable-install-root
+                                      STABLE_INSTALL_ROOT [--confirm-central-stopped]
                                       source central_data_root
 
 positional arguments:
@@ -678,8 +678,8 @@ usage: board_butler.py [-h] [--url URL] --token-path TOKEN_PATH [--home-board HO
                        [--project PROJECT] [--wait-timeout WAIT_TIMEOUT] [--refresh-seconds REFRESH_SECONDS]
                        [--act-on-board BOARD_ID] [--no-live-candidates-cycles NO_LIVE_CANDIDATES_CYCLES]
                        [--active-action {park_no_live_candidates,refuse_incapable_target}]
-                       [--action-hold-seconds ACTION_HOLD_SECONDS] [--once] [--dry-run] [--kill-switch |
-                       --veto-question VETO_QUESTION] [--control-reason CONTROL_REASON]
+                       [--action-hold-seconds ACTION_HOLD_SECONDS] [--once] [--dry-run]
+                       [--kill-switch | --veto-question VETO_QUESTION] [--control-reason CONTROL_REASON]
 
 Registry-wide coordinator findings refresher and shadow question drafter. The butler runs the real coordinator
 derivation for every active registry board on a bounded cycle and listens for coordinator questions through the same

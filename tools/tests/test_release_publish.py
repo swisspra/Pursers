@@ -314,22 +314,6 @@ elif name == "shasum" and failure == "checksum":
         assert forbidden_call not in calls
 
 
-def test_current_whats_new_versions_match_release_manifest() -> None:
-    import re
-
-    document = (ROOT / "docs-local/whats-new.html").read_text(encoding="utf-8")
-    current_release = document.split('<section id="unreleased">', 1)[1]
-    history = re.search(
-        r"(?m)^\s*<h3>\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)? · ", current_release
-    )
-    assert history is not None
-    current_release = current_release[: history.start()]
-    assert f"Released · {VERSIONS.product}" in current_release
-    manifest_versions = {VERSIONS.product, *VERSIONS.packages.values()}
-    mentioned = set(re.findall(r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?", current_release))
-    assert mentioned and mentioned <= manifest_versions
-    assert "2026-09-18" in current_release
-
 
 def test_deterministic_tar_is_byte_stable_and_lists_each_member_once(
     tmp_path: Path,

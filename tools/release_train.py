@@ -96,15 +96,8 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
 # component cannot silently retain a stale version here.
 COHORT_VERSION_FILES = (
     "README.md",
-    "docs-local/architecture-th.html",
-    "docs-local/manual-en.html",
-    "docs-local/manual-th.html",
-    "docs-local/whats-new.html",
 )
 
-WHATS_NEW_HISTORY_HEADING = re.compile(
-    r"(?m)^\s*<h3>\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)? · \d{4}-\d{2}-\d{2}</h3>\s*$"
-)
 VERSION_REFERENCE = r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?"
 
 LOCKED_SOURCE_PACKAGES = {
@@ -193,8 +186,7 @@ def _replace_versions(
     for relative, keys in by_path.items():
         path = root / relative
         original = path.read_text(encoding="utf-8")
-        editable, history = _version_reference_regions(relative, original)
-        updated = editable
+        updated = original
         changed_olds = {values[key][0] for key in keys if values[key][0] != values[key][1]}
         for old in sorted(changed_olds):
             # Components this file references that currently share this exact
@@ -235,7 +227,6 @@ def _replace_versions(
             for (start, end), span_keys in sorted(spans.items(), reverse=True):
                 new = values[next(iter(span_keys))][1]
                 updated = updated[:start] + new + updated[end:]
-        updated += history
         if updated != original:
             planned[path] = updated
     return planned
@@ -296,17 +287,6 @@ def _qualified_spans(
             spans.setdefault((start, match.end()), set()).add(key)
     return spans
 
-
-def _version_reference_regions(relative: str, text: str) -> tuple[str, str]:
-    """Return the current-reference region and protected release history."""
-    if relative != "docs-local/whats-new.html":
-        return text, ""
-    match = WHATS_NEW_HISTORY_HEADING.search(text)
-    if match is None:
-        raise ReleaseTrainError(
-            "docs-local/whats-new.html: release history boundary is missing"
-        )
-    return text[: match.start()], text[match.start() :]
 
 
 def _package_distribution(root: Path, key: str) -> str:
@@ -378,10 +358,7 @@ def _cohort_version_errors(root: Path, versions: ReleaseVersions) -> list[str]:
     errors: list[str] = []
     for relative in COHORT_VERSION_FILES:
         try:
-            current, _history = _version_reference_regions(
-                relative,
-                (root / relative).read_text(encoding="utf-8"),
-            )
+            current = (root / relative).read_text(encoding="utf-8")
             references = _component_version_references(root, versions, current)
         except ReleaseTrainError as exc:
             errors.append(str(exc))

@@ -31,7 +31,6 @@ IGNORED_PARTS = {
 NON_PRODUCT_CONTENT_ROOTS = {
     ".superdesign",
     "docs",
-    "docs-local",
     "planning",
 }
 

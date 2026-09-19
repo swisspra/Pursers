@@ -699,12 +699,21 @@ def render_environment() -> str:
     return "\n".join(lines)
 
 
+# argparse changed its --help layout in Python 3.13, so cli.md is literal only
+# for one interpreter. It is pinned to the version CI runs (.github/workflows/ci.yml).
+CLI_REFERENCE_PYTHON = (3, 12)
+
+
+def cli_reference_python_matches() -> bool:
+    return sys.version_info[:2] == CLI_REFERENCE_PYTHON
+
+
 def generated_documents() -> dict[Path, str]:
-    return {
-        OUTPUTS["mcp-tools.md"]: render_mcp_tools(),
-        OUTPUTS["cli.md"]: render_cli(),
-        OUTPUTS["environment.md"]: render_environment(),
-    }
+    documents = {OUTPUTS["mcp-tools.md"]: render_mcp_tools()}
+    if cli_reference_python_matches():
+        documents[OUTPUTS["cli.md"]] = render_cli()
+    documents[OUTPUTS["environment.md"]] = render_environment()
+    return documents
 
 
 def write_documents(*, check: bool = False) -> list[Path]:
@@ -729,6 +738,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.check and changed:
         print("reference documentation is stale: " + ", ".join(map(str, changed)))
         return 1
+    if not cli_reference_python_matches():
+        wanted = ".".join(map(str, CLI_REFERENCE_PYTHON))
+        print(f"skipped {OUTPUTS['cli.md']}: regenerate it with python{wanted}")
     state = "current" if not changed else "generated"
     print(f"reference documentation {state}: {len(OUTPUTS)} files")
     return 0
