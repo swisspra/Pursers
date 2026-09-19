@@ -69,6 +69,12 @@ sequenceDiagram
 
 </details>
 
+**Recorded from the real product** — the Fleet dashboard following one ticket on a disposable board, from offer to independent approval:
+
+<p align="center">
+  <img src="docs/media/ticket-flow.gif" alt="Fleet dashboard: a ticket moves Created, Offered, Claimed under a lease, Submitted, Reviewed, and closes approved" width="720">
+</p>
+
 | Role | Does |
 | --- | --- |
 | **Coordinator** | Talks to you, turns intent into tickets, amends them, answers the questions seats raise, keeps context on the board |
@@ -85,6 +91,10 @@ sequenceDiagram
    to SQLite. The record outlives every chat, crash, and context compaction.
 3. **Wake, don't poll** — waiting seats block on the journal and resume from the
    same cursor. An idle seat spends no model turns until there is work for it.
+
+<p align="center">
+  <img src="docs/media/wake-dont-poll.gif" alt="A worker blocked in a2a_wait on the journal subscription is woken by a pushed ticket_offered event" width="560">
+</p>
 
 ## From zero to production with a fleet
 
