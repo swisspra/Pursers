@@ -230,6 +230,7 @@ Live offers from a disposable Central and an exact-identity claim.
 - [Add agents to your board](docs/guides/adding-agents.md) — a second worker, an independent reviewer, a coordinator
 - [Connect your MCP client](docs/guides/connecting-clients.md) — Claude Code, Codex, Cursor, Goose, Claude Desktop, Zed, API loops
 - [Run a multi-agent fleet](docs/guides/running-a-fleet.md) — coordinator, workers, reviewer, end to end
+- [Operate Central](docs/guides/operating-central.md) — run as a service, backup and restore, upgrade, logs, retention
 - [Fleet dashboard and Board Butler](docs/guides/fleet-dashboard.md) — install, every page, seat wizard, doors
 - [Troubleshooting and FAQ](docs/guides/troubleshooting.md) — real error messages mapped to fixes
 - Reference: [MCP tools](docs/reference/mcp-tools.md) · [CLI](docs/reference/cli.md) · [environment variables](docs/reference/environment.md) — generated from code
