@@ -84,6 +84,6 @@
   <text x="38" y="345" font-size="12" class="muted">cached input</text>
   <rect x="130" y="334" width="12" height="12" rx="2" fill="var(--paid)"/>
   <text x="148" y="345" font-size="12" class="muted">uncached input</text>
-  <text x="800" y="345" font-size="12" class="muted" text-anchor="end">Provider dashboards · docs/evidence/cache-efficiency.md</text>
+  <text x="800" y="345" font-size="12" class="muted" text-anchor="end">Provider dashboards · docs/performance/cache-efficiency.md</text>
   </g>
 </svg>

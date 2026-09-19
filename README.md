@@ -106,7 +106,7 @@ sequenceDiagram
 | **Ask** | A seat that needs a human asks through the board and keeps waiting without burning turns; your answer wakes it. |
 | **Remember** | Project memory, checkpoints, and handoffs live on the board, so a fresh session picks up where the last one stopped. |
 | **Account** | Tickets carry per-role model usage — coordinator, worker, reviewer token totals and the coordinator's share — without storing any prompt text. |
-| **Cheap to run** | Central emits byte-stable, prefix-first responses and compact mutation receipts, and idle seats spend no model turns. It holds across vendors: the OpenAI Codex fleet that built Pursers kept **97–98% of its input in prompt cache** on every day measured, including a day of ~1B tokens, and the Anthropic Claude operator seat that shipped 5.0.0 ran at **99%**. [Design](docs/cache-friendly-prose.md) · [numbers](docs/evidence/cache-efficiency.md) |
+| **Cheap to run** | Central emits byte-stable, prefix-first responses and compact mutation receipts, and idle seats spend no model turns. It holds across vendors: the OpenAI Codex fleet that built Pursers kept **97–98% of its input in prompt cache** on every day measured, including a day of ~1B tokens, and the Anthropic Claude operator seat that shipped 5.0.0 ran at **99%**. [Design](docs/cache-friendly-prose.md) · [numbers](docs/performance/cache-efficiency.md) |
 | **Watch** | The Fleet dashboard shows the ticket funnel, live seats, claims, review pressure, and every project board on one screen. |
 
 <p align="center">

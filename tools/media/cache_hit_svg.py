@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the animated prompt-cache SVGs used by the README.
 
-The numbers are the measured ones in docs/evidence/cache-efficiency.md. Like the
+The numbers are the measured ones in docs/performance/cache-efficiency.md. Like the
 ticket-flow SVGs, this writes fixed-color light and dark files; the README picks
 one with <picture><source media="(prefers-color-scheme: dark)">.
 
@@ -24,7 +24,7 @@ PALETTES = {
                  cached="#3fb950", paid="#d29922"),
 }
 
-# (vendor, detail, cache share) — docs/evidence/cache-efficiency.md
+# (vendor, detail, cache share) — docs/performance/cache-efficiency.md
 ROWS = (
     ("OpenAI Codex fleet", "13 Aug · 294M tokens", 97.6),
     ("OpenAI Codex fleet", "14 Aug · 210M tokens", 97.5),
@@ -113,7 +113,7 @@ TEMPLATE = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 350" widt
   <text x="38" y="{key_text_y}" font-size="12" class="muted">cached input</text>
   <rect x="130" y="{key_y}" width="12" height="12" rx="2" fill="var(--paid)"/>
   <text x="148" y="{key_text_y}" font-size="12" class="muted">uncached input</text>
-  <text x="800" y="{key_text_y}" font-size="12" class="muted" text-anchor="end">Provider dashboards · docs/evidence/cache-efficiency.md</text>
+  <text x="800" y="{key_text_y}" font-size="12" class="muted" text-anchor="end">Provider dashboards · docs/performance/cache-efficiency.md</text>
   </g>
 </svg>
 """

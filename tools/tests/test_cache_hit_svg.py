@@ -27,7 +27,7 @@ def test_cache_hit_svgs_honour_reduced_motion_and_fixed_themes() -> None:
 
 
 def test_cache_hit_shares_match_the_evidence_page() -> None:
-    evidence = (ROOT / "docs" / "evidence" / "cache-efficiency.md").read_text(encoding="utf-8")
+    evidence = (ROOT / "docs" / "performance" / "cache-efficiency.md").read_text(encoding="utf-8")
     published = set(re.findall(r"(\d+\.\d)%", evidence))
     svg = (ROOT / "docs" / "media" / "cache-hit-light.svg").read_text(encoding="utf-8")
     shown = set(re.findall(r">(\d+\.\d)%<", svg))
