@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Generate a self-contained Pursers worker or reviewer seat."""
+"""Generate a Pursers seat or check existing seat identity files."""
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 WAIT_BRIDGE_DIR = Path(__file__).resolve().parents[1] / "wait-bridge"
@@ -2141,6 +2143,336 @@ def _self_check(python: Path, board_script: Path) -> None:
         raise ValueError(f"generated board.py self-check failed{suffix}")
 
 
+_AGENTS_IDENTITY_PATTERNS = (
+    (
+        "title",
+        re.compile(
+            r"^# Pursers (?:seat|worker|reviewer): "
+            r"([A-Za-z0-9][A-Za-z0-9._-]{0,79})\s*$"
+        ),
+    ),
+    (
+        "identity declaration",
+        re.compile(
+            r"identity to `([A-Za-z0-9][A-Za-z0-9._-]{0,79})`"
+        ),
+    ),
+    (
+        "board_onboard agent_name",
+        re.compile(
+            r"board_onboard\b.*?agent_name=(?:`|'|\")?"
+            r"([A-Za-z0-9][A-Za-z0-9._-]{0,79})"
+        ),
+    ),
+)
+_START_IDENTITY_RE = re.compile(
+    r"Connect to Pursers as "
+    r"([A-Za-z0-9][A-Za-z0-9._-]{0,79})\b"
+)
+
+
+def _seat_identity_from_folder(seat_dir: Path) -> str:
+    """Derive the fleet identity encoded by the directory hierarchy."""
+
+    leaf = seat_dir.name
+    fleet = re.fullmatch(
+        r"Pursers-([A-Za-z0-9][A-Za-z0-9._-]{0,79})",
+        seat_dir.parent.name,
+    )
+    if fleet is None:
+        return leaf
+    prefix = fleet.group(1).lower()
+    if leaf.lower().startswith(f"{prefix}-"):
+        return leaf
+    return f"{prefix}-{leaf}"
+
+
+def _source_line(path: Path, pattern: re.Pattern[str]) -> tuple[int, str] | None:
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        match = pattern.search(line)
+        if match is not None:
+            return line_number, match.group(1)
+    return None
+
+
+def _config_line(path: Path, key: str) -> int:
+    pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if pattern.search(line):
+            return line_number
+    return 1
+
+
+def _jwt_subject(path: Path) -> str:
+    try:
+        compact = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("configured token file is unreadable") from exc
+    parts = compact.split(".")
+    if len(parts) != 3 or any(not part for part in parts):
+        raise ValueError("configured token file is not a compact JWT")
+    try:
+        padding = "=" * (-len(parts[1]) % 4)
+        payload = json.loads(
+            base64.urlsafe_b64decode(parts[1] + padding).decode("utf-8")
+        )
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("configured token JWT payload is invalid") from exc
+    subject = payload.get("sub") if isinstance(payload, dict) else None
+    if not isinstance(subject, str) or not subject.strip():
+        raise ValueError("configured token JWT payload has no string sub")
+    return subject.strip()
+
+
+def _seat_config_values(path: Path) -> tuple[str | None, str | None]:
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("MCP config is unreadable or invalid TOML") from exc
+    servers = document.get("mcp_servers") if isinstance(document, dict) else None
+    if not isinstance(servers, dict):
+        return None, None
+    preferred = servers.get("pursers-wait-bridge")
+    candidates = [preferred] if isinstance(preferred, dict) else []
+    candidates.extend(
+        value
+        for key, value in servers.items()
+        if key != "pursers-wait-bridge" and isinstance(value, dict)
+    )
+    for server in candidates:
+        environment = server.get("env")
+        if not isinstance(environment, dict):
+            continue
+        agent_name = environment.get("ONBOARD_AGENT_NAME")
+        token_file = environment.get("ONBOARD_CENTRAL_TOKEN_FILE")
+        if isinstance(agent_name, str) or isinstance(token_file, str):
+            return (
+                agent_name.strip() if isinstance(agent_name, str) else None,
+                token_file.strip() if isinstance(token_file, str) else None,
+            )
+    return None, None
+
+
+def _problem(
+    display_dir: Path,
+    relative: str,
+    line: int,
+    message: str,
+    expected: str,
+) -> str:
+    path = (display_dir / relative).as_posix()
+    return (
+        f"ERROR {path}:{line}: {message}; fix: use identity {expected!r} "
+        f"or regenerate with seat_new.py --name {expected!r} --dest "
+        f"{display_dir.as_posix()!r} --upgrade"
+    )
+
+
+def _check_seat(
+    seat_dir: Path, display_dir: Path
+) -> tuple[list[str], str, str | None]:
+    expected = _seat_identity_from_folder(seat_dir)
+    problems: list[str] = []
+    agents = seat_dir / "AGENTS.md"
+    start = seat_dir / "START.md"
+    config = seat_dir / ".codex" / "config.toml"
+
+    if not agents.is_file():
+        problems.append(
+            _problem(display_dir, "AGENTS.md", 1, "file is missing", expected)
+        )
+    else:
+        for label, pattern in _AGENTS_IDENTITY_PATTERNS:
+            found = _source_line(agents, pattern)
+            if found is None:
+                problems.append(
+                    _problem(
+                        display_dir,
+                        "AGENTS.md",
+                        1,
+                        f"{label} is missing",
+                        expected,
+                    )
+                )
+                continue
+            line, identity = found
+            if identity != expected:
+                problems.append(
+                    _problem(
+                        display_dir,
+                        "AGENTS.md",
+                        line,
+                        f"{label} names {identity!r}, expected {expected!r}",
+                        expected,
+                    )
+                )
+
+    if not start.is_file():
+        problems.append(
+            _problem(display_dir, "START.md", 1, "file is missing", expected)
+        )
+    else:
+        found = _source_line(start, _START_IDENTITY_RE)
+        if found is None:
+            problems.append(
+                _problem(
+                    display_dir,
+                    "START.md",
+                    1,
+                    "Pursers connection identity is missing",
+                    expected,
+                )
+            )
+        else:
+            line, identity = found
+            if identity != expected:
+                problems.append(
+                    _problem(
+                        display_dir,
+                        "START.md",
+                        line,
+                        f"connection names {identity!r}, expected {expected!r}",
+                        expected,
+                    )
+                )
+
+    principal: str | None = None
+    if not config.is_file():
+        problems.append(
+            _problem(
+                display_dir,
+                ".codex/config.toml",
+                1,
+                "MCP config is missing",
+                expected,
+            )
+        )
+    else:
+        try:
+            config_identity, token_file = _seat_config_values(config)
+        except ValueError as exc:
+            problems.append(
+                _problem(
+                    display_dir,
+                    ".codex/config.toml",
+                    1,
+                    str(exc),
+                    expected,
+                )
+            )
+        else:
+            agent_line = _config_line(config, "ONBOARD_AGENT_NAME")
+            if not config_identity:
+                problems.append(
+                    _problem(
+                        display_dir,
+                        ".codex/config.toml",
+                        agent_line,
+                        "ONBOARD_AGENT_NAME is missing",
+                        expected,
+                    )
+                )
+            elif config_identity != expected:
+                problems.append(
+                    _problem(
+                        display_dir,
+                        ".codex/config.toml",
+                        agent_line,
+                        f"ONBOARD_AGENT_NAME is {config_identity!r}, expected {expected!r}",
+                        expected,
+                    )
+                )
+            token_line = _config_line(config, "ONBOARD_CENTRAL_TOKEN_FILE")
+            if not token_file:
+                problems.append(
+                    _problem(
+                        display_dir,
+                        ".codex/config.toml",
+                        token_line,
+                        "ONBOARD_CENTRAL_TOKEN_FILE is missing",
+                        expected,
+                    )
+                )
+            else:
+                token_path = Path(token_file).expanduser()
+                if not token_path.is_absolute():
+                    token_path = seat_dir / token_path
+                try:
+                    principal = _jwt_subject(token_path)
+                except ValueError as exc:
+                    problems.append(
+                        _problem(
+                            display_dir,
+                            ".codex/config.toml",
+                            token_line,
+                            str(exc),
+                            expected,
+                        )
+                    )
+    return problems, expected, principal
+
+
+def check_seats(paths: list[str]) -> int:
+    all_problems: list[str] = []
+    principals: dict[str, list[str]] = {}
+    checked = 0
+    for raw_path in paths:
+        display_dir = Path(raw_path)
+        seat_dir = display_dir.expanduser().resolve()
+        markers = (
+            seat_dir / "AGENTS.md",
+            seat_dir / "START.md",
+            seat_dir / ".codex" / "config.toml",
+        )
+        if seat_dir.is_dir() and not any(path.exists() for path in markers):
+            print(f"SKIP {display_dir.as_posix()}: no seat identity files")
+            continue
+        checked += 1
+        if not seat_dir.is_dir():
+            all_problems.append(
+                f"ERROR {display_dir.as_posix()}:1: seat directory is missing; "
+                "fix: pass an existing seat directory"
+            )
+            continue
+        problems, identity, principal = _check_seat(seat_dir, display_dir)
+        all_problems.extend(problems)
+        if principal is not None:
+            principals.setdefault(principal, []).append(identity)
+        if not problems:
+            print(
+                f"OK {display_dir.as_posix()}: identity={identity} "
+                f"principal={principal}"
+            )
+
+    for problem in all_problems:
+        print(problem)
+    shared = 0
+    for principal, identities in sorted(principals.items()):
+        unique = sorted(set(identities))
+        if len(unique) < 2:
+            continue
+        shared += 1
+        print(f"INFO principal {principal} shared by {', '.join(unique)}")
+    if all_problems:
+        print(f"CHECK FAILED: {len(all_problems)} problem(s) across {checked} seat(s)")
+        return 1
+    print(f"CHECK OK: {checked} seat(s), {shared} shared principal group(s)")
+    return 0
+
+
+def _check_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="seat_new.py check",
+        description="Read-only seat identity consistency check.",
+    )
+    parser.add_argument("directories", nargs="+", metavar="DIR")
+    return parser
+
+
 def generate(args: argparse.Namespace) -> Path:
     if not NAME_RE.fullmatch(args.name):
         raise ValueError("--name must be a safe 1-80 character agent name")
@@ -2302,7 +2634,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args and raw_args[0] == "check":
+        return check_seats(_check_parser().parse_args(raw_args[1:]).directories)
+    args = build_parser().parse_args(raw_args)
     try:
         dest = generate(args)
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:

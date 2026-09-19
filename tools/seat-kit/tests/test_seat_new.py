@@ -78,6 +78,58 @@ def synthetic_door(*, role: str = "worker") -> str:
     return f"prs1.{segment({'u': 'http://127.0.0.1:8766/mcp', 'b': 'sandbox', 'r': role, 't': compact})}"
 
 
+def synthetic_jwt(subject: str) -> str:
+    def segment(value: dict[str, object]) -> str:
+        return base64.urlsafe_b64encode(
+            json.dumps(value, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+
+    return (
+        f"{segment({'alg': 'RS256', 'kid': 'seat-check'})}."
+        f"{segment({'sub': subject, 'exp': 2_000_000_000})}."
+        f"{base64.urlsafe_b64encode(b'synthetic-signature').decode().rstrip('=')}"
+    )
+
+
+def write_check_seat(
+    seat: Path,
+    *,
+    identity: str,
+    agents_identity: str | None = None,
+    start_identity: str | None = None,
+    include_agents: bool = True,
+    include_start: bool = True,
+    include_config: bool = True,
+    principal: str = "PR-shared",
+) -> None:
+    seat.mkdir(parents=True)
+    agents_identity = agents_identity or identity
+    start_identity = start_identity or identity
+    if include_agents:
+        (seat / "AGENTS.md").write_text(
+            f"# Pursers worker: {agents_identity}\n\n"
+            f"This folder fixes your identity to `{agents_identity}`.\n\n"
+            f"Use board_onboard with agent_name=`{agents_identity}`.\n",
+            encoding="utf-8",
+        )
+    if include_start:
+        (seat / "START.md").write_text(
+            f"Read AGENTS.md. Connect to Pursers as {start_identity} with role worker.\n",
+            encoding="utf-8",
+        )
+    if include_config:
+        token = seat / "seat.jwt"
+        token.write_text(synthetic_jwt(principal), encoding="utf-8")
+        config = seat / ".codex" / "config.toml"
+        config.parent.mkdir()
+        config.write_text(
+            "[mcp_servers.pursers-wait-bridge.env]\n"
+            f"ONBOARD_AGENT_NAME = {json.dumps(identity)}\n"
+            f"ONBOARD_CENTRAL_TOKEN_FILE = {json.dumps(str(token))}\n",
+            encoding="utf-8",
+        )
+
+
 def load_generated(path: Path, name: str) -> Any:
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
@@ -215,6 +267,80 @@ def test_worker_folder_permissions_and_secret_safety(tmp_path: Path) -> None:
     assert "worker-a" in generated
     assert "ticket_review" in generated
     assert "never call ticket_review" in generated
+
+
+def test_check_accepts_consistent_seats_and_reports_shared_principal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fleet = tmp_path / "Pursers-Mong1"
+    first = fleet / "worker-2"
+    second = fleet / "worker-3"
+    write_check_seat(first, identity="mong1-worker-2")
+    write_check_seat(second, identity="mong1-worker-3")
+
+    assert seat_new.main(["check", str(first), str(second)]) == 0
+
+    output = capsys.readouterr().out
+    assert (first / "seat.jwt").read_text(encoding="utf-8") not in output
+    assert (second / "seat.jwt").read_text(encoding="utf-8") not in output
+    assert f"OK {first}: identity=mong1-worker-2 principal=PR-shared" in output
+    assert f"OK {second}: identity=mong1-worker-3 principal=PR-shared" in output
+    assert (
+        "INFO principal PR-shared shared by mong1-worker-2, mong1-worker-3"
+        in output
+    )
+    assert "CHECK OK: 2 seat(s), 1 shared principal group(s)" in output
+
+
+def test_check_flags_agents_file_copied_from_another_seat(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seat = tmp_path / "Pursers-Mong1" / "worker-9"
+    write_check_seat(
+        seat,
+        identity="mong1-worker-9",
+        agents_identity="mong1-worker-3",
+    )
+
+    assert seat_new.main(["check", str(seat)]) == 1
+
+    output = capsys.readouterr().out
+    assert f"ERROR {seat / 'AGENTS.md'}:1:" in output
+    assert f"ERROR {seat / 'AGENTS.md'}:3:" in output
+    assert f"ERROR {seat / 'AGENTS.md'}:5:" in output
+    assert output.count("expected 'mong1-worker-9'") == 3
+    assert "CHECK FAILED: 3 problem(s) across 1 seat(s)" in output
+
+
+def test_check_flags_start_identity_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seat = tmp_path / "Pursers-Mong1" / "reviewer-4"
+    write_check_seat(
+        seat,
+        identity="mong1-reviewer-4",
+        start_identity="mong1-reviewer-5",
+    )
+
+    assert seat_new.main(["check", str(seat)]) == 1
+
+    output = capsys.readouterr().out
+    assert f"ERROR {seat / 'START.md'}:1:" in output
+    assert "connection names 'mong1-reviewer-5'" in output
+    assert "fix: use identity 'mong1-reviewer-4'" in output
+
+
+def test_check_flags_missing_seat_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seat = tmp_path / "Pursers-Mong1" / "worker-6"
+    write_check_seat(seat, identity="mong1-worker-6", include_start=False)
+
+    assert seat_new.main(["check", str(seat)]) == 1
+
+    output = capsys.readouterr().out
+    assert f"ERROR {seat / 'START.md'}:1: file is missing" in output
+    assert "CHECK FAILED: 1 problem(s) across 1 seat(s)" in output
 
 
 def test_door_setup_writes_private_state_and_secret_free_launcher(

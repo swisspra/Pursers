@@ -40,6 +40,16 @@ Create four stable seat identities:
 - one reviewer on a different principal, with `can_work=false` and
   `can_review=true`.
 
+Before any seat onboards, run the read-only identity check:
+
+```sh
+python3 tools/seat-kit/seat_new.py check /PATH/TO/Pursers-Mong1/*
+```
+
+Fix every reported identity mismatch first. Shared principal subjects are
+informational; confirm that each shared group matches the intended trust
+boundary.
+
 The dispatcher's eligibility check uses role, tier, skills, current load, and
 declared capabilities. A display name is not authentication. Confirm the
 returned `agent_id`, `principal_id`, role, and capabilities after onboarding.
