@@ -35,7 +35,22 @@ def _fixture_repository(tmp_path: Path, *, distinct: bool = True) -> Path:
         shutil.copy2(source, destination)
     if distinct:
         _rebase_to_distinct_versions(tmp_path)
+    else:
+        _rebase_to_shared_central(tmp_path)
     return tmp_path
+
+
+def _rebase_to_shared_central(root: Path) -> None:
+    # Shared-version tests need central and client on one version string. A
+    # patch release can move central alone, so converge it back onto client.
+    current = load_versions(root / "tools/release_versions.toml")
+    if current.packages["central"] == current.packages["client"]:
+        return
+    target = release_train.bumped_versions(
+        current, (f"central={current.packages['client']}",), None
+    )
+    for path, content in release_train.plan_bump(root, current, target).items():
+        path.write_text(content, encoding="utf-8")
 
 
 # The released cohort shares version strings (central, client, wait bridge and
