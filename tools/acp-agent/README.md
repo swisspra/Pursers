@@ -86,6 +86,8 @@ For current Zed development builds, the custom agent configuration is:
 This shape was validated against the official
 [Zed External Agents documentation](https://zed.dev/docs/ai/external-agents)
 on 2026-09-14. Published installs should use the ACP Registry; extension-based
-agent servers are deprecated. `pursers/agent.json` is validated against the
-registry schema from the pinned FORMAT commit and records the uvx launch,
-Darwin architecture targets, and secret-free authentication contract.
+agent servers are deprecated. `pursers/agent.json` and `pursers/icon.svg` are a
+ready-to-copy upstream registry directory. They are validated against the
+schema pinned in the tests and contain only public launch metadata. See
+[`docs/zed/acp-registry-submission.md`](../../docs/zed/acp-registry-submission.md)
+for the exact operator-owned validation and pull-request procedure.

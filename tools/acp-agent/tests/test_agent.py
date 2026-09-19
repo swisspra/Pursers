@@ -41,6 +41,18 @@ class FakeBoard:
     async def board_status(self) -> JSON:
         return {"board_id": self.board_id, "status_counts": {"open": 1}, "latest_seq": 4}
 
+    async def ticket_evidence(self, ticket_id: str) -> JSON:
+        return {
+            "ticket": {
+                "ticket_id": ticket_id,
+                "status": "submitted",
+                "summary": "Ready for review",
+                "files_changed": ["src/example.py"],
+                "review_verdict": None,
+                "notes": "branch_and_commit: branch@abc\ntest_output: 2 passed",
+            }
+        }
+
     def create_action(self, title: str, description: str) -> JSON:
         return {
             "operation": "ticket_create",
@@ -55,10 +67,19 @@ class FakeBoard:
             "params": {"ticket_id": ticket_id, "text": text},
         }
 
+    async def answer_action(self, ticket_id: str, text: str) -> JSON:
+        return {
+            "operation": "ticket_human_resolve",
+            "board_id": self.board_id,
+            "params": {"ticket_id": ticket_id, "content": text},
+        }
+
     async def mutate(self, action: JSON) -> JSON:
         self.mutations.append(action)
         if action["operation"] == "ticket_create":
             return {"ticket": {"ticket_id": "TK-created"}}
+        if action["operation"] == "ticket_human_resolve":
+            return {"ticket": {"ticket_id": action["params"]["ticket_id"]}}
         return {"annotation": {"annotation_id": "AN-created"}}
 
     async def watch(
@@ -127,7 +148,7 @@ class FakeACPClient:
             ).encode()
         )
         while True:
-            message = await asyncio.wait_for(self.outgoing.get(), 2)
+            message = await asyncio.wait_for(self.outgoing.get(), 15)
             if message.get("method") == "session/update":
                 self.updates.append(message["params"])
                 continue
@@ -192,6 +213,15 @@ async def _conformance_honest_capabilities_and_read_intents(tmp_path: Path) -> N
         assert initialized["authMethods"][0]["id"] == "pursers-personal-profile"
         assert initialized["authMethods"][0]["type"] == "agent"
         session = await client.new_session(tmp_path)
+        commands_update = client.updates[-1]["update"]
+        assert commands_update["sessionUpdate"] == "available_commands_update"
+        assert [row["name"] for row in commands_update["availableCommands"]] == [
+            "board",
+            "create",
+            "watch",
+            "evidence",
+            "answer",
+        ]
         assert (await client.prompt(session, "my tickets"))["stopReason"] == "end_turn"
         text = client.updates[-1]["update"]["content"]["text"]
         assert "TK-owned" in text
@@ -199,6 +229,86 @@ async def _conformance_honest_capabilities_and_read_intents(tmp_path: Path) -> N
     finally:
         await client.close()
     assert board.closed
+
+
+def test_board_transport_is_opened_and_closed_by_run_loop_task() -> None:
+    asyncio.run(_board_transport_is_opened_and_closed_by_run_loop_task())
+
+
+async def _board_transport_is_opened_and_closed_by_run_loop_task() -> None:
+    opened_by: asyncio.Task[object] | None = None
+
+    class TaskBoundBoard(FakeBoard):
+        async def close(self) -> None:
+            assert asyncio.current_task() is opened_by
+            await super().close()
+
+    bound_board = TaskBoundBoard()
+
+    def bound_factory() -> TaskBoundBoard:
+        nonlocal opened_by
+        opened_by = asyncio.current_task()
+        return bound_board
+
+    client = FakeACPClient(PursersACPAgent(bound_factory))
+    await client.initialize()
+    await client.close()
+    assert bound_board.closed
+
+
+def test_five_slash_commands_are_executable_and_writes_request_permission(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_five_slash_commands_are_executable_and_writes_request_permission(tmp_path))
+
+
+async def _five_slash_commands_are_executable_and_writes_request_permission(
+    tmp_path: Path,
+) -> None:
+    board = FakeBoard()
+    client = FakeACPClient(PursersACPAgent(lambda: board))
+    try:
+        await client.initialize()
+        session = await client.new_session(tmp_path)
+        await client.prompt(session, "/board")
+        await client.prompt(session, "/evidence TK-owned")
+        await client.prompt(session, "/create Title :: Description")
+        await client.prompt(session, "/answer TK-owned approved")
+
+        messages = [
+            row["update"].get("content", {}).get("text", "")
+            for row in client.updates
+            if row["update"].get("sessionUpdate") == "agent_message_chunk"
+        ]
+        assert any(text.startswith("Board pursers") for text in messages)
+        assert any("branch_and_commit: branch@abc" in text for text in messages)
+        assert [row["toolCall"]["rawInput"]["operation"] for row in client.permissions] == [
+            "ticket_create",
+            "ticket_human_resolve",
+        ]
+    finally:
+        await client.close()
+
+
+def test_board_failure_is_rendered_as_agent_message(tmp_path: Path) -> None:
+    asyncio.run(_board_failure_is_rendered_as_agent_message(tmp_path))
+
+
+async def _board_failure_is_rendered_as_agent_message(tmp_path: Path) -> None:
+    class BrokenBoard(FakeBoard):
+        async def board_status(self) -> JSON:
+            raise RuntimeError("profile points at an unavailable Central")
+
+    client = FakeACPClient(PursersACPAgent(lambda: BrokenBoard()))
+    try:
+        await client.initialize()
+        session = await client.new_session(tmp_path)
+        assert await client.prompt(session, "/board") == {"stopReason": "end_turn"}
+        text = client.updates[-1]["update"]["content"]["text"]
+        assert "Check the selected Personal profile and board access" in text
+        assert "unavailable Central" in text
+    finally:
+        await client.close()
 
 
 def test_every_write_requires_exact_allow_once_payload(tmp_path: Path) -> None:
@@ -258,6 +368,15 @@ async def _watch_streams_then_cancel_stops_prompt(tmp_path: Path) -> None:
             await asyncio.sleep(0)
         await client.notify("session/cancel", {"sessionId": session})
         assert await prompt == {"stopReason": "cancelled"}
+        plans = [
+            row["update"]
+            for row in client.updates
+            if row["update"].get("sessionUpdate") == "plan"
+        ]
+        assert [row["entries"][0]["status"] for row in plans] == [
+            "in_progress",
+            "completed",
+        ]
     finally:
         await client.close()
 

@@ -10,27 +10,6 @@
   ],
   "license": "Apache-2.0",
   "license_url": "https://github.com/swisspra/Pursers/blob/main/LICENSE",
-  "icon": "https://raw.githubusercontent.com/swisspra/Pursers/main/tools/acp-agent/pursers/icon.svg",
-  "platforms": [
-    "darwin-aarch64",
-    "darwin-x86_64"
-  ],
-  "launch": {
-    "command": "uvx",
-    "args": [
-      "pursers-acp==0.1.0"
-    ],
-    "env": {}
-  },
-  "authentication": {
-    "agent_method_id": "pursers-personal-profile",
-    "terminal_method_id": "pursers-personal-login",
-    "terminal_args": [
-      "--login"
-    ],
-    "credential": "local Pursers Personal profile",
-    "secret_in_registry_or_settings": false
-  },
   "distribution": {
     "uvx": {
       "package": "pursers-acp==0.1.0",
