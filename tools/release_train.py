@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "tools/release_versions.toml"
 VERSION_FILES: dict[str, tuple[str, ...]] = {
     "product": (
+        "server.json",
         "packages/personal/README.md",
         "packages/personal/pyproject.toml",
         "packages/personal/src/pursers_personal/__init__.py",
@@ -50,12 +51,14 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "tools/seat-kit/README.md",
     ),
     "central": (
+        "server.json",
         "packages/central/pyproject.toml",
         "packages/personal/pyproject.toml",
         "packages/personal/tests/test_apps_contract.py",
         "packages/pursers/pyproject.toml",
     ),
     "client": (
+        "server.json",
         "packages/central/pyproject.toml",
         "packages/client/pyproject.toml",
         "packages/personal/pyproject.toml",
@@ -260,6 +263,14 @@ def _qualified_version_pattern(
     branches = [
         rf"(?i:(?<![\w-])(?:{alternatives})(?:==|~=|>=|<=|-|_|/|{_QUALIFIER_GAP}))"
     ]
+    if relative == "server.json":
+        # Package identifiers and their version fields are separate members of
+        # the same small JSON object. Keep this bounded so a package cannot
+        # qualify a later package's version.
+        branches.append(
+            rf'(?is:(?<![\w-])(?:{alternatives})(?![\w-])'
+            rf'(?:(?!\n\s*\}}).){{0,160}}?"version"\s*:\s*")'
+        )
     if relative.endswith("pyproject.toml"):
         project = str(_pyproject(root / relative)["project"]["name"])
         owners = {"pursers", "personal"} if key == "product" else {key}

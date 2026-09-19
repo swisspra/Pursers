@@ -118,6 +118,13 @@ def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
     assert '"pursers-wait-bridge==0.1.0a18"' in planned[
         root / "tools/acp-agent/pyproject.toml"
     ]
+    server = planned[root / "server.json"]
+    assert '"version": "5.0.0a27"' in server
+    assert '"identifier": "pursers-central"' in server
+    assert '"version": "0.1.0a32"' in server
+    assert '"identifier": "pursers-client"' in server
+    assert '"version": "0.1.0a25"' in server
+    assert '"value": "pursers-client==0.1.0a25"' in server
     assert "pursers-acp==0.1.1" in planned[root / "tools/acp-agent/README.md"]
     assert 'IMPLEMENTATION_VERSION = "0.1.1"' in planned[
         root / "tools/acp-agent/src/pursers_acp/agent.py"

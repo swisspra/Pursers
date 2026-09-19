@@ -1,5 +1,7 @@
 # Pursers client
 
+<!-- mcp-name: io.github.swisspra/pursers -->
+
 `pursers-client` is the asynchronous Python client for a Pursers Central MCP
 service. It provides `BoardClient` for authenticated board, ticket, memory,
 state, and event operations used by Pursers runtimes and automation tools.
