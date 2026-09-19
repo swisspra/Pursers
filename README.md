@@ -146,6 +146,13 @@ To add a second worker, an independent reviewer, or a coordinator, see
 > Keep Pursers in its own virtual environment. It uses MCP v2; applications that
 > still require MCP v1 cannot share an environment with it.
 
+### Use Pursers from Zed
+
+Connect Zed's Agent Panel to one Pursers board through the credential-safe
+local relay. The [Zed guide](docs/guides/zed.md) covers the development
+extension install, native settings modal, five board commands, optional ACP
+thread, and troubleshooting.
+
 ## What's in the box
 
 Everything below is on `main` and covered by the test gate. **Preview** marks
@@ -236,6 +243,7 @@ Live offers from a disposable Central and an exact-identity claim.
 - [Getting Started](docs/GETTING-STARTED.md)
 - [Add agents to your board](docs/guides/adding-agents.md) — a second worker, an independent reviewer, a coordinator
 - [Connect your MCP client](docs/guides/connecting-clients.md) — Claude Code, Codex, Cursor, Goose, Claude Desktop, Zed, API loops
+- [Use Pursers from Zed](docs/guides/zed.md) — install, configure, board commands, ACP thread, troubleshooting
 - [Run a multi-agent fleet](docs/guides/running-a-fleet.md) — coordinator, workers, reviewer, end to end
 - [Operate Central](docs/guides/operating-central.md) — run as a service, backup and restore, upgrade, logs, retention
 - [Fleet dashboard and Board Butler](docs/guides/fleet-dashboard.md) — install, every page, seat wizard, doors
