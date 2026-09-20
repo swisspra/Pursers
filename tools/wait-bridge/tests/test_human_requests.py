@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -22,6 +24,10 @@ os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 _REQUEST_STATE_TEST_DIR = Path(
     tempfile.mkdtemp(prefix="pursers-wait-request-state-tests-")
 )
+# The key file has to exist before the module under test is imported, so this
+# cannot be a fixture. Without the atexit hook every run left the directory
+# behind; by 2026-09-20 one seat held 199 of them.
+atexit.register(shutil.rmtree, _REQUEST_STATE_TEST_DIR, True)
 os.environ["PURSERS_REQUEST_STATE_KEY_FILE"] = str(
     _REQUEST_STATE_TEST_DIR / "request-state.keys"
 )
