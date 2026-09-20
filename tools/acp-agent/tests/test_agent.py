@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -93,12 +94,33 @@ class FakeBoard:
             "params": {"ticket_id": ticket_id, "content": text},
         }
 
+    def question_answer_action(
+        self, ticket_id: str, question_id: str, text: str
+    ) -> JSON:
+        return {
+            "operation": "ticket_question_answer",
+            "board_id": self.board_id,
+            "params": {
+                "ticket_id": ticket_id,
+                "question_id": question_id,
+                "action": "answer",
+                "message": text,
+            },
+        }
+
     async def mutate(self, action: JSON) -> JSON:
         self.mutations.append(action)
         if action["operation"] == "ticket_create":
             return {"ticket": {"ticket_id": "TK-created"}}
         if action["operation"] == "ticket_human_resolve":
             return {"ticket": {"ticket_id": action["params"]["ticket_id"]}}
+        if action["operation"] == "ticket_question_answer":
+            return {
+                "question": {
+                    "question_id": action["params"]["question_id"],
+                    "state": "answered",
+                }
+            }
         return {"annotation": {"annotation_id": "AN-created"}}
 
     async def watch(
@@ -182,14 +204,24 @@ class BlockingBoard(FakeBoard):
 class FakeACPClient:
     """Small fake IDE client derived from the P0 ACP client harness."""
 
-    def __init__(self, agent: PursersACPAgent, *, allow: bool = True) -> None:
+    def __init__(
+        self,
+        agent: PursersACPAgent,
+        *,
+        allow: bool | list[bool] = True,
+        elicit: JSON | list[JSON] | None = None,
+    ) -> None:
         self.agent = agent
         self.allow = allow
+        self.elicit = elicit
         self.incoming: asyncio.Queue[bytes] = asyncio.Queue()
         self.outgoing: asyncio.Queue[JSON] = asyncio.Queue()
         self.next_id = 0
         self.updates: list[JSON] = []
         self.permissions: list[JSON] = []
+        self.elicitations: list[JSON] = []
+        self.elicitation_responses: list[JSON] = []
+        self.wire: list[JSON] = []
         self.task = asyncio.create_task(agent.run(self.incoming.get, self.outgoing.put))
 
     async def close(self) -> None:
@@ -213,21 +245,44 @@ class FakeACPClient:
             message = await asyncio.wait_for(
                 self.outgoing.get(), TEST_TIMEOUT_S
             )
+            self.wire.append(message)
             if message.get("method") == "session/update":
                 self.updates.append(message["params"])
                 continue
             if message.get("method") == "session/request_permission":
                 self.permissions.append(message["params"])
+                if isinstance(self.allow, list):
+                    allow = self.allow.pop(0)
+                else:
+                    allow = self.allow
                 outcome = {
                     "outcome": {
                         "outcome": "selected",
-                        "optionId": "allow-once" if self.allow else "reject-once",
+                        "optionId": "allow-once" if allow else "reject-once",
                     }
                 }
                 await self.incoming.put(
                     json.dumps(
                         {"jsonrpc": "2.0", "id": message["id"], "result": outcome}
                     ).encode()
+                )
+                continue
+            if message.get("method") == "elicitation/create":
+                self.elicitations.append(message["params"])
+                if isinstance(self.elicit, list):
+                    result = self.elicit.pop(0)
+                elif isinstance(self.elicit, dict):
+                    result = self.elicit
+                else:
+                    raise AssertionError("unexpected elicitation/create request")
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": result,
+                }
+                self.elicitation_responses.append(response)
+                await self.incoming.put(
+                    json.dumps(response).encode()
                 )
                 continue
             if message.get("id") == request_id:
@@ -240,7 +295,10 @@ class FakeACPClient:
             "initialize",
             {
                 "protocolVersion": ACP_VERSION,
-                "clientCapabilities": {"auth": {"terminal": True}},
+                "clientCapabilities": {
+                    "auth": {"terminal": True},
+                    "elicitation": {"form": {}},
+                },
                 "clientInfo": {"name": "fake-ide", "version": "1"},
             },
         )
@@ -766,6 +824,231 @@ def test_empty_truncated_snapshot_does_not_claim_the_board_is_idle() -> None:
             "status": "in_progress",
         }
     ]
+def test_watch_review_verdict_completes_turn_for_notification(tmp_path: Path) -> None:
+    asyncio.run(_watch_review_verdict_completes_turn_for_notification(tmp_path))
+
+
+async def _watch_review_verdict_completes_turn_for_notification(
+    tmp_path: Path,
+) -> None:
+    class ReviewBoard(FakeBoard):
+        async def watch(
+            self, cursor: int | None, cancel: asyncio.Event
+        ) -> AsyncIterator[tuple[int, JSON]]:
+            yield 7, {
+                "seq": 7,
+                "kind": "ticket_status_changed",
+                "ticket_id": "TK-reviewed",
+                "status_to": "open",
+                "review_verdict": "reject",
+            }
+            await cancel.wait()
+
+    client = FakeACPClient(PursersACPAgent(lambda: ReviewBoard()))
+    try:
+        await client.initialize()
+        session_id = await client.new_session(tmp_path)
+        assert await client.prompt(session_id, "/watch") == {
+            "stopReason": "end_turn"
+        }
+        plans = [
+            row["update"]
+            for row in client.updates
+            if row["update"].get("sessionUpdate") == "plan"
+        ]
+        assert [row["entries"][0]["status"] for row in plans] == [
+            "in_progress",
+            "in_progress",
+            "completed",
+        ]
+    finally:
+        await client.close()
+
+
+def test_watch_questions_use_stable_references_and_refusal_preserves_pending(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_watch_questions_use_stable_references_and_refusal_preserves_pending(tmp_path))
+
+
+async def _watch_questions_use_stable_references_and_refusal_preserves_pending(
+    tmp_path: Path,
+) -> None:
+    class QuestionBoard(FakeBoard):
+        def __init__(self) -> None:
+            super().__init__()
+            self.next_event = 0
+
+        async def ticket_evidence(self, ticket_id: str) -> JSON:
+            number = "one" if ticket_id == "TK-one" else "two"
+            return {
+                "ticket": {
+                    "ticket_id": ticket_id,
+                    "required_fields": ["observations"],
+                    "coordinator_questions": [
+                        {
+                            "question_id": f"CQ-{number}",
+                            "state": "open",
+                            "message": f"Question from seat {number}",
+                            "asked_at": "2026-09-20T14:00:00+00:00",
+                            "asked_by": {"agent_name": f"worker-{number}"},
+                        }
+                    ],
+                }
+            }
+
+        async def watch(
+            self, cursor: int | None, cancel: asyncio.Event
+        ) -> AsyncIterator[tuple[int, JSON]]:
+            self.watch_started.set()
+            seq, number = ((5, "one"), (6, "two"))[self.next_event]
+            self.next_event += 1
+            yield seq, {
+                "seq": seq,
+                "kind": "coordinator_question_asked",
+                "ticket_id": f"TK-{number}",
+                "question_id": f"CQ-{number}",
+            }
+            await cancel.wait()
+
+    board = QuestionBoard()
+    client = FakeACPClient(
+        PursersACPAgent(lambda: board),
+        allow=[True, False],
+        elicit=[
+            {
+                "action": "accept",
+                "content": {
+                    "answer": "Ship the first change",
+                    "observations": "First is unblocked",
+                },
+            },
+            {
+                "action": "accept",
+                "content": {
+                    "answer": "Hold the second change",
+                    "observations": "Second needs more review",
+                },
+            },
+        ],
+    )
+    try:
+        await client.initialize()
+        session_id = await client.new_session(tmp_path)
+        assert await client.prompt(session_id, "/watch") == {
+            "stopReason": "end_turn"
+        }
+        assert await client.prompt(session_id, "/watch") == {
+            "stopReason": "end_turn"
+        }
+        plans = [
+            row["update"]
+            for row in client.updates
+            if row["update"].get("sessionUpdate") == "plan"
+        ]
+        assert [row["entries"][0]["status"] for row in plans] == [
+            "in_progress",
+            "completed",
+            "in_progress",
+            "completed",
+        ]
+
+        assert await client.prompt(session_id, "ambiguous bare reply") == {
+            "stopReason": "end_turn"
+        }
+        assert client.permissions == []
+        assert "Pursers will not guess" in client.updates[-1]["update"]["content"]["text"]
+
+        await client.prompt(session_id, "/answer #1")
+        await client.prompt(session_id, "/answer #2")
+
+        assert [row["toolCall"]["rawInput"]["operation"] for row in client.permissions] == [
+            "ticket_question_answer",
+            "ticket_question_answer",
+        ]
+        assert "host_binding" not in json.dumps(client.permissions)
+        assert len(client.elicitations) == 2
+        first_schema = client.elicitations[0]["requestedSchema"]
+        assert first_schema["required"] == ["answer", "observations"]
+        assert set(first_schema["properties"]) == {"answer", "observations"}
+        first_elicitation_index = next(
+            index
+            for index, message in enumerate(client.wire)
+            if message.get("method") == "elicitation/create"
+        )
+        first_permission_index = next(
+            index
+            for index, message in enumerate(client.wire)
+            if message.get("method") == "session/request_permission"
+        )
+        assert first_elicitation_index < first_permission_index
+        assert [row["params"]["question_id"] for row in board.mutations] == ["CQ-one"]
+        pending = client.agent.sessions[session_id].pending_questions
+        assert list(pending) == ["CQ-two"]
+    finally:
+        await client.close()
+
+
+def test_question_elicitation_decline_and_cancel_leave_board_unanswered(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_question_elicitation_decline_and_cancel_leave_board_unanswered(tmp_path))
+
+
+async def _question_elicitation_decline_and_cancel_leave_board_unanswered(
+    tmp_path: Path,
+) -> None:
+    class OneQuestionBoard(FakeBoard):
+        async def ticket_evidence(self, ticket_id: str) -> JSON:
+            return {
+                "ticket": {
+                    "ticket_id": ticket_id,
+                    "required_fields": ["observations"],
+                    "coordinator_questions": [
+                        {
+                            "question_id": "CQ-one",
+                            "state": "open",
+                            "message": "Choose safely",
+                            "asked_at": "2026-09-20T14:00:00+00:00",
+                            "asked_by": {"agent_name": "worker-one"},
+                        }
+                    ],
+                }
+            }
+
+        async def watch(
+            self, cursor: int | None, cancel: asyncio.Event
+        ) -> AsyncIterator[tuple[int, JSON]]:
+            yield 5, {
+                "seq": 5,
+                "kind": "coordinator_question_asked",
+                "ticket_id": "TK-one",
+                "question_id": "CQ-one",
+            }
+            await cancel.wait()
+
+    board = OneQuestionBoard()
+    client = FakeACPClient(
+        PursersACPAgent(lambda: board),
+        elicit=[{"action": "decline"}, {"action": "cancel"}],
+    )
+    try:
+        await client.initialize()
+        session_id = await client.new_session(tmp_path)
+        assert await client.prompt(session_id, "/watch") == {
+            "stopReason": "end_turn"
+        }
+        assert await client.prompt(session_id, "/answer") == {
+            "stopReason": "end_turn"
+        }
+        assert await client.prompt(session_id, "/answer") == {
+            "stopReason": "end_turn"
+        }
+        assert board.mutations == []
+        assert client.permissions == []
+        assert list(client.agent.sessions[session_id].pending_questions) == ["CQ-one"]
+    finally:
+        await client.close()
 
 
 def _stdio_server_script(path: Path, source: str) -> None:
@@ -1157,6 +1440,11 @@ calls = 0
 @server.resource('board://pursers/digest')
 async def digest_resource():
     return '{}'
+@server.tool()
+async def board_question_inbox(ctx: Context, state: str, limit: int):
+    assert state == 'open'
+    assert limit == 100
+    return {'questions': []}
 @server.tool()
 async def board_digest(ctx: Context, since: dict[str, int], boards: list[str], include_notes_keys: list[str], max_transitions_per_ticket: int):
     global calls
@@ -1552,11 +1840,22 @@ def test_personal_setup_command_has_no_inherited_board_secret(
 
 
 class InProcessPersonalBoard(PersonalBoardSurface):
-    def __init__(self, raw: Client, principal_id: str) -> None:
+    def __init__(
+        self,
+        raw: Client,
+        principal_id: str,
+        *,
+        agent_name: str = "human-personal",
+        agent_id: str = "",
+        coordinator_binding: str = "",
+    ) -> None:
         self.profile = None
         self.board_id = "acp-e2e"
         self.principal_id = principal_id
-        self.agent_name = "human-personal"
+        self.agent_name = agent_name
+        self.agent_id = agent_id
+        self._coordinator_binding = coordinator_binding
+        self._wait_bridge_factory = None
         self._client = raw
 
     async def close(self) -> None:
@@ -1617,6 +1916,290 @@ async def _end_to_end_create_against_in_process_central(
             )
             assert fetched["ticket"]["title"] == "ACP E2E"
             assert fetched["ticket"]["created_by_principal_id"] == principal.principal_id
+        finally:
+            await client.close()
+
+
+def test_end_to_end_two_seat_questions_answer_and_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asyncio.run(_end_to_end_two_seat_questions_answer_and_refuse(tmp_path, monkeypatch))
+
+
+async def _end_to_end_two_seat_questions_answer_and_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jwks = tmp_path / "questions-jwks.json"
+    jwks.write_text('{"keys": []}', encoding="utf-8")
+    monkeypatch.setenv("CENTRAL_AUTH_MODE", "jwt")
+    monkeypatch.setenv("CENTRAL_JWT_ISSUER", "https://issuer.invalid")
+    monkeypatch.setenv("CENTRAL_JWT_AUDIENCE", "http://localhost:8765/mcp")
+    monkeypatch.setenv("CENTRAL_JWKS_PATH", str(jwks))
+    monkeypatch.setenv("CENTRAL_ADMISSION", "invite")
+    monkeypatch.setenv("STORE_BACKEND", "sqlite")
+    mcp, service = central.build_server("localhost", 8765, tmp_path / "question-central")
+    principals = {
+        "admin": central.Principal(
+            "PR-admin", "admin", frozenset({"board:read", "board:write"})
+        ),
+        "coord": central.Principal(
+            "PR-coord",
+            "coord",
+            frozenset({"board:read", "board:write", "board:coordinate"}),
+        ),
+        "worker-one": central.Principal(
+            "PR-worker-one",
+            "worker-one",
+            frozenset({"board:read", "board:write"}),
+        ),
+        "worker-two": central.Principal(
+            "PR-worker-two",
+            "worker-two",
+            frozenset({"board:read", "board:write"}),
+        ),
+    }
+    current = {"name": "admin"}
+    binding_secret = "throwaway-question-binding"
+    monkeypatch.setattr(
+        central, "current_principal", lambda: principals[current["name"]]
+    )
+    monkeypatch.setattr(
+        central,
+        "current_host_binding",
+        lambda agent_id: hashlib.sha256(
+            json.dumps([binding_secret, agent_id], separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
+
+    async with Client(mcp, mode="2026-07-28", cache=None) as raw:
+        async def call(name: str, **arguments: object) -> JSON:
+            result = await raw.call_tool(name, {"board_id": "acp-e2e", **arguments})
+            return BoardClient._decode(result)
+
+        await call("board_join", agent_name="admin-agent")
+        agent_ids: dict[str, str] = {}
+        for name in ("coord", "worker-one", "worker-two"):
+            await call(
+                "board_member_add",
+                agent_name="admin-agent",
+                principal_id=principals[name].principal_id,
+                role="member",
+            )
+            current["name"] = name
+            joined = await call(
+                "board_join",
+                agent_name=name,
+                role="coordinator" if name == "coord" else "worker",
+            )
+            agent_ids[name] = joined["agent_id"]
+            current["name"] = "admin"
+        await call(
+            "board_state_update",
+            agent_name="admin-agent",
+            key="project_registry",
+            value=json.dumps(
+                {
+                    "schema_version": 1,
+                    "projects": {
+                        "acp-e2e": {
+                            "board_id": "acp-e2e",
+                            "work_dir": "/PATH/TO/acp-e2e",
+                            "status": "active",
+                        }
+                    },
+                }
+            ),
+        )
+        await call(
+            "board_state_update",
+            agent_name="admin-agent",
+            key=central.PROJECT_COORDINATORS_STATE_KEY,
+            value=json.dumps({"acp-e2e": [agent_ids["coord"]]}),
+        )
+
+        events: list[JSON] = []
+        for number, worker in (("one", "worker-one"), ("two", "worker-two")):
+            ticket_id = f"TK-{number}"
+            await call(
+                "ticket_create",
+                ticket_id=ticket_id,
+                agent_name="admin-agent",
+                title=f"Question {number}",
+                description="Throwaway ACP question transcript",
+                scope="interactive-no-send",
+                required_fields=["observations"],
+                unassigned=True,
+            )
+            current["name"] = worker
+            await call("ticket_claim", ticket_id=ticket_id, agent_name=worker)
+            asked = await call(
+                "ticket_question_ask",
+                ticket_id=ticket_id,
+                agent_name=worker,
+                message=f"Question from {worker}",
+                kind="decision",
+            )
+            events.append(asked["event"])
+            current["name"] = "admin"
+
+        class ProductQuestionBoard(InProcessPersonalBoard):
+            next_event = 0
+
+            async def watch(
+                self, cursor: int | None, cancel: asyncio.Event
+            ) -> AsyncIterator[tuple[int, JSON]]:
+                event = events[self.next_event]
+                self.next_event += 1
+                yield int(event["seq"]), event
+                await cancel.wait()
+
+        current["name"] = "coord"
+        coordinator_binding = central.current_host_binding(agent_ids["coord"])
+        board = ProductQuestionBoard(
+            raw,
+            principals["coord"].principal_id,
+            agent_name="coord",
+            agent_id=agent_ids["coord"],
+            coordinator_binding=coordinator_binding,
+        )
+        client = FakeACPClient(
+            PursersACPAgent(lambda: board),
+            allow=[True, False],
+            elicit=[
+                {
+                    "action": "accept",
+                    "content": {
+                        "answer": "Ship one first",
+                        "observations": "First seat can proceed",
+                    },
+                },
+                {
+                    "action": "decline",
+                },
+                {
+                    "action": "cancel",
+                },
+                {
+                    "action": "accept",
+                    "content": {
+                        "answer": "Hold two",
+                        "observations": "Second seat stays blocked",
+                    },
+                },
+            ],
+        )
+        try:
+            await client.initialize()
+            session_id = await client.new_session(tmp_path)
+            assert await client.prompt(session_id, "/watch") == {
+                "stopReason": "end_turn"
+            }
+            assert await client.prompt(session_id, "/watch") == {
+                "stopReason": "end_turn"
+            }
+            assert await client.prompt(session_id, "/answer #1") == {
+                "stopReason": "end_turn"
+            }
+            assert len(client.elicitations) == 1
+            assert len(client.permissions) == 1
+            permission_message = client.permissions[0]["toolCall"]["rawInput"][
+                "params"
+            ]["message"]
+            assert isinstance(permission_message, str), repr(permission_message)
+            answer_messages = [
+                row["update"].get("content", {}).get("text", "")
+                for row in client.updates
+                if row["update"].get("sessionUpdate") == "agent_message_chunk"
+            ]
+            assert service.load("acp-e2e")["tickets"]["TK-one"][
+                "coordinator_questions"
+            ][0]["state"] == "answered", answer_messages
+            path_states = {
+                "accept_then_allow": {
+                    "TK-one": "answered",
+                    "TK-two": "open",
+                }
+            }
+            assert await client.prompt(session_id, "/answer #2") == {
+                "stopReason": "end_turn"
+            }
+            assert len(client.permissions) == 1
+            assert service.load("acp-e2e")["tickets"]["TK-two"][
+                "coordinator_questions"
+            ][0]["state"] == "open"
+            path_states["decline"] = {"TK-two": "open"}
+            assert await client.prompt(session_id, "/answer #2") == {
+                "stopReason": "end_turn"
+            }
+            assert len(client.permissions) == 1
+            assert service.load("acp-e2e")["tickets"]["TK-two"][
+                "coordinator_questions"
+            ][0]["state"] == "open"
+            path_states["cancel"] = {"TK-two": "open"}
+            assert await client.prompt(session_id, "/answer #2") == {
+                "stopReason": "end_turn"
+            }
+            path_states["accept_then_reject_permission"] = {"TK-two": "open"}
+
+            state = {
+                ticket_id: [
+                    {
+                        "question_id": question["question_id"],
+                        "state": question["state"],
+                        "answer": question.get("answer"),
+                    }
+                    for question in service.load("acp-e2e")["tickets"][ticket_id][
+                        "coordinator_questions"
+                    ]
+                ]
+                for ticket_id in ("TK-one", "TK-two")
+            }
+            assert state["TK-one"][0]["state"] == "answered"
+            assert state["TK-one"][0]["answer"] == (
+                "Ship one first\n\nobservations: First seat can proceed"
+            )
+            assert state["TK-two"][0]["state"] == "open"
+            assert state["TK-two"][0]["answer"] is None
+            assert len(client.permissions) == 2
+            assert "host_binding" not in json.dumps(client.permissions)
+
+            if os.environ.get("PURSERS_ACP_TRANSCRIPT") == "1":
+                session_updates = [
+                    message
+                    for message in client.wire
+                    if message.get("method") == "session/update"
+                    and (
+                        message.get("params", {})
+                        .get("update", {})
+                        .get("sessionUpdate")
+                        in {"agent_message_chunk", "tool_call", "tool_call_update"}
+                    )
+                ]
+                permission_requests = [
+                    message
+                    for message in client.wire
+                    if message.get("method") == "session/request_permission"
+                ]
+                elicitation_requests = [
+                    message
+                    for message in client.wire
+                    if message.get("method") == "elicitation/create"
+                ]
+                print(
+                    "ACP_QUESTION_TRANSCRIPT="
+                    + json.dumps(
+                        {
+                            "session_updates": session_updates,
+                            "elicitation_requests": elicitation_requests,
+                            "elicitation_responses": client.elicitation_responses,
+                            "permission_requests": permission_requests,
+                            "path_states": path_states,
+                            "board_state": state,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
         finally:
             await client.close()
 

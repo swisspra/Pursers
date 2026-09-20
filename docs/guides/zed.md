@@ -12,9 +12,9 @@ token file and talks to Pursers Central.
 | --- | --- |
 | `/board` | Show a compact board summary and the items that need you. |
 | `/create <summary>` | Create one ticket after Zed shows its normal tool permission prompt. |
-| `/watch` | Watch this board for work, review, and human-question events. |
+| `/watch` | Watch this board until an important update arrives; a seat question ends the turn so Zed can notify you. |
 | `/evidence <ticket-id>` | Show the exact branch, commit, changed files, tests, and review state for one ticket. |
-| `/answer <ticket-id> <answer>` | Answer one pending human question after Zed shows its permission prompt. |
+| `/answer <ticket-id> <answer>` | Answer a pending human request after Zed shows its permission prompt. In an ACP thread, use `/answer` or `/answer #N` to open a form for a watched seat question; `#N` is needed only when several are pending. |
 
 These are MCP prompts. If another server defines the same prompt name, Zed may
 prefix the command with the server ID, for example `/pursers.board`.
@@ -96,10 +96,11 @@ Keep one Agent Panel thread for the board:
    ![Zed Agent Panel waiting for permission before the Pursers ticket_create write](../media/zed/create-permission-dark.png)
 
 3. Run `/watch` while claims, reviews, or questions matter. Keep that turn
-   active.
+   active. The first new seat question, review verdict, or failure ends the
+   turn after its update so Zed's normal completion notification can wake you;
+   run `/watch` again when you want the next important update.
 
    ![Zed Agent Panel showing an active Pursers watch with a new ticket event and advanced cursor](../media/zed/watch-event-dark.png)
-
 4. Run `/evidence TK-…` before acting on a submission. Check the exact commit,
    file list, test output, and independent-review state.
 
@@ -110,17 +111,39 @@ Keep one Agent Panel thread for the board:
 
 ### When a seat asks you a question
 
-Questions reach you in Zed only while `/watch` is active. When a question
-arrives, the Agent Panel shows the ticket ID, seat name, question, and the
-answer command. Reply in the same thread:
+Questions reach you in Zed only while `/watch` is active. In a Pursers ACP
+thread, each new seat question appears as a clearly marked update with the seat
+name, ticket ID, question, waiting time, and a short `#N` reference. The agent
+then completes that watch turn; Zed does not notify for a free-standing
+`session/update`, but it does apply its normal completion notification when the
+turn stops. Run this to open the answer form without retyping the ticket ID:
 
 ```text
-/answer TK-… your answer
+/answer
 ```
 
-Zed asks for permission before sending the answer. If `/watch` is not active,
-Zed 1.20.2 has no MCP notification channel that can wake the Agent Panel. Check
-the board elsewhere or start `/watch` again.
+If several questions have accumulated, select one explicitly; Pursers never
+guesses:
+
+```text
+/answer #2
+```
+
+The session-scoped `elicitation/create` form shows the question and fields for
+the ticket's required evidence. Accepting the form proceeds to a separate
+`allow_once` permission request for the board write. Declining or cancelling
+the form, rejecting permission, or closing the thread leaves the question
+unanswered on the board.
+
+The update can reach a loaded ACP thread for the lifetime of its connection,
+but Zed drops it after the thread entity is released. There is no delivery or
+notification when Zed is closed entirely, and no background watcher remains
+after the watch turn ends. Questions raised while `/watch` is stopped appear
+only after `/watch` runs again; its initial read checks the coordinator's
+current open-question inbox rather than relying on retained journal events.
+That inbox read is bounded to the oldest 100 open questions. The MCP extension
+still has no push channel that can wake the Agent Panel; use the ACP thread for
+these same-thread replies, or check the board elsewhere.
 
 ## Optional: use a Pursers ACP thread
 
@@ -156,8 +179,8 @@ not have a Personal profile, run the documented setup first or launch
 
 Prefer the MCP extension when you want Pursers tools inside a normal Zed Agent
 thread. Prefer the ACP thread when you want a separate board conversation and
-native ACP plan updates. Keep `/watch` active in either path if questions must
-arrive in Zed.
+native ACP plan updates. Re-run `/watch` after each surfaced question if more
+questions must arrive in Zed.
 
 ## Troubleshooting
 
