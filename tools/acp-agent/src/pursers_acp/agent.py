@@ -34,6 +34,13 @@ IMPLEMENTATION_VERSION = "0.1.0"
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_TEXT_CHARS = 8_000
 MAX_ROWS = 20
+MAX_PLAN_ENTRIES = 20
+MAX_PLAN_TITLE_CHARS = 160
+WATCH_SNAPSHOT_LIMIT = 500
+IN_FLIGHT_TICKET_STATES = frozenset(
+    {"claimed", "in_progress", "creating_report", "submitted", "reviewing", "in_review"}
+)
+REVIEW_DISPATCH_STATES = frozenset({"review_claimed", "reviewing", "in_review"})
 
 
 class AuthRequired(RuntimeError):
@@ -68,6 +75,9 @@ AuthSetup = Callable[[], None | Awaitable[None]]
 class WaitBridge(Protocol):
     async def close(self) -> None: ...
     async def wait(self, board_id: str, cursor: int | None) -> JSON: ...
+    def digests(
+        self, board_id: str, cursor: int | None, cancel: asyncio.Event
+    ) -> AsyncIterator[JSON]: ...
 
 
 WaitBridgeFactory = Callable[[], WaitBridge | Awaitable[WaitBridge]]
@@ -114,6 +124,68 @@ class StdioWaitBridge:
             arguments["since_seq"] = {board_id: cursor}
         result = await self._client.call_tool("a2a_wait", arguments)
         return BoardClient._decode(result)
+
+    async def _digest(self, board_id: str, cursor: int | None) -> JSON:
+        if self._client is None:
+            raise RuntimeError("wait bridge is closed")
+        since = {board_id: cursor} if cursor is not None else {board_id: 0}
+        result = await self._client.call_tool(
+            "board_digest",
+            {
+                "since": since,
+                "boards": [board_id],
+                "include_notes_keys": [],
+                "max_transitions_per_ticket": 2,
+            },
+        )
+        return BoardClient._decode(result)
+
+    async def digests(
+        self, board_id: str, cursor: int | None, cancel: asyncio.Event
+    ) -> AsyncIterator[JSON]:
+        """Yield event-driven digest deltas without adding a polling loop."""
+        if self._client is None:
+            raise RuntimeError("wait bridge is closed")
+
+        current = cursor
+        initial = await self._digest(board_id, current)
+        current = _digest_cursor(initial, board_id, current)
+        yield initial
+
+        resource_uri = f"board://{board_id}/digest"
+        async with self._client.listen(
+            resource_subscriptions=[resource_uri]
+        ) as subscription:
+            honored = getattr(subscription, "honored", None)
+            selected = getattr(honored, "resource_subscriptions", None)
+            if selected is not None and resource_uri not in set(selected):
+                raise RuntimeError("wait bridge did not honor the board digest subscription")
+
+            # Live-first splice: the listen is active before this second digest,
+            # so an update cannot fall between the first read and the stream.
+            splice = await self._digest(board_id, current)
+            current = _digest_cursor(splice, board_id, current)
+            yield splice
+
+            stream = aiter(subscription)
+            while not cancel.is_set():
+                cue = asyncio.create_task(anext(stream))
+                stopped = asyncio.create_task(cancel.wait())
+                done, pending = await asyncio.wait(
+                    {cue, stopped}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                if stopped in done:
+                    return
+                try:
+                    cue.result()
+                except StopAsyncIteration:
+                    return
+                page = await self._digest(board_id, current)
+                current = _digest_cursor(page, board_id, current)
+                yield page
 
 
 class PersonalBoardSurface:
@@ -322,33 +394,47 @@ class PersonalBoardSurface:
     ) -> AsyncIterator[tuple[int, JSON]]:
         if self._wait_bridge_factory is None:
             raise RuntimeError("wait bridge is unavailable")
+        snapshot = await self._call(
+            "ticket_list",
+            {
+                "include_closed": False,
+                "include_archived": False,
+                "limit": WATCH_SNAPSHOT_LIMIT,
+            },
+        )
+        snapshot_cursor = snapshot.get("latest_seq")
+        if isinstance(snapshot_cursor, int) and not isinstance(snapshot_cursor, bool):
+            cursor = max(cursor or 0, snapshot_cursor)
+        tickets = [
+            ticket for ticket in snapshot.get("tickets", []) if isinstance(ticket, dict)
+        ]
+        total_matching = snapshot.get("total_matching")
+        snapshot_truncated = bool(
+            isinstance(total_matching, int)
+            and not isinstance(total_matching, bool)
+            and total_matching > len(tickets)
+        )
+        yield cursor or 0, {
+            "kind": "watch_snapshot",
+            "tickets": tickets,
+            "truncated": snapshot_truncated,
+        }
+
         selected = self._wait_bridge_factory()
         bridge = await selected if inspect.isawaitable(selected) else selected
         try:
-            while not cancel.is_set():
-                cue = asyncio.create_task(bridge.wait(self.board_id, cursor))
-                stopped = asyncio.create_task(cancel.wait())
-                done, pending = await asyncio.wait(
-                    {cue, stopped}, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                if stopped in done:
-                    return
-                page = cue.result()
-                raw_cursor = page.get("new_seq")
-                if isinstance(raw_cursor, Mapping):
-                    raw_cursor = raw_cursor.get(self.board_id)
-                if isinstance(raw_cursor, int) and not isinstance(raw_cursor, bool):
-                    if raw_cursor > 0:
-                        cursor = raw_cursor
-                resynced = page.get("resynced")
-                if isinstance(resynced, Mapping) and resynced.get(self.board_id):
-                    yield cursor or 0, {"kind": "resync_required"}
-                for event in page.get("events", []):
-                    if isinstance(event, dict):
-                        yield cursor or 0, event
+            async for page in bridge.digests(self.board_id, cursor, cancel):
+                cursor = _digest_cursor(page, self.board_id, cursor)
+                for ticket in page.get("tickets", []):
+                    if not isinstance(ticket, dict):
+                        continue
+                    yield cursor or 0, {
+                        "kind": "ticket_status_changed",
+                        "ticket_id": ticket.get("ticket_id"),
+                        "title": ticket.get("title"),
+                        "status_to": ticket.get("status_now"),
+                        "dispatch_state": ticket.get("dispatch_state"),
+                    }
         finally:
             await bridge.close()
 
@@ -734,6 +820,8 @@ class PursersACPAgent:
                     f"This profile is bound to {self.board.board_id}; refusing cross-board watch.",
                 )
                 return "refusal"
+            plan_tickets: dict[str, JSON] = {}
+            snapshot_truncated = False
             await self._plan(session_id, board_id, "in_progress")
             try:
                 async with aclosing(
@@ -741,7 +829,34 @@ class PursersACPAgent:
                 ) as events:
                     async for cursor, event in events:
                         session.cursors[board_id] = cursor
-                        await self._message(session_id, _format_event(event))
+                        if event.get("kind") == "watch_snapshot":
+                            plan_tickets = {
+                                item["ticket_id"]: item
+                                for row in event.get("tickets", [])
+                                if isinstance(row, Mapping)
+                                and (item := _plan_ticket(row)) is not None
+                            }
+                            snapshot_truncated = event.get("truncated") is True
+                        else:
+                            ticket_id = event.get("ticket_id")
+                            prior = (
+                                plan_tickets.get(ticket_id)
+                                if isinstance(ticket_id, str)
+                                else None
+                            )
+                            item = _plan_ticket(event, prior=prior)
+                            if item is not None:
+                                plan_tickets[item["ticket_id"]] = item
+                            elif isinstance(ticket_id, str):
+                                plan_tickets.pop(ticket_id, None)
+                            await self._message(session_id, _format_event(event))
+                        await self._plan(
+                            session_id,
+                            board_id,
+                            "in_progress",
+                            tickets=plan_tickets,
+                            snapshot_truncated=snapshot_truncated,
+                        )
                         if session.cancel.is_set():
                             break
             finally:
@@ -877,18 +992,33 @@ class PursersACPAgent:
             },
         )
 
-    async def _plan(self, session_id: str, board_id: str, status: str) -> None:
+    async def _plan(
+        self,
+        session_id: str,
+        board_id: str,
+        status: str,
+        *,
+        tickets: Mapping[str, JSON] | None = None,
+        snapshot_truncated: bool = False,
+    ) -> None:
+        entries = (
+            _plan_entries(tickets, snapshot_truncated=snapshot_truncated)
+            if status == "in_progress" and (tickets or snapshot_truncated)
+            else []
+        )
+        if not entries:
+            entries = [
+                {
+                    "content": f"Watch {board_id} for board events and seat questions",
+                    "priority": "high",
+                    "status": status,
+                }
+            ]
         await self._update(
             session_id,
             {
                 "sessionUpdate": "plan",
-                "entries": [
-                    {
-                        "content": f"Watch {board_id} for board events and seat questions",
-                        "priority": "high",
-                        "status": status,
-                    }
-                ],
+                "entries": entries,
             },
         )
 
@@ -958,6 +1088,86 @@ def _parse_answer_content(value: str) -> Any:
 
 def _bounded(value: str, limit: int) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
+
+
+def _digest_cursor(page: Mapping[str, Any], board_id: str, prior: int | None) -> int:
+    raw = page.get("cursor_map")
+    value = raw.get(board_id) if isinstance(raw, Mapping) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return max(prior or 0, value)
+    return prior or 0
+
+
+def _plan_ticket(
+    ticket: Mapping[str, Any], *, prior: Mapping[str, Any] | None = None
+) -> JSON | None:
+    ticket_id = ticket.get("ticket_id")
+    if not isinstance(ticket_id, str) or not ticket_id:
+        return None
+    raw_status = ticket.get("status_to") or ticket.get("status_now") or ticket.get(
+        "status"
+    )
+    if not isinstance(raw_status, str) or raw_status not in IN_FLIGHT_TICKET_STATES:
+        return None
+
+    dispatch = ticket.get("dispatch_state")
+    dispatch_state = dispatch.get("state") if isinstance(dispatch, Mapping) else None
+    review_state = ticket.get("review_state")
+    reviewing = bool(
+        raw_status in {"reviewing", "in_review"}
+        or dispatch_state in REVIEW_DISPATCH_STATES
+        or isinstance(ticket.get("review_lease"), Mapping)
+        or review_state in {"claimed", "claimed_by_me", "claimed_by_other", "reviewing"}
+    )
+    phase = "review" if reviewing else "submitted" if raw_status == "submitted" else "work"
+    title = ticket.get("title")
+    if not (isinstance(title, str) and title.strip()) and prior is not None:
+        title = prior.get("title")
+    safe_title = _bounded(
+        title.strip() if isinstance(title, str) and title.strip() else "(untitled)",
+        MAX_PLAN_TITLE_CHARS,
+    )
+    return {"ticket_id": ticket_id, "title": safe_title, "phase": phase}
+
+
+def _plan_entries(
+    tickets: Mapping[str, JSON], *, snapshot_truncated: bool = False
+) -> list[JSON]:
+    rows = sorted(tickets.values(), key=lambda item: item["ticket_id"])
+    needs_overflow = len(rows) > MAX_PLAN_ENTRIES or snapshot_truncated
+    visible_limit = MAX_PLAN_ENTRIES - 1 if needs_overflow else MAX_PLAN_ENTRIES
+    entries: list[JSON] = []
+    for item in rows[:visible_limit]:
+        # ACP v1 has pending/in_progress/completed but no review status. A
+        # submitted ticket is pending review; active review stays in_progress
+        # and is never reported completed before the board closes it.
+        status = "pending" if item["phase"] == "submitted" else "in_progress"
+        entries.append(
+            {
+                "content": _bounded(
+                    f"{item['ticket_id']} — {item['title']}", MAX_TEXT_CHARS
+                ),
+                "priority": "high",
+                "status": status,
+            }
+        )
+
+    if needs_overflow:
+        known_omitted = max(0, len(rows) - visible_limit)
+        if snapshot_truncated:
+            content = (
+                f"{known_omitted} more known in-flight; additional active tickets "
+                f"are outside the {WATCH_SNAPSHOT_LIMIT}-ticket snapshot"
+            )
+        else:
+            content = (
+                f"{known_omitted} more in-flight tickets "
+                f"({MAX_PLAN_ENTRIES}-entry plan cap)"
+            )
+        entries.append(
+            {"content": content, "priority": "high", "status": "in_progress"}
+        )
+    return entries
 
 
 def _content(text: str) -> JSON:

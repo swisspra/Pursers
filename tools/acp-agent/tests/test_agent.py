@@ -87,7 +87,30 @@ class FakeBoard:
         self, cursor: int | None, cancel: asyncio.Event
     ) -> AsyncIterator[tuple[int, JSON]]:
         self.watch_started.set()
-        yield 5, {"seq": 5, "kind": "ticket_created", "ticket_id": "TK-live"}
+        yield 4, {
+            "kind": "watch_snapshot",
+            "tickets": [
+                {"ticket_id": "TK-work", "title": "Build runtime", "status": "claimed"},
+                {
+                    "ticket_id": "TK-submitted",
+                    "title": "Await review",
+                    "status": "submitted",
+                },
+                {
+                    "ticket_id": "TK-review",
+                    "title": "Review active",
+                    "status": "submitted",
+                    "dispatch_state": {"state": "reviewing"},
+                },
+            ],
+            "truncated": False,
+        }
+        yield 5, {
+            "seq": 5,
+            "kind": "ticket_status_changed",
+            "ticket_id": "TK-work",
+            "status_to": "submitted",
+        }
         await cancel.wait()
 
 
@@ -376,12 +399,114 @@ async def _watch_streams_then_cancel_stops_prompt(tmp_path: Path) -> None:
             for row in client.updates
             if row["update"].get("sessionUpdate") == "plan"
         ]
-        assert [row["entries"][0]["status"] for row in plans] == [
-            "in_progress",
-            "completed",
+        assert [row["entries"] for row in plans] == [
+            [
+                {
+                    "content": "Watch pursers for board events and seat questions",
+                    "priority": "high",
+                    "status": "in_progress",
+                }
+            ],
+            [
+                {
+                    "content": "TK-review — Review active",
+                    "priority": "high",
+                    "status": "in_progress",
+                },
+                {
+                    "content": "TK-submitted — Await review",
+                    "priority": "high",
+                    "status": "pending",
+                },
+                {
+                    "content": "TK-work — Build runtime",
+                    "priority": "high",
+                    "status": "in_progress",
+                },
+            ],
+            [
+                {
+                    "content": "TK-review — Review active",
+                    "priority": "high",
+                    "status": "in_progress",
+                },
+                {
+                    "content": "TK-submitted — Await review",
+                    "priority": "high",
+                    "status": "pending",
+                },
+                {
+                    "content": "TK-work — Build runtime",
+                    "priority": "high",
+                    "status": "pending",
+                },
+            ],
+            [
+                {
+                    "content": "Watch pursers for board events and seat questions",
+                    "priority": "high",
+                    "status": "completed",
+                }
+            ],
         ]
     finally:
         await client.close()
+
+
+def test_live_plan_is_bounded_and_represents_overflow() -> None:
+    tickets = {
+        f"TK-{index:02d}": {
+            "ticket_id": f"TK-{index:02d}",
+            "title": f"Parallel item {index}",
+            "phase": "work",
+        }
+        for index in range(25)
+    }
+
+    entries = agent_module._plan_entries(tickets)
+
+    assert len(entries) == 20
+    assert entries[-1] == {
+        "content": "6 more in-flight tickets (20-entry plan cap)",
+        "priority": "high",
+        "status": "in_progress",
+    }
+    rendered = json.dumps(entries, sort_keys=True)
+    assert "claimed_by" not in rendered
+    assert "/Users/" not in rendered
+
+
+def test_truncated_snapshot_is_disclosed_in_plan() -> None:
+    entries = agent_module._plan_entries(
+        {
+            "TK-known": {
+                "ticket_id": "TK-known",
+                "title": "Known item",
+                "phase": "work",
+            }
+        },
+        snapshot_truncated=True,
+    )
+
+    assert entries[-1]["content"] == (
+        "0 more known in-flight; additional active tickets are outside the "
+        "500-ticket snapshot"
+    )
+
+
+def test_empty_truncated_snapshot_does_not_claim_the_board_is_idle() -> None:
+    entries = agent_module._plan_entries({}, snapshot_truncated=True)
+
+    assert entries == [
+        {
+            "content": (
+                "0 more known in-flight; additional active tickets are outside the "
+                "500-ticket snapshot"
+            ),
+            "priority": "high",
+            "status": "in_progress",
+        }
+    ]
 
 
 def _stdio_server_script(path: Path, source: str) -> None:
@@ -402,22 +527,34 @@ def test_personal_watch_uses_wait_bridge_cursor_and_cancel_teardown(
 async def _personal_watch_uses_wait_bridge_cursor_and_cancel_teardown(
     tmp_path: Path,
 ) -> None:
-    marker = tmp_path / "wait-calls.jsonl"
+    marker = tmp_path / "digest-calls.jsonl"
     script = tmp_path / "wait_bridge.py"
     _stdio_server_script(
         script,
         """import asyncio, json, os
 from pathlib import Path
+from mcp.server.mcpserver import Context
 server = MCPServer('wait-bridge-stub')
+calls = 0
+@server.resource('board://pursers/digest')
+async def digest_resource():
+    return '{}'
 @server.tool()
-async def a2a_wait(boards: list[str], only_mine: bool, timeout_s: int, since_seq: dict[str, int] | None = None):
+async def board_digest(ctx: Context, since: dict[str, int], boards: list[str], include_notes_keys: list[str], max_transitions_per_ticket: int):
+    global calls
+    calls += 1
     marker = Path(os.environ['WAIT_MARKER'])
     with marker.open('a', encoding='utf-8') as stream:
-        stream.write(json.dumps({'boards': boards, 'only_mine': only_mine, 'timeout_s': timeout_s, 'since_seq': since_seq}, sort_keys=True) + '\\n')
-    if since_seq is None:
-        return {'new_seq': {'pursers': 7}, 'events': [{'seq': 7, 'kind': 'ticket_created', 'ticket_id': 'TK-live'}], 'timed_out': False, 'resynced': {'pursers': False}}
-    await asyncio.sleep(60)
-    return {'new_seq': since_seq, 'events': [], 'timed_out': True, 'resynced': {'pursers': False}}
+        stream.write(json.dumps({'boards': boards, 'include_notes_keys': include_notes_keys, 'max_transitions_per_ticket': max_transitions_per_ticket, 'since': since}, sort_keys=True) + '\\n')
+    if calls == 1:
+        return {'cursor_map': {'pursers': 7}, 'tickets': [{'ticket_id': 'TK-live', 'title': 'Live item', 'status_now': 'claimed', 'dispatch_state': {'state': 'claimed'}}]}
+    if calls == 2:
+        async def notify():
+            await asyncio.sleep(0.05)
+            await ctx.notify_resource_updated('board://pursers/digest')
+        asyncio.create_task(notify())
+        return {'cursor_map': {'pursers': 7}, 'tickets': []}
+    return {'cursor_map': {'pursers': 8}, 'tickets': [{'ticket_id': 'TK-live', 'title': 'Live item', 'status_now': 'submitted', 'dispatch_state': {'state': 'broadcast'}}]}
 """,
     )
     profile = SimpleNamespace(board_id="pursers", principal_id="PR-human")
@@ -429,9 +566,33 @@ async def a2a_wait(boards: list[str], only_mine: bool, timeout_s: int, since_seq
         def __init__(self) -> None:
             self.calls: list[str] = []
 
-        async def call_tool(self, name: str, _arguments: JSON) -> None:
+        async def call_tool(self, name: str, arguments: JSON) -> Any:
             self.calls.append(name)
-            raise AssertionError("watch bypassed the configured wait bridge")
+            if name != "ticket_list":
+                raise AssertionError("watch bypassed the configured wait bridge")
+            assert arguments == {
+                "board_id": "pursers",
+                "include_closed": False,
+                "include_archived": False,
+                "limit": 500,
+            }
+            return SimpleNamespace(
+                is_error=False,
+                structured_content={
+                    "result": {
+                        "tickets": [
+                            {
+                                "ticket_id": "TK-snapshot",
+                                "title": "Snapshot item",
+                                "status": "claimed",
+                            }
+                        ],
+                        "latest_seq": 6,
+                        "total_matching": 1,
+                    }
+                },
+                content=[],
+            )
 
         def listen(self, **_kwargs: object) -> None:
             self.calls.append("listen")
@@ -454,7 +615,7 @@ async def a2a_wait(boards: list[str], only_mine: bool, timeout_s: int, since_seq
         session = await client.new_session(tmp_path)
         prompt = asyncio.create_task(client.prompt(session, "watch pursers"))
         async with asyncio.timeout(TEST_TIMEOUT_S):
-            while not marker.exists() or len(marker.read_text().splitlines()) < 2:
+            while not marker.exists() or len(marker.read_text().splitlines()) < 3:
                 await asyncio.sleep(0.01)
         await client.notify("session/cancel", {"sessionId": session})
         assert await prompt == {"stopReason": "cancelled"}
@@ -464,13 +625,14 @@ async def a2a_wait(boards: list[str], only_mine: bool, timeout_s: int, since_seq
     calls = [json.loads(line) for line in marker.read_text().splitlines()]
     assert calls[0] == {
         "boards": ["pursers"],
-        "only_mine": False,
-        "since_seq": None,
-        "timeout_s": 180,
+        "include_notes_keys": [],
+        "max_transitions_per_ticket": 2,
+        "since": {"pursers": 6},
     }
-    assert calls[1]["since_seq"] == {"pursers": 7}
+    assert calls[1]["since"] == {"pursers": 7}
+    assert calls[2]["since"] == {"pursers": 7}
     assert bridges and bridges[0]._client is None
-    assert central.calls == []
+    assert central.calls == ["ticket_list"]
 
 
 def test_nonempty_stdio_mcp_servers_initialize_and_close(tmp_path: Path) -> None:
