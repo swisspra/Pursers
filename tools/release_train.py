@@ -198,12 +198,28 @@ def _replace_versions(
             # the wrong component, so only package-qualified occurrences change.
             sharers = [key for key in keys if values[key][0] == old]
             targets = {values[key][1] for key in sharers}
+            # A component this bump has already moved can land on a version
+            # another component still holds: acp 0.1.0 -> 0.1.1 collides with
+            # central's 0.1.1. Such an occurrence names acp, so it belongs to
+            # acp and is neither ambiguous nor ours to rewrite a second time.
+            foreign = _qualified_spans(
+                {
+                    key: _qualified_version_pattern(root, relative, key, old)
+                    for key in values
+                    if key not in sharers
+                    and values[key][1] == old
+                    and values[key][0] != old
+                },
+                updated,
+            )
             if len(targets) == 1:
-                updated = re.sub(
-                    rf"(?<![\w]){re.escape(old)}(?![\w])",
-                    targets.pop(),
-                    updated,
-                )
+                new = targets.pop()
+                for match in reversed(
+                    list(re.finditer(rf"(?<![\w]){re.escape(old)}(?![\w])", updated))
+                ):
+                    if match.span() in foreign:
+                        continue
+                    updated = updated[: match.start()] + new + updated[match.end() :]
                 continue
             patterns = {
                 key: _qualified_version_pattern(root, relative, key, old)
@@ -213,6 +229,8 @@ def _replace_versions(
             owners = "/".join(f"{key}->{values[key][1]}" for key in sharers)
             for match in re.finditer(rf"(?<![\w.]){re.escape(old)}(?![\w])", updated):
                 span_keys = spans.get(match.span(), set())
+                if not span_keys and match.span() in foreign:
+                    continue
                 if not span_keys and "product" in sharers:
                     # Release documents describe a product release; a bare
                     # product version ("Released · 5.0.0") is the product's.

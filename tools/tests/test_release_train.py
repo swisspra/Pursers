@@ -464,3 +464,28 @@ def test_a_version_bound_to_one_name_is_not_claimed_by_the_next(tmp_path: Path) 
     assert [
         match.group(0) for match in pattern.finditer("<td>0.1.0</td><td>client</td>")
     ] == ["0.1.0"]
+
+
+def test_a_component_may_move_onto_a_version_another_component_holds(
+    tmp_path: Path,
+) -> None:
+    """acp 0.1.0 -> 0.1.1 lands on the version central still holds.
+
+    The second pass over the file then sees a bare `0.1.1` that the first pass
+    wrote. It names acp, so it is acp's and must not be rewritten again.
+    """
+    root = _fixture_repository(tmp_path)
+    current = load_versions(root / "tools/release_versions.toml")
+    collision = current.packages["client"]
+    assert current.packages["acp"] != collision
+    moved_client = "0.9.9"
+    target = release_train.bumped_versions(
+        current, (f"acp={collision}", f"client={moved_client}"), None
+    )
+
+    planned = release_train.plan_bump(root, current, target)
+
+    acp = planned[root / "tools/acp-agent/pyproject.toml"]
+    assert f'version = "{collision}"' in acp
+    assert f'"pursers-client=={moved_client}"' in acp
+    assert f'"pursers-client=={collision}"' not in acp
