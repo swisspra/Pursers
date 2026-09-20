@@ -222,13 +222,13 @@ async def _missing_token_becomes_clean_tool_error(tmp_path: Path, capsys: Any) -
     assert capsys.readouterr().out == ""
 
 
-def test_prompts_have_at_most_one_argument_and_bounded_instructions(
+def test_prompts_have_at_most_one_argument_and_human_facing_copy(
     tmp_path: Path,
 ) -> None:
-    asyncio.run(_prompts_have_at_most_one_argument_and_bounded_instructions(tmp_path))
+    asyncio.run(_prompts_have_at_most_one_argument_and_human_facing_copy(tmp_path))
 
 
-async def _prompts_have_at_most_one_argument_and_bounded_instructions(
+async def _prompts_have_at_most_one_argument_and_human_facing_copy(
     tmp_path: Path,
 ) -> None:
     relay = CentralRelay(
@@ -246,12 +246,58 @@ async def _prompts_have_at_most_one_argument_and_bounded_instructions(
         "answer",
     ]
     assert all(len(prompt.arguments or []) <= 1 for prompt in prompts)
-    board = await server.get_prompt("board")
-    evidence = await server.get_prompt("evidence", {"ticket_id": "TK-123"})
-    assert "Needs you" in board.messages[0].content.text
-    assert "fleet" in board.messages[0].content.text
-    assert "TK-123" in evidence.messages[0].content.text
-    assert "branch_and_commit" in evidence.messages[0].content.text
+    rendered = {
+        "board": await server.get_prompt("board"),
+        "create": await server.get_prompt("create", {"summary": "Ship the guide"}),
+        "watch": await server.get_prompt("watch"),
+        "evidence": await server.get_prompt("evidence", {"ticket_id": "TK-123"}),
+        "answer": await server.get_prompt(
+            "answer", {"ticket_and_answer": "TK-123 approved"}
+        ),
+    }
+    text = {name: value.messages[0].content.text for name, value in rendered.items()}
+    assert text == {
+        "board": (
+            "Your work on `prompt-board` at a glance: its board ID, key counts, and up to "
+            "10 active tickets needing attention, each led by its ticket ID. This view "
+            "stays on this board."
+        ),
+        "create": (
+            "New work for `prompt-board`: 'Ship the guide'. Any missing required detail "
+            "comes first; creation happens once under Zed's single confirmation, followed "
+            "by the new ticket ID and a brief recap."
+        ),
+        "watch": (
+            "Live changes for `prompt-board`: work, reviews, and questions needing "
+            "attention, limited to changed IDs and next steps. The watch resumes from its "
+            "latest saved position and stays on this board."
+        ),
+        "evidence": (
+            "Evidence for `TK-123` on `prompt-board`: the ticket ID first, then its exact "
+            "branch and commit, changed files, literal test results, and independent-review "
+            "state. The view contains no unrelated tickets."
+        ),
+        "answer": (
+            "Answer for 'TK-123 approved' on `prompt-board`: the exact ticket's pending "
+            "question is resolved once, followed by its ticket ID and resulting state. "
+            "This stays on this board."
+        ),
+    }
+    forbidden = (
+        "board_status",
+        "ticket_list",
+        "ticket_create",
+        "a2a_wait",
+        "board_catchup",
+        "ticket_get",
+        "include_closed",
+        "false",
+        "Markdown",
+    )
+    assert all(term not in body for term in forbidden for body in text.values())
+    assert "no more than 10 active tickets" in server.instructions
+    assert "host's single native confirmation" in server.instructions
+    assert "resume only from a returned positive cursor" in server.instructions
 
 
 def test_long_call_does_not_block_another_call(tmp_path: Path) -> None:
