@@ -24,6 +24,7 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 from pursers_client import (
     BoardClient,
+    BoardClientError,
     PersonalProfileError,
     coordinator_host_binding,
     parse_project_registry,
@@ -57,6 +58,11 @@ IN_FLIGHT_TICKET_STATES = frozenset(
     }
 )
 REVIEW_DISPATCH_STATES = frozenset({"review_claimed", "reviewing", "in_review"})
+QUESTION_INBOX_UNAVAILABLE = (
+    "Seat-question replies are unavailable in this ACP profile because its board "
+    "identity is not a registered project coordinator. Ordinary board updates "
+    "will continue."
+)
 
 
 class AuthRequired(RuntimeError):
@@ -193,11 +199,20 @@ class StdioWaitBridge:
         if self._client is None:
             raise RuntimeError("wait bridge is closed")
         page = await self._digest(board_id, cursor)
-        result = await self._client.call_tool(
-            "board_question_inbox",
-            {"state": "open", "limit": MAX_QUESTION_INBOX},
-        )
-        inbox = BoardClient._decode(result)
+        try:
+            result = await self._client.call_tool(
+                "board_question_inbox",
+                {"state": "open", "limit": MAX_QUESTION_INBOX},
+            )
+            inbox = BoardClient._decode(result)
+        except BoardClientError as exc:
+            if not _question_inbox_authority_error(exc):
+                raise
+            return {
+                **page,
+                "questions": [],
+                "question_inbox_unavailable": QUESTION_INBOX_UNAVAILABLE,
+            }
         return {
             **page,
             "questions": [
@@ -560,9 +575,17 @@ class PersonalBoardSurface:
 
         selected = self._wait_bridge_factory()
         bridge = await selected if inspect.isawaitable(selected) else selected
+        question_notice_sent = False
         try:
             async for page in bridge.digests(self.board_id, cursor, cancel):
                 cursor = _digest_cursor(page, self.board_id, cursor)
+                question_notice = page.get("question_inbox_unavailable")
+                if isinstance(question_notice, str) and not question_notice_sent:
+                    question_notice_sent = True
+                    yield cursor or 0, {
+                        "kind": "question_inbox_unavailable",
+                        "message": question_notice,
+                    }
                 for question in page.get("questions", []):
                     if not isinstance(question, dict):
                         continue
@@ -581,6 +604,11 @@ class PersonalBoardSurface:
                     if not isinstance(ticket, dict):
                         continue
                     review = ticket.get("review")
+                    review_verdict = (
+                        review.get("verdict")
+                        if isinstance(review, Mapping)
+                        else ticket.get("review_verdict")
+                    )
                     event = {
                         "kind": "ticket_status_changed",
                         "ticket_id": ticket.get("ticket_id"),
@@ -591,12 +619,9 @@ class PersonalBoardSurface:
                         "claimed_by": ticket.get("claimed_by"),
                         "review_state": ticket.get("review_state"),
                         "review_claimed_by": ticket.get("review_claimed_by"),
-                        "review_verdict": (
-                            review.get("verdict")
-                            if isinstance(review, Mapping)
-                            else ticket.get("review_verdict")
-                        ),
                     }
+                    if review_verdict is not None:
+                        event["review_verdict"] = review_verdict
                     offers = ticket.get("offers")
                     review_offer = (
                         offers.get("review_offer")
@@ -1819,6 +1844,8 @@ def _format_evidence(result: JSON) -> str:
 
 
 def _format_event(event: JSON) -> str:
+    if event.get("kind") == "question_inbox_unavailable":
+        return _bounded(str(event.get("message") or QUESTION_INBOX_UNAVAILABLE), 500)
     kind = str(event.get("kind", "board update")).replace("_", " ").capitalize()
     lines = ["Pursers board update", "", kind]
     if event.get("project") is not None:
@@ -1911,6 +1938,15 @@ def _event_ends_watch(event: JSON) -> bool:
         event.get("review_verdict") is not None
         or event.get("status_to") in {"failed", "rejected"}
         or (isinstance(kind, str) and "failed" in kind)
+    )
+
+
+def _question_inbox_authority_error(exc: BoardClientError) -> bool:
+    message = str(exc).casefold()
+    return (
+        "question inbox requires role coordinator" in message
+        or "coordinator inbox requires registered project coordinator ownership"
+        in message
     )
 
 

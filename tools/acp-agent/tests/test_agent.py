@@ -13,6 +13,8 @@ from typing import Any
 
 import pytest
 from mcp import Client
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from pursers_client import BoardClient
 import pursers_acp.agent as agent_module
 from pursers_acp.agent import ACP_VERSION, AuthRequired, PursersACPAgent
@@ -1289,6 +1291,147 @@ async def _personal_watch_projects_digest_holder_and_human_request() -> None:
 
 def test_cancel_stops_blocked_watch_snapshot(tmp_path: Path) -> None:
     asyncio.run(_cancel_stops_blocked_watch_snapshot(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "authority_error",
+    [
+        "question inbox requires role coordinator",
+        (
+            "board_question_inbox Central error: coordinator inbox requires "
+            "registered project coordinator ownership on this board"
+        ),
+    ],
+    ids=["worker-role", "unbound-coordinator"],
+)
+def test_question_inbox_authority_failure_preserves_ordinary_digest(
+    authority_error: str,
+) -> None:
+    asyncio.run(
+        _question_inbox_authority_failure_preserves_ordinary_digest(authority_error)
+    )
+
+
+async def _question_inbox_authority_failure_preserves_ordinary_digest(
+    authority_error: str,
+) -> None:
+    server = MCPServer("question-inbox-authority-stub")
+
+    @server.tool()
+    async def board_digest(
+        since: dict[str, int],
+        boards: list[str],
+        include_notes_keys: list[str],
+        max_transitions_per_ticket: int,
+    ) -> JSON:
+        assert since == {"pursers": 11}
+        assert boards == ["pursers"]
+        assert include_notes_keys == []
+        assert max_transitions_per_ticket == 2
+        return {
+            "cursor_map": {"pursers": 12},
+            "tickets": [
+                {
+                    "ticket_id": "TK-ordinary",
+                    "title": "Ordinary update",
+                    "status_now": "submitted",
+                }
+            ],
+        }
+
+    @server.tool()
+    async def board_question_inbox(state: str, limit: int) -> JSON:
+        assert state == "open"
+        assert limit == 100
+        raise ToolError(authority_error)
+
+    async with Client(server, mode="2026-07-28", cache=None) as raw:
+        bridge = StdioWaitBridge("stub", [], {})
+        bridge._client = raw
+        page = await bridge._digest_with_questions("pursers", 11)
+
+    assert page["cursor_map"] == {"pursers": 12}
+    assert page["tickets"] == [
+        {
+            "ticket_id": "TK-ordinary",
+            "title": "Ordinary update",
+            "status_now": "submitted",
+        }
+    ]
+    assert page["questions"] == []
+    assert page["question_inbox_unavailable"] == agent_module.QUESTION_INBOX_UNAVAILABLE
+
+
+def test_personal_watch_reports_question_limit_once_and_streams_ticket() -> None:
+    asyncio.run(_personal_watch_reports_question_limit_once_and_streams_ticket())
+
+
+async def _personal_watch_reports_question_limit_once_and_streams_ticket() -> None:
+    profile = SimpleNamespace(board_id="pursers", principal_id="PR-human")
+    board = PersonalBoardSurface(profile)
+
+    class SnapshotCentral:
+        async def call_tool(self, name: str, arguments: JSON) -> Any:
+            assert name == "ticket_list"
+            return SimpleNamespace(
+                is_error=False,
+                structured_content={
+                    "result": {
+                        "tickets": [],
+                        "latest_seq": 11,
+                        "total_matching": 0,
+                    }
+                },
+                content=[],
+            )
+
+    class UnauthorizedQuestionBridge:
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def digests(
+            self, board_id: str, cursor: int | None, cancel: asyncio.Event
+        ) -> AsyncIterator[JSON]:
+            assert board_id == "pursers"
+            assert cursor == 11
+            for status in ("claimed", "submitted"):
+                yield {
+                    "cursor_map": {"pursers": 12},
+                    "question_inbox_unavailable": (
+                        agent_module.QUESTION_INBOX_UNAVAILABLE
+                    ),
+                    "questions": [],
+                    "tickets": [
+                        {
+                            "ticket_id": "TK-ordinary",
+                            "title": "Ordinary update",
+                            "status_now": status,
+                        }
+                    ],
+                }
+
+    central = SnapshotCentral()
+    bridge = UnauthorizedQuestionBridge()
+    board._client = central  # type: ignore[assignment]
+    board._wait_bridge_factory = lambda: bridge  # type: ignore[assignment]
+    events = board.watch(None, asyncio.Event())
+    try:
+        observed = [await anext(events) for _ in range(4)]
+    finally:
+        await events.aclose()
+
+    assert [event[1]["kind"] for event in observed] == [
+        "watch_snapshot",
+        "question_inbox_unavailable",
+        "ticket_status_changed",
+        "ticket_status_changed",
+    ]
+    assert observed[1][1]["message"] == agent_module.QUESTION_INBOX_UNAVAILABLE
+    assert observed[2][1]["ticket_id"] == "TK-ordinary"
+    assert observed[3][1]["status_to"] == "submitted"
+    assert bridge.closed is True
 
 
 async def _cancel_stops_blocked_watch_snapshot(tmp_path: Path) -> None:

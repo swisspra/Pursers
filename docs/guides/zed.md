@@ -111,12 +111,14 @@ Keep one Agent Panel thread for the board:
 
 ### When a seat asks you a question
 
-Questions reach you in Zed only while `/watch` is active. In a Pursers ACP
-thread, each new seat question appears as a clearly marked update with the seat
-name, ticket ID, question, waiting time, and a short `#N` reference. The agent
-then completes that watch turn; Zed does not notify for a free-standing
-`session/update`, but it does apply its normal completion notification when the
-turn stops. Run this to open the answer form without retyping the ticket ID:
+Questions reach you in Zed only while `/watch` is active and the Personal
+profile selects a coordinator identity registered to at least one project on
+the board. In that case, each new seat question appears as a clearly marked
+update with the seat name, ticket ID, question, waiting time, and a short `#N`
+reference. The agent then completes that watch turn; Zed does not notify for a
+free-standing `session/update`, but it does apply its normal completion
+notification when the turn stops. Run this to open the answer form without
+retyping the ticket ID:
 
 ```text
 /answer
@@ -141,9 +143,13 @@ notification when Zed is closed entirely, and no background watcher remains
 after the watch turn ends. Questions raised while `/watch` is stopped appear
 only after `/watch` runs again; its initial read checks the coordinator's
 current open-question inbox rather than relying on retained journal events.
-That inbox read is bounded to the oldest 100 open questions. The MCP extension
-still has no push channel that can wake the Agent Panel; use the ACP thread for
-these same-thread replies, or check the board elsewhere.
+That inbox read is bounded to the oldest 100 open questions. If the selected
+identity is a worker or is not registered as a project coordinator, `/watch`
+states that seat-question replies are unavailable and continues streaming
+ordinary board updates; it does not widen that identity's authority. The MCP
+extension still has no push channel that can wake the Agent Panel; use a
+correctly registered coordinator ACP thread for these same-thread replies, or
+check the board elsewhere.
 
 ## Optional: use a Pursers ACP thread
 
