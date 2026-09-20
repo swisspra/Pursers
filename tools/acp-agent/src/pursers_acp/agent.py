@@ -21,7 +21,12 @@ import httpx2
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
-from pursers_client import BoardClient, PersonalProfileError, read_capability
+from pursers_client import (
+    BoardClient,
+    PersonalProfileError,
+    parse_project_registry,
+    read_capability,
+)
 from pursers_client.personal_profile import (
     default_profiles_root,
     profile_path_for_project,
@@ -350,8 +355,24 @@ class PersonalBoardSurface:
         ][:MAX_ROWS]
 
     async def board_status(self) -> JSON:
-        status = await self._status()
-        return {
+        status, page = await asyncio.gather(
+            self._status(),
+            self._call(
+                "ticket_list",
+                {"include_closed": False, "include_archived": False, "limit": 100},
+            ),
+        )
+        registry: JSON | None = None
+        try:
+            state = await self._call(
+                "board_state_get", {"key": "project_registry"}
+            )
+            registry = parse_project_registry(state)
+        except Exception:
+            # Older and single-project boards remain usable. Ticket-owned project
+            # labels still provide an honest, narrower view.
+            pass
+        result = {
             key: status.get(key)
             for key in (
                 "board_id",
@@ -361,6 +382,17 @@ class PersonalBoardSurface:
                 "latest_seq",
             )
         }
+        projects = _project_summaries(
+            self.board_id,
+            page.get("tickets", []),
+            registry,
+        )
+        result["project_count"] = len(projects)
+        result["projects"] = projects[:MAX_ROWS]
+        result["project_ticket_scan_limited"] = bool(
+            page.get("next_cursor") or len(page.get("tickets", [])) >= 100
+        )
+        return result
 
     async def ticket_evidence(self, ticket_id: str) -> JSON:
         return await self._call("ticket_get", {"ticket_id": ticket_id})
@@ -477,6 +509,7 @@ class PersonalBoardSurface:
                         "kind": "ticket_status_changed",
                         "ticket_id": ticket.get("ticket_id"),
                         "title": ticket.get("title"),
+                        "project": ticket.get("project"),
                         "status_to": ticket.get("status_now"),
                         "dispatch_state": ticket.get("dispatch_state"),
                     }
@@ -854,8 +887,10 @@ class PursersACPAgent:
                 session, lambda: self.board.answer_action(ticket_id, answer)
             )
             return await self._mutation(session_id, session, action)
-        if lowered == "/watch" or lowered.startswith(("/watch ", "watch ")):
-            if lowered == "/watch":
+        if lowered in {"/watch", "watch"} or lowered.startswith(
+            ("/watch ", "watch ")
+        ):
+            if lowered in {"/watch", "watch"}:
                 board_id = self.board.board_id
             else:
                 board_id = normalized.split(" ", 1)[1].strip()
@@ -1172,13 +1207,29 @@ def _plan_ticket(
         title.strip() if isinstance(title, str) and title.strip() else "(untitled)",
         MAX_PLAN_TITLE_CHARS,
     )
-    return {"ticket_id": ticket_id, "title": safe_title, "phase": phase}
+    project = _ticket_project(ticket)
+    if project == "(unassigned)" and prior is not None:
+        prior_project = prior.get("project")
+        if isinstance(prior_project, str) and prior_project:
+            project = prior_project
+    return {
+        "ticket_id": ticket_id,
+        "title": safe_title,
+        "project": project,
+        "phase": phase,
+    }
 
 
 def _plan_entries(
     tickets: Mapping[str, JSON], *, snapshot_truncated: bool = False
 ) -> list[JSON]:
-    rows = sorted(tickets.values(), key=lambda item: item["ticket_id"])
+    rows = sorted(
+        tickets.values(),
+        key=lambda item: (
+            str(item.get("project", "(unassigned)")).casefold(),
+            item["ticket_id"],
+        ),
+    )
     needs_overflow = len(rows) > MAX_PLAN_ENTRIES or snapshot_truncated
     visible_limit = MAX_PLAN_ENTRIES - 1 if needs_overflow else MAX_PLAN_ENTRIES
     entries: list[JSON] = []
@@ -1190,7 +1241,9 @@ def _plan_entries(
         entries.append(
             {
                 "content": _bounded(
-                    f"{item['ticket_id']} — {item['title']}", MAX_TEXT_CHARS
+                    f"{item.get('project', '(unassigned)')} · "
+                    f"{item['ticket_id']} — {item['title']}",
+                    MAX_TEXT_CHARS,
                 ),
                 "priority": "high",
                 "status": status,
@@ -1222,12 +1275,21 @@ def _content(text: str) -> JSON:
 def _format_tickets(rows: list[JSON]) -> str:
     if not rows:
         return "No active tickets are associated with this Personal principal."
-    lines = ["My tickets"]
+    grouped: dict[str, list[JSON]] = {}
     for row in rows[:MAX_ROWS]:
-        lines.append(
-            f"- {row.get('ticket_id', '?')} [{row.get('status', '?')}] "
-            f"{_bounded(str(row.get('title', '(untitled)')), 200)}"
-        )
+        grouped.setdefault(_ticket_project(row), []).append(row)
+    lines = [
+        "My Pursers tickets by project "
+        f"(showing {len(rows[:MAX_ROWS])}, limit {MAX_ROWS})"
+    ]
+    for project in sorted(grouped, key=str.casefold):
+        lines.append(f"{project}")
+        for row in grouped[project]:
+            lines.append(
+                f"- {row.get('ticket_id', '?')} · "
+                f"{_ticket_state_label(row)} · {_ticket_owner_label(row)} — "
+                f"{_bounded(str(row.get('title', '(untitled)')), 200)}"
+            )
     return "\n".join(lines)
 
 
@@ -1244,14 +1306,37 @@ def _format_offers(rows: list[JSON]) -> str:
 
 
 def _format_board(status: JSON, tickets: list[JSON], offers: list[JSON]) -> str:
+    needs_answer = sum(1 for ticket in tickets if _ticket_needs_answer(ticket))
     lines = [
-        f"Board {status.get('board_id', '?')}",
+        "Pursers board overview",
         "",
         f"Review policy: {status.get('review_policy', '?')}",
         f"Latest event: {status.get('latest_seq', '?')}",
-        f"Your active tickets: {len(tickets)}",
-        f"Your current offers: {len(offers)}",
+        f"Associated tickets shown: {len(tickets)} (limit {MAX_ROWS})",
+        f"Offers shown: {len(offers)} (limit {MAX_ROWS})",
+        f"Needs your answer: {needs_answer}",
     ]
+    projects = status.get("projects")
+    if isinstance(projects, list) and projects:
+        total_projects = status.get("project_count", len(projects))
+        heading = f"Pursers projects (showing {len(projects)} of {total_projects})"
+        lines.extend(["", heading])
+        for project in projects:
+            if not isinstance(project, Mapping):
+                continue
+            counts = project.get("ticket_counts")
+            if not isinstance(counts, Mapping):
+                counts = {}
+            count_text = ", ".join(
+                f"{count} {str(ticket_status).replace('_', ' ')}"
+                for ticket_status, count in sorted(counts.items())
+            ) or "no active tickets"
+            lines.append(
+                f"- {project.get('name', '(unassigned)')} "
+                f"[{project.get('status', 'observed')}] — {count_text}"
+            )
+        if status.get("project_ticket_scan_limited"):
+            lines.append("Ticket counts cover the first 100 active board tickets.")
     if tickets:
         lines.extend(["", _format_tickets(tickets)])
     if offers:
@@ -1291,12 +1376,90 @@ def _format_evidence(result: JSON) -> str:
 
 
 def _format_event(event: JSON) -> str:
-    selected = {
-        key: event.get(key)
-        for key in ("seq", "kind", "ticket_id", "status_to", "payload_ref")
-        if event.get(key) is not None
-    }
-    return "Board event\n\n```json\n" + json.dumps(selected, sort_keys=True) + "\n```"
+    kind = str(event.get("kind", "board update")).replace("_", " ").capitalize()
+    lines = ["Pursers board update", "", kind]
+    if event.get("project") is not None:
+        lines.append(f"Project: {_bounded(str(event['project']), 100)}")
+    if event.get("ticket_id") is not None:
+        lines.append(f"Ticket: {_bounded(str(event['ticket_id']), 100)}")
+    if event.get("status_to") is not None:
+        lines.append(
+            f"Now: {_bounded(str(event['status_to']).replace('_', ' '), 100).capitalize()}"
+        )
+    if event.get("seq") is not None:
+        lines.append(f"Board event: {_bounded(str(event['seq']), 40)}")
+    return "\n".join(lines)
+
+
+def _ticket_needs_answer(ticket: Mapping[str, Any]) -> bool:
+    request = ticket.get("human_request")
+    return ticket.get("status") == "needs_human" or (
+        isinstance(request, Mapping) and request.get("resolution") is None
+    )
+
+
+def _ticket_state_label(ticket: Mapping[str, Any]) -> str:
+    status = str(ticket.get("status", "unknown")).replace("_", " ")
+    return status.capitalize()
+
+
+def _ticket_owner_label(ticket: Mapping[str, Any]) -> str:
+    if _ticket_needs_answer(ticket):
+        return "Needs your answer"
+    if ticket.get("status") == "submitted":
+        return "Awaiting review"
+    claimed_by = ticket.get("claimed_by")
+    if isinstance(claimed_by, str) and claimed_by:
+        return f"Held by {_bounded(claimed_by, 80)}"
+    assigned_to = ticket.get("assigned_to")
+    if isinstance(assigned_to, str) and assigned_to:
+        return f"Assigned to {_bounded(assigned_to, 80)}"
+    return "Unassigned"
+
+
+def _ticket_project(ticket: Mapping[str, Any]) -> str:
+    project = ticket.get("project")
+    if isinstance(project, str) and project.strip():
+        return project.strip()
+    target = ticket.get("target_url")
+    if isinstance(target, str) and target and "://" not in target:
+        candidate = target.split("/", 1)[0].strip()
+        if candidate:
+            return candidate
+    return "(unassigned)"
+
+
+def _project_summaries(
+    board_id: str, tickets: Any, registry: JSON | None
+) -> list[JSON]:
+    projects: dict[str, JSON] = {}
+    if isinstance(registry, Mapping):
+        registry_projects = registry.get("projects")
+        if isinstance(registry_projects, Mapping):
+            for name, project in registry_projects.items():
+                if (
+                    isinstance(name, str)
+                    and isinstance(project, Mapping)
+                    and project.get("board_id") == board_id
+                ):
+                    projects[name] = {
+                        "name": name,
+                        "status": project.get("status", "observed"),
+                        "ticket_counts": {},
+                    }
+    if isinstance(tickets, list):
+        for ticket in tickets:
+            if not isinstance(ticket, Mapping):
+                continue
+            name = _ticket_project(ticket)
+            project = projects.setdefault(
+                name,
+                {"name": name, "status": "observed", "ticket_counts": {}},
+            )
+            ticket_status = str(ticket.get("status", "unknown"))
+            counts = project["ticket_counts"]
+            counts[ticket_status] = counts.get(ticket_status, 0) + 1
+    return sorted(projects.values(), key=lambda project: project["name"].casefold())
 
 
 def _mutation_summary(action: JSON, result: JSON) -> str:
@@ -1344,7 +1507,7 @@ def _help() -> str:
         "- /watch (cancel to stop)\n- /evidence TK-…\n"
         "- /answer TK-… <JSON-or-text>\n\n"
         "Legacy text commands remain supported: my tickets, my offers, board status, "
-        "create ticket, annotate, and watch <board>."
+        "create ticket, annotate, and watch (optionally followed by this board)."
     )
 
 

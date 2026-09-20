@@ -34,13 +34,31 @@ class FakeBoard:
         self.closed = True
 
     async def my_tickets(self) -> list[JSON]:
-        return [{"ticket_id": "TK-owned", "status": "open", "title": "Owned"}]
+        return [
+            {
+                "ticket_id": "TK-owned",
+                "status": "open",
+                "title": "Owned",
+                "project": "Atlas",
+            }
+        ]
 
     async def my_offers(self) -> list[JSON]:
         return [{"ticket_id": "TK-offer", "agent_name": "personal", "kind": "work"}]
 
     async def board_status(self) -> JSON:
-        return {"board_id": self.board_id, "status_counts": {"open": 1}, "latest_seq": 4}
+        return {
+            "board_id": self.board_id,
+            "status_counts": {"open": 1},
+            "latest_seq": 4,
+            "projects": [
+                {
+                    "name": "Atlas",
+                    "status": "active",
+                    "ticket_counts": {"open": 1},
+                }
+            ],
+        }
 
     async def ticket_evidence(self, ticket_id: str) -> JSON:
         return {
@@ -90,16 +108,23 @@ class FakeBoard:
         yield 4, {
             "kind": "watch_snapshot",
             "tickets": [
-                {"ticket_id": "TK-work", "title": "Build runtime", "status": "claimed"},
+                {
+                    "ticket_id": "TK-work",
+                    "title": "Build runtime",
+                    "status": "claimed",
+                    "project": "Atlas",
+                },
                 {
                     "ticket_id": "TK-submitted",
                     "title": "Await review",
                     "status": "submitted",
+                    "project": "Atlas",
                 },
                 {
                     "ticket_id": "TK-review",
                     "title": "Review active",
                     "status": "submitted",
+                    "project": "Beacon",
                     "dispatch_state": {"state": "reviewing"},
                 },
             ],
@@ -306,7 +331,7 @@ async def _five_slash_commands_are_executable_and_writes_request_permission(
             for row in client.updates
             if row["update"].get("sessionUpdate") == "agent_message_chunk"
         ]
-        assert any(text.startswith("Board pursers") for text in messages)
+        assert any(text.startswith("Pursers board overview") for text in messages)
         assert any("branch_and_commit: branch@abc" in text for text in messages)
         assert [row["toolCall"]["rawInput"]["operation"] for row in client.permissions] == [
             "ticket_create",
@@ -318,6 +343,107 @@ async def _five_slash_commands_are_executable_and_writes_request_permission(
 
 def test_board_failure_is_rendered_as_agent_message(tmp_path: Path) -> None:
     asyncio.run(_board_failure_is_rendered_as_agent_message(tmp_path))
+
+
+def test_board_and_watch_make_multiple_projects_legible(tmp_path: Path) -> None:
+    asyncio.run(_board_and_watch_make_multiple_projects_legible(tmp_path))
+
+
+async def _board_and_watch_make_multiple_projects_legible(tmp_path: Path) -> None:
+    class MultiProjectBoard(FakeBoard):
+        async def my_tickets(self) -> list[JSON]:
+            return [
+                {
+                    "ticket_id": "TK-a",
+                    "status": "open",
+                    "title": "API",
+                    "project": "Atlas",
+                },
+                {
+                    "ticket_id": "TK-b",
+                    "status": "claimed",
+                    "title": "UI",
+                    "project": "Beacon",
+                    "claimed_by": "worker-beacon",
+                },
+                {
+                    "ticket_id": "TK-c",
+                    "status": "submitted",
+                    "title": "Docs",
+                    "project": "Comet",
+                },
+            ]
+
+        async def board_status(self) -> JSON:
+            return {
+                "board_id": self.board_id,
+                "status_counts": {"open": 1, "claimed": 1, "submitted": 1},
+                "latest_seq": 9,
+                "projects": [
+                    {
+                        "name": "Atlas",
+                        "status": "active",
+                        "ticket_counts": {"needs_human": 1, "open": 1},
+                    },
+                    {
+                        "name": "Beacon",
+                        "status": "active",
+                        "ticket_counts": {"claimed": 1},
+                    },
+                    {
+                        "name": "Comet",
+                        "status": "paused",
+                        "ticket_counts": {"submitted": 1},
+                    },
+                ],
+            }
+
+    board = MultiProjectBoard()
+    client = FakeACPClient(PursersACPAgent(lambda: board))
+    try:
+        await client.initialize()
+        session = await client.new_session(tmp_path)
+        assert await client.prompt(session, "/board") == {"stopReason": "end_turn"}
+        text = client.updates[-1]["update"]["content"]["text"]
+        assert "Pursers projects (showing 3 of 3)" in text
+        assert "- Atlas [active] — 1 needs human, 1 open" in text
+        assert "- Beacon [active] — 1 claimed" in text
+        assert "- Comet [paused] — 1 submitted" in text
+        assert "Needs your answer: 0" in text
+        assert "Atlas\n- TK-a · Open · Unassigned — API" in text
+        assert "Beacon\n- TK-b · Claimed · Held by worker-beacon — UI" in text
+        assert "Comet\n- TK-c · Submitted · Awaiting review — Docs" in text
+
+        prompt = asyncio.create_task(client.prompt(session, "watch"))
+        await asyncio.wait_for(board.watch_started.wait(), TEST_TIMEOUT_S)
+        while not any(
+            row["update"].get("sessionUpdate") == "plan"
+            and any(
+                entry.get("content", "").startswith("Atlas ·")
+                for entry in row["update"].get("entries", [])
+            )
+            for row in client.updates
+        ):
+            await asyncio.sleep(0)
+        plan = next(
+            row["update"]
+            for row in reversed(client.updates)
+            if row["update"].get("sessionUpdate") == "plan"
+        )
+        assert [entry["content"] for entry in plan["entries"]] == [
+            "Atlas · TK-submitted — Await review",
+            "Atlas · TK-work — Build runtime",
+            "Beacon · TK-review — Review active",
+        ]
+        assert [entry["status"] for entry in plan["entries"]] == [
+            "pending",
+            "pending",
+            "in_progress",
+        ]
+        await client.notify("session/cancel", {"sessionId": session})
+        assert await prompt == {"stopReason": "cancelled"}
+    finally:
+        await client.close()
 
 
 async def _board_failure_is_rendered_as_agent_message(tmp_path: Path) -> None:
@@ -388,10 +514,26 @@ async def _watch_streams_then_cancel_stops_prompt(tmp_path: Path) -> None:
         prompt = asyncio.create_task(client.prompt(session, "watch pursers"))
         await asyncio.wait_for(board.watch_started.wait(), TEST_TIMEOUT_S)
         while not any(
-            row["update"].get("content", {}).get("text", "").startswith("Board event")
+            row["update"]
+            .get("content", {})
+            .get("text", "")
+            .startswith("Pursers board update")
             for row in client.updates
         ):
             await asyncio.sleep(0)
+        update = next(
+            row["update"]["content"]["text"]
+            for row in client.updates
+            if row["update"]
+            .get("content", {})
+            .get("text", "")
+            .startswith("Pursers board update")
+        )
+        assert update == (
+            "Pursers board update\n\nTicket status changed\n"
+            "Ticket: TK-work\nNow: Submitted\nBoard event: 5"
+        )
+        assert "{" not in update
         await client.notify("session/cancel", {"sessionId": session})
         assert await prompt == {"stopReason": "cancelled"}
         plans = [
@@ -409,36 +551,36 @@ async def _watch_streams_then_cancel_stops_prompt(tmp_path: Path) -> None:
             ],
             [
                 {
-                    "content": "TK-review — Review active",
-                    "priority": "high",
-                    "status": "in_progress",
-                },
-                {
-                    "content": "TK-submitted — Await review",
+                    "content": "Atlas · TK-submitted — Await review",
                     "priority": "high",
                     "status": "pending",
                 },
                 {
-                    "content": "TK-work — Build runtime",
+                    "content": "Atlas · TK-work — Build runtime",
+                    "priority": "high",
+                    "status": "in_progress",
+                },
+                {
+                    "content": "Beacon · TK-review — Review active",
                     "priority": "high",
                     "status": "in_progress",
                 },
             ],
             [
                 {
-                    "content": "TK-review — Review active",
+                    "content": "Atlas · TK-submitted — Await review",
+                    "priority": "high",
+                    "status": "pending",
+                },
+                {
+                    "content": "Atlas · TK-work — Build runtime",
+                    "priority": "high",
+                    "status": "pending",
+                },
+                {
+                    "content": "Beacon · TK-review — Review active",
                     "priority": "high",
                     "status": "in_progress",
-                },
-                {
-                    "content": "TK-submitted — Await review",
-                    "priority": "high",
-                    "status": "pending",
-                },
-                {
-                    "content": "TK-work — Build runtime",
-                    "priority": "high",
-                    "status": "pending",
                 },
             ],
             [
