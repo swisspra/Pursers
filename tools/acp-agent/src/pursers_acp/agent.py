@@ -43,7 +43,15 @@ MAX_PLAN_ENTRIES = 20
 MAX_PLAN_TITLE_CHARS = 160
 WATCH_SNAPSHOT_LIMIT = 500
 IN_FLIGHT_TICKET_STATES = frozenset(
-    {"claimed", "in_progress", "creating_report", "submitted", "reviewing", "in_review"}
+    {
+        "claimed",
+        "in_progress",
+        "creating_report",
+        "submitted",
+        "reviewing",
+        "in_review",
+        "needs_human",
+    }
 )
 REVIEW_DISPATCH_STATES = frozenset({"review_claimed", "reviewing", "in_review"})
 
@@ -502,17 +510,40 @@ class PersonalBoardSurface:
         try:
             async for page in bridge.digests(self.board_id, cursor, cancel):
                 cursor = _digest_cursor(page, self.board_id, cursor)
+                human_requests = {
+                    request.get("ticket_id"): request
+                    for request in page.get("human_requests", [])
+                    if isinstance(request, Mapping)
+                    and isinstance(request.get("ticket_id"), str)
+                }
                 for ticket in page.get("tickets", []):
                     if not isinstance(ticket, dict):
                         continue
-                    yield cursor or 0, {
+                    event = {
                         "kind": "ticket_status_changed",
                         "ticket_id": ticket.get("ticket_id"),
                         "title": ticket.get("title"),
                         "project": ticket.get("project"),
                         "status_to": ticket.get("status_now"),
                         "dispatch_state": ticket.get("dispatch_state"),
+                        "claimed_by": ticket.get("claimed_by"),
+                        "review_state": ticket.get("review_state"),
+                        "review_claimed_by": ticket.get("review_claimed_by"),
                     }
+                    offers = ticket.get("offers")
+                    review_offer = (
+                        offers.get("review_offer")
+                        if isinstance(offers, Mapping)
+                        else None
+                    )
+                    if isinstance(review_offer, Mapping):
+                        event["review_offer"] = dict(review_offer)
+                    request = human_requests.get(ticket.get("ticket_id"))
+                    if request is not None:
+                        event["human_request"] = {
+                            "asked_by": {"agent_name": request.get("asked_by")}
+                        }
+                    yield cursor or 0, event
         finally:
             await bridge.close()
 
@@ -947,13 +978,14 @@ class PursersACPAgent:
 
     async def _mutation(self, session_id: str, session: Session, action: JSON) -> str:
         tool_call_id = f"board-{uuid.uuid4().hex}"
+        title = _mutation_title(action)
         await self._update(
             session_id,
             {
                 "sessionUpdate": "tool_call",
                 "toolCallId": tool_call_id,
-                "title": f"{action['operation']} on {action['board_id']}",
-                "kind": "other",
+                "title": title,
+                "kind": "edit",
                 "status": "pending",
                 "rawInput": action,
             },
@@ -995,14 +1027,18 @@ class PursersACPAgent:
             )
             raise
         summary = _mutation_summary(action, result)
+        locations = _result_locations(result, Path(session.cwd))
+        completed: JSON = {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": tool_call_id,
+            "status": "completed",
+            "content": [_content(summary)],
+        }
+        if locations:
+            completed["locations"] = locations
         await self._update(
             session_id,
-            {
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": tool_call_id,
-                "status": "completed",
-                "content": [_content(summary)],
-            },
+            completed,
         )
         await self._message(session_id, summary)
         return "end_turn"
@@ -1023,8 +1059,8 @@ class PursersACPAgent:
                     "sessionId": session_id,
                     "toolCall": {
                         "toolCallId": tool_call_id,
-                        "title": f"{action['operation']} on {action['board_id']}",
-                        "kind": "other",
+                        "title": _mutation_title(action),
+                        "kind": "edit",
                         "rawInput": action,
                     },
                     "options": [
@@ -1089,8 +1125,8 @@ class PursersACPAgent:
         if not entries:
             entries = [
                 {
-                    "content": f"Watch {board_id} for board events and seat questions",
-                    "priority": "high",
+                    "content": f"{board_id} is quiet — no active work needs attention",
+                    "priority": "low",
                     "status": status,
                 }
             ]
@@ -1199,7 +1235,15 @@ def _plan_ticket(
         or isinstance(ticket.get("review_lease"), Mapping)
         or review_state in {"claimed", "claimed_by_me", "claimed_by_other", "reviewing"}
     )
-    phase = "review" if reviewing else "submitted" if raw_status == "submitted" else "work"
+    phase = (
+        "needs_human"
+        if raw_status == "needs_human"
+        else "review"
+        if reviewing
+        else "submitted"
+        if raw_status == "submitted"
+        else "work"
+    )
     title = ticket.get("title")
     if not (isinstance(title, str) and title.strip()) and prior is not None:
         title = prior.get("title")
@@ -1212,20 +1256,106 @@ def _plan_ticket(
         prior_project = prior.get("project")
         if isinstance(prior_project, str) and prior_project:
             project = prior_project
+    review_offer = ticket.get("review_offer")
+    if not isinstance(review_offer, Mapping):
+        offers = ticket.get("offers")
+        review_offer = (
+            offers.get("review_offer") if isinstance(offers, Mapping) else None
+        )
+    offered_reviewer_name = (
+        review_offer.get("agent_name") if isinstance(review_offer, Mapping) else None
+    )
+    offered_reviewer_id = (
+        review_offer.get("agent_id") if isinstance(review_offer, Mapping) else None
+    )
+    active_reviewer_id: Any = None
+    holder: Any = None
+    if phase == "needs_human":
+        request = ticket.get("human_request")
+        asked_by = request.get("asked_by") if isinstance(request, Mapping) else None
+        if isinstance(asked_by, Mapping):
+            holder = asked_by.get("agent_name")
+        holder = holder or ticket.get("last_claimed_by")
+    elif phase == "review":
+        lease = ticket.get("review_lease")
+        if isinstance(lease, Mapping):
+            holder = lease.get("reviewer_agent_name")
+            active_reviewer_id = lease.get("reviewer_agent_id")
+        holder = holder or ticket.get("review_claimed_by")
+        dispatch = ticket.get("dispatch_state")
+        if isinstance(dispatch, Mapping):
+            holder = holder or dispatch.get("agent_name")
+            active_reviewer_id = active_reviewer_id or dispatch.get("agent_id")
+        # board_digest intentionally omits review_lease and exposes only the
+        # active reviewer's agent_id. Retain the human name from the preceding
+        # review offer, but only when its ID matches the new active holder.
+        if (
+            not (isinstance(holder, str) and holder.strip())
+            and isinstance(active_reviewer_id, str)
+            and prior is not None
+            and prior.get("reviewer_agent_id") == active_reviewer_id
+        ):
+            holder = prior.get("reviewer_name")
+    else:
+        holder = ticket.get("claimed_by") or ticket.get("assigned_to")
+    if not (isinstance(holder, str) and holder.strip()):
+        if prior is not None and prior.get("phase") == phase:
+            holder = prior.get("holder")
+    safe_holder = (
+        _bounded(holder.strip(), 100)
+        if isinstance(holder, str) and holder.strip()
+        else None
+    )
     return {
         "ticket_id": ticket_id,
         "title": safe_title,
         "project": project,
         "phase": phase,
+        "holder": safe_holder,
+        "reviewer_name": (
+            safe_holder
+            if phase == "review"
+            else _bounded(offered_reviewer_name.strip(), 100)
+            if isinstance(offered_reviewer_name, str)
+            and offered_reviewer_name.strip()
+            else None
+        ),
+        "reviewer_agent_id": (
+            active_reviewer_id if phase == "review" else offered_reviewer_id
+        ),
     }
+
+
+def _plan_content(item: Mapping[str, Any]) -> str:
+    phase = item["phase"]
+    holder = item.get("holder")
+    if phase == "needs_human":
+        detail = f"Needs you · asked by {holder}" if holder else "Needs you"
+    elif phase == "review":
+        detail = f"In review · {holder}" if holder else "In review · reviewer not reported"
+    elif phase == "work":
+        detail = f"Working · {holder}" if holder else "Working · holder not reported"
+    else:
+        detail = (
+            f"Awaiting reviewer · submitted by {holder}"
+            if holder
+            else "Awaiting reviewer"
+        )
+    return _bounded(
+        f"{item.get('project', '(unassigned)')} · "
+        f"{item['ticket_id']} — {item['title']} · {detail}",
+        MAX_TEXT_CHARS,
+    )
 
 
 def _plan_entries(
     tickets: Mapping[str, JSON], *, snapshot_truncated: bool = False
 ) -> list[JSON]:
+    phase_order = {"needs_human": 0, "review": 1, "work": 2, "submitted": 3}
     rows = sorted(
         tickets.values(),
         key=lambda item: (
+            phase_order[item["phase"]],
             str(item.get("project", "(unassigned)")).casefold(),
             item["ticket_id"],
         ),
@@ -1237,15 +1367,24 @@ def _plan_entries(
         # ACP v1 has pending/in_progress/completed but no review status. A
         # submitted ticket is pending review; active review stays in_progress
         # and is never reported completed before the board closes it.
-        status = "pending" if item["phase"] == "submitted" else "in_progress"
+        status = (
+            "pending"
+            if item["phase"] in {"needs_human", "submitted"}
+            else "in_progress"
+        )
+        # Priority describes required attention: high needs the human, medium
+        # is active work/review, and low is deliberate queueing or summary.
+        priority = (
+            "high"
+            if item["phase"] == "needs_human"
+            else "low"
+            if item["phase"] == "submitted"
+            else "medium"
+        )
         entries.append(
             {
-                "content": _bounded(
-                    f"{item.get('project', '(unassigned)')} · "
-                    f"{item['ticket_id']} — {item['title']}",
-                    MAX_TEXT_CHARS,
-                ),
-                "priority": "high",
+                "content": _plan_content(item),
+                "priority": priority,
                 "status": status,
             }
         )
@@ -1263,9 +1402,54 @@ def _plan_entries(
                 f"({MAX_PLAN_ENTRIES}-entry plan cap)"
             )
         entries.append(
-            {"content": content, "priority": "high", "status": "in_progress"}
+            {"content": content, "priority": "low", "status": "in_progress"}
         )
     return entries
+
+
+def _mutation_title(action: Mapping[str, Any]) -> str:
+    operation = action.get("operation")
+    board_id = str(action.get("board_id") or "board")
+    params = action.get("params")
+    ticket_id = params.get("ticket_id") if isinstance(params, Mapping) else None
+    if operation == "ticket_create":
+        return f"Create ticket on {board_id}"
+    if operation == "ticket_annotate":
+        return f"Add note to {ticket_id or board_id}"
+    if operation == "ticket_human_resolve":
+        return f"Answer request on {ticket_id or board_id}"
+    return f"Update {board_id}"
+
+
+def _result_locations(result: Mapping[str, Any], cwd: Path) -> list[JSON]:
+    ticket = result.get("ticket")
+    if not isinstance(ticket, Mapping):
+        return []
+    raw_paths: list[Any] = []
+    for key in ("files_changed", "related_files"):
+        values = ticket.get(key)
+        if isinstance(values, list):
+            raw_paths.extend(values)
+    root = cwd.resolve()
+    locations: list[JSON] = []
+    seen: set[Path] = set()
+    for value in raw_paths:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        candidate = (
+            (root / value).resolve()
+            if not Path(value).is_absolute()
+            else Path(value).resolve()
+        )
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if candidate in seen or not candidate.is_file():
+            continue
+        seen.add(candidate)
+        locations.append({"path": str(candidate), "line": 1})
+    return locations[:MAX_ROWS]
 
 
 def _content(text: str) -> JSON:

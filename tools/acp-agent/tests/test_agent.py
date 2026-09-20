@@ -113,12 +113,14 @@ class FakeBoard:
                     "title": "Build runtime",
                     "status": "claimed",
                     "project": "Atlas",
+                    "claimed_by": "worker-build",
                 },
                 {
                     "ticket_id": "TK-submitted",
                     "title": "Await review",
                     "status": "submitted",
                     "project": "Atlas",
+                    "claimed_by": "worker-submit",
                 },
                 {
                     "ticket_id": "TK-review",
@@ -126,6 +128,16 @@ class FakeBoard:
                     "status": "submitted",
                     "project": "Beacon",
                     "dispatch_state": {"state": "reviewing"},
+                    "review_lease": {"reviewer_agent_name": "reviewer-one"},
+                },
+                {
+                    "ticket_id": "TK-human",
+                    "title": "Choose rollout",
+                    "status": "needs_human",
+                    "project": "Beacon",
+                    "human_request": {
+                        "asked_by": {"agent_name": "worker-question"}
+                    },
                 },
             ],
             "truncated": False,
@@ -135,6 +147,7 @@ class FakeBoard:
             "kind": "ticket_status_changed",
             "ticket_id": "TK-work",
             "status_to": "submitted",
+            "claimed_by": "worker-build",
         }
         await cancel.wait()
 
@@ -431,14 +444,22 @@ async def _board_and_watch_make_multiple_projects_legible(tmp_path: Path) -> Non
             if row["update"].get("sessionUpdate") == "plan"
         )
         assert [entry["content"] for entry in plan["entries"]] == [
-            "Atlas · TK-submitted — Await review",
-            "Atlas · TK-work — Build runtime",
-            "Beacon · TK-review — Review active",
+            "Beacon · TK-human — Choose rollout · Needs you · asked by worker-question",
+            "Beacon · TK-review — Review active · In review · reviewer-one",
+            (
+                "Atlas · TK-submitted — Await review · Awaiting reviewer · "
+                "submitted by worker-submit"
+            ),
+            (
+                "Atlas · TK-work — Build runtime · Awaiting reviewer · "
+                "submitted by worker-build"
+            ),
         ]
         assert [entry["status"] for entry in plan["entries"]] == [
             "pending",
-            "pending",
             "in_progress",
+            "pending",
+            "pending",
         ]
         await client.notify("session/cancel", {"sessionId": session})
         assert await prompt == {"stopReason": "cancelled"}
@@ -501,6 +522,69 @@ async def _rejected_write_makes_no_board_call(tmp_path: Path) -> None:
         await client.close()
 
 
+def test_mutation_cards_use_human_titles_edit_kind_and_real_locations(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_mutation_cards_use_human_titles_edit_kind_and_real_locations(tmp_path))
+
+
+async def _mutation_cards_use_human_titles_edit_kind_and_real_locations(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "evidence.md"
+    artifact.write_text("evidence", encoding="utf-8")
+
+    class ArtifactBoard(FakeBoard):
+        async def mutate(self, action: JSON) -> JSON:
+            self.mutations.append(action)
+            return {
+                "ticket": {
+                    "ticket_id": "TK-created",
+                    "related_files": ["evidence.md", "../outside.txt"],
+                }
+            }
+
+    board = ArtifactBoard()
+    client = FakeACPClient(PursersACPAgent(lambda: board))
+    try:
+        await client.initialize()
+        session = await client.new_session(tmp_path)
+        await client.prompt(session, "/create Human title :: Human description")
+        calls = [
+            row["update"]
+            for row in client.updates
+            if row["update"].get("sessionUpdate") in {"tool_call", "tool_call_update"}
+        ]
+        assert calls[0]["title"] == "Create ticket on pursers"
+        assert calls[0]["kind"] == "edit"
+        assert client.permissions[0]["toolCall"]["title"] == "Create ticket on pursers"
+        assert client.permissions[0]["toolCall"]["kind"] == "edit"
+        assert calls[-1]["locations"] == [{"path": str(artifact), "line": 1}]
+        assert "ticket_create on pursers" not in json.dumps(calls)
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    ("operation", "params", "title"),
+    [
+        ("ticket_create", {}, "Create ticket on pursers"),
+        ("ticket_annotate", {"ticket_id": "TK-one"}, "Add note to TK-one"),
+        (
+            "ticket_human_resolve",
+            {"ticket_id": "TK-one"},
+            "Answer request on TK-one",
+        ),
+    ],
+)
+def test_mutation_titles_hide_internal_operation_names(
+    operation: str, params: JSON, title: str
+) -> None:
+    assert agent_module._mutation_title(
+        {"operation": operation, "board_id": "pursers", "params": params}
+    ) == title
+
+
 def test_watch_streams_then_cancel_stops_prompt(tmp_path: Path) -> None:
     asyncio.run(_watch_streams_then_cancel_stops_prompt(tmp_path))
 
@@ -544,49 +628,82 @@ async def _watch_streams_then_cancel_stops_prompt(tmp_path: Path) -> None:
         assert [row["entries"] for row in plans] == [
             [
                 {
-                    "content": "Watch pursers for board events and seat questions",
-                    "priority": "high",
+                    "content": "pursers is quiet — no active work needs attention",
+                    "priority": "low",
                     "status": "in_progress",
                 }
             ],
             [
                 {
-                    "content": "Atlas · TK-submitted — Await review",
+                    "content": (
+                        "Beacon · TK-human — Choose rollout · Needs you · asked by "
+                        "worker-question"
+                    ),
                     "priority": "high",
                     "status": "pending",
                 },
                 {
-                    "content": "Atlas · TK-work — Build runtime",
-                    "priority": "high",
+                    "content": (
+                        "Beacon · TK-review — Review active · In review · "
+                        "reviewer-one"
+                    ),
+                    "priority": "medium",
                     "status": "in_progress",
                 },
                 {
-                    "content": "Beacon · TK-review — Review active",
-                    "priority": "high",
+                    "content": (
+                        "Atlas · TK-work — Build runtime · Working · worker-build"
+                    ),
+                    "priority": "medium",
                     "status": "in_progress",
+                },
+                {
+                    "content": (
+                        "Atlas · TK-submitted — Await review · Awaiting reviewer · "
+                        "submitted by worker-submit"
+                    ),
+                    "priority": "low",
+                    "status": "pending",
                 },
             ],
             [
                 {
-                    "content": "Atlas · TK-submitted — Await review",
+                    "content": (
+                        "Beacon · TK-human — Choose rollout · Needs you · asked by "
+                        "worker-question"
+                    ),
                     "priority": "high",
                     "status": "pending",
                 },
                 {
-                    "content": "Atlas · TK-work — Build runtime",
-                    "priority": "high",
-                    "status": "pending",
-                },
-                {
-                    "content": "Beacon · TK-review — Review active",
-                    "priority": "high",
+                    "content": (
+                        "Beacon · TK-review — Review active · In review · "
+                        "reviewer-one"
+                    ),
+                    "priority": "medium",
                     "status": "in_progress",
+                },
+                {
+                    "content": (
+                        "Atlas · TK-submitted — Await review · Awaiting reviewer · "
+                        "submitted by worker-submit"
+                    ),
+                    "priority": "low",
+                    "status": "pending",
+                },
+                {
+                    "content": (
+                        "Atlas · TK-work — Build runtime · Awaiting reviewer · "
+                        "submitted by worker-build"
+                    ),
+                    "priority": "low",
+                    "status": "pending",
                 },
             ],
             [
                 {
-                    "content": "Watch pursers for board events and seat questions",
-                    "priority": "high",
+                    "content": "pursers is quiet — no active work needs attention",
+                    "priority": "low",
                     "status": "completed",
                 }
             ],
@@ -610,7 +727,7 @@ def test_live_plan_is_bounded_and_represents_overflow() -> None:
     assert len(entries) == 20
     assert entries[-1] == {
         "content": "6 more in-flight tickets (20-entry plan cap)",
-        "priority": "high",
+        "priority": "low",
         "status": "in_progress",
     }
     rendered = json.dumps(entries, sort_keys=True)
@@ -645,7 +762,7 @@ def test_empty_truncated_snapshot_does_not_claim_the_board_is_idle() -> None:
                 "0 more known in-flight; additional active tickets are outside the "
                 "500-ticket snapshot"
             ),
-            "priority": "high",
+            "priority": "low",
             "status": "in_progress",
         }
     ]
@@ -664,6 +781,227 @@ def test_personal_watch_uses_wait_bridge_cursor_and_cancel_teardown(
     tmp_path: Path,
 ) -> None:
     asyncio.run(_personal_watch_uses_wait_bridge_cursor_and_cancel_teardown(tmp_path))
+
+
+def test_personal_watch_projects_digest_holder_and_human_request() -> None:
+    asyncio.run(_personal_watch_projects_digest_holder_and_human_request())
+
+
+def test_personal_watch_retains_reviewer_name_across_live_digest_claim() -> None:
+    asyncio.run(_personal_watch_retains_reviewer_name_across_live_digest_claim())
+
+
+async def _personal_watch_retains_reviewer_name_across_live_digest_claim() -> None:
+    profile = SimpleNamespace(board_id="pursers", principal_id="PR-human")
+    board = PersonalBoardSurface(profile)
+    board.agent_name = "human-personal"
+
+    class SnapshotCentral:
+        async def call_tool(self, name: str, arguments: JSON) -> Any:
+            assert name == "ticket_list"
+            return SimpleNamespace(
+                is_error=False,
+                structured_content={
+                    "result": {
+                        "tickets": [
+                            {
+                                "ticket_id": "TK-review",
+                                "title": "Check the release",
+                                "status": "submitted",
+                                "project": "Atlas",
+                                "claimed_by": "worker-submit",
+                                "dispatch_state": {
+                                    "state": "review_offered",
+                                    "agent_id": "AI-reviewer",
+                                },
+                                "review_offer": {
+                                    "agent_id": "AI-reviewer",
+                                    "agent_name": "reviewer-one",
+                                },
+                            }
+                        ],
+                        "latest_seq": 6,
+                        "total_matching": 1,
+                    }
+                },
+                content=[],
+            )
+
+    class ReviewClaimDigest:
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def digests(
+            self, board_id: str, cursor: int | None, cancel: asyncio.Event
+        ) -> AsyncIterator[JSON]:
+            assert board_id == "pursers"
+            assert cursor == 6
+            # This is the real board_digest ticket shape: active review claims
+            # carry only dispatch_state.agent_id, not review_lease or a name.
+            yield {
+                "cursor_map": {"pursers": 7},
+                "tickets": [
+                    {
+                        "ticket_id": "TK-review",
+                        "board_id": "pursers",
+                        "title": "Check the release",
+                        "transitions": [
+                            {
+                                "from": "submitted",
+                                "to": "submitted",
+                                "actor": "AI-reviewer",
+                                "at": "2030-01-01T00:00:00+00:00",
+                            }
+                        ],
+                        "transitions_omitted_count": 0,
+                        "status_now": "submitted",
+                        "review": {
+                            "verdict": None,
+                            "rejection_count": 0,
+                            "reviewer": None,
+                        },
+                        "claimed_by": "worker-submit",
+                        "dispatch_state": {
+                            "state": "review_claimed",
+                            "kind": "review",
+                            "agent_id": "AI-reviewer",
+                        },
+                        "offers": {},
+                    }
+                ],
+                "human_requests": [],
+            }
+
+    bridge = ReviewClaimDigest()
+    board._client = SnapshotCentral()  # type: ignore[assignment]
+    board._wait_bridge_factory = lambda: bridge
+    rows = [row async for row in board.watch(None, asyncio.Event())]
+
+    prior = agent_module._plan_ticket(rows[0][1]["tickets"][0])
+    assert prior is not None
+    current = agent_module._plan_ticket(rows[1][1], prior=prior)
+    assert current is not None
+    assert current["holder"] == "reviewer-one"
+    assert agent_module._plan_content(current) == (
+        "Atlas · TK-review — Check the release · In review · reviewer-one"
+    )
+    assert "AI-reviewer" not in agent_module._plan_content(current)
+    assert bridge.closed
+
+
+def test_plan_review_transition_does_not_reuse_a_different_offer_holder() -> None:
+    prior = agent_module._plan_ticket(
+        {
+            "ticket_id": "TK-review",
+            "title": "Check the release",
+            "status": "submitted",
+            "claimed_by": "worker-submit",
+            "review_offer": {
+                "agent_id": "AI-old-reviewer",
+                "agent_name": "old-reviewer",
+            },
+        }
+    )
+    assert prior is not None
+
+    current = agent_module._plan_ticket(
+        {
+            "ticket_id": "TK-review",
+            "title": "Check the release",
+            "status_to": "submitted",
+            "dispatch_state": {
+                "state": "review_claimed",
+                "agent_id": "AI-new-reviewer",
+            },
+        },
+        prior=prior,
+    )
+
+    assert current is not None
+    assert current["holder"] is None
+    assert agent_module._plan_content(current).endswith(
+        "In review · reviewer not reported"
+    )
+    assert "old-reviewer" not in agent_module._plan_content(current)
+    assert "AI-new-reviewer" not in agent_module._plan_content(current)
+
+
+async def _personal_watch_projects_digest_holder_and_human_request() -> None:
+    profile = SimpleNamespace(board_id="pursers", principal_id="PR-human")
+    board = PersonalBoardSurface(profile)
+    board.agent_name = "human-personal"
+
+    class SnapshotCentral:
+        async def call_tool(self, name: str, arguments: JSON) -> Any:
+            assert name == "ticket_list"
+            return SimpleNamespace(
+                is_error=False,
+                structured_content={
+                    "result": {
+                        "tickets": [],
+                        "latest_seq": 6,
+                        "total_matching": 0,
+                    }
+                },
+                content=[],
+            )
+
+    class OneDigest:
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def digests(
+            self, board_id: str, cursor: int | None, cancel: asyncio.Event
+        ) -> AsyncIterator[JSON]:
+            assert board_id == "pursers"
+            assert cursor == 6
+            yield {
+                "cursor_map": {"pursers": 7},
+                "tickets": [
+                    {
+                        "ticket_id": "TK-human",
+                        "title": "Choose rollout",
+                        "status_now": "needs_human",
+                        "claimed_by": None,
+                        "dispatch_state": {"state": "needs_human"},
+                    }
+                ],
+                "human_requests": [
+                    {
+                        "ticket_id": "TK-human",
+                        "asked_by": "worker-question",
+                    }
+                ],
+            }
+
+    central = SnapshotCentral()
+    bridge = OneDigest()
+    board._client = central  # type: ignore[assignment]
+    board._wait_bridge_factory = lambda: bridge
+    rows = [row async for row in board.watch(None, asyncio.Event())]
+
+    assert rows[1] == (
+        7,
+        {
+            "kind": "ticket_status_changed",
+            "ticket_id": "TK-human",
+            "title": "Choose rollout",
+            "project": None,
+            "status_to": "needs_human",
+            "dispatch_state": {"state": "needs_human"},
+            "claimed_by": None,
+            "review_state": None,
+            "review_claimed_by": None,
+            "human_request": {
+                "asked_by": {"agent_name": "worker-question"}
+            },
+        },
+    )
+    assert bridge.closed
 
 
 def test_cancel_stops_blocked_watch_snapshot(tmp_path: Path) -> None:
@@ -717,8 +1055,8 @@ async def _cancel_stops_blocked_watch_snapshot(tmp_path: Path) -> None:
             "sessionUpdate": "plan",
             "entries": [
                 {
-                    "content": "Watch pursers for board events and seat questions",
-                    "priority": "high",
+                    "content": "pursers is quiet — no active work needs attention",
+                    "priority": "low",
                     "status": "completed",
                 }
             ],
@@ -794,8 +1132,8 @@ async def _cancel_stops_blocked_wait_bridge_digest_and_closes_bridge(
             "sessionUpdate": "plan",
             "entries": [
                 {
-                    "content": "Watch pursers for board events and seat questions",
-                    "priority": "high",
+                    "content": "pursers is quiet — no active work needs attention",
+                    "priority": "low",
                     "status": "completed",
                 }
             ],
