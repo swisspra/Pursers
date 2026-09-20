@@ -9,9 +9,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Zed: `/watch` now shows the fleet's work as a live plan. One entry per ticket
+  in flight, refreshed from the subscription that already exists, so a human
+  watching twelve seats can read what is moving. The entry count is bounded and
+  says so when it overflows; a ticket in review is never shown as completed,
+  because ACP has no status that means "waiting on a reviewer". An idle board
+  still shows one entry, so quiet reads as quiet rather than as broken.
+- Zed: the guide shows what the integration looks like. Six screenshots taken
+  through an isolated profile against a throwaway board, each placed at the
+  step it illustrates.
 - Zed: the guide now covers Restricted Mode. Zed opens an unfamiliar project
   with every MCP server blocked and no log line to explain it, so Pursers shows
   no state dot and no commands until **Trust and Continue** is clicked.
+- `docs/zed/research/08-surface-audit.md` records what Zed 1.20.2 actually
+  gives an integration, with a citation per row. The finding that shaped this
+  release: an ACP `session/update` reaches a thread with no prompt in flight,
+  but raises no notification by itself. Zed notifies on the thread's `Stopped`
+  event, so ending the turn is the notification. An MCP context server has no
+  equivalent channel at all.
 
 ### Fixed
 
