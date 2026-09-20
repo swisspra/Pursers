@@ -140,7 +140,9 @@ jobs:
           python tools/ci_manifest.py collect --output .ci/collection-counts.json
 
       - name: Run every required Python suite
-        run: python tools/ci_manifest.py run
+        # GitHub-hosted standard runners expose 2 vCPUs. Keep both busy while
+        # leaving build, lock, manifest, and collection checks serial above.
+        run: python tools/ci_manifest.py run --jobs 2
 
       - name: Verify every suite collected tests
         if: ${{ always() }}

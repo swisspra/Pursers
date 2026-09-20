@@ -19,6 +19,7 @@ from pursers_acp.agent import PersonalBoardSurface, StdioWaitBridge
 from pursers_central import central
 
 JSON = dict[str, Any]
+TEST_TIMEOUT_S = float(os.environ.get("PURSERS_TEST_TIMEOUT_S", "30"))
 
 
 class FakeBoard:
@@ -148,7 +149,9 @@ class FakeACPClient:
             ).encode()
         )
         while True:
-            message = await asyncio.wait_for(self.outgoing.get(), 15)
+            message = await asyncio.wait_for(
+                self.outgoing.get(), TEST_TIMEOUT_S
+            )
             if message.get("method") == "session/update":
                 self.updates.append(message["params"])
                 continue
@@ -360,7 +363,7 @@ async def _watch_streams_then_cancel_stops_prompt(tmp_path: Path) -> None:
         await client.initialize()
         session = await client.new_session(tmp_path)
         prompt = asyncio.create_task(client.prompt(session, "watch pursers"))
-        await asyncio.wait_for(board.watch_started.wait(), 1)
+        await asyncio.wait_for(board.watch_started.wait(), TEST_TIMEOUT_S)
         while not any(
             row["update"].get("content", {}).get("text", "").startswith("Board event")
             for row in client.updates
@@ -450,7 +453,7 @@ async def a2a_wait(boards: list[str], only_mine: bool, timeout_s: int, since_seq
         await client.initialize()
         session = await client.new_session(tmp_path)
         prompt = asyncio.create_task(client.prompt(session, "watch pursers"))
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(TEST_TIMEOUT_S):
             while not marker.exists() or len(marker.read_text().splitlines()) < 2:
                 await asyncio.sleep(0.01)
         await client.notify("session/cancel", {"sessionId": session})
@@ -561,7 +564,7 @@ async def _cancel_before_prompt_task_starts_is_bound_to_that_turn(
             "params": {"sessionId": "session"},
         }
     )
-    await asyncio.wait_for(response_sent.wait(), 1)
+    await asyncio.wait_for(response_sent.wait(), TEST_TIMEOUT_S)
 
     response = next(message for message in sent if message.get("id") == 1)
     assert response["result"] == {"stopReason": "cancelled"}
@@ -582,7 +585,7 @@ async def _cancel_before_prompt_task_starts_is_bound_to_that_turn(
             },
         }
     )
-    await asyncio.wait_for(response_sent.wait(), 1)
+    await asyncio.wait_for(response_sent.wait(), TEST_TIMEOUT_S)
     second = next(message for message in sent if message.get("id") == 2)
     assert second["result"] == {"stopReason": "end_turn"}
     await agent.close()
@@ -597,9 +600,11 @@ async def _cancel_stops_in_flight_read_and_returns_cancelled(
         await client.initialize()
         session = await client.new_session(tmp_path)
         prompt = asyncio.create_task(client.prompt(session, "my tickets"))
-        await asyncio.wait_for(board.read_started.wait(), 1)
+        await asyncio.wait_for(board.read_started.wait(), TEST_TIMEOUT_S)
         await client.notify("session/cancel", {"sessionId": session})
-        assert await asyncio.wait_for(prompt, 1) == {"stopReason": "cancelled"}
+        assert await asyncio.wait_for(prompt, TEST_TIMEOUT_S) == {
+            "stopReason": "cancelled"
+        }
         assert board.read_cancelled.is_set()
     finally:
         await client.close()
@@ -618,9 +623,11 @@ async def _cancel_stops_approved_in_flight_write(tmp_path: Path) -> None:
         prompt = asyncio.create_task(
             client.prompt(session, "create ticket Title :: Description")
         )
-        await asyncio.wait_for(board.mutate_started.wait(), 1)
+        await asyncio.wait_for(board.mutate_started.wait(), TEST_TIMEOUT_S)
         await client.notify("session/cancel", {"sessionId": session})
-        assert await asyncio.wait_for(prompt, 1) == {"stopReason": "cancelled"}
+        assert await asyncio.wait_for(prompt, TEST_TIMEOUT_S) == {
+            "stopReason": "cancelled"
+        }
         assert board.mutate_cancelled.is_set()
         updates = [row["update"] for row in client.updates]
         assert any(

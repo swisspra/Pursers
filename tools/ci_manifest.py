@@ -12,6 +12,7 @@ state and process providers rather than depend on operator-machine access.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -19,6 +20,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -30,6 +33,17 @@ class Suite:
     path: str
     cwd: str = "."
     covers: tuple[str, ...] = ()
+    # Relative wall-time hint used only to start expensive parallel work first.
+    # Output and validation always retain manifest order.
+    parallel_weight: int = 0
+
+
+@dataclass(frozen=True)
+class SuiteResult:
+    suite: Suite
+    returncode: int
+    output: str
+    duration_s: float
 
 
 @dataclass(frozen=True)
@@ -62,37 +76,91 @@ class IntegrationFilesState:
 
 
 SUITES: tuple[Suite, ...] = (
-    Suite("central", "packages/central/tests", covers=("packages/central",)),
-    Suite("client", "packages/client/tests", covers=("packages/client",)),
+    Suite(
+        "central",
+        "packages/central/tests",
+        covers=("packages/central",),
+        parallel_weight=90,
+    ),
+    Suite(
+        "client",
+        "packages/client/tests",
+        covers=("packages/client",),
+        parallel_weight=9,
+    ),
     Suite(
         "import",
         "packages/import/tests",
         cwd="packages/import",
         covers=("packages/import",),
+        parallel_weight=24,
     ),
-    Suite("personal", "packages/personal/tests", covers=("packages/personal",)),
-    Suite("wait-bridge", "tools/wait-bridge/tests", covers=("tools/wait-bridge",)),
+    Suite(
+        "personal",
+        "packages/personal/tests",
+        covers=("packages/personal",),
+        parallel_weight=3,
+    ),
+    Suite(
+        "wait-bridge",
+        "tools/wait-bridge/tests",
+        covers=("tools/wait-bridge",),
+        parallel_weight=47,
+    ),
     Suite(
         "fleet-dashboard",
         "tools/fleet-dashboard/tests",
         covers=("tools/fleet-dashboard",),
+        parallel_weight=85,
     ),
-    Suite("coordinator", "tools/coordinator/tests", covers=("tools/coordinator",)),
-    Suite("board-butler", "tools/board-butler/tests", covers=("tools/board-butler",)),
+    Suite(
+        "coordinator",
+        "tools/coordinator/tests",
+        covers=("tools/coordinator",),
+        parallel_weight=3,
+    ),
+    Suite(
+        "board-butler",
+        "tools/board-butler/tests",
+        covers=("tools/board-butler",),
+        parallel_weight=4,
+    ),
     Suite(
         "worker-runtime",
         "tools/worker-runtime/tests",
         covers=("tools/worker-runtime",),
+        parallel_weight=15,
     ),
-    Suite("acp-seat", "tools/acp-seat/tests", covers=("tools/acp-seat",)),
-    Suite("acp-agent", "tools/acp-agent/tests", covers=("tools/acp-agent",)),
-    Suite("seat-kit", "tools/seat-kit/tests", covers=("tools/seat-kit",)),
+    Suite(
+        "acp-seat",
+        "tools/acp-seat/tests",
+        covers=("tools/acp-seat",),
+        parallel_weight=8,
+    ),
+    Suite(
+        "acp-agent",
+        "tools/acp-agent/tests",
+        covers=("tools/acp-agent",),
+        parallel_weight=2,
+    ),
+    Suite(
+        "seat-kit",
+        "tools/seat-kit/tests",
+        covers=("tools/seat-kit",),
+        parallel_weight=93,
+    ),
     Suite(
         "aionui-extension",
         "tools/aionui-extension/tests",
         covers=("tools/aionui-extension", "packages/client", "packages/personal"),
+        parallel_weight=143,
     ),
-    Suite("release-tools", "tools/tests", covers=("tools",)),
+    Suite(
+        "release-tools",
+        "tools/tests",
+        covers=("tools",),
+        parallel_weight=126,
+    ),
 )
 
 INTEGRATION_FILES_MANIFEST = Path(
@@ -103,6 +171,7 @@ SHA256_MANIFEST_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
 # similarly sized run plus normal filesystem churn.
 DEFAULT_MIN_FREE_BYTES = 10 * 1024 * 1024 * 1024
 MIN_FREE_BYTES_ENV = "PURSERS_CI_MIN_FREE_BYTES"
+DEFAULT_JOB_CAP = 4
 
 
 def require_free_space(
@@ -295,7 +364,23 @@ def pytest_target(suite: Suite) -> str:
     return Path(suite.path).relative_to(suite.cwd).as_posix()
 
 
-def suite_environment(root: Path) -> dict[str, str]:
+def default_job_count(
+    cpu_count: int | None = None,
+    load_average: float | None = None,
+) -> int:
+    """Use idle CPU capacity without adding pressure to an overloaded host."""
+    available = os.cpu_count() if cpu_count is None else cpu_count
+    available = max(1, available or 1)
+    if load_average is None:
+        try:
+            load_average = os.getloadavg()[0]
+        except (AttributeError, OSError):
+            load_average = 0.0
+    idle_capacity = max(1, int(available - max(0.0, load_average)))
+    return min(DEFAULT_JOB_CAP, available, idle_capacity)
+
+
+def suite_environment(root: Path, scratch: Path | None = None) -> dict[str, str]:
     """Prefer checkout package sources over operator installations."""
     environment = os.environ.copy()
     sources = [str(path) for path in sorted((root / "packages").glob("*/src"))]
@@ -303,6 +388,22 @@ def suite_environment(root: Path) -> dict[str, str]:
     if inherited:
         sources.append(inherited)
     environment["PYTHONPATH"] = os.pathsep.join(sources)
+    if scratch is not None:
+        isolated = {
+            "TMPDIR": scratch / "tmp",
+            "TEMP": scratch / "tmp",
+            "TMP": scratch / "tmp",
+            "XDG_CACHE_HOME": scratch / "xdg-cache",
+            "PIP_CACHE_DIR": scratch / "pip-cache",
+            "UV_CACHE_DIR": scratch / "uv-cache",
+            "npm_config_cache": scratch / "npm-cache",
+        }
+        for path in set(isolated.values()):
+            path.mkdir(parents=True, exist_ok=True)
+        environment.update({name: str(path) for name, path in isolated.items()})
+        # Do not let parallel interpreters race on checkout __pycache__ files.
+        # Disabling writes avoids the cold I/O cost of a new tree per suite.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return environment
 
 
@@ -341,21 +442,112 @@ def collect_counts(root: Path, suites: Sequence[Suite] = SUITES) -> dict[str, An
     return {"schema": 1, "suites": results}
 
 
-def run_suites(root: Path, suites: Sequence[Suite] = SUITES) -> None:
-    for suite in suites:
-        print(f"::group::pytest {suite.name} ({suite.path})", flush=True)
-        completed = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", pytest_target(suite)],
-            cwd=root / suite.cwd,
-            env=suite_environment(root),
-            check=False,
+def _run_suite(root: Path, suite: Suite, scratch: Path) -> SuiteResult:
+    pytest_tmp = scratch / "pytest-tmp"
+    pytest_cache = scratch / "pytest-cache"
+    pytest_tmp.mkdir(parents=True, exist_ok=True)
+    pytest_cache.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--basetemp",
+            str(pytest_tmp),
+            "-o",
+            f"cache_dir={pytest_cache}",
+            pytest_target(suite),
+        ],
+        cwd=root / suite.cwd,
+        env=suite_environment(root, scratch),
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return SuiteResult(
+        suite=suite,
+        returncode=completed.returncode,
+        output=completed.stdout or "",
+        duration_s=time.monotonic() - started,
+    )
+
+
+def _print_suite_result(result: SuiteResult) -> None:
+    suite = result.suite
+    print(f"::group::pytest {suite.name} ({suite.path})", flush=True)
+    if result.output:
+        print(result.output, end="" if result.output.endswith("\n") else "\n")
+    print(
+        f"ci-manifest suite {suite.name} duration={result.duration_s:.2f}s "
+        f"exit={result.returncode}",
+        flush=True,
+    )
+    print("::endgroup::", flush=True)
+
+
+def run_suites(
+    root: Path,
+    suites: Sequence[Suite] = SUITES,
+    jobs: int | None = None,
+) -> None:
+    worker_count = default_job_count() if jobs is None else jobs
+    if worker_count < 1:
+        raise ValueError("--jobs must be at least 1")
+
+    configured_tmp = os.environ.get("TMPDIR")
+    scratch_parent = (
+        Path(configured_tmp).expanduser().resolve()
+        if configured_tmp
+        else Path(tempfile.gettempdir()).resolve()
+    )
+    scratch_parent.mkdir(parents=True, exist_ok=True)
+    failures: list[SuiteResult] = []
+    with tempfile.TemporaryDirectory(
+        prefix="pursers-ci-manifest-",
+        dir=scratch_parent,
+    ) as temporary:
+        scratch_root = Path(temporary)
+        indexed = tuple(
+            (suite, scratch_root / f"{index:02d}-{suite.name}")
+            for index, suite in enumerate(suites)
         )
-        print("::endgroup::", flush=True)
-        if completed.returncode != 0:
-            raise RuntimeError(
-                f"pytest failed for {suite.name} ({suite.path}) "
-                f"with exit code {completed.returncode}"
-            )
+
+        if worker_count == 1:
+            for suite, scratch in indexed:
+                result = _run_suite(root, suite, scratch)
+                _print_suite_result(result)
+                if result.returncode != 0:
+                    failures.append(result)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(worker_count, max(1, len(indexed)))
+            ) as executor:
+                prioritized = sorted(
+                    enumerate(indexed),
+                    key=lambda item: (-item[1][0].parallel_weight, item[0]),
+                )
+                futures = {
+                    position: executor.submit(_run_suite, root, suite, scratch)
+                    for position, (suite, scratch) in prioritized
+                }
+                # Await and print in manifest order, regardless of finish order.
+                for position in range(len(indexed)):
+                    result = futures[position].result()
+                    _print_suite_result(result)
+                    if result.returncode != 0:
+                        failures.append(result)
+
+    if failures:
+        detail = "; ".join(
+            f"pytest failed for {result.suite.name} ({result.suite.path}) "
+            f"with exit code {result.returncode}"
+            for result in failures
+        )
+        raise RuntimeError(f"pytest failures: {detail}")
+    print(f"ci manifest: all {len(suites)} required pytest suites passed")
 
 
 def run_seat_suites(root: Path, suites: Sequence[Suite] = SUITES) -> None:
@@ -448,7 +640,16 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("check", help="compare test directories with the manifest")
     collect = subparsers.add_parser("collect", help="collect every required suite")
     collect.add_argument("--output", type=Path, required=True)
-    subparsers.add_parser("run", help="run every required suite")
+    run = subparsers.add_parser("run", help="run every required suite")
+    run.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        help=(
+            "parallel pytest groups "
+            f"(default: idle CPU capacity capped at {DEFAULT_JOB_CAP})"
+        ),
+    )
     seat_run = subparsers.add_parser(
         "seat-suite-report",
         help="run seat suites and report release-owned digest drift; not a CI gate",
@@ -477,7 +678,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         elif args.command == "run":
-            run_suites(root)
+            run_suites(root, jobs=args.jobs)
         elif args.command == "seat-suite-report":
             print_seat_digest_report(root, args.base_ref)
             run_seat_suites(root)

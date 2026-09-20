@@ -5,6 +5,8 @@ import re
 import stat
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,11 +22,13 @@ from ci_manifest import (  # noqa: E402
     Suite,
     changed_paths_since,
     covering_suites,
+    default_job_count,
     inspect_integration_files,
     parse_collected_count,
     print_seat_digest_report,
     pytest_target,
     require_free_space,
+    run_suites,
     run_seat_suites,
     suite_environment,
     validate_integration_files,
@@ -254,6 +258,189 @@ def test_suite_environment_prepends_checkout_package_sources(
         str(tmp_path / "packages/personal/src"),
         "/existing/source",
     ]
+
+
+def test_default_job_count_uses_idle_cpu_capacity_with_a_sensible_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert default_job_count(0, 0.0) == 1
+    assert default_job_count(1, 0.0) == 1
+    assert default_job_count(3, 0.0) == 3
+    assert default_job_count(128, 0.0) == 4
+    assert default_job_count(10, 7.2) == 2
+    assert default_job_count(10, 12.0) == 1
+    monkeypatch.setattr(ci_manifest.os, "cpu_count", lambda: 10)
+    monkeypatch.setattr(ci_manifest.os, "getloadavg", lambda: (8.1, 0.0, 0.0))
+    assert default_job_count() == 1
+
+
+def test_parallel_runner_buffers_output_in_manifest_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    suites = (
+        Suite("slow-first", "packages/first/tests"),
+        Suite("fast-second", "packages/second/tests"),
+    )
+
+    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        target = command[-1]
+        if target == "packages/first/tests":
+            time.sleep(0.04)
+            return SimpleNamespace(returncode=0, stdout="first output\n")
+        return SimpleNamespace(returncode=0, stdout="second output\n")
+
+    monkeypatch.setattr(ci_manifest.subprocess, "run", run)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "runner-tmp"))
+
+    run_suites(tmp_path, suites=suites, jobs=2)
+
+    output = capsys.readouterr().out
+    assert output.index("pytest slow-first") < output.index("first output")
+    assert output.index("first output") < output.index("pytest fast-second")
+    assert output.index("pytest fast-second") < output.index("second output")
+
+
+def test_parallel_runner_starts_high_weight_suites_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suites = (
+        Suite("low", "packages/low/tests", parallel_weight=1),
+        Suite("high", "packages/high/tests", parallel_weight=100),
+        Suite("medium", "packages/medium/tests", parallel_weight=50),
+    )
+    lock = threading.Lock()
+    started: list[str] = []
+    release = threading.Event()
+
+    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        with lock:
+            started.append(command[-1])
+            if len(started) == 2:
+                release.set()
+        assert release.wait(timeout=1)
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(ci_manifest.subprocess, "run", run)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "runner-tmp"))
+
+    run_suites(tmp_path, suites=suites, jobs=2)
+
+    assert set(started[:2]) == {"packages/high/tests", "packages/medium/tests"}
+
+
+def test_parallel_runner_aggregates_every_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suites = (
+        Suite("first", "packages/first/tests"),
+        Suite("second", "packages/second/tests"),
+        Suite("third", "packages/third/tests"),
+    )
+    exits = {
+        "packages/first/tests": 3,
+        "packages/second/tests": 0,
+        "packages/third/tests": 7,
+    }
+
+    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(returncode=exits[command[-1]], stdout="")
+
+    monkeypatch.setattr(ci_manifest.subprocess, "run", run)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "runner-tmp"))
+
+    with pytest.raises(RuntimeError) as raised:
+        run_suites(tmp_path, suites=suites, jobs=3)
+
+    message = str(raised.value)
+    assert "pytest failed for first (packages/first/tests) with exit code 3" in message
+    assert "pytest failed for third (packages/third/tests) with exit code 7" in message
+    assert "second" not in message
+
+
+def test_jobs_one_runs_sequentially_in_manifest_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    suites = (
+        Suite("first", "packages/first/tests"),
+        Suite("second", "packages/second/tests"),
+    )
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+    targets: list[str] = []
+
+    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+            targets.append(command[-1])
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return SimpleNamespace(returncode=0, stdout="ok\n")
+
+    monkeypatch.setattr(ci_manifest.subprocess, "run", run)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "runner-tmp"))
+
+    run_suites(tmp_path, suites=suites, jobs=1)
+
+    assert targets == ["packages/first/tests", "packages/second/tests"]
+    assert maximum_active == 1
+    assert capsys.readouterr().out.endswith(
+        "ci manifest: all 2 required pytest suites passed\n"
+    )
+
+
+def test_parallel_runner_isolates_each_suite_tmp_and_cache_dirs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    suites = (
+        Suite("first", "packages/first/tests"),
+        Suite("second", "packages/second/tests"),
+    )
+    environments: list[dict[str, str]] = []
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        environments.append(environment)
+        commands.append(command)
+        for name in (
+            "TMPDIR",
+            "XDG_CACHE_HOME",
+            "PIP_CACHE_DIR",
+            "UV_CACHE_DIR",
+            "npm_config_cache",
+        ):
+            assert Path(environment[name]).is_dir()
+        assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(ci_manifest.subprocess, "run", run)
+    configured_tmp = tmp_path / "owned-tmp"
+    monkeypatch.setenv("TMPDIR", str(configured_tmp))
+
+    run_suites(tmp_path, suites=suites, jobs=2)
+
+    assert len(environments) == 2
+    for name in (
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "PIP_CACHE_DIR",
+        "UV_CACHE_DIR",
+        "npm_config_cache",
+    ):
+        assert environments[0][name] != environments[1][name]
+        assert Path(environments[0][name]).is_relative_to(configured_tmp)
+        assert Path(environments[1][name]).is_relative_to(configured_tmp)
+    assert all("--basetemp" in command for command in commands)
+    assert all("cache_dir=" in " ".join(command) for command in commands)
 
 
 def test_verify_counts_requires_every_suite_to_be_positive() -> None:

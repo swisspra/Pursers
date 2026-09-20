@@ -46,6 +46,7 @@ MAX_CONFIG_BYTES = 1_000_000
 MAX_HTTP_BODY_BYTES = 65_536
 MAX_LOG_BYTES = 262_144
 MAX_SELECTED_VALUE_BYTES = 16_384
+TEST_TIMEOUT_S = float(os.environ.get("PURSERS_TEST_TIMEOUT_S", "30"))
 SENSITIVE_KEY = re.compile(r"(?:authorization|bearer|cookie|password|secret|token|private_key)", re.I)
 PRIVATE_PATH = re.compile(r"(?:/Users/|/home/|[A-Za-z]:\\\\Users\\\\)")
 SECRET_VALUE = re.compile(
@@ -959,7 +960,7 @@ def _process_cwd(pid: int, label: str) -> Path:
     lsof = _lsof_executable(f"{label} working directory is unavailable")
     completed = subprocess.run(
         [lsof, "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
-        text=True, capture_output=True, check=False, timeout=5,
+        text=True, capture_output=True, check=False, timeout=TEST_TIMEOUT_S,
         env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
     )
     paths = [line[1:] for line in completed.stdout.splitlines() if line.startswith("n")]
