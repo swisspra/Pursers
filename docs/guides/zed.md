@@ -67,9 +67,15 @@ The default form is:
 }
 ```
 
+![Pursers extension configure modal showing the default Central URL, local board ID, and token-file placeholder](../media/zed/configure-defaults-dark.png)
+
 Save the modal. In **Settings → AI → MCP Servers**, confirm that Pursers has a
 green state dot. Open the Agent Panel and run `/board`. A successful response
 starts with the configured board ID and shows a compact status summary.
+
+![Zed MCP Servers settings showing Pursers connected with a green state dot and extension badge](../media/zed/mcp-servers-connected-dark.png)
+
+![Zed Agent Panel showing a compact Pursers board summary and Needs you ticket list](../media/zed/agent-board-summary-dark.png)
 
 ### Restricted Mode
 
@@ -86,10 +92,19 @@ Keep one Agent Panel thread for the board:
 1. Run `/board` to see what needs attention.
 2. Run `/create <summary>` when you want to add work. Review Zed's native tool
    permission prompt before allowing the write.
+
+   ![Zed Agent Panel waiting for permission before the Pursers ticket_create write](../media/zed/create-permission-dark.png)
+
 3. Run `/watch` while claims, reviews, or questions matter. Keep that turn
    active.
+
+   ![Zed Agent Panel showing an active Pursers watch with a new ticket event and advanced cursor](../media/zed/watch-event-dark.png)
+
 4. Run `/evidence TK-…` before acting on a submission. Check the exact commit,
    file list, test output, and independent-review state.
+
+   ![Zed Agent Panel showing bounded ticket evidence with branch, commit, files, tests, and review state](../media/zed/agent-evidence-dark.png)
+
 5. Merge only through your normal, explicitly authorized repository workflow.
    The extension does not add a merge button.
 
