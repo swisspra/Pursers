@@ -258,9 +258,10 @@ async def _prompts_have_at_most_one_argument_and_human_facing_copy(
     text = {name: value.messages[0].content.text for name, value in rendered.items()}
     assert text == {
         "board": (
-            "Your work on `prompt-board` at a glance: its board ID, key counts, and up to "
-            "10 active tickets needing attention, each led by its ticket ID. This view "
-            "stays on this board."
+            "Your work on `prompt-board` at a glance: its board ID and board-wide key "
+            "counts, followed by a clearly labeled subset of up to 10 active tickets "
+            "needing attention. Each row leads with its ticket ID and gives its specific "
+            "reason for needing attention. This view stays on this board."
         ),
         "create": (
             "New work for `prompt-board`: 'Ship the guide'. Any missing required detail "
@@ -295,7 +296,8 @@ async def _prompts_have_at_most_one_argument_and_human_facing_copy(
         "Markdown",
     )
     assert all(term not in body for term in forbidden for body in text.values())
-    assert "no more than 10 active tickets" in server.instructions
+    assert "subset of no more than 10 active tickets" in server.instructions
+    assert "each row with its ID and specific reason" in server.instructions
     assert "host's single native confirmation" in server.instructions
     assert "resume only from a returned positive cursor" in server.instructions
 
@@ -379,6 +381,92 @@ async def _relay_calls_read_only_tool_on_throwaway_central(tmp_path: Path) -> No
         }
     finally:
         await relay.aclose()
+
+
+def test_board_prompt_matches_board_wide_counts_to_a_bounded_subset(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_board_prompt_matches_board_wide_counts_to_a_bounded_subset(tmp_path))
+
+
+async def _board_prompt_matches_board_wide_counts_to_a_bounded_subset(
+    tmp_path: Path,
+) -> None:
+    central = MCPServer("Seeded throwaway Pursers Central")
+    calls: list[tuple[str, str, int | None]] = []
+    tickets = [
+        {
+            "ticket_id": f"TK-{index:03d}",
+            "status": "open" if index <= 7 else "submitted",
+            "attention_reason": (
+                "work offer awaiting response"
+                if index <= 7
+                else "independent review awaiting claim"
+            ),
+        }
+        for index in range(1, 13)
+    ]
+
+    @central.tool(description="Read board-wide counts from one board.")
+    async def board_status(board_id: str) -> dict[str, Any]:
+        calls.append(("board_status", board_id, None))
+        return {
+            "board_id": board_id,
+            "key_counts": {"open": 7, "in_review": 5},
+            "needs_attention_total": len(tickets),
+        }
+
+    @central.tool(description="Read a bounded subset of tickets from one board.")
+    async def ticket_list(board_id: str, limit: int = 10) -> dict[str, Any]:
+        calls.append(("ticket_list", board_id, limit))
+        return {
+            "board_id": board_id,
+            "tickets": tickets[:limit],
+            "returned": min(limit, len(tickets)),
+            "total": len(tickets),
+        }
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        async with Client(central, mode="2026-07-28", cache=None) as client:
+            yield client
+
+    token_file = tmp_path / "credential.jwt"
+    token_file.write_text("throwaway-credential", encoding="utf-8")
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="seeded-board",
+        token_file=token_file,
+        connection_factory=connect,
+    )
+    try:
+        async with Client(build_server(relay), mode="2026-07-28", cache=None) as client:
+            await client.list_tools()
+            rendered = await client.get_prompt("board")
+            status = await client.call_tool("board_status")
+            listed = await client.call_tool("ticket_list", {"limit": 10})
+    finally:
+        await relay.aclose()
+
+    prompt = rendered.messages[0].content.text
+    assert "board-wide key counts" in prompt
+    assert "clearly labeled subset of up to 10" in prompt
+    assert "specific reason for needing attention" in prompt
+    assert status.structured_content == {
+        "board_id": "seeded-board",
+        "key_counts": {"open": 7, "in_review": 5},
+        "needs_attention_total": 12,
+    }
+    assert listed.structured_content == {
+        "board_id": "seeded-board",
+        "tickets": tickets[:10],
+        "returned": 10,
+        "total": 12,
+    }
+    assert calls == [
+        ("board_status", "seeded-board", None),
+        ("ticket_list", "seeded-board", 10),
+    ]
 
 
 def test_stdio_framing_has_no_stdout_noise_and_completes_initialize(

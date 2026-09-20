@@ -45,13 +45,14 @@ DEFAULT_TOOLS = frozenset(
 WAIT_TOOL_NAMES = frozenset({"a2a_wait", "ticket_question_wait"})
 MAX_WAIT_SECONDS = 50
 PROMPT_BEHAVIOR_INSTRUCTIONS = (
-    "Pursers prompt behavior: board summaries stay on the selected board, include no "
-    "more than 10 active tickets, and lead ticket rows with IDs. Ticket creation first "
-    "collects only missing required fields, performs one create call, and relies on the "
-    "host's single native confirmation. Watches prefer a2a_wait, otherwise use bounded "
-    "board_catchup with a wait-bridge notice; they resume only from a returned positive "
-    "cursor. Evidence and answers stay on one exact ticket, and answer resolution runs "
-    "once. Results are compact and never expand into fleet or unrelated-board data."
+    "Pursers prompt behavior: board summaries stay on the selected board, report "
+    "board-wide counts, clearly label the attention rows as a subset of no more than "
+    "10 active tickets, and lead each row with its ID and specific reason. Ticket "
+    "creation first collects only missing required fields, performs one create call, and "
+    "relies on the host's single native confirmation. Watches prefer a2a_wait, otherwise "
+    "use bounded board_catchup with a wait-bridge notice; they resume only from a returned "
+    "positive cursor. Evidence and answers stay on one exact ticket, and answer resolution "
+    "runs once. Results are compact and never expand into fleet or unrelated-board data."
 )
 
 
@@ -285,9 +286,10 @@ class CentralRelay:
 def _prompt_text(name: str, argument: str | None, board: str) -> str:
     if name == "board":
         return (
-            f"Your work on `{board}` at a glance: its board ID, key counts, and up to "
-            "10 active tickets needing attention, each led by its ticket ID. This view "
-            "stays on this board."
+            f"Your work on `{board}` at a glance: its board ID and board-wide key "
+            "counts, followed by a clearly labeled subset of up to 10 active tickets "
+            "needing attention. Each row leads with its ticket ID and gives its specific "
+            "reason for needing attention. This view stays on this board."
         )
     if name == "create":
         return (
