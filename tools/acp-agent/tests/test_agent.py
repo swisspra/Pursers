@@ -787,6 +787,147 @@ def test_personal_watch_projects_digest_holder_and_human_request() -> None:
     asyncio.run(_personal_watch_projects_digest_holder_and_human_request())
 
 
+def test_personal_watch_retains_reviewer_name_across_live_digest_claim() -> None:
+    asyncio.run(_personal_watch_retains_reviewer_name_across_live_digest_claim())
+
+
+async def _personal_watch_retains_reviewer_name_across_live_digest_claim() -> None:
+    profile = SimpleNamespace(board_id="pursers", principal_id="PR-human")
+    board = PersonalBoardSurface(profile)
+    board.agent_name = "human-personal"
+
+    class SnapshotCentral:
+        async def call_tool(self, name: str, arguments: JSON) -> Any:
+            assert name == "ticket_list"
+            return SimpleNamespace(
+                is_error=False,
+                structured_content={
+                    "result": {
+                        "tickets": [
+                            {
+                                "ticket_id": "TK-review",
+                                "title": "Check the release",
+                                "status": "submitted",
+                                "project": "Atlas",
+                                "claimed_by": "worker-submit",
+                                "dispatch_state": {
+                                    "state": "review_offered",
+                                    "agent_id": "AI-reviewer",
+                                },
+                                "review_offer": {
+                                    "agent_id": "AI-reviewer",
+                                    "agent_name": "reviewer-one",
+                                },
+                            }
+                        ],
+                        "latest_seq": 6,
+                        "total_matching": 1,
+                    }
+                },
+                content=[],
+            )
+
+    class ReviewClaimDigest:
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def digests(
+            self, board_id: str, cursor: int | None, cancel: asyncio.Event
+        ) -> AsyncIterator[JSON]:
+            assert board_id == "pursers"
+            assert cursor == 6
+            # This is the real board_digest ticket shape: active review claims
+            # carry only dispatch_state.agent_id, not review_lease or a name.
+            yield {
+                "cursor_map": {"pursers": 7},
+                "tickets": [
+                    {
+                        "ticket_id": "TK-review",
+                        "board_id": "pursers",
+                        "title": "Check the release",
+                        "transitions": [
+                            {
+                                "from": "submitted",
+                                "to": "submitted",
+                                "actor": "AI-reviewer",
+                                "at": "2030-01-01T00:00:00+00:00",
+                            }
+                        ],
+                        "transitions_omitted_count": 0,
+                        "status_now": "submitted",
+                        "review": {
+                            "verdict": None,
+                            "rejection_count": 0,
+                            "reviewer": None,
+                        },
+                        "claimed_by": "worker-submit",
+                        "dispatch_state": {
+                            "state": "review_claimed",
+                            "kind": "review",
+                            "agent_id": "AI-reviewer",
+                        },
+                        "offers": {},
+                    }
+                ],
+                "human_requests": [],
+            }
+
+    bridge = ReviewClaimDigest()
+    board._client = SnapshotCentral()  # type: ignore[assignment]
+    board._wait_bridge_factory = lambda: bridge
+    rows = [row async for row in board.watch(None, asyncio.Event())]
+
+    prior = agent_module._plan_ticket(rows[0][1]["tickets"][0])
+    assert prior is not None
+    current = agent_module._plan_ticket(rows[1][1], prior=prior)
+    assert current is not None
+    assert current["holder"] == "reviewer-one"
+    assert agent_module._plan_content(current) == (
+        "Atlas · TK-review — Check the release · In review · reviewer-one"
+    )
+    assert "AI-reviewer" not in agent_module._plan_content(current)
+    assert bridge.closed
+
+
+def test_plan_review_transition_does_not_reuse_a_different_offer_holder() -> None:
+    prior = agent_module._plan_ticket(
+        {
+            "ticket_id": "TK-review",
+            "title": "Check the release",
+            "status": "submitted",
+            "claimed_by": "worker-submit",
+            "review_offer": {
+                "agent_id": "AI-old-reviewer",
+                "agent_name": "old-reviewer",
+            },
+        }
+    )
+    assert prior is not None
+
+    current = agent_module._plan_ticket(
+        {
+            "ticket_id": "TK-review",
+            "title": "Check the release",
+            "status_to": "submitted",
+            "dispatch_state": {
+                "state": "review_claimed",
+                "agent_id": "AI-new-reviewer",
+            },
+        },
+        prior=prior,
+    )
+
+    assert current is not None
+    assert current["holder"] is None
+    assert agent_module._plan_content(current).endswith(
+        "In review · reviewer not reported"
+    )
+    assert "old-reviewer" not in agent_module._plan_content(current)
+    assert "AI-new-reviewer" not in agent_module._plan_content(current)
+
+
 async def _personal_watch_projects_digest_holder_and_human_request() -> None:
     profile = SimpleNamespace(board_id="pursers", principal_id="PR-human")
     board = PersonalBoardSurface(profile)

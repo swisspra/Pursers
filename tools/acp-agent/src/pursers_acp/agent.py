@@ -530,6 +530,14 @@ class PersonalBoardSurface:
                         "review_state": ticket.get("review_state"),
                         "review_claimed_by": ticket.get("review_claimed_by"),
                     }
+                    offers = ticket.get("offers")
+                    review_offer = (
+                        offers.get("review_offer")
+                        if isinstance(offers, Mapping)
+                        else None
+                    )
+                    if isinstance(review_offer, Mapping):
+                        event["review_offer"] = dict(review_offer)
                     request = human_requests.get(ticket.get("ticket_id"))
                     if request is not None:
                         event["human_request"] = {
@@ -1248,6 +1256,19 @@ def _plan_ticket(
         prior_project = prior.get("project")
         if isinstance(prior_project, str) and prior_project:
             project = prior_project
+    review_offer = ticket.get("review_offer")
+    if not isinstance(review_offer, Mapping):
+        offers = ticket.get("offers")
+        review_offer = (
+            offers.get("review_offer") if isinstance(offers, Mapping) else None
+        )
+    offered_reviewer_name = (
+        review_offer.get("agent_name") if isinstance(review_offer, Mapping) else None
+    )
+    offered_reviewer_id = (
+        review_offer.get("agent_id") if isinstance(review_offer, Mapping) else None
+    )
+    active_reviewer_id: Any = None
     holder: Any = None
     if phase == "needs_human":
         request = ticket.get("human_request")
@@ -1259,10 +1280,22 @@ def _plan_ticket(
         lease = ticket.get("review_lease")
         if isinstance(lease, Mapping):
             holder = lease.get("reviewer_agent_name")
+            active_reviewer_id = lease.get("reviewer_agent_id")
         holder = holder or ticket.get("review_claimed_by")
         dispatch = ticket.get("dispatch_state")
         if isinstance(dispatch, Mapping):
             holder = holder or dispatch.get("agent_name")
+            active_reviewer_id = active_reviewer_id or dispatch.get("agent_id")
+        # board_digest intentionally omits review_lease and exposes only the
+        # active reviewer's agent_id. Retain the human name from the preceding
+        # review offer, but only when its ID matches the new active holder.
+        if (
+            not (isinstance(holder, str) and holder.strip())
+            and isinstance(active_reviewer_id, str)
+            and prior is not None
+            and prior.get("reviewer_agent_id") == active_reviewer_id
+        ):
+            holder = prior.get("reviewer_name")
     else:
         holder = ticket.get("claimed_by") or ticket.get("assigned_to")
     if not (isinstance(holder, str) and holder.strip()):
@@ -1279,6 +1312,17 @@ def _plan_ticket(
         "project": project,
         "phase": phase,
         "holder": safe_holder,
+        "reviewer_name": (
+            safe_holder
+            if phase == "review"
+            else _bounded(offered_reviewer_name.strip(), 100)
+            if isinstance(offered_reviewer_name, str)
+            and offered_reviewer_name.strip()
+            else None
+        ),
+        "reviewer_agent_id": (
+            active_reviewer_id if phase == "review" else offered_reviewer_id
+        ),
     }
 
 
