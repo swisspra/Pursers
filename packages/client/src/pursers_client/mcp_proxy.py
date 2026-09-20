@@ -44,6 +44,15 @@ DEFAULT_TOOLS = frozenset(
 )
 WAIT_TOOL_NAMES = frozenset({"a2a_wait", "ticket_question_wait"})
 MAX_WAIT_SECONDS = 50
+PROMPT_BEHAVIOR_INSTRUCTIONS = (
+    "Pursers prompt behavior: board summaries stay on the selected board, include no "
+    "more than 10 active tickets, and lead ticket rows with IDs. Ticket creation first "
+    "collects only missing required fields, performs one create call, and relies on the "
+    "host's single native confirmation. Watches prefer a2a_wait, otherwise use bounded "
+    "board_catchup with a wait-bridge notice; they resume only from a returned positive "
+    "cursor. Evidence and answers stay on one exact ticket, and answer resolution runs "
+    "once. Results are compact and never expand into fleet or unrelated-board data."
+)
 
 
 class RelayFailure(RuntimeError):
@@ -276,35 +285,31 @@ class CentralRelay:
 def _prompt_text(name: str, argument: str | None, board: str) -> str:
     if name == "board":
         return (
-            f"For board `{board}`, call `board_status` and a bounded `ticket_list` "
-            "(`include_closed=false`, at most 10 useful rows). Return compact Markdown: "
-            "board ID first, counts, then a **Needs you** list with ticket IDs first. "
-            "Do not dump other boards or the fleet."
+            f"Your work on `{board}` at a glance: its board ID, key counts, and up to "
+            "10 active tickets needing attention, each led by its ticket ID. This view "
+            "stays on this board."
         )
     if name == "create":
         return (
-            f"Create work on board `{board}` from this summary: {argument!r}. Inspect "
-            "the advertised `ticket_create` schema, ask only for required missing fields, "
-            "then call it once. Return the new ticket ID first and a bounded Markdown recap. "
-            "Use Zed's native tool confirmation; do not add a second confirmation."
+            f"New work for `{board}`: {argument!r}. Any missing required detail comes "
+            "first; creation happens once under Zed's single confirmation, followed by "
+            "the new ticket ID and a brief recap."
         )
     if name == "watch":
         return (
-            f"Watch only board `{board}` for work, review, and human-question events. "
-            "Use `a2a_wait` if advertised; otherwise use bounded `board_catchup` and explain "
-            "that continuous push requires the Pursers wait bridge. Reuse the returned "
-            "positive cursor, never cursor 0, and show only changed IDs and next actions."
+            f"Live changes for `{board}`: work, reviews, and questions needing attention, "
+            "limited to changed IDs and next steps. The watch resumes from its latest "
+            "saved position and stays on this board."
         )
     if name == "evidence":
         return (
-            f"For ticket `{argument}` on board `{board}`, call `ticket_get`. Return compact "
-            "Markdown with ticket ID first, exact branch_and_commit, exact files_changed, "
-            "literal test evidence, and current independent-review state. Do not list unrelated tickets."
+            f"Evidence for `{argument}` on `{board}`: the ticket ID first, then its exact "
+            "branch and commit, changed files, literal test results, and independent-review "
+            "state. The view contains no unrelated tickets."
         )
     return (
-        f"Parse this as `TK-… <answer>`: {argument!r}. On board `{board}`, find the "
-        "pending human question for that exact ticket and call the advertised answer/resolve "
-        "tool once. Return the ticket ID first and the resulting state; do not inspect other boards."
+        f"Answer for {argument!r} on `{board}`: the exact ticket's pending question is "
+        "resolved once, followed by its ticket ID and resulting state. This stays on this board."
     )
 
 
@@ -314,7 +319,8 @@ def build_server(relay: CentralRelay) -> MCPServer[Any]:
         version=package_version(),
         instructions=(
             "Credential-safe stdio bridge. Downstream clients may negotiate MCP 2025-11-25; "
-            "Central is contacted independently with MCP 2026-07-28."
+            "Central is contacted independently with MCP 2026-07-28. "
+            f"{PROMPT_BEHAVIOR_INSTRUCTIONS}"
         ),
     )
     server.list_tools = relay.list_tools  # type: ignore[method-assign]
