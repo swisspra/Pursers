@@ -71,6 +71,14 @@ Save the modal. In **Settings → AI → MCP Servers**, confirm that Pursers has
 green state dot. Open the Agent Panel and run `/board`. A successful response
 starts with the configured board ID and shows a compact status summary.
 
+### Restricted Mode
+
+Zed opens a project it has not seen before in Restricted Mode, and that blocks
+every MCP server from starting. Pursers then shows no state dot and its commands
+are missing, with nothing in the server log to explain why. Click **Trust and
+Continue** in the banner at the top of the workspace, once per project, and the
+server starts.
+
 ## Daily loop
 
 Keep one Agent Panel thread for the board:
@@ -145,6 +153,7 @@ arrive in Zed.
 | Central is unreachable. | Check `central_url`, confirm Central is running, and confirm the URL ends at the intended Central origin or `/mcp` endpoint. |
 | A private TLS endpoint fails certificate validation. | Set `ca_file` to the private CA certificate file. Do not disable certificate verification. |
 | A tool reports a timeout. | Check Central health and retry the bounded command. Keep `/watch` active instead of using an unbounded tool call; the relay caps each wait below Zed's 60-second default. |
+| Pursers has no state dot at all and no log output. | The project is in Restricted Mode. Click **Trust and Continue** in the banner at the top of the workspace. |
 | A command is missing. | Confirm the Pursers MCP server has a green state dot. Restart it after changing settings. If a prompt name collides, look for the server-prefixed form such as `/pursers.board`. |
 
 Zed 1.20.2 speaks MCP `2025-11-25`. Pursers Central also supports newer MCP

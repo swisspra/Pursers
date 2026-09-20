@@ -283,7 +283,10 @@ def _qualified_version_pattern(
     )
     return re.compile(
         rf"(?P<prefix>{prefix}){escaped}(?![\w])"
-        rf"|(?<![\w.]){escaped}(?![\w]){followed_by_name}"
+        # A version already bound to a name on its left belongs to that name even
+        # when a package name happens to follow it: in
+        # `bridge=0.1.0 client=0.1.0` the first version is the bridge's.
+        rf"|(?<![\w.])(?<![=:]){escaped}(?![\w]){followed_by_name}"
     )
 
 
@@ -323,6 +326,10 @@ def _component_aliases(distribution: str, key: str) -> tuple[str, ...]:
     }
     if words[:1] == ["pursers"] and len(words) > 1:
         aliases.add(" ".join(words[1:]))
+        # Prose and compact markers name a component by its last word alone
+        # ("bridge=0.1.0"). Without this, `pursers-wait-bridge` is the only
+        # component with no short name, so its versions look unqualified.
+        aliases.add(words[-1])
     return tuple(sorted(aliases, key=len, reverse=True))
 
 

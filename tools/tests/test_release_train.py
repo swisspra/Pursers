@@ -434,3 +434,33 @@ def test_unqualified_shared_version_is_refused(tmp_path: Path) -> None:
     target = release_train.bumped_versions(current, ("central=0.9.9",), None)
     with pytest.raises(release_train.ReleaseTrainError, match="not qualified"):
         release_train.plan_bump(root, current, target)
+
+
+def test_every_component_has_a_short_name_for_compact_markers() -> None:
+    """`bridge=0.1.0` names the wait bridge; without the alias it looks unowned."""
+    root = Path(release_train.__file__).resolve().parent.parent
+    assert "bridge" in release_train._component_aliases(
+        "pursers-wait-bridge", "wait_bridge"
+    )
+    for key in ("central", "client", "personal", "wait_bridge"):
+        distribution = release_train._package_distribution(root, key)
+        aliases = release_train._component_aliases(distribution, key)
+        assert any(" " not in alias and "-" not in alias for alias in aliases), key
+
+
+def test_a_version_bound_to_one_name_is_not_claimed_by_the_next(tmp_path: Path) -> None:
+    """In `bridge=0.1.0 client=0.1.0` the first version belongs to the bridge.
+
+    The trailing-name branch used to match a bare version whenever a package
+    name followed it, which silently moved the bridge to the client's version.
+    """
+    root = _fixture_repository(tmp_path, distinct=False)
+    pattern = release_train._qualified_version_pattern(
+        root, "README.md", "client", "0.1.0"
+    )
+    matched = [match.span() for match in pattern.finditer("bridge=0.1.0 client=0.1.0")]
+    assert matched == [(13, 25)]
+    # A version the name genuinely follows is still the client's.
+    assert [
+        match.group(0) for match in pattern.finditer("<td>0.1.0</td><td>client</td>")
+    ] == ["0.1.0"]

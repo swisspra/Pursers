@@ -25,3 +25,4 @@ POLICY-signed.json
 docs-local/
 .codex/
 tools/wait-bridge/bridge-stats.json
+integrations/zed/pursers-mcp/target/
