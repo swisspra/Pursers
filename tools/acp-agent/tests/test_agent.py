@@ -524,6 +524,144 @@ def test_personal_watch_uses_wait_bridge_cursor_and_cancel_teardown(
     asyncio.run(_personal_watch_uses_wait_bridge_cursor_and_cancel_teardown(tmp_path))
 
 
+def test_cancel_stops_blocked_watch_snapshot(tmp_path: Path) -> None:
+    asyncio.run(_cancel_stops_blocked_watch_snapshot(tmp_path))
+
+
+async def _cancel_stops_blocked_watch_snapshot(tmp_path: Path) -> None:
+    profile = SimpleNamespace(board_id="pursers", principal_id="PR-human")
+    board = PersonalBoardSurface(profile)
+    board.agent_name = "human-personal"
+
+    class BlockingCentral:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def call_tool(self, name: str, arguments: JSON) -> Any:
+            assert name == "ticket_list"
+            assert arguments["board_id"] == "pursers"
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+            raise AssertionError("unreachable")
+
+    central = BlockingCentral()
+    board._client = central  # type: ignore[assignment]
+    bridge_opened = False
+
+    def bridge_factory() -> Any:
+        nonlocal bridge_opened
+        bridge_opened = True
+        raise AssertionError("wait bridge opened before the snapshot completed")
+
+    board._wait_bridge_factory = bridge_factory
+    client = FakeACPClient(PursersACPAgent(lambda: board))
+    try:
+        await client.initialize()
+        session = await client.new_session(tmp_path)
+        prompt = asyncio.create_task(client.prompt(session, "watch pursers"))
+        await asyncio.wait_for(central.started.wait(), TEST_TIMEOUT_S)
+        await client.notify("session/cancel", {"sessionId": session})
+        assert await asyncio.wait_for(prompt, TEST_TIMEOUT_S) == {
+            "stopReason": "cancelled"
+        }
+        assert central.cancelled.is_set()
+        assert not bridge_opened
+        assert client.updates[-1]["update"] == {
+            "sessionUpdate": "plan",
+            "entries": [
+                {
+                    "content": "Watch pursers for board events and seat questions",
+                    "priority": "high",
+                    "status": "completed",
+                }
+            ],
+        }
+    finally:
+        await client.close()
+
+
+def test_cancel_stops_blocked_wait_bridge_digest_and_closes_bridge(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_cancel_stops_blocked_wait_bridge_digest_and_closes_bridge(tmp_path))
+
+
+async def _cancel_stops_blocked_wait_bridge_digest_and_closes_bridge(
+    tmp_path: Path,
+) -> None:
+    profile = SimpleNamespace(board_id="pursers", principal_id="PR-human")
+    board = PersonalBoardSurface(profile)
+    board.agent_name = "human-personal"
+
+    class SnapshotCentral:
+        async def call_tool(self, name: str, arguments: JSON) -> Any:
+            assert name == "ticket_list"
+            assert arguments["board_id"] == "pursers"
+            return SimpleNamespace(
+                is_error=False,
+                structured_content={
+                    "result": {
+                        "tickets": [],
+                        "latest_seq": 6,
+                        "total_matching": 0,
+                    }
+                },
+                content=[],
+            )
+
+    class BlockingDigestClient:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+
+        async def call_tool(self, name: str, arguments: JSON) -> Any:
+            assert name == "board_digest"
+            assert arguments["since"] == {"pursers": 6}
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+            raise AssertionError("unreachable")
+
+    central = SnapshotCentral()
+    digest_client = BlockingDigestClient()
+    bridge = StdioWaitBridge("stub", [], {})
+    bridge._client = digest_client  # type: ignore[assignment]
+    board._client = central  # type: ignore[assignment]
+    board._wait_bridge_factory = lambda: bridge
+    client = FakeACPClient(PursersACPAgent(lambda: board))
+    try:
+        await client.initialize()
+        session = await client.new_session(tmp_path)
+        prompt = asyncio.create_task(client.prompt(session, "watch pursers"))
+        await asyncio.wait_for(digest_client.started.wait(), TEST_TIMEOUT_S)
+        await client.notify("session/cancel", {"sessionId": session})
+        assert await asyncio.wait_for(prompt, TEST_TIMEOUT_S) == {
+            "stopReason": "cancelled"
+        }
+        assert digest_client.cancelled.is_set()
+        assert bridge._client is None
+        assert client.updates[-1]["update"] == {
+            "sessionUpdate": "plan",
+            "entries": [
+                {
+                    "content": "Watch pursers for board events and seat questions",
+                    "priority": "high",
+                    "status": "completed",
+                }
+            ],
+        }
+    finally:
+        await client.close()
+
+
 async def _personal_watch_uses_wait_bridge_cursor_and_cancel_teardown(
     tmp_path: Path,
 ) -> None:

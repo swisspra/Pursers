@@ -51,6 +51,33 @@ class PromptCancelled(Exception):
     """The client cancelled the active prompt."""
 
 
+async def _cancelable_io(
+    cancel: asyncio.Event, operation: Callable[[], Awaitable[Any]]
+) -> Any:
+    """Run one blocking I/O operation until it finishes or the prompt is cancelled."""
+    if cancel.is_set():
+        raise PromptCancelled
+    work = asyncio.ensure_future(operation())
+    stopped = asyncio.create_task(cancel.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {work, stopped}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if stopped in done:
+            work.cancel()
+            await asyncio.gather(work, return_exceptions=True)
+            raise PromptCancelled
+        return work.result()
+    except BaseException:
+        if not work.done():
+            work.cancel()
+            await asyncio.gather(work, return_exceptions=True)
+        raise
+    finally:
+        stopped.cancel()
+        await asyncio.gather(stopped, return_exceptions=True)
+
+
 class BoardSurface(Protocol):
     board_id: str
 
@@ -148,7 +175,12 @@ class StdioWaitBridge:
             raise RuntimeError("wait bridge is closed")
 
         current = cursor
-        initial = await self._digest(board_id, current)
+        try:
+            initial = await _cancelable_io(
+                cancel, lambda: self._digest(board_id, current)
+            )
+        except PromptCancelled:
+            return
         current = _digest_cursor(initial, board_id, current)
         yield initial
 
@@ -163,7 +195,12 @@ class StdioWaitBridge:
 
             # Live-first splice: the listen is active before this second digest,
             # so an update cannot fall between the first read and the stream.
-            splice = await self._digest(board_id, current)
+            try:
+                splice = await _cancelable_io(
+                    cancel, lambda: self._digest(board_id, current)
+                )
+            except PromptCancelled:
+                return
             current = _digest_cursor(splice, board_id, current)
             yield splice
 
@@ -183,7 +220,12 @@ class StdioWaitBridge:
                     cue.result()
                 except StopAsyncIteration:
                     return
-                page = await self._digest(board_id, current)
+                try:
+                    page = await _cancelable_io(
+                        cancel, lambda: self._digest(board_id, current)
+                    )
+                except PromptCancelled:
+                    return
                 current = _digest_cursor(page, board_id, current)
                 yield page
 
@@ -394,13 +436,16 @@ class PersonalBoardSurface:
     ) -> AsyncIterator[tuple[int, JSON]]:
         if self._wait_bridge_factory is None:
             raise RuntimeError("wait bridge is unavailable")
-        snapshot = await self._call(
-            "ticket_list",
-            {
-                "include_closed": False,
-                "include_archived": False,
-                "limit": WATCH_SNAPSHOT_LIMIT,
-            },
+        snapshot = await _cancelable_io(
+            cancel,
+            lambda: self._call(
+                "ticket_list",
+                {
+                    "include_closed": False,
+                    "include_archived": False,
+                    "limit": WATCH_SNAPSHOT_LIMIT,
+                },
+            ),
         )
         snapshot_cursor = snapshot.get("latest_seq")
         if isinstance(snapshot_cursor, int) and not isinstance(snapshot_cursor, bool):
