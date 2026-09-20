@@ -7,6 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Zed: the guide now covers Restricted Mode. Zed opens an unfamiliar project
+  with every MCP server blocked and no log line to explain it, so Pursers shows
+  no state dot and no commands until **Trust and Continue** is clicked.
+
+### Fixed
+
+- `release_train` no longer moves a version that belongs to another component.
+  In a line such as `bridge=0.1.0 client=0.1.0`, the pattern that matches a bare
+  version *followed* by a package name claimed the bridge's version for the
+  client. A version already bound to a name on its left is now left alone, and
+  `pursers-wait-bridge` gained the short alias `bridge` it was the only
+  component to lack.
+- The wait-bridge test suite cleans up the temporary key directory it has to
+  create before importing the module under test. Every run used to leave one
+  behind.
+
 ## [5.0.2] - 2026-09-20
 
 This release includes `pursers-central==0.1.1`,
