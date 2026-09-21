@@ -6,6 +6,9 @@ answer a seat's question without putting a bearer token in Zed settings. The
 extension starts a local `pursers-mcp` relay, which reads the credential from a
 token file and talks to Pursers Central.
 
+New to Pursers? Start with [your first finished ticket in Zed](zed-first-ticket.md).
+It is a ten-minute narrative walkthrough; this page is the complete reference.
+
 ## Commands
 
 | Command | Result |
@@ -42,11 +45,20 @@ checkout for now:
 After the extension is listed, open Zed Extensions, search for **Pursers**, and
 select **Install** instead.
 
+> [!WARNING]
+> Uninstalling the extension empties `context_servers` without warning. Copy
+> your Pursers entry from `settings.json` before uninstalling; Zed cannot restore
+> it from the UI.
+
 ## Configure the connection
 
-Open **Settings → AI → MCP Servers**, find **Pursers**, and open its native
-configure modal. Enter a small JSONC object in that modal. You do not need to
-edit `settings.json` directly.
+Open Zed Extensions, find **Pursers**, and select **Configure**. Use this modal
+for the first setup only. Once the connection works, keep the configuration in
+`settings.json`: saving the modal replaces the whole Pursers entry with the text
+currently in its box, so omitted keys are deleted. Every fresh open starts from
+the shipped example; it does not load the values already saved in
+`settings.json`. Values you type remain visible only in that open dialog, until
+you save or cancel it.
 
 | Setting | Required | Value |
 | --- | --- | --- |
@@ -54,7 +66,7 @@ edit `settings.json` directly.
 | `board_id` | Yes | The board to use. The local Quickstart default is `pursers-local`. |
 | `token_file` | Yes | The path to `worker.jwt` created by `pursers-central init`. Store the path, not the token. |
 | `ca_file` | No | A CA certificate file when Central uses a private TLS certificate. |
-| `uvx_path` | No | A different `uvx` executable path or command name. |
+| `uvx_path` | No | An absolute path to `uvx`, such as `/opt/homebrew/bin/uvx`, when Zed cannot launch the automatically resolved executable. |
 | `package_spec` | No | A different `pursers-client` version or a local client checkout for development. |
 
 The default form is:
@@ -69,9 +81,11 @@ The default form is:
 
 ![Pursers extension configure modal showing the default Central URL, local board ID, and token-file placeholder](../media/zed/configure-defaults-dark.png)
 
-Save the modal. In **Settings → AI → MCP Servers**, confirm that Pursers has a
-green state dot. Open the Agent Panel and run `/board`. A successful response
-starts with the configured board ID and shows a compact status summary.
+Save the modal once. In **Settings → AI → MCP Servers**, confirm that Pursers
+has a green state dot. Open the Agent Panel and run `/board`. A successful
+response starts with the configured board ID and shows a compact status
+summary. After that, edit the Pursers object in `settings.json` instead of
+reopening and saving the modal.
 
 ![Zed MCP Servers settings showing Pursers connected with a green state dot and extension badge](../media/zed/mcp-servers-connected-dark.png)
 
@@ -192,7 +206,9 @@ questions must arrive in Zed.
 
 | Problem | Fix |
 | --- | --- |
-| Zed reports that it could not start `uvx`. | Install uv, confirm `uvx --version` works in a new terminal, then restart Zed. Set `uvx_path` only when Zed needs an explicit executable path. |
+| Pursers stays silent, then Zed logs `ERROR [project::context_server_store] pursers context server failed to start: Context server request timeout` followed by `ERROR [crates/context_server/src/transport/stdio_transport.rs:58] Broken pipe (os error 32)`. | The relay never started; Zed does not report that it could not start `uvx`. Set `uvx_path` to the absolute path printed by `which uvx`, then restart the server. |
+| A fresh Configure dialog shows the shipped `pursers-local` example instead of the working values. | This is how the extension dialog opens: it does not hydrate from saved settings. Cancel without saving and edit the Pursers object in `settings.json`. Saving the modal writes its box back verbatim, deleting omitted keys and replacing saved values with the examples shown. |
+| The Pursers configuration disappeared after uninstalling the extension. | Uninstalling empties `context_servers`. Restore the entry you copied from `settings.json`; there is no undo in the UI. |
 | Authentication fails or the token file is rejected. | Confirm that `token_file` points to the correct `worker.jwt`, that the file is readable by your account, and that it contains one credential line. Do not paste the token into the modal. |
 | Central is unreachable. | Check `central_url`, confirm Central is running, and confirm the URL ends at the intended Central origin or `/mcp` endpoint. |
 | A private TLS endpoint fails certificate validation. | Set `ca_file` to the private CA certificate file. Do not disable certificate verification. |
