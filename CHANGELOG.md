@@ -7,8 +7,35 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.3] - 2026-09-21
+
+This release includes `pursers-central==0.1.1`,
+`pursers-client==0.1.2`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.0.3`, `pursers==5.0.3`,
+`pursers-wait-bridge==0.1.0`, and
+`pursers-acp==0.1.1`.
+
 ### Added
 
+- Zed: a seat's question now reaches you and can be answered where you are.
+  `/watch` ends its turn when a question arrives, which is what lets Zed's own
+  completion notification wake you; we add no notification of our own because
+  Zed gives an idle thread none. `/answer` then opens a form for the question,
+  so you never retype a ticket ID, and `/answer #2` picks between several.
+  Declining the form, cancelling it, refusing the permission prompt or closing
+  the thread all leave the question unanswered on the board. The write still
+  goes through Zed's permission prompt: answering a seat is a write.
+- Zed: the plan says who holds each ticket and what it waits on, ordered by
+  what needs a human first, then review, then work, then queued. Priorities
+  mean something rather than all being high, an idle board says it is quiet,
+  and a write is announced by what it does instead of by the tool that does it.
+- Zed: a board running several projects is legible as several projects. The
+  plan groups what is in flight, and `docs/zed/multi-project.md` shows it.
+- Zed: the five commands read like product rather than instructions to a model.
+  Zed prints a prompt's body in the thread before any answer arrives, so those
+  five strings are the most-read copy the extension has; they used to name our
+  tools and arguments. A board summary can also no longer disagree with itself:
+  the counts are board-wide and the list below them says it is a subset.
 - Zed: `/watch` now shows the fleet's work as a live plan. One entry per ticket
   in flight, refreshed from the subscription that already exists, so a human
   watching twelve seats can read what is moving. The entry count is bounded and

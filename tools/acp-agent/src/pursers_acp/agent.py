@@ -38,7 +38,7 @@ from pursers_client.personal_profile import (
 
 JSON = dict[str, Any]
 ACP_VERSION = 1
-IMPLEMENTATION_VERSION = "0.1.0"
+IMPLEMENTATION_VERSION = "0.1.1"
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_TEXT_CHARS = 8_000
 MAX_ROWS = 20

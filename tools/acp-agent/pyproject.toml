@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pursers-acp"
-version = "0.1.0"
+version = "0.1.1"
 description = "A small ACP board assistant for Pursers Personal"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-  "pursers-client==0.1.1",
-  "pursers-personal==5.0.2",
+  "pursers-client==0.1.2",
+  "pursers-personal==5.0.3",
   "pursers-wait-bridge==0.1.0",
 ]
 

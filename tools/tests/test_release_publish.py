@@ -50,14 +50,19 @@ def test_release_tag_must_be_canonical_and_match_manifest(tag: str) -> None:
 
 
 def test_seven_wheel_cohort_matches_manifest_versions() -> None:
+    # Built from the manifest rather than written out, so a bump cannot break
+    # this test by moving a version it had hard-coded. What the test is for is
+    # that the cohort is exactly these seven distributions, each at the version
+    # the manifest says, and that is still checked.
+    packages = VERSIONS.packages
     assert set(expected_wheel_filenames()) == {
-        "pursers-5.0.2-py3-none-any.whl",
-        "pursers_central-0.1.1-py3-none-any.whl",
-        "pursers_client-0.1.1-py3-none-any.whl",
-        "pursers_personal-5.0.2-py3-none-any.whl",
-        "pursers_personal_import-5.0.0-py3-none-any.whl",
-        "pursers_wait_bridge-0.1.0-py3-none-any.whl",
-        "pursers_acp-0.1.0-py3-none-any.whl",
+        f"pursers-{packages['pursers']}-py3-none-any.whl",
+        f"pursers_central-{packages['central']}-py3-none-any.whl",
+        f"pursers_client-{packages['client']}-py3-none-any.whl",
+        f"pursers_personal-{packages['personal']}-py3-none-any.whl",
+        f"pursers_personal_import-{packages['import']}-py3-none-any.whl",
+        f"pursers_wait_bridge-{packages['wait_bridge']}-py3-none-any.whl",
+        f"pursers_acp-{packages['acp']}-py3-none-any.whl",
     }
 
 
