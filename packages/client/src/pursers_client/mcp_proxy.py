@@ -279,7 +279,7 @@ class CentralRelay:
         return tools
 
     def _resolved_uvx(self) -> str | None:
-        command = self._uvx_path or os.environ.get("PURSERS_UVX_PATH") or "uvx"
+        command = self._uvx_path or "uvx"
         return shutil.which(command)
 
     def _local_endpoint(self) -> tuple[str, int]:
