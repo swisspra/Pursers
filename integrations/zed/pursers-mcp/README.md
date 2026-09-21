@@ -4,10 +4,10 @@ This Zed extension starts `pursers-mcp` and connects Zed's Agent Panel to one Pu
 
 ## Install
 
-1. Install [uv](https://docs.astral.sh/uv/) and restart Zed so `uvx` is on its `PATH`. If uv is installed somewhere unusual, note the absolute path to its `uvx` executable for `uvx_path` below.
-2. Run `pursers-central init DIR`. This creates `DIR/worker.jwt`.
-3. In Zed, run `zed: install dev extension` and select this directory.
-4. For a first-time setup, open the Pursers context-server configure form.
+1. In Zed, run `zed: install dev extension` and select this directory.
+2. Open the Pursers context-server configure form and accept its local defaults.
+3. Open the Agent Panel and run `/setup`.
+4. Accept the confirmation. Pursers creates `~/.pursers/central`, starts Central in the background, and adds the real board tools to the same chat.
 
 For a registry release, install `Pursers` from Zed Extensions instead of step 3.
 
@@ -17,10 +17,10 @@ Set these required fields:
 
 - `central_url`: the Central MCP endpoint. The local default is `http://127.0.0.1:8766/mcp`.
 - `board_id`: the board to use. The local default is `pursers-local`.
-- `token_file`: the path to `DIR/worker.jwt`. Replace `/PATH/TO/PURSERS/worker.jwt`; do not paste a token value.
 
 Optional fields:
 
+- `token_file`: a worker JWT path for a Central you already run. The local default is `~/.pursers/central/worker.jwt`; do not paste a token value.
 - `ca_file`: a CA certificate file for a TLS endpoint.
 - `uvx_path`: an absolute path to the uvx executable. Use this override when automatic lookup cannot see an unusual uv installation.
 - `package_spec`: another package version or a local `pursers-client` checkout for development.
@@ -28,14 +28,18 @@ Optional fields:
 The release default is `pursers-client==0.1.1`. Automatic lookup resolves `uvx` to an absolute path before launch. For example, the launched command on a Homebrew system may be:
 
 ```text
-/opt/homebrew/bin/uvx --from pursers-client==0.1.1 pursers-mcp --central-url URL --board BOARD_ID --token-file PATH [--ca-file PATH]
+/opt/homebrew/bin/uvx --from pursers-client==0.1.1 pursers-mcp --central-url URL --board BOARD_ID [--token-file PATH] [--ca-file PATH]
 ```
 
 For an existing setup, edit `context_servers.pursers` in `settings.json` directly. The Configure dialog can show `default_settings.json` instead of the saved values, and Save replaces the existing entry verbatim. Do not save placeholder values; if the form omits `uvx_path`, Zed deletes that override. Uninstalling the extension clears `context_servers` entirely, so restore the Pursers settings after reinstalling.
 
 ## Verify
 
-Open Zed's logs and start the Pursers context server. Confirm the log shows `uvx`, the pinned package, the selected Central URL, board, and token file path. It must not show a token value.
+Start the Pursers context server and run `/setup`. Before confirmation, Zed shows the two local setup tools. After setup, it refreshes the tool list in the same chat. The result names the Central log at `~/.pursers/central/central.log`; it never shows a token value.
+
+If Central is already reachable but the board is not, the same consent-gated setup action uses the local admin credential to create or join the board and onboard the caller. `board_onboard` stays out of the normal Zed tool set so routine chats do not receive a broad identity-management tool.
+
+For the managed local token, the relay hides `agent_name` and supplies the setup identity automatically. A fresh user's first `/create` therefore does not depend on knowing the internal `zed-local-owner` name.
 
 For source checks:
 
@@ -48,9 +52,12 @@ These Rust checks stay outside `tools/ci_manifest.py`: that manifest inventories
 
 ## Troubleshoot
 
-- `Pursers could not start uvx`: install uv, restart Zed, or set `uvx_path`.
+- Setup reports that `uvx` is unavailable: let the extension's uv installation finish, then restart the Pursers server. Set `uvx_path` only for a development override.
 - A required setting is empty: open Configure and set the named field.
-- Central is unreachable: check `central_url`, the Central process, and `ca_file` for private TLS.
+- Central is unreachable on the local defaults: run `/setup` and accept the confirmation.
+- Central is reachable but the board is missing: run `/setup`; after confirmation it uses the local `admin.jwt` to create the board and onboard the caller.
+- Central reports that the principal is not a member: run `/setup`. If local admission is unavailable, ask a board administrator to run `board_invite_create`, then redeem the invite with `board_join` as `zed-local-owner` with role `worker`.
+- Setup reports that port 8766 is in use: stop the other service or connect to that Central with its existing `token_file`; Pursers will not start a second process on the port.
 - Authentication fails: confirm `token_file` points to the worker JWT created by `pursers-central init DIR`.
 
 ## License

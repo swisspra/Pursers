@@ -2,11 +2,15 @@
 
 Pursers coordinates work, leases, and reviews on a shared board.
 
-1. [Install uv](https://docs.astral.sh/uv/) so `uvx` is available to Zed. If uv is installed somewhere unusual, set `uvx_path` to the absolute path of its `uvx` executable.
-2. Run `pursers-central init DIR`. It creates `DIR/worker.jwt`.
-3. For a first-time setup, set `central_url`, `board_id`, and `token_file` in the configure form. Replace the token-file placeholder with the path to `DIR/worker.jwt`.
+1. Accept the default `central_url` and `board_id`, then start the server.
+2. Open Zed's Agent Panel and run `/setup`.
+3. Review and accept the setup confirmation. Pursers creates a private local instance, starts Central, and makes the board tools available in the same chat.
 
-`ca_file` is optional for a private CA. `uvx_path` overrides automatic lookup and must be an absolute executable path. `package_spec` selects another package version or a local checkout for development.
+If Central is already running but the board is not readable, `/setup` instead uses the local admin credential to create or join the board and onboard this caller. It never starts a second Central in that case.
+
+With the managed local token, the relay supplies the setup identity automatically, so the first `/create` does not ask for an `agent_name`.
+
+For an existing Central, set `central_url`, `board_id`, and the optional `token_file` override. `ca_file` is optional for a private CA. `uvx_path` overrides automatic lookup and must be an absolute executable path. `package_spec` selects another package version or a local checkout for development.
 
 For an existing setup, edit `context_servers.pursers` in `settings.json` directly. The Configure dialog can show `default_settings.json` instead of the saved values, and Save replaces the existing entry verbatim. Do not save placeholder values; any omitted `uvx_path` is also removed. Uninstalling the extension clears `context_servers`; after reinstalling, restore the Pursers settings before starting the server.
 

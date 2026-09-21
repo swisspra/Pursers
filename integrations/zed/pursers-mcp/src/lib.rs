@@ -13,7 +13,7 @@ const INSTALL_UV_MESSAGE: &str = "Pursers could not start uvx. Install uv: https
 struct PursersSettings {
     central_url: String,
     board_id: String,
-    token_file: String,
+    token_file: Option<String>,
     ca_file: Option<String>,
     uvx_path: Option<String>,
     package_spec: Option<String>,
@@ -75,9 +75,9 @@ struct PursersExtension;
 impl PursersExtension {
     fn command_for_project(project: &Project) -> Result<Command> {
         let settings = ContextServerSettings::for_project(CONTEXT_SERVER_ID, project)?;
-        let value = settings.settings.ok_or_else(|| {
-            "Pursers is not configured. Set central_url, board_id, and token_file.".to_owned()
-        })?;
+        let value = settings
+            .settings
+            .ok_or_else(|| "Pursers is not configured. Set central_url and board_id.".to_owned())?;
         let settings = serde_json::from_value(value)
             .map_err(|error| format!("Pursers settings are invalid: {error}"))?;
         build_command(&settings, &ZedProcessProbe)
@@ -124,10 +124,9 @@ impl zed::Extension for PursersExtension {
 fn build_command(settings: &PursersSettings, probe: &impl UvxProbe) -> Result<Command> {
     require_value("central_url", &settings.central_url)?;
     require_value("board_id", &settings.board_id)?;
-    require_value("token_file", &settings.token_file)?;
-
     let ca_file = optional_value("ca_file", settings.ca_file.as_deref())?;
     let configured_uvx = optional_value("uvx_path", settings.uvx_path.as_deref())?;
+    let token_file = optional_value("token_file", settings.token_file.as_deref())?;
     let package_spec = optional_value("package_spec", settings.package_spec.as_deref())?
         .unwrap_or(DEFAULT_PACKAGE_SPEC);
 
@@ -145,9 +144,10 @@ fn build_command(settings: &PursersSettings, probe: &impl UvxProbe) -> Result<Co
         settings.central_url.to_owned(),
         "--board".to_owned(),
         settings.board_id.to_owned(),
-        "--token-file".to_owned(),
-        settings.token_file.to_owned(),
     ];
+    if let Some(token_file) = token_file {
+        args.extend(["--token-file".to_owned(), token_file.to_owned()]);
+    }
     if let Some(ca_file) = ca_file {
         args.extend(["--ca-file".to_owned(), ca_file.to_owned()]);
     }
@@ -206,7 +206,7 @@ mod tests {
         PursersSettings {
             central_url: "https://central.example.test/mcp".to_owned(),
             board_id: "example-board".to_owned(),
-            token_file: "/credentials/worker.jwt".to_owned(),
+            token_file: Some("/credentials/worker.jwt".to_owned()),
             ca_file: Some("/credentials/ca.pem".to_owned()),
             uvx_path: None,
             package_spec: None,
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn empty_token_file_should_be_rejected() {
         let mut settings = settings();
-        settings.token_file = "  ".to_owned();
+        settings.token_file = Some("  ".to_owned());
 
         let error = build_command(&settings, &Available).expect_err("token file is required");
 
@@ -308,6 +308,17 @@ mod tests {
     }
 
     #[test]
+    fn local_defaults_should_not_require_or_pass_a_token_path() {
+        let mut settings = settings();
+        settings.token_file = None;
+
+        let command = build_command(&settings, &Available).expect("valid local defaults");
+
+        assert!(!command.args.iter().any(|value| value == "--token-file"));
+        assert!(!command.args.iter().any(|value| value.contains("/PATH/TO/")));
+    }
+
+    #[test]
     fn schema_and_defaults_should_form_a_strict_valid_configuration() {
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("../configuration/settings_schema.json"))
@@ -317,7 +328,16 @@ mod tests {
                 .expect("defaults match settings");
 
         assert_eq!(schema["additionalProperties"], false);
+        assert!(
+            !schema["required"]
+                .as_array()
+                .expect("required array")
+                .iter()
+                .any(|value| value == "token_file")
+        );
         assert_eq!(defaults.board_id, "pursers-local");
+        assert_eq!(defaults.token_file, None);
+        assert!(!include_str!("../configuration/default_settings.json").contains("/PATH/TO/"));
     }
 
     #[test]

@@ -3,7 +3,7 @@
   "title": "Pursers settings",
   "type": "object",
   "additionalProperties": false,
-  "required": ["central_url", "board_id", "token_file"],
+  "required": ["central_url", "board_id"],
   "properties": {
     "central_url": {
       "type": "string",
@@ -18,7 +18,7 @@
     "token_file": {
       "type": "string",
       "minLength": 1,
-      "description": "Path to the worker JWT file. The token itself never belongs in Zed settings."
+      "description": "Optional path to an existing worker JWT file. Omit it for the local ~/.pursers/central/worker.jwt default. The token itself never belongs in Zed settings."
     },
     "ca_file": {
       "type": "string",
