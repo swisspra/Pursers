@@ -5,7 +5,7 @@ use zed_extension_api::{
 };
 
 const CONTEXT_SERVER_ID: &str = "pursers";
-const DEFAULT_PACKAGE_SPEC: &str = "pursers-client==0.1.1";
+const DEFAULT_PACKAGE_SPEC: &str = "pursers-client==0.1.2";
 const INSTALL_UV_MESSAGE: &str = "Pursers could not start uvx. Install uv: https://docs.astral.sh/uv/ then restart Zed. You can also set uvx_path to the uvx executable.";
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -172,7 +172,7 @@ mod tests {
             command.args,
             [
                 "--from",
-                "pursers-client==0.1.1",
+                DEFAULT_PACKAGE_SPEC,
                 "pursers-mcp",
                 "--central-url",
                 "https://central.example.test/mcp",

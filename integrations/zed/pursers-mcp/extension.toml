@@ -1,7 +1,7 @@
 id = "pursers-mcp"
 name = "Pursers"
 description = "Connect Zed to a Pursers board through its MCP server"
-version = "0.1.0"
+version = "0.1.1"
 schema_version = 1
 authors = ["Swisspra"]
 repository = "https://github.com/swisspra/pursers-zed"
