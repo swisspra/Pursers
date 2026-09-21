@@ -10,6 +10,7 @@ repository = "https://github.com/swisspra/pursers-zed"
 # user before either the lookup probe or the server command can run it.
 capabilities = [
   { kind = "process:exec", command = "*", args = ["**"] },
+  { kind = "download_file", host = "github.com", path = ["astral-sh", "uv", "releases", "download", "**"] },
 ]
 
 [context_servers.pursers]

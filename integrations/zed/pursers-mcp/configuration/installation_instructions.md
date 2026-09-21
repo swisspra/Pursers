@@ -24,7 +24,9 @@ If Central is already running but the board is not readable, `/setup` instead us
 
 With the managed local token, the relay supplies the setup identity automatically, so the first `/create` does not ask for an `agent_name`.
 
-For an existing Central, set `central_url`, `board_id`, and the optional `token_file` override. `ca_file` is optional for a private CA. `uvx_path` overrides automatic lookup and must be an absolute executable path. `package_spec` selects another package version or a local checkout for development.
+The extension uses an existing `uvx` when Zed can find one. Otherwise it downloads and verifies uv inside the extension's private directory; it does not change your `PATH` or shell profile. Installing [uv](https://docs.astral.sh/uv/) yourself is optional. Set `uvx_path` only when you want to choose a specific absolute executable path.
+
+For an existing Central, set `central_url`, `board_id`, and the optional `token_file` override. `ca_file` is optional for a private CA. Set `uvx_path` only when you want to choose a specific absolute executable path. `package_spec` selects another package version or a local checkout for development.
 
 For an existing setup, edit `context_servers.pursers` in `settings.json` directly. The Configure dialog can show `default_settings.json` instead of the saved values, and Save replaces the existing entry verbatim. Do not save placeholder values; any omitted `uvx_path` is also removed. Uninstalling the extension clears `context_servers`; after reinstalling, restore the Pursers settings before starting the server.
 
