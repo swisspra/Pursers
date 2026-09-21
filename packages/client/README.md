@@ -35,7 +35,9 @@ MCP elicitation to ask before creating files or starting a background process.
 It initializes `~/.pursers/central`, writes Central output to `central.log`,
 creates the configured board, reconnects, and emits
 `notifications/tools/list_changed`. A failed setup stops any Central process it
-started.
+started. For the managed local token, the relay hides the internal
+`agent_name` field and supplies the setup identity itself, so the first ticket
+can be created without discovering an implementation-only seat name.
 
 Zed 1.20.2 negotiates MCP `2025-11-25`. The relay terminates that local
 protocol and opens a separate MCP `2026-07-28` connection to Central. It

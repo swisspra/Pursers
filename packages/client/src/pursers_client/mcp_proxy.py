@@ -145,6 +145,16 @@ def _result_is_unauthorized(result: types.CallToolResult) -> bool:
     return False
 
 
+def _result_error_text(result: types.CallToolResult) -> str | None:
+    if not result.is_error:
+        return None
+    for item in result.content:
+        text = getattr(item, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip().splitlines()[0]
+    return "Central rejected the board request"
+
+
 class CentralRelay:
     """Concurrent, rotating-token relay to one Pursers Central.
 
@@ -176,6 +186,7 @@ class CentralRelay:
         self._connection_factory = connection_factory or self._http_connection
         self._uvx_path = uvx_path
         self._known_tools: dict[str, types.Tool] = {}
+        self._local_identity_tools: set[str] = set()
         self._reported_error: str | None = None
 
     @asynccontextmanager
@@ -253,7 +264,7 @@ class CentralRelay:
                 name=SETUP_TOOL,
                 description=(
                     "With the user's explicit confirmation, create and start a private "
-                    "local Pursers Central and board."
+                    "local Pursers Central or onboard this local caller to its board."
                 ),
                 inputSchema=empty_schema,
             ),
@@ -264,8 +275,45 @@ class CentralRelay:
         tools = result.tools
         if self.tools_mode == "default":
             tools = [tool for tool in tools if tool.name in DEFAULT_TOOLS]
+        self._local_identity_tools = set()
+        if not self._token_file_was_overridden:
+            exposed_tools: list[types.Tool] = []
+            for tool in tools:
+                schema = tool.input_schema
+                properties = schema.get("properties", {})
+                if "agent_name" not in properties:
+                    exposed_tools.append(tool)
+                    continue
+                self._local_identity_tools.add(tool.name)
+                exposed = tool.model_copy(deep=True)
+                exposed.input_schema["properties"].pop("agent_name")
+                required = exposed.input_schema.get("required")
+                if isinstance(required, list):
+                    exposed.input_schema["required"] = [
+                        name for name in required if name != "agent_name"
+                    ]
+                exposed_tools.append(exposed)
+            tools = exposed_tools
         self._known_tools = {tool.name: tool for tool in tools}
         return tools
+
+    async def _board_access(self) -> tuple[bool, str | None]:
+        try:
+            result = await self._retrying(
+                lambda client: client.call_tool("board_status", {"board_id": self.board})
+            )
+        except Exception as exc:
+            return False, str(self._safe_failure(exc))
+        return not result.is_error, _result_error_text(result)
+
+    def _membership_instructions(self, detail: str | None) -> RelayFailure:
+        suffix = f" Central reported: {detail}." if detail else ""
+        return RelayFailure(
+            f"Central is reachable, but this credential cannot read board {self.board}."
+            f"{suffix} Ask an administrator of board {self.board} to run "
+            "board_invite_create for this principal; then redeem that invite with "
+            f"board_join using agent_name {SETUP_AGENT_NAME} and role worker."
+        )
 
     async def list_tools(self) -> list[types.Tool]:
         try:
@@ -274,6 +322,14 @@ class CentralRelay:
             failure = self._safe_failure(exc)
             self._report(failure)
             self._known_tools = {}
+            self._local_identity_tools = set()
+            return self._setup_tools(failure)
+        board_available, board_error = await self._board_access()
+        if not board_available:
+            failure = self._membership_instructions(board_error)
+            self._report(failure)
+            self._known_tools = {}
+            self._local_identity_tools = set()
             return self._setup_tools(failure)
         self._reported_error = None
         return tools
@@ -323,17 +379,10 @@ class CentralRelay:
             tool_count = len(tools)
         board_available = False
         board_checked = False
+        board_error: str | None = None
         if central_reachable:
             board_checked = True
-            try:
-                board_result = await self._retrying(
-                    lambda client: client.call_tool(
-                        "board_status", {"board_id": self.board}
-                    )
-                )
-                board_available = not board_result.is_error
-            except Exception:
-                board_available = False
+            board_available, board_error = await self._board_access()
         return {
             "ok": True,
             "uvx": {"available": uvx is not None, "path": uvx},
@@ -346,6 +395,7 @@ class CentralRelay:
                 "id": self.board,
                 "available": board_available,
                 "checked": board_checked,
+                "error": board_error,
             },
             "token_file": {
                 "path": str(self.token_file),
@@ -503,7 +553,44 @@ class CentralRelay:
                     break
             raise RelayFailure(f"could not create local board: {detail}")
 
+    async def _onboard_reachable_central(self) -> dict[str, Any]:
+        self._local_endpoint()
+        admin_file = self.setup_root / "admin.jwt"
+        try:
+            admin_token = _read_token(admin_file)
+        except RelayFailure as exc:
+            raise self._membership_instructions(
+                f"the local admin credential is unavailable at {admin_file}"
+            ) from exc
+        try:
+            await self._create_board(admin_token)
+        except RelayFailure as exc:
+            raise self._membership_instructions(str(exc)) from exc
+        tools = await self._upstream_tools()
+        board_available, board_error = await self._board_access()
+        if not board_available:
+            raise self._membership_instructions(board_error)
+        self._reported_error = None
+        log_path = self.setup_root / "central.log"
+        return {
+            "ok": True,
+            "central_url": self.central_url,
+            "central_started": False,
+            "board_id": self.board,
+            "board_onboarded": True,
+            "token_file": str(self.token_file),
+            "log_file": str(log_path) if log_path.exists() else None,
+            "pid": None,
+            "real_tools": [tool.name for tool in tools],
+        }
+
     async def _provision(self) -> dict[str, Any]:
+        try:
+            await self._upstream_tools()
+        except Exception:
+            pass
+        else:
+            return await self._onboard_reachable_central()
         if self._token_file_was_overridden and self.token_file != self.setup_root / "worker.jwt":
             raise RelayFailure(
                 "automatic setup cannot replace an explicit token_file override; "
@@ -546,12 +633,20 @@ class CentralRelay:
                 {"ok": False, "error": "setup requires an interactive MCP session"},
                 is_error=True,
             )
+        status = await self._setup_status()
+        if status["central"]["reachable"]:
+            consent_message = (
+                f"Use the local Central administrator credential in {self.setup_root} "
+                f"to create or join board {self.board} and onboard this caller?"
+            )
+        else:
+            consent_message = (
+                f"Create a private Pursers Central in {self.setup_root}, start it in "
+                f"the background, and create board {self.board}?"
+            )
         try:
             consent = await context.elicit(
-                (
-                    f"Create a private Pursers Central in {self.setup_root}, start it in "
-                    f"the background, and create board {self.board}?"
-                ),
+                consent_message,
                 SetupConsent,
             )
         except Exception as exc:
@@ -584,6 +679,8 @@ class CentralRelay:
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         if "board_id" in properties and "board_id" not in arguments:
             arguments = {"board_id": self.board, **arguments}
+        if name in self._local_identity_tools and "agent_name" not in arguments:
+            arguments = {"agent_name": SETUP_AGENT_NAME, **arguments}
         if name in WAIT_TOOL_NAMES:
             for key in ("timeout_s", "wait_seconds", "timeout"):
                 if key not in properties:

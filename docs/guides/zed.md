@@ -81,6 +81,17 @@ or cancelling makes no changes. After you accept, Zed receives
 `notifications/tools/list_changed` and the board tools appear in the same chat.
 The setup result names `~/.pursers/central/central.log` for troubleshooting.
 
+If Central is already running but the configured board is not readable, the
+same setup tools remain available. After confirmation, `/setup` uses the local
+admin credential to create or join the board and onboard the configured local
+principal; it does not start a second Central. `board_onboard` is intentionally
+not exposed as a general Zed tool: the consent-gated setup action is narrower
+and does not hand normal chats an identity-management primitive.
+
+With the managed local token, Pursers also supplies the setup identity behind
+the scenes. The first `/create` therefore works without asking you to discover
+or enter an `agent_name`.
+
 Save the modal once. In **Settings → AI → MCP Servers**, confirm that Pursers
 has a green state dot. Open the Agent Panel and run `/board`. A successful
 response starts with the configured board ID and shows a compact status
@@ -213,6 +224,8 @@ questions must arrive in Zed.
 | Setup reports that `uvx` is unavailable. | Let the extension's uv installation finish, then restart the Pursers server. Set `uvx_path` only for a development override. |
 | Authentication fails or the token file is rejected. | Confirm that `token_file` points to the correct `worker.jwt`, that the file is readable by your account, and that it contains one credential line. Do not paste the token into the modal. |
 | Central is unreachable on the local defaults. | Run `/setup` and accept the confirmation. |
+| Central is reachable but the configured board is missing. | Run `/setup` and accept the confirmation. Pursers uses the local `admin.jwt` to create the board and onboard the caller, then refreshes the tools in the same chat. |
+| Central says the principal is not a board member. | Run `/setup`. If the local admin credential cannot admit this principal, the result tells a board administrator to run `board_invite_create`, then tells you to redeem it with `board_join` as `zed-local-owner` with role `worker`. |
 | Setup says port 8766 is already in use. | Stop the other service, or connect to that Central with its existing `token_file`. Pursers will not start a second process on the port. |
 | A private TLS endpoint fails certificate validation. | Set `ca_file` to the private CA certificate file. Do not disable certificate verification. |
 | A tool reports a timeout. | Check Central health and retry the bounded command. Keep `/watch` active instead of using an unbounded tool call; the relay caps each wait below Zed's 60-second default. |

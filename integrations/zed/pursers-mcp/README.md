@@ -37,6 +37,10 @@ For an existing setup, edit `context_servers.pursers` in `settings.json` directl
 
 Start the Pursers context server and run `/setup`. Before confirmation, Zed shows the two local setup tools. After setup, it refreshes the tool list in the same chat. The result names the Central log at `~/.pursers/central/central.log`; it never shows a token value.
 
+If Central is already reachable but the board is not, the same consent-gated setup action uses the local admin credential to create or join the board and onboard the caller. `board_onboard` stays out of the normal Zed tool set so routine chats do not receive a broad identity-management tool.
+
+For the managed local token, the relay hides `agent_name` and supplies the setup identity automatically. A fresh user's first `/create` therefore does not depend on knowing the internal `zed-local-owner` name.
+
 For source checks:
 
 ```sh
@@ -51,6 +55,8 @@ These Rust checks stay outside `tools/ci_manifest.py`: that manifest inventories
 - Setup reports that `uvx` is unavailable: let the extension's uv installation finish, then restart the Pursers server. Set `uvx_path` only for a development override.
 - A required setting is empty: open Configure and set the named field.
 - Central is unreachable on the local defaults: run `/setup` and accept the confirmation.
+- Central is reachable but the board is missing: run `/setup`; after confirmation it uses the local `admin.jwt` to create the board and onboard the caller.
+- Central reports that the principal is not a member: run `/setup`. If local admission is unavailable, ask a board administrator to run `board_invite_create`, then redeem the invite with `board_join` as `zed-local-owner` with role `worker`.
 - Setup reports that port 8766 is in use: stop the other service or connect to that Central with its existing `token_file`; Pursers will not start a second process on the port.
 - Authentication fails: confirm `token_file` points to the worker JWT created by `pursers-central init DIR`.
 

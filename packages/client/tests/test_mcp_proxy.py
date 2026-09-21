@@ -89,7 +89,10 @@ async def _relay_preserves_central_tool_and_supplies_configured_board(
         assert tools[0].input_schema == client.tool.input_schema
         result = await relay.call_tool("board_status", {})
         assert not result.is_error
-        assert client.calls == [("board_status", {"board_id": "board-from-config"})]
+        assert client.calls == [
+            ("board_status", {"board_id": "board-from-config"}),
+            ("board_status", {"board_id": "board-from-config"}),
+        ]
     finally:
         await relay.aclose()
 
@@ -128,8 +131,9 @@ async def _token_file_is_reread_after_401(tmp_path: Path) -> None:
     try:
         tools = await relay.list_tools()
         assert [tool.name for tool in tools] == ["board_status"]
-        assert len(fingerprints) == 2
+        assert len(fingerprints) == 3
         assert fingerprints[0] != fingerprints[1]
+        assert fingerprints[1] == fingerprints[2]
     finally:
         await relay.aclose()
 
@@ -175,6 +179,66 @@ async def _default_tool_set_is_curated_and_all_is_opt_in(tmp_path: Path) -> None
         "board_status",
         "journal_compact",
     ]
+
+
+def test_local_setup_identity_is_hidden_and_injected(tmp_path: Path) -> None:
+    asyncio.run(_local_setup_identity_is_hidden_and_injected(tmp_path))
+
+
+async def _local_setup_identity_is_hidden_and_injected(tmp_path: Path) -> None:
+    setup_root = tmp_path / "central"
+    setup_root.mkdir()
+    (setup_root / "worker.jwt").write_text("opaque-test-credential", encoding="utf-8")
+
+    class TicketClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tool = types.Tool(
+                name="ticket_create",
+                description="Create work.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "board_id": {"type": "string"},
+                        "agent_name": {"type": "string"},
+                        "ticket_id": {"type": "string"},
+                        "title": {"type": "string"},
+                    },
+                    "required": ["board_id", "agent_name", "title"],
+                },
+            )
+
+    client = TicketClient()
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        yield client
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="fresh-local-board",
+        setup_root=setup_root,
+        connection_factory=connect,
+    )
+    tools = await relay.list_tools()
+    assert len(tools) == 1
+    assert "agent_name" not in tools[0].input_schema["properties"]
+    assert "agent_name" not in tools[0].input_schema["required"]
+
+    result = await relay.call_tool(
+        "ticket_create",
+        {"ticket_id": "TK-first", "title": "First ticket"},
+    )
+    assert not result.is_error
+    assert client.calls[-1] == (
+        "ticket_create",
+        {
+            "agent_name": "zed-local-owner",
+            "board_id": "fresh-local-board",
+            "ticket_id": "TK-first",
+            "title": "First ticket",
+        },
+    )
 
 
 def test_wait_timeout_is_capped_at_fifty_seconds(tmp_path: Path) -> None:
@@ -229,6 +293,7 @@ async def _missing_token_serves_setup_tools_instead_of_an_error(
         "id": "missing-board",
         "available": False,
         "checked": False,
+        "error": None,
     }
     assert result.structured_content["token_file"]["readable"] is False
     assert capsys.readouterr().out == ""
@@ -362,6 +427,135 @@ async def _setup_switches_tools_and_emits_wire_notification(tmp_path: Path) -> N
         for message in messages
     }
     assert "notifications/tools/list_changed" in wire_methods
+
+
+def test_reachable_central_without_board_is_onboarded_after_consent(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_reachable_central_without_board_is_onboarded_after_consent(tmp_path))
+
+
+async def _reachable_central_without_board_is_onboarded_after_consent(
+    tmp_path: Path,
+) -> None:
+    setup_root = tmp_path / "central"
+    setup_root.mkdir()
+    (setup_root / "worker.jwt").write_text("worker-token", encoding="utf-8")
+    (setup_root / "admin.jwt").write_text("admin-token", encoding="utf-8")
+    board_available = False
+
+    class ReachableClient(FakeClient):
+        async def call_tool(
+            self, name: str, arguments: dict[str, Any] | None = None, **_kwargs: Any
+        ) -> types.CallToolResult:
+            nonlocal board_available
+            payload = arguments or {}
+            self.calls.append((name, payload))
+            if name == "board_onboard":
+                board_available = True
+                return _result("onboarded")
+            if name == "board_status" and not board_available:
+                return types.CallToolResult(
+                    content=[
+                        types.TextContent(
+                            type="text",
+                            text="board access denied: principal is not a member",
+                        )
+                    ],
+                    isError=True,
+                )
+            return _result(payload.get("board_id", "missing"))
+
+    client = ReachableClient()
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        yield client
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="new-local-board",
+        setup_root=setup_root,
+        connection_factory=connect,
+    )
+    relay._http_connection = connect  # type: ignore[method-assign]
+
+    class AcceptingContext:
+        session = SimpleNamespace(send_tool_list_changed=AsyncMock())
+
+        async def elicit(self, message: str, _schema: Any) -> Any:
+            assert "create or join board new-local-board" in message
+            return SimpleNamespace(
+                action="accept", data=SimpleNamespace(provision=True)
+            )
+
+    assert [tool.name for tool in await relay.list_tools()] == [
+        SETUP_STATUS_TOOL,
+        SETUP_TOOL,
+    ]
+    result = await relay.call_tool(SETUP_TOOL, {}, AcceptingContext())
+    assert not result.is_error
+    assert result.structured_content["central_started"] is False
+    assert result.structured_content["board_onboarded"] is True
+    assert [tool.name for tool in await relay.list_tools()] == ["board_status"]
+    assert any(name == "board_onboard" for name, _ in client.calls)
+
+
+def test_reachable_non_member_gets_exact_admin_recovery_commands(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_reachable_non_member_gets_exact_admin_recovery_commands(tmp_path))
+
+
+async def _reachable_non_member_gets_exact_admin_recovery_commands(
+    tmp_path: Path,
+) -> None:
+    setup_root = tmp_path / "central"
+    setup_root.mkdir()
+    (setup_root / "worker.jwt").write_text("worker-token", encoding="utf-8")
+
+    class NonMemberClient(FakeClient):
+        async def call_tool(
+            self, name: str, arguments: dict[str, Any] | None = None, **_kwargs: Any
+        ) -> types.CallToolResult:
+            if name == "board_status":
+                return types.CallToolResult(
+                    content=[
+                        types.TextContent(
+                            type="text",
+                            text="board access denied: principal is not a member",
+                        )
+                    ],
+                    isError=True,
+                )
+            return await super().call_tool(name, arguments, **_kwargs)
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        yield NonMemberClient()
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="admin-owned-board",
+        setup_root=setup_root,
+        connection_factory=connect,
+    )
+
+    class AcceptingContext:
+        session = SimpleNamespace(send_tool_list_changed=AsyncMock())
+
+        async def elicit(self, _message: str, _schema: Any) -> Any:
+            return SimpleNamespace(
+                action="accept", data=SimpleNamespace(provision=True)
+            )
+
+    result = await relay.call_tool(SETUP_TOOL, {}, AcceptingContext())
+    assert result.is_error
+    error = result.structured_content["error"]
+    assert "administrator of board admin-owned-board" in error
+    assert "board_invite_create" in error
+    assert "board_join" in error
+    assert "agent_name zed-local-owner" in error
 
 
 def test_prompts_have_at_most_one_argument_and_human_facing_copy(
@@ -614,6 +808,7 @@ async def _board_prompt_matches_board_wide_counts_to_a_bounded_subset(
         "total": 12,
     }
     assert calls == [
+        ("board_status", "seeded-board", None),
         ("board_status", "seeded-board", None),
         ("ticket_list", "seeded-board", 10),
     ]

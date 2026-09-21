@@ -75,9 +75,9 @@ struct PursersExtension;
 impl PursersExtension {
     fn command_for_project(project: &Project) -> Result<Command> {
         let settings = ContextServerSettings::for_project(CONTEXT_SERVER_ID, project)?;
-        let value = settings.settings.ok_or_else(|| {
-            "Pursers is not configured. Set central_url and board_id.".to_owned()
-        })?;
+        let value = settings
+            .settings
+            .ok_or_else(|| "Pursers is not configured. Set central_url and board_id.".to_owned())?;
         let settings = serde_json::from_value(value)
             .map_err(|error| format!("Pursers settings are invalid: {error}"))?;
         build_command(&settings, &ZedProcessProbe)
@@ -328,11 +328,13 @@ mod tests {
                 .expect("defaults match settings");
 
         assert_eq!(schema["additionalProperties"], false);
-        assert!(!schema["required"]
-            .as_array()
-            .expect("required array")
-            .iter()
-            .any(|value| value == "token_file"));
+        assert!(
+            !schema["required"]
+                .as_array()
+                .expect("required array")
+                .iter()
+                .any(|value| value == "token_file")
+        );
         assert_eq!(defaults.board_id, "pursers-local");
         assert_eq!(defaults.token_file, None);
         assert!(!include_str!("../configuration/default_settings.json").contains("/PATH/TO/"));
