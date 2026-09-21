@@ -14,6 +14,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -23,7 +24,9 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 from pursers_client import (
     BoardClient,
+    BoardClientError,
     PersonalProfileError,
+    coordinator_host_binding,
     parse_project_registry,
     read_capability,
 )
@@ -39,6 +42,7 @@ IMPLEMENTATION_VERSION = "0.1.0"
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_TEXT_CHARS = 8_000
 MAX_ROWS = 20
+MAX_QUESTION_INBOX = 100
 MAX_PLAN_ENTRIES = 20
 MAX_PLAN_TITLE_CHARS = 160
 WATCH_SNAPSHOT_LIMIT = 500
@@ -54,6 +58,11 @@ IN_FLIGHT_TICKET_STATES = frozenset(
     }
 )
 REVIEW_DISPATCH_STATES = frozenset({"review_claimed", "reviewing", "in_review"})
+QUESTION_INBOX_UNAVAILABLE = (
+    "Seat-question replies are unavailable in this ACP profile because its board "
+    "identity is not a registered project coordinator. Ordinary board updates "
+    "will continue."
+)
 
 
 class AuthRequired(RuntimeError):
@@ -102,6 +111,9 @@ class BoardSurface(Protocol):
     def create_action(self, title: str, description: str) -> JSON: ...
     def annotate_action(self, ticket_id: str, text: str) -> JSON: ...
     async def answer_action(self, ticket_id: str, text: str) -> JSON: ...
+    def question_answer_action(
+        self, ticket_id: str, question_id: str, text: str
+    ) -> JSON: ...
     async def mutate(self, action: JSON) -> JSON: ...
     def watch(
         self, cursor: int | None, cancel: asyncio.Event
@@ -180,6 +192,36 @@ class StdioWaitBridge:
         )
         return BoardClient._decode(result)
 
+    async def _digest_with_questions(
+        self, board_id: str, cursor: int | None
+    ) -> JSON:
+        """Read one pushed digest and the coordinator's current open questions."""
+        if self._client is None:
+            raise RuntimeError("wait bridge is closed")
+        page = await self._digest(board_id, cursor)
+        try:
+            result = await self._client.call_tool(
+                "board_question_inbox",
+                {"state": "open", "limit": MAX_QUESTION_INBOX},
+            )
+            inbox = BoardClient._decode(result)
+        except BoardClientError as exc:
+            if not _question_inbox_authority_error(exc):
+                raise
+            return {
+                **page,
+                "questions": [],
+                "question_inbox_unavailable": QUESTION_INBOX_UNAVAILABLE,
+            }
+        return {
+            **page,
+            "questions": [
+                question
+                for question in inbox.get("questions", [])
+                if isinstance(question, dict)
+            ],
+        }
+
     async def digests(
         self, board_id: str, cursor: int | None, cancel: asyncio.Event
     ) -> AsyncIterator[JSON]:
@@ -190,7 +232,7 @@ class StdioWaitBridge:
         current = cursor
         try:
             initial = await _cancelable_io(
-                cancel, lambda: self._digest(board_id, current)
+                cancel, lambda: self._digest_with_questions(board_id, current)
             )
         except PromptCancelled:
             return
@@ -210,7 +252,7 @@ class StdioWaitBridge:
             # so an update cannot fall between the first read and the stream.
             try:
                 splice = await _cancelable_io(
-                    cancel, lambda: self._digest(board_id, current)
+                    cancel, lambda: self._digest_with_questions(board_id, current)
                 )
             except PromptCancelled:
                 return
@@ -235,7 +277,7 @@ class StdioWaitBridge:
                     return
                 try:
                     page = await _cancelable_io(
-                        cancel, lambda: self._digest(board_id, current)
+                        cancel, lambda: self._digest_with_questions(board_id, current)
                     )
                 except PromptCancelled:
                     return
@@ -251,6 +293,8 @@ class PersonalBoardSurface:
         self.board_id = profile.board_id
         self.principal_id = profile.principal_id
         self.agent_name = ""
+        self.agent_id = ""
+        self._coordinator_binding = ""
         self._stack = AsyncExitStack()
         self._client: Client | None = None
         self._wait_bridge_factory: WaitBridgeFactory | None = None
@@ -290,6 +334,7 @@ class PersonalBoardSurface:
                 ),
                 key=lambda row: (
                     row.get("lifecycle_status") != "active",
+                    row.get("role") != "coordinator",
                     row.get("agent_name", ""),
                 ),
             )
@@ -299,6 +344,10 @@ class PersonalBoardSurface:
                 )
             board.agent_name = own_agents[0]["agent_name"]
             identity = own_agents[0]
+            board.agent_id = str(identity["agent_id"])
+            board._coordinator_binding = coordinator_host_binding(
+                token, board.agent_id
+            )
             bridge_env = _wait_bridge_environment(profile, token, identity)
 
             async def wait_bridge_factory() -> StdioWaitBridge:
@@ -456,6 +505,24 @@ class PersonalBoardSurface:
             },
         }
 
+    def question_answer_action(
+        self, ticket_id: str, question_id: str, text: str
+    ) -> JSON:
+        if not self._coordinator_binding:
+            raise RuntimeError("coordinator binding is unavailable")
+        return {
+            "operation": "ticket_question_answer",
+            "board_id": self.board_id,
+            "params": {
+                "agent_name": self.agent_name,
+                "ticket_id": ticket_id,
+                "question_id": question_id,
+                "host_binding": self._coordinator_binding,
+                "action": "answer",
+                "message": text,
+            },
+        }
+
     async def mutate(self, action: JSON) -> JSON:
         if action.get("board_id") != self.board_id:
             raise PermissionError("mutation board differs from the approved board")
@@ -464,6 +531,7 @@ class PersonalBoardSurface:
             "ticket_create",
             "ticket_annotate",
             "ticket_human_resolve",
+            "ticket_question_answer",
         }:
             raise PermissionError("unsupported mutation")
         params = action.get("params")
@@ -507,9 +575,25 @@ class PersonalBoardSurface:
 
         selected = self._wait_bridge_factory()
         bridge = await selected if inspect.isawaitable(selected) else selected
+        question_notice_sent = False
         try:
             async for page in bridge.digests(self.board_id, cursor, cancel):
                 cursor = _digest_cursor(page, self.board_id, cursor)
+                question_notice = page.get("question_inbox_unavailable")
+                if isinstance(question_notice, str) and not question_notice_sent:
+                    question_notice_sent = True
+                    yield cursor or 0, {
+                        "kind": "question_inbox_unavailable",
+                        "message": question_notice,
+                    }
+                for question in page.get("questions", []):
+                    if not isinstance(question, dict):
+                        continue
+                    yield cursor or 0, {
+                        "kind": "coordinator_question_asked",
+                        "ticket_id": question.get("ticket_id"),
+                        "question_id": question.get("question_id"),
+                    }
                 human_requests = {
                     request.get("ticket_id"): request
                     for request in page.get("human_requests", [])
@@ -519,6 +603,12 @@ class PersonalBoardSurface:
                 for ticket in page.get("tickets", []):
                     if not isinstance(ticket, dict):
                         continue
+                    review = ticket.get("review")
+                    review_verdict = (
+                        review.get("verdict")
+                        if isinstance(review, Mapping)
+                        else ticket.get("review_verdict")
+                    )
                     event = {
                         "kind": "ticket_status_changed",
                         "ticket_id": ticket.get("ticket_id"),
@@ -530,6 +620,8 @@ class PersonalBoardSurface:
                         "review_state": ticket.get("review_state"),
                         "review_claimed_by": ticket.get("review_claimed_by"),
                     }
+                    if review_verdict is not None:
+                        event["review_verdict"] = review_verdict
                     offers = ticket.get("offers")
                     review_offer = (
                         offers.get("review_offer")
@@ -557,6 +649,8 @@ class Session:
     prompt_request_id: Any | None = None
     mcp_stop: asyncio.Event | None = None
     mcp_task: asyncio.Task[None] | None = None
+    pending_questions: dict[str, JSON] = field(default_factory=dict)
+    next_question_ref: int = 1
 
 
 class PursersACPAgent:
@@ -668,7 +762,7 @@ class PursersACPAgent:
         if "result" in message:
             future.set_result(message["result"])
         elif "error" in message:
-            future.set_exception(RuntimeError("ACP client rejected permission request"))
+            future.set_exception(RuntimeError("ACP client rejected request"))
 
     async def _request(self, request_id: Any, method: str, params: JSON) -> None:
         try:
@@ -909,15 +1003,10 @@ class PursersACPAgent:
             )
             await self._message(session_id, _format_evidence(evidence))
             return "end_turn"
+        if lowered == "/answer":
+            return await self._answer(session_id, session, "")
         if lowered.startswith("/answer "):
-            ticket_id, separator, answer = normalized[8:].partition(" ")
-            if not separator or not ticket_id.startswith("TK-") or not answer:
-                await self._message(session_id, "Usage: /answer TK-… <JSON-or-text>")
-                return "end_turn"
-            action = await self._run_cancelable(
-                session, lambda: self.board.answer_action(ticket_id, answer)
-            )
-            return await self._mutation(session_id, session, action)
+            return await self._answer(session_id, session, normalized[8:])
         if lowered in {"/watch", "watch"} or lowered.startswith(
             ("/watch ", "watch ")
         ):
@@ -940,6 +1029,29 @@ class PursersACPAgent:
                 ) as events:
                     async for cursor, event in events:
                         session.cursors[board_id] = cursor
+                        question = None
+                        if event.get("kind") == "coordinator_question_asked":
+                            ticket_id = event.get("ticket_id")
+                            if isinstance(ticket_id, str):
+                                evidence = await self._run_cancelable(
+                                    session,
+                                    lambda: self.board.ticket_evidence(ticket_id),
+                                )
+                                question = _question_from_event(evidence, event)
+                        if question is not None:
+                            question_id = str(question["question_id"])
+                            if question_id in session.pending_questions:
+                                continue
+                            question["reply_ref"] = session.next_question_ref
+                            session.next_question_ref += 1
+                            session.pending_questions[question_id] = question
+                            await self._message(
+                                session_id, _format_question_update(question)
+                            )
+                            # Completing the prompt is what makes Zed surface its
+                            # normal turn-completion notification. A free-standing
+                            # session/update alone does not wake the human.
+                            break
                         if event.get("kind") == "watch_snapshot":
                             plan_tickets = {
                                 item["ticket_id"]: item
@@ -968,17 +1080,175 @@ class PursersACPAgent:
                             tickets=plan_tickets,
                             snapshot_truncated=snapshot_truncated,
                         )
+                        if _event_ends_watch(event):
+                            break
                         if session.cancel.is_set():
                             break
             finally:
                 await self._plan(session_id, board_id, "completed")
             return "cancelled" if session.cancel.is_set() else "end_turn"
+        if session.pending_questions and not normalized.startswith("/"):
+            if len(session.pending_questions) == 1:
+                return await self._answer_pending(
+                    session_id,
+                    session,
+                    next(iter(session.pending_questions.values())),
+                )
+            await self._message(session_id, _pending_question_help(session))
+            return "end_turn"
         await self._message(session_id, _help())
         return "end_turn"
 
-    async def _mutation(self, session_id: str, session: Session, action: JSON) -> str:
+    async def _answer(self, session_id: str, session: Session, value: str) -> str:
+        assert self.board is not None
+        target, separator, answer = value.partition(" ")
+        if target.startswith("TK-"):
+            if not separator or not answer:
+                await self._message(session_id, "Usage: /answer TK-… <JSON-or-text>")
+                return "end_turn"
+            action = await self._run_cancelable(
+                session, lambda: self.board.answer_action(target, answer)
+            )
+            return await self._mutation(session_id, session, action)
+        if target.startswith("#"):
+            if separator or answer or not target[1:].isdigit():
+                await self._message(session_id, _pending_question_help(session))
+                return "end_turn"
+            selected = next(
+                (
+                    question
+                    for question in session.pending_questions.values()
+                    if question.get("reply_ref") == int(target[1:])
+                ),
+                None,
+            )
+            if selected is None:
+                await self._message(session_id, _pending_question_help(session))
+                return "end_turn"
+            return await self._answer_pending(session_id, session, selected)
+        if len(session.pending_questions) == 1:
+            return await self._answer_pending(
+                session_id,
+                session,
+                next(iter(session.pending_questions.values())),
+            )
+        if session.pending_questions:
+            await self._message(session_id, _pending_question_help(session))
+            return "end_turn"
+        await self._message(session_id, "Usage: /answer TK-… <JSON-or-text>")
+        return "end_turn"
+
+    async def _answer_pending(
+        self, session_id: str, session: Session, question: JSON
+    ) -> str:
+        assert self.board is not None
+        response = await self._elicit_question_answer(session_id, session, question)
+        if response is None:
+            return "cancelled" if session.cancel.is_set() else "end_turn"
+        action_name = response.get("action")
+        if action_name == "decline":
+            await self._message(
+                session_id,
+                "You declined the answer form. The seat question remains unanswered.",
+            )
+            return "end_turn"
+        if action_name == "cancel":
+            await self._message(
+                session_id,
+                "The answer form was cancelled. The seat question remains unanswered.",
+            )
+            return "end_turn"
+        if action_name != "accept":
+            await self._message(
+                session_id,
+                "The answer form returned an unsupported action. "
+                "The seat question remains unanswered.",
+            )
+            return "end_turn"
+        content = response.get("content")
+        answer = _elicited_answer_text(question, content)
+        if answer is None:
+            await self._message(
+                session_id,
+                "The accepted answer form was incomplete. "
+                "The seat question remains unanswered.",
+            )
+            return "end_turn"
+        question_id = str(question["question_id"])
+        action = self.board.question_answer_action(
+            str(question["ticket_id"]), question_id, answer
+        )
+        return await self._mutation(
+            session_id,
+            session,
+            action,
+            on_completed=lambda: session.pending_questions.pop(question_id, None),
+        )
+
+    async def _elicit_question_answer(
+        self, session_id: str, session: Session, question: JSON
+    ) -> JSON | None:
+        elicitation = self.client_capabilities.get("elicitation")
+        if not (
+            isinstance(elicitation, Mapping)
+            and isinstance(elicitation.get("form"), Mapping)
+        ):
+            await self._message(
+                session_id,
+                "This ACP client does not advertise form elicitation. "
+                "The seat question remains unanswered.",
+            )
+            return None
+        self.next_id += 1
+        request_id = self.next_id
+        future = asyncio.get_running_loop().create_future()
+        self.pending[request_id] = future
+        await self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "elicitation/create",
+                "params": {
+                    "sessionId": session_id,
+                    "mode": "form",
+                    "message": (
+                        f"Answer seat {question.get('asked_by_name', '(unknown)')} "
+                        f"on {question.get('ticket_id', '?')}: "
+                        f"{_bounded(str(question.get('message') or '(empty)'), 2_000)}"
+                    ),
+                    "requestedSchema": _question_answer_schema(question),
+                },
+            }
+        )
+        stopped = asyncio.create_task(session.cancel.wait())
+        done, pending = await asyncio.wait(
+            {future, stopped}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            if task is not future:
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in pending if task is not future),
+            return_exceptions=True,
+        )
+        if stopped in done:
+            self.pending.pop(request_id, None)
+            future.cancel()
+            return None
+        response = future.result()
+        return response if isinstance(response, dict) else {}
+
+    async def _mutation(
+        self,
+        session_id: str,
+        session: Session,
+        action: JSON,
+        *,
+        on_completed: Callable[[], object] | None = None,
+    ) -> str:
         tool_call_id = f"board-{uuid.uuid4().hex}"
         title = _mutation_title(action)
+        public_action = _public_action(action)
         await self._update(
             session_id,
             {
@@ -987,10 +1257,12 @@ class PursersACPAgent:
                 "title": title,
                 "kind": "edit",
                 "status": "pending",
-                "rawInput": action,
+                "rawInput": public_action,
             },
         )
-        allowed = await self._permission(session_id, session, tool_call_id, action)
+        allowed = await self._permission(
+            session_id, session, tool_call_id, public_action
+        )
         if not allowed:
             await self._update(
                 session_id,
@@ -1027,6 +1299,8 @@ class PursersACPAgent:
             )
             raise
         summary = _mutation_summary(action, result)
+        if on_completed is not None:
+            on_completed()
         locations = _result_locations(result, Path(session.cwd))
         completed: JSON = {
             "sessionUpdate": "tool_call_update",
@@ -1456,6 +1730,16 @@ def _content(text: str) -> JSON:
     return {"type": "content", "content": {"type": "text", "text": text}}
 
 
+def _public_action(action: JSON) -> JSON:
+    public = dict(action)
+    params = action.get("params")
+    if isinstance(params, dict):
+        public["params"] = {
+            key: value for key, value in params.items() if key != "host_binding"
+        }
+    return public
+
+
 def _format_tickets(rows: list[JSON]) -> str:
     if not rows:
         return "No active tickets are associated with this Personal principal."
@@ -1560,6 +1844,8 @@ def _format_evidence(result: JSON) -> str:
 
 
 def _format_event(event: JSON) -> str:
+    if event.get("kind") == "question_inbox_unavailable":
+        return _bounded(str(event.get("message") or QUESTION_INBOX_UNAVAILABLE), 500)
     kind = str(event.get("kind", "board update")).replace("_", " ").capitalize()
     lines = ["Pursers board update", "", kind]
     if event.get("project") is not None:
@@ -1646,12 +1932,174 @@ def _project_summaries(
     return sorted(projects.values(), key=lambda project: project["name"].casefold())
 
 
+def _event_ends_watch(event: JSON) -> bool:
+    kind = event.get("kind")
+    return (
+        event.get("review_verdict") is not None
+        or event.get("status_to") in {"failed", "rejected"}
+        or (isinstance(kind, str) and "failed" in kind)
+    )
+
+
+def _question_inbox_authority_error(exc: BoardClientError) -> bool:
+    message = str(exc).casefold()
+    return (
+        "question inbox requires role coordinator" in message
+        or "coordinator inbox requires registered project coordinator ownership"
+        in message
+    )
+
+
+def _question_from_event(result: JSON, event: JSON) -> JSON | None:
+    ticket = result.get("ticket")
+    if not isinstance(ticket, Mapping):
+        return None
+    question_id = event.get("question_id")
+    questions = ticket.get("coordinator_questions")
+    if not isinstance(question_id, str) or not isinstance(questions, list):
+        return None
+    for raw in questions:
+        if (
+            isinstance(raw, Mapping)
+            and raw.get("question_id") == question_id
+            and raw.get("state") != "answered"
+        ):
+            question = dict(raw)
+            question["ticket_id"] = event.get("ticket_id")
+            required_fields = ticket.get("required_fields")
+            question["required_fields"] = (
+                [
+                    field
+                    for field in required_fields
+                    if isinstance(field, str) and field and len(field) <= 100
+                ][:MAX_ROWS]
+                if isinstance(required_fields, list)
+                else []
+            )
+            asked_by = question.get("asked_by")
+            question["asked_by_name"] = (
+                asked_by.get("agent_name")
+                if isinstance(asked_by, Mapping)
+                else None
+            )
+            return question
+    return None
+
+
+def _question_answer_schema(question: JSON) -> JSON:
+    message = _bounded(str(question.get("message") or "(empty)"), 2_000)
+    properties: JSON = {
+        "answer": {
+            "type": "string",
+            "title": "Answer",
+            "description": message,
+            "minLength": 1,
+            "maxLength": MAX_TEXT_CHARS,
+        }
+    }
+    required = ["answer"]
+    for field in question.get("required_fields", []):
+        if not isinstance(field, str) or field in properties:
+            continue
+        properties[field] = {
+            "type": "string",
+            "title": field.replace("_", " ").strip().title() or field,
+            "description": f"Ticket required field: {field}",
+            "maxLength": 2_000,
+        }
+        required.append(field)
+    return {
+        "type": "object",
+        "title": f"Seat question on {question.get('ticket_id', '?')}",
+        "description": (
+            f"From {question.get('asked_by_name') or '(unknown)'}; "
+            "accept to continue to board-write permission, or decline/cancel "
+            "to leave the board unchanged."
+        ),
+        "properties": properties,
+        "required": required,
+    }
+
+
+def _elicited_answer_text(question: JSON, content: Any) -> str | None:
+    if not isinstance(content, Mapping):
+        return None
+    required = ["answer", *question.get("required_fields", [])]
+    selected: JSON = {}
+    for field in required:
+        value = content.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        selected[field] = _bounded(value.strip(), MAX_TEXT_CHARS)
+    if len(selected) == 1:
+        return str(selected["answer"])
+    lines = [str(selected.pop("answer"))]
+    lines.extend(f"{field}: {value}" for field, value in selected.items())
+    return _bounded("\n\n".join(lines), MAX_TEXT_CHARS)
+
+
+def _waiting_duration(asked_at: Any) -> str:
+    if not isinstance(asked_at, str):
+        return "an unknown time"
+    try:
+        asked = datetime.fromisoformat(asked_at.replace("Z", "+00:00"))
+        if asked.tzinfo is None:
+            asked = asked.replace(tzinfo=timezone.utc)
+        seconds = max(0, int((datetime.now(timezone.utc) - asked).total_seconds()))
+    except ValueError:
+        return "an unknown time"
+    if seconds < 60:
+        return f"{seconds} seconds"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    hours = minutes // 60
+    return f"{hours} hour{'s' if hours != 1 else ''}"
+
+
+def _format_question_update(question: JSON) -> str:
+    asked_by = question.get("asked_by")
+    seat = asked_by.get("agent_name") if isinstance(asked_by, Mapping) else None
+    reference = question.get("reply_ref", "?")
+    return "\n".join(
+        [
+            "SEAT QUESTION — ANSWER NEEDED",
+            f"Seat: {seat or '(unknown)'}",
+            f"Ticket: {question.get('ticket_id', '?')}",
+            f"Waiting: {_waiting_duration(question.get('asked_at'))}",
+            f"Question: {_bounded(str(question.get('message') or '(empty)'), 2_000)}",
+            "",
+            "This watch turn is ending now so Zed can notify you. Reply /answer "
+            "in this thread to open a form. With several pending questions, use "
+            f"/answer #{reference}. Accepting the form still requires board-write permission.",
+        ]
+    )
+
+
+def _pending_question_help(session: Session) -> str:
+    lines = [
+        "More than one seat question is pending. Choose one; Pursers will not guess:"
+    ]
+    for question in session.pending_questions.values():
+        asked_by = question.get("asked_by")
+        seat = asked_by.get("agent_name") if isinstance(asked_by, Mapping) else None
+        lines.append(
+            f"- #{question.get('reply_ref', '?')} {question.get('ticket_id', '?')} "
+            f"from {seat or '(unknown)'}: "
+            f"{_bounded(str(question.get('message') or '(empty)'), 200)}"
+        )
+    lines.append("Reply with /answer #N to open that question's answer form.")
+    return "\n".join(lines)
+
+
 def _mutation_summary(action: JSON, result: JSON) -> str:
     if action.get("operation") == "ticket_create":
         ticket = result.get("ticket", {})
         return f"Created ticket {ticket.get('ticket_id', '(unknown)')}."
     if action.get("operation") == "ticket_human_resolve":
         return f"Answered the pending request on {action['params']['ticket_id']}."
+    if action.get("operation") == "ticket_question_answer":
+        return f"Answered the seat question on {action['params']['ticket_id']}."
     annotation = result.get("annotation", {})
     return f"Added annotation {annotation.get('annotation_id', '(recorded)')}."
 
@@ -1669,7 +2117,7 @@ def _available_commands() -> list[JSON]:
         },
         {
             "name": "watch",
-            "description": "Watch the configured board until this turn is cancelled",
+            "description": "Watch until an important update ends this turn",
         },
         {
             "name": "evidence",
@@ -1678,8 +2126,8 @@ def _available_commands() -> list[JSON]:
         },
         {
             "name": "answer",
-            "description": "Answer a pending human request after native permission",
-            "input": {"hint": "TK-… <JSON-or-text>"},
+            "description": "Answer a human request or open a watched-question form",
+            "input": {"hint": "TK-… <JSON-or-text> or [#N]"},
         },
     ]
 
@@ -1688,8 +2136,9 @@ def _help() -> str:
     return (
         "Pursers board commands:\n"
         "- /board\n- /create <title> :: <description>\n"
-        "- /watch (cancel to stop)\n- /evidence TK-…\n"
-        "- /answer TK-… <JSON-or-text>\n\n"
+        "- /watch (ends after a seat question)\n- /evidence TK-…\n"
+        "- /answer TK-… <JSON-or-text>\n"
+        "- /answer [#N] (opens a form for a watched seat question)\n\n"
         "Legacy text commands remain supported: my tickets, my offers, board status, "
         "create ticket, annotate, and watch (optionally followed by this board)."
     )
