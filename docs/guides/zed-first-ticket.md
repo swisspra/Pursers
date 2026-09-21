@@ -1,9 +1,10 @@
-# From nothing to your first finished ticket, in Zed
+# Your first finished ticket in Zed, in about ten minutes
 
-This is the whole product in about ten minutes of your time: install an
-extension, create one ticket, and watch a fleet claim it, do the work, submit
-evidence, review it independently, and hand it back to you ready to merge —
-without leaving Zed's Agent Panel.
+This is a roughly ten-minute Zed walkthrough once your Pursers board, eligible
+worker, and independent-principal reviewer loops are already running. Install
+the extension, create one ticket, and watch the fleet claim it, do the work,
+submit evidence, review it independently, and hand it back to you ready to
+merge — without leaving Zed's Agent Panel.
 
 Follow it in order the first time. Every step below was run on a real machine
 before it was written down, and the failure notes are failures that actually
