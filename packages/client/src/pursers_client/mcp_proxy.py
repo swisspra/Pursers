@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import logging
+import os
+import shutil
+import signal
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -15,11 +20,17 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx2
 from mcp import Client, types
 from mcp.client.streamable_http import streamable_http_client
+from mcp.server import NotificationOptions
 from mcp.server.mcpserver import MCPServer
+from pydantic import BaseModel, Field
 
 
 LOG = logging.getLogger("pursers-mcp")
-DIAGNOSTIC_TOOL = "pursers_connection_status"
+SETUP_STATUS_TOOL = "pursers_setup_status"
+SETUP_TOOL = "pursers_setup"
+CENTRAL_PACKAGE_SPEC = "pursers-central==0.1.1"
+DEFAULT_INSTANCE_DIR = Path.home() / ".pursers" / "central"
+SETUP_AGENT_NAME = "zed-local-owner"
 DEFAULT_TOOLS = frozenset(
     {
         "a2a_wait",
@@ -58,6 +69,14 @@ PROMPT_BEHAVIOR_INSTRUCTIONS = (
 
 class RelayFailure(RuntimeError):
     """A safe-to-display relay failure that never contains credential text."""
+
+
+class SetupConsent(BaseModel):
+    provision: bool = Field(
+        description=(
+            "Create a private local Pursers instance and start Central in the background."
+        )
+    )
 
 
 class UpstreamClient(Protocol):
@@ -140,17 +159,22 @@ class CentralRelay:
         *,
         central_url: str,
         board: str,
-        token_file: Path,
+        token_file: Path | None = None,
         ca_file: Path | None = None,
         tools_mode: str = "default",
         connection_factory: ConnectionFactory | None = None,
+        setup_root: Path | None = None,
+        uvx_path: str | None = None,
     ) -> None:
         self.central_url = central_mcp_url(central_url)
         self.board = board
-        self.token_file = token_file
+        self.setup_root = (setup_root or DEFAULT_INSTANCE_DIR).expanduser()
+        self.token_file = (token_file or self.setup_root / "worker.jwt").expanduser()
+        self._token_file_was_overridden = token_file is not None
         self.ca_file = ca_file
         self.tools_mode = tools_mode
         self._connection_factory = connection_factory or self._http_connection
+        self._uvx_path = uvx_path
         self._known_tools: dict[str, types.Tool] = {}
         self._reported_error: str | None = None
 
@@ -210,30 +234,347 @@ class CentralRelay:
         self._reported_error = message
         print(f"pursers-mcp: {message}", file=sys.stderr, flush=True)
 
-    def _diagnostic_tool(self, failure: RelayFailure) -> types.Tool:
-        return types.Tool(
-            name=DIAGNOSTIC_TOOL,
-            description=(
-                "Report why pursers-mcp cannot currently reach Central. "
-                f"Current error: {failure}"
+    def _setup_tools(self, failure: RelayFailure) -> list[types.Tool]:
+        empty_schema = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        return [
+            types.Tool(
+                name=SETUP_STATUS_TOOL,
+                description=(
+                    "Check what this local Pursers connection still needs. "
+                    f"Current connection error: {failure}"
+                ),
+                inputSchema=empty_schema,
             ),
-            inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
-        )
+            types.Tool(
+                name=SETUP_TOOL,
+                description=(
+                    "With the user's explicit confirmation, create and start a private "
+                    "local Pursers Central and board."
+                ),
+                inputSchema=empty_schema,
+            ),
+        ]
 
-    async def list_tools(self) -> list[types.Tool]:
-        try:
-            result = await self._retrying(lambda client: client.list_tools())
-        except Exception as exc:
-            failure = self._safe_failure(exc)
-            self._report(failure)
-            self._known_tools = {}
-            return [self._diagnostic_tool(failure)]
-        self._reported_error = None
+    async def _upstream_tools(self) -> list[types.Tool]:
+        result = await self._retrying(lambda client: client.list_tools())
         tools = result.tools
         if self.tools_mode == "default":
             tools = [tool for tool in tools if tool.name in DEFAULT_TOOLS]
         self._known_tools = {tool.name: tool for tool in tools}
         return tools
+
+    async def list_tools(self) -> list[types.Tool]:
+        try:
+            tools = await self._upstream_tools()
+        except Exception as exc:
+            failure = self._safe_failure(exc)
+            self._report(failure)
+            self._known_tools = {}
+            return self._setup_tools(failure)
+        self._reported_error = None
+        return tools
+
+    def _resolved_uvx(self) -> str | None:
+        command = self._uvx_path or os.environ.get("PURSERS_UVX_PATH") or "uvx"
+        return shutil.which(command)
+
+    def _local_endpoint(self) -> tuple[str, int]:
+        parsed = urlsplit(self.central_url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "http" or host not in {"127.0.0.1", "localhost", "::1"}:
+            raise RelayFailure(
+                "automatic setup is available only for a local http:// Central endpoint"
+            )
+        return host, parsed.port or 80
+
+    async def _port_is_open(self, host: str, port: int) -> bool:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=0.4
+            )
+        except (OSError, TimeoutError):
+            return False
+        del reader
+        writer.close()
+        await writer.wait_closed()
+        return True
+
+    async def _setup_status(self) -> dict[str, Any]:
+        uvx = self._resolved_uvx()
+        token_readable = False
+        try:
+            _read_token(self.token_file)
+            token_readable = True
+        except RelayFailure:
+            pass
+        try:
+            tools = await self._upstream_tools()
+        except Exception as exc:
+            central_reachable = False
+            connection_error = str(self._safe_failure(exc))
+            tool_count = 0
+        else:
+            central_reachable = True
+            connection_error = None
+            tool_count = len(tools)
+        board_available = False
+        board_checked = False
+        if central_reachable:
+            board_checked = True
+            try:
+                board_result = await self._retrying(
+                    lambda client: client.call_tool(
+                        "board_status", {"board_id": self.board}
+                    )
+                )
+                board_available = not board_result.is_error
+            except Exception:
+                board_available = False
+        return {
+            "ok": True,
+            "uvx": {"available": uvx is not None, "path": uvx},
+            "central": {
+                "reachable": central_reachable,
+                "url": self.central_url,
+                "error": connection_error,
+            },
+            "board": {
+                "id": self.board,
+                "available": board_available,
+                "checked": board_checked,
+            },
+            "token_file": {
+                "path": str(self.token_file),
+                "readable": token_readable,
+                "overridden": self._token_file_was_overridden,
+            },
+            "real_tool_count": tool_count,
+        }
+
+    def _json_result(
+        self, payload: dict[str, Any], *, is_error: bool = False
+    ) -> types.CallToolResult:
+        return types.CallToolResult(
+            content=[
+                types.TextContent(
+                    type="text", text=json.dumps(payload, indent=2, sort_keys=True)
+                )
+            ],
+            structuredContent=payload,
+            isError=is_error,
+        )
+
+    async def _run_init(self, uvx: str, host_port: int) -> None:
+        process = await asyncio.create_subprocess_exec(
+            uvx,
+            "--from",
+            CENTRAL_PACKAGE_SPEC,
+            "pursers-central",
+            "init",
+            str(self.setup_root),
+            "--port",
+            str(host_port),
+            "--board",
+            self.board,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            detail = (stderr or stdout).decode("utf-8", "replace").strip().splitlines()
+            suffix = f": {detail[-1]}" if detail else ""
+            raise RelayFailure(f"pursers-central init failed{suffix}")
+
+    def _has_reusable_instance(self, port: int) -> bool:
+        profile = self.setup_root / "profile.env"
+        credentials = [self.setup_root / "admin.jwt", self.setup_root / "worker.jwt"]
+        managed = [profile, *credentials]
+        existing = [path for path in managed if path.exists()]
+        if not existing:
+            return False
+        if len(existing) != len(managed):
+            raise RelayFailure(
+                "the local setup directory is incomplete; move it aside and retry setup"
+            )
+        try:
+            values = dict(
+                line.split("=", 1)
+                for line in profile.read_text(encoding="utf-8").splitlines()
+                if line and not line.startswith("#") and "=" in line
+            )
+        except (OSError, UnicodeError) as exc:
+            raise RelayFailure("the local Central profile is unreadable") from exc
+        if values.get("ONBOARD_CENTRAL_PORT") != str(port):
+            raise RelayFailure(
+                "the existing local Central uses a different port; use its configured URL"
+            )
+        if values.get("PURSERS_BOARD_ID") != self.board:
+            raise RelayFailure(
+                "the existing local Central uses a different board; use its configured board_id"
+            )
+        for credential in credentials:
+            _read_token(credential)
+        return True
+
+    async def _start_central(self, uvx: str) -> tuple[asyncio.subprocess.Process, Path]:
+        self.setup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        log_path = self.setup_root / "central.log"
+        log_handle = log_path.open("ab", buffering=0)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                uvx,
+                "--from",
+                CENTRAL_PACKAGE_SPEC,
+                "pursers-central",
+                "run",
+                str(self.setup_root),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log_handle.close()
+        return process, log_path
+
+    async def _stop_central(self, process: asyncio.subprocess.Process) -> None:
+        if process.returncode is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except TimeoutError:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await process.wait()
+
+    async def _wait_for_central(
+        self, token_file: Path, process: asyncio.subprocess.Process
+    ) -> str:
+        token = _read_token(token_file)
+        deadline = asyncio.get_running_loop().time() + 30
+        last_error: Exception | None = None
+        while asyncio.get_running_loop().time() < deadline:
+            if process.returncode is not None:
+                raise RelayFailure(
+                    f"Central exited before becoming ready (status {process.returncode})"
+                )
+            try:
+                async with self._http_connection(token) as client:
+                    await client.list_tools()
+                return token
+            except Exception as exc:
+                last_error = exc
+                await asyncio.sleep(0.2)
+        raise RelayFailure("Central did not become ready within 30 seconds") from last_error
+
+    async def _create_board(self, admin_token: str) -> None:
+        async with self._http_connection(admin_token) as client:
+            result = await client.call_tool(
+                "board_onboard",
+                {
+                    "board_id": self.board,
+                    "agent_name": SETUP_AGENT_NAME,
+                    "role": "worker",
+                    "allow_takeover": True,
+                    "capabilities": {
+                        "can_work": True,
+                        "can_review": False,
+                        "tier_max": 2,
+                        "max_parallel": 1,
+                    },
+                },
+            )
+        if result.is_error:
+            detail = "board_onboard returned an error"
+            for item in result.content:
+                if isinstance(item, types.TextContent) and item.text:
+                    detail = item.text.splitlines()[0]
+                    break
+            raise RelayFailure(f"could not create local board: {detail}")
+
+    async def _provision(self) -> dict[str, Any]:
+        if self._token_file_was_overridden and self.token_file != self.setup_root / "worker.jwt":
+            raise RelayFailure(
+                "automatic setup cannot replace an explicit token_file override; "
+                "remove the override or point it at an existing Central"
+            )
+        uvx = self._resolved_uvx()
+        if uvx is None:
+            raise RelayFailure("uvx is unavailable; restart Zed after its uv installation finishes")
+        host, port = self._local_endpoint()
+        if await self._port_is_open(host, port):
+            raise RelayFailure(
+                f"port {port} is already in use; no second Central was started"
+            )
+        if not self._has_reusable_instance(port):
+            await self._run_init(uvx, port)
+        process, log_path = await self._start_central(uvx)
+        try:
+            admin_token = await self._wait_for_central(
+                self.setup_root / "admin.jwt", process
+            )
+            await self._create_board(admin_token)
+            tools = await self._upstream_tools()
+        except BaseException:
+            await self._stop_central(process)
+            raise
+        self._reported_error = None
+        return {
+            "ok": True,
+            "central_url": self.central_url,
+            "board_id": self.board,
+            "token_file": str(self.token_file),
+            "log_file": str(log_path),
+            "pid": process.pid,
+            "real_tools": [tool.name for tool in tools],
+        }
+
+    async def _perform_setup(self, context: Any) -> types.CallToolResult:
+        if context is None:
+            return self._json_result(
+                {"ok": False, "error": "setup requires an interactive MCP session"},
+                is_error=True,
+            )
+        try:
+            consent = await context.elicit(
+                (
+                    f"Create a private Pursers Central in {self.setup_root}, start it in "
+                    f"the background, and create board {self.board}?"
+                ),
+                SetupConsent,
+            )
+        except Exception as exc:
+            return self._json_result(
+                {"ok": False, "error": f"could not request setup consent: {exc}"},
+                is_error=True,
+            )
+        if consent.action != "accept" or not consent.data.provision:
+            return self._json_result(
+                {"ok": False, "provisioned": False, "reason": consent.action}
+            )
+        try:
+            payload = await self._provision()
+        except Exception as exc:
+            failure = self._safe_failure(exc)
+            self._report(failure)
+            return self._json_result(
+                {"ok": False, "provisioned": False, "error": str(failure)},
+                is_error=True,
+            )
+        await context.session.send_tool_list_changed()
+        payload["tools_list_changed"] = True
+        return self._json_result(payload)
 
     def _arguments_for(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = self._known_tools.get(name)
@@ -262,11 +603,10 @@ class CentralRelay:
         arguments: dict[str, Any],
         _context: Any = None,
     ) -> types.CallToolResult:
-        if name == DIAGNOSTIC_TOOL:
-            message = self._reported_error or "Central connection has not been checked"
-            return types.CallToolResult(
-                content=[types.TextContent(type="text", text=message)], isError=True
-            )
+        if name == SETUP_STATUS_TOOL:
+            return self._json_result(await self._setup_status())
+        if name == SETUP_TOOL:
+            return await self._perform_setup(_context)
         payload = self._arguments_for(name, dict(arguments))
         try:
             return await self._retrying(
@@ -284,6 +624,13 @@ class CentralRelay:
 
 
 def _prompt_text(name: str, argument: str | None, board: str) -> str:
+    if name == "setup":
+        return (
+            f"Set up Pursers for `{board}` in this chat. Check the local setup status, "
+            "explain what is missing, then run the setup tool. The setup tool asks me "
+            "for confirmation before it creates files or starts Central. After setup, "
+            "continue in this same chat with the newly available board tools."
+        )
     if name == "board":
         return (
             f"Your work on `{board}` at a glance: its board ID and board-wide key "
@@ -328,6 +675,23 @@ def build_server(relay: CentralRelay) -> MCPServer[Any]:
     server.list_tools = relay.list_tools  # type: ignore[method-assign]
     server.call_tool = relay.call_tool  # type: ignore[method-assign]
 
+    # MCPServer 2.2 has no public constructor setting for legacy list-changed
+    # capabilities. Zed negotiates the 2025-11-25 wire, so advertise the exact
+    # notification this relay emits when setup replaces its bootstrap tools.
+    lowlevel = server._lowlevel_server  # type: ignore[attr-defined]
+    create_options = lowlevel.create_initialization_options
+
+    def create_initialization_options(
+        notification_options: NotificationOptions | None = None,
+        experimental_capabilities: dict[str, dict[str, Any]] | None = None,
+        extensions: dict[str, dict[str, Any]] | None = None,
+    ) -> Any:
+        options = notification_options or NotificationOptions()
+        options.tools_changed = True
+        return create_options(options, experimental_capabilities, extensions)
+
+    lowlevel.create_initialization_options = create_initialization_options
+
     @server.prompt(name="board", description="Compact board summary and Needs you list")
     def board_prompt() -> str:
         return _prompt_text("board", None, relay.board)
@@ -348,6 +712,10 @@ def build_server(relay: CentralRelay) -> MCPServer[Any]:
     def answer_prompt(ticket_and_answer: str) -> str:
         return _prompt_text("answer", ticket_and_answer, relay.board)
 
+    @server.prompt(name="setup", description="Set up a local Pursers board in this chat")
+    def setup_prompt() -> str:
+        return _prompt_text("setup", None, relay.board)
+
     return server
 
 
@@ -355,7 +723,7 @@ def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(prog="pursers-mcp")
     command.add_argument("--central-url", required=True)
     command.add_argument("--board", required=True)
-    command.add_argument("--token-file", required=True, type=Path)
+    command.add_argument("--token-file", type=Path)
     command.add_argument("--ca-file", type=Path)
     command.add_argument("--tools", choices=("default", "all"), default="default")
     command.add_argument("--version", action="version", version=f"pursers-mcp {package_version()}")
