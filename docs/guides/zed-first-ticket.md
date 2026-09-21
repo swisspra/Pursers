@@ -1,10 +1,12 @@
-# Your first finished ticket in Zed, in about ten minutes
+# Create and follow your first ticket in Zed
 
-This is a roughly ten-minute Zed walkthrough once your Pursers board, eligible
-worker, and independent-principal reviewer loops are already running. Install
-the extension, create one ticket, and watch the fleet claim it, do the work,
-submit evidence, review it independently, and hand it back to you ready to
-merge — without leaving Zed's Agent Panel.
+This is a roughly ten-minute walkthrough of the Zed side of Pursers: connect
+the extension, create one ticket, watch its state, answer a question, and read
+its evidence without leaving Zed's Agent Panel. Zed does **not** provision or
+start the worker and independent reviewer that finish the ticket. If those
+seat loops are already running, you can follow the same ticket through review
+to `ready to merge`; on a fresh Central with no seats, the honest end state of
+this walkthrough is an open ticket.
 
 Follow it in order the first time. Every step below was run on a real machine
 before it was written down, and the failure notes are failures that actually
@@ -18,19 +20,19 @@ the narrative; that page is the manual.
 
 Zed 1.20.2 or later, and a network connection.
 
-You also need [uv](https://docs.astral.sh/uv/) on your `PATH` and a complete
-Pursers fleet, not just a running Central. The board must already exist, with
-at least one onboarded, online worker advertising `can_work=true` and one
-online reviewer advertising `can_review=true`. The reviewer must authenticate
-as a different principal from the worker, or strict review cannot approve the
-ticket.
+You also need [uv](https://docs.astral.sh/uv/) on your `PATH`. A running
+Central is enough to connect Zed and create a ticket. Finishing that ticket
+also requires at least one onboarded, online worker advertising
+`can_work=true` and one online reviewer advertising `can_review=true`. The
+reviewer must authenticate as a different principal from the worker, or strict
+review cannot approve the ticket.
 
-If you are starting from nothing, follow [Run a multi-agent
-fleet](running-a-fleet.md) first. It creates the board, credentials, memberships,
-and seat identities, and starts the worker and reviewer push loops. Return here
-only after those loops are running. A bare Central created with these two
-commands is useful for connection testing, but it cannot finish this walkthrough
-by itself:
+If you are starting from nothing and want to reach `ready to merge`, follow
+[Run a multi-agent fleet](running-a-fleet.md) first. It creates the board,
+credentials, memberships, and seat identities, and starts the worker and
+reviewer push loops. If you want to see the Zed boundary for yourself, a bare
+Central created with these two commands is enough to connect and create the
+open ticket, but it cannot finish that ticket by itself:
 
 ```sh
 uvx --from pursers-central pursers-central init ./pursers-local
@@ -43,6 +45,31 @@ give Zed the **path** to it and never the contents.
 Leave `run` going in its own terminal. Both uv and first-chat Central setup are
 prerequisites we are removing; until that work lands, set them up before opening
 Zed.
+
+### Where self-service ends
+
+The Zed extension uses an existing board credential. It does not issue the two
+different-principal seat credentials, ask for a model provider, or start worker
+and reviewer processes. Creating a ticket on a bare Central therefore succeeds,
+but `/watch` has no worker claim to report and the ticket remains `open`.
+
+If you want the ticket to finish, an operator must first follow [Run a
+multi-agent fleet](running-a-fleet.md). The provider is selected when the
+worker and reviewer runtimes are configured; in the Fleet Dashboard this is
+**Team → New agent**, where the form asks for the provider, model, base URL,
+and API key before the seat can be started. The worker and reviewer must use
+separate credentials whose returned `principal_id` values differ.
+
+If no credential is configured for a remote provider, the headless runtime
+exits before joining the work loop with this message:
+
+```text
+configuration error: llm requires exactly one of api_key_env, api_key_file, or api_key_keychain (loopback providers may omit all three)
+```
+
+That is a fleet-setup stop, not a Zed connection failure. You can still use
+Zed to create and inspect the open ticket, then return after the seat operator
+has configured and started both loops.
 
 ## 1. Install the extension
 
@@ -114,13 +141,14 @@ Run `/board`. On a brand-new board you get the board ID and a row of zeroes.
 That is the correct answer, and it means the whole path works: Zed reached the
 relay, the relay reached Central, and Central checked your credential.
 
-It does **not** prove that a worker or reviewer is online. Before `/create`, ask
-the fleet operator to verify that the board exists, a `can_work=true` worker is
-onboarded and running its push loop, and a `can_review=true` reviewer on a
-different principal is onboarded and running its review loop. If any one is
-missing, stop here and
-finish [the fleet setup](running-a-fleet.md#4-run-each-seat-as-a-push-loop);
-the ticket can be created, but it cannot travel all the way to `ready to merge`.
+It does **not** prove that a worker or reviewer is online. If your goal is only
+to create the ticket, continue. If you expect it to finish during this session,
+ask the fleet operator to verify that the board exists, a `can_work=true`
+worker is onboarded and running its push loop, and a `can_review=true` reviewer
+on a different principal is onboarded and running its review loop. If any one
+is missing, the ticket can still be created, but it cannot travel to
+`ready to merge` until [fleet setup](running-a-fleet.md#4-run-each-seat-as-a-push-loop)
+is complete.
 
 If a first attempt fails with an authorization error rather than a timeout,
 that is also good news — it proves the round trip. You are a member problem
@@ -143,7 +171,10 @@ nothing is written on your behalf without it.
 You get back a ticket ID like `TK-4a7c19e0b3d2`. That ID is how you refer to
 this work everywhere from now on.
 
-## 5. Watch it get picked up
+This is the end of the path Zed can complete by itself. On a bare Central the
+new ticket is `open`; that is expected, not a failed creation.
+
+## 5. With a running fleet, watch it get picked up
 
 ```text
 /watch
@@ -207,14 +238,16 @@ you named as the person it is waiting on.
 Merge it through your normal repository workflow. The extension deliberately
 adds no merge button: the last step stays yours.
 
-## What you just watched
+## What Zed did — and did not do
 
-One sentence of intent became a tracked ticket, a claimed lease, real commits,
-literal test output, an independent review with the authority to say no, and a
-finished change waiting for your approval.
+Zed turned one sentence of intent into a tracked ticket and gave you the
+commands to watch it, answer questions, and inspect evidence. A separately
+operated fleet supplied the claimed lease, real commits, literal test output,
+and independent review. Without that fleet, the accurate result is the same
+tracked ticket waiting in `open`.
 
-You typed five commands and answered one question. The rest ran on its own, and
-every step left evidence you can read.
+When both seat loops are running, you type five commands and answer one
+question. The fleet does the rest, and every step leaves evidence you can read.
 
 ## When it goes wrong
 

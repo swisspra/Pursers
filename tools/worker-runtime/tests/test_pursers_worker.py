@@ -525,6 +525,45 @@ def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
         assert "done" not in log
 
 
+def test_main_reports_missing_remote_provider_credential_without_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    token_file = tmp_path / "seat.jwt"
+    token_file.write_text("TOKEN_PRIVATE\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    config_file = tmp_path / "worker.toml"
+    config_file.write_text(
+        "\n".join(
+            (
+                'boards = ["board-one"]',
+                "[seat]",
+                'agent_name = "worker-one"',
+                'role = "worker"',
+                'central_url = "http://127.0.0.1:8766/mcp"',
+                f'token_file = "{token_file}"',
+                "[llm]",
+                'base_url = "https://api.example.invalid/v1"',
+                'model = "example-model"',
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    config_file.chmod(0o600)
+
+    with pytest.raises(SystemExit) as stopped:
+        worker_module.main([str(config_file)])
+
+    assert stopped.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "configuration error: llm requires exactly one of api_key_env, "
+        "api_key_file, or api_key_keychain (loopback providers may omit all three)\n"
+    )
+    assert "Traceback" not in captured.err
+
+
 def test_runtime_records_provider_usage_without_content_or_extra_model_call() -> None:
     with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)

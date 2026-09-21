@@ -6,8 +6,10 @@ answer a seat's question without putting a bearer token in Zed settings. The
 extension starts a local `pursers-mcp` relay, which reads the credential from a
 token file and talks to Pursers Central.
 
-New to Pursers? Start with [your first finished ticket in Zed](zed-first-ticket.md).
-It is a ten-minute narrative walkthrough; this page is the complete reference.
+New to Pursers? Start with [creating and following your first ticket in
+Zed](zed-first-ticket.md). It is a ten-minute narrative walkthrough that marks
+the boundary between Zed and the separately operated worker/reviewer fleet;
+this page is the complete reference.
 
 ## Commands
 

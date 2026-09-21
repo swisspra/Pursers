@@ -150,9 +150,10 @@ To add a second worker, an independent reviewer, or a coordinator, see
 
 Connect Zed's Agent Panel to one Pursers board through the credential-safe
 local relay. Follow the [first-ticket walkthrough](docs/guides/zed-first-ticket.md)
-to watch one job reach `ready to merge`, or use the [Zed reference guide](docs/guides/zed.md)
-for installation, settings, all five board commands, the optional ACP thread,
-and troubleshooting.
+to create and follow one ticket, including the exact point where an operated
+worker/reviewer fleet becomes necessary, or use the [Zed reference
+guide](docs/guides/zed.md) for installation, settings, all five board commands,
+the optional ACP thread, and troubleshooting.
 
 ## What's in the box
 
