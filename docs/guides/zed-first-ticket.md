@@ -17,12 +17,19 @@ the narrative; that page is the manual.
 
 Zed 1.20.2 or later, and a network connection.
 
-You also need [uv](https://docs.astral.sh/uv/) on your `PATH`, and a running
-Pursers Central. Both of these are prerequisites we are removing: the extension
-will download its own uv, and the first chat will be able to set Central up for
-you. Until that lands you install uv yourself and run Central once.
+You also need [uv](https://docs.astral.sh/uv/) on your `PATH` and a complete
+Pursers fleet, not just a running Central. The board must already exist, with
+at least one onboarded, online worker advertising `can_work=true` and one
+online reviewer advertising `can_review=true`. The reviewer must authenticate
+as a different principal from the worker, or strict review cannot approve the
+ticket.
 
-If you have no Central yet, this creates one and starts it:
+If you are starting from nothing, follow [Run a multi-agent
+fleet](running-a-fleet.md) first. It creates the board, credentials, memberships,
+and seat identities, and starts the worker and reviewer push loops. Return here
+only after those loops are running. A bare Central created with these two
+commands is useful for connection testing, but it cannot finish this walkthrough
+by itself:
 
 ```sh
 uvx --from pursers-central pursers-central init ./pursers-local
@@ -32,7 +39,9 @@ uvx --from pursers-central pursers-central run ./pursers-local
 `init` writes `./pursers-local/worker.jwt`. That file is a credential. You will
 give Zed the **path** to it and never the contents.
 
-Leave `run` going in its own terminal. Everything below talks to it.
+Leave `run` going in its own terminal. Both uv and first-chat Central setup are
+prerequisites we are removing; until that work lands, set them up before opening
+Zed.
 
 ## 1. Install the extension
 
@@ -104,6 +113,14 @@ Run `/board`. On a brand-new board you get the board ID and a row of zeroes.
 That is the correct answer, and it means the whole path works: Zed reached the
 relay, the relay reached Central, and Central checked your credential.
 
+It does **not** prove that a worker or reviewer is online. Before `/create`, ask
+the fleet operator to verify that the board exists, a `can_work=true` worker is
+onboarded and running its push loop, and a `can_review=true` reviewer on a
+different principal is onboarded and running its review loop. If any one is
+missing, stop here and
+finish [the fleet setup](running-a-fleet.md#4-run-each-seat-as-a-push-loop);
+the ticket can be created, but it cannot travel all the way to `ready to merge`.
+
 If a first attempt fails with an authorization error rather than a timeout,
 that is also good news — it proves the round trip. You are a member problem
 away, not a connection problem away.
@@ -131,9 +148,10 @@ this work everywhere from now on.
 /watch
 ```
 
-Keep the turn running. Within seconds the board offers your ticket to a seat
-that is idle and capable, and that seat claims it. `/watch` reports the claim
-with the seat's name.
+Keep the turn running. When an eligible `can_work=true` worker's push loop is
+online, the board normally offers your ticket within seconds and that seat
+claims it. `/watch` reports the claim with the seat's name. If no eligible
+worker is online, the ticket stays open until one connects.
 
 What happens next happens without you. The seat reads the ticket, works in its
 own clone, and commits. You are not in the loop and do not need to be.
@@ -176,10 +194,11 @@ and the review state. Not a summary of the work — the work.
 
 ## 8. The verdict, from someone else
 
-Your ticket is now reviewed by a **different** seat than the one that built it.
-That reviewer can reject it, and frequently does. A rejection comes back with
-the specific reason attached, the original seat picks the ticket up again, fixes
-it, and resubmits. You will see that whole exchange in `/board` and `/evidence`.
+With an eligible review loop online, your ticket is now reviewed by a
+**different authenticated principal** from the one that built it. That reviewer
+can reject it, and frequently does. A rejection comes back with the specific
+reason attached, an eligible worker picks the ticket up again, fixes it, and
+resubmits. You will see that whole exchange in `/board` and `/evidence`.
 
 Only after an independent approval does the ticket reach `ready to merge`, with
 you named as the person it is waiting on.
