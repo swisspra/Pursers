@@ -28,7 +28,7 @@
     "uvx_path": {
       "type": "string",
       "minLength": 1,
-      "description": "Optional uvx executable path or command name."
+      "description": "Optional absolute path to the uvx executable."
     },
     "package_spec": {
       "type": "string",
