@@ -1218,7 +1218,7 @@ def test_ten_minute_idle_window_has_no_central_calls_beyond_subscription(
 
 
 @pytest.mark.parametrize("role", ["worker", "reviewer"])
-def test_real_bridge_scans_backlog_once_at_ten_minute_cadence(
+def test_real_bridge_scans_backlog_at_bounded_reconciliation_cadence(
     role: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     central_src = Path(__file__).parents[3] / "packages" / "central" / "src" / "pursers_central"
@@ -1515,8 +1515,11 @@ def test_real_bridge_scans_backlog_once_at_ten_minute_cadence(
                             if name == "lease_renew"
                         )
                     else:
-                        assert idle_names == ["ticket_list"]
-                    assert idle_names.count("ticket_list") == 1
+                        assert set(idle_names) == {"ticket_list"}
+                    expected_scans = int(
+                        600 // api.wait_bridge.BACKLOG_SCAN_INTERVAL_S
+                    )
+                    assert idle_names.count("ticket_list") == expected_scans
                     assert not {"ticket_get", "board_catchup"}.intersection(idle_names)
 
                     if role == "worker":

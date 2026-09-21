@@ -1800,6 +1800,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(wait_server, "WAIT_MODE", "poll"),
             patch.object(wait_server, "BACKLOG_RESURFACE_INTERVAL_S", 0.5),
+            patch.object(wait_server, "BACKLOG_SCAN_INTERVAL_S", 0.5),
             patch.object(wait_server.time, "monotonic", clock.monotonic),
             patch.object(wait_server.asyncio, "sleep", clock.sleep),
         ):
@@ -1817,6 +1818,33 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         # First return, second entry scan, and the resurfacing cadence each
         # perform one list. Offer reconciliation reuses the matching scan.
         self.assertEqual(client.ticket_list_calls, 3)
+
+    async def test_idle_wait_detects_new_broadcast_on_scan_interval(self) -> None:
+        clock = ManualClock()
+        client = ScriptedBoardClient([])
+
+        async def sleep(delay: float) -> None:
+            clock.now += delay
+            client._tickets = [{
+                "ticket_id": "TK-new-broadcast",
+                "status": "open",
+                "dispatch_state": {"state": "broadcast", "kind": "work"},
+            }]
+
+        with (
+            patch.object(wait_server, "WAIT_MODE", "poll"),
+            patch.object(wait_server, "BACKLOG_SCAN_INTERVAL_S", 0.5),
+            patch.object(wait_server.time, "monotonic", clock.monotonic),
+            patch.object(wait_server.asyncio, "sleep", sleep),
+        ):
+            result = await wait_server._wait_for_work(
+                client, since_seq=0, timeout_s=2, only_mine=True
+            )
+
+        self.assertEqual(result["reason"], "backlog")
+        self.assertEqual(result["events"][0]["ticket_id"], "TK-new-broadcast")
+        self.assertEqual(result["waited_s"], 0.5)
+        self.assertEqual(client.ticket_list_calls, 2)
 
 
 if __name__ == "__main__":

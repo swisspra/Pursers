@@ -45,6 +45,7 @@ Unset means the component applies its documented default or requires an explicit
 | `PATH` | ACP | operating-system default | Executable search path passed to local ACP child processes. |
 | `PROJECT_REGISTRY_FILE` | Wait bridge | unset | Project-registry JSON file used by the registry seeder. |
 | `PURSERS_BACKLOG_RESURFACE_INTERVAL_S` | Wait bridge | `600` seconds | Minimum interval before an unchanged backlog cue can resurface. |
+| `PURSERS_BACKLOG_SCAN_INTERVAL_S` | Wait bridge | `30` seconds | Interval between claimable-backlog reconciliation scans while a push wait remains open. |
 | `PURSERS_BOARDS` | Wait bridge | unset | Comma-separated board allowlist for a multi-board wait bridge. |
 | `PURSERS_BOARD_CONNECTOR_TOKEN` | Wait bridge | unset | Connector token used only by the optional token-match guard. |
 | `PURSERS_BOARD_CONNECTOR_TOKEN_SHA256` | Wait bridge | unset | Expected connector-token fingerprint for the token-match guard. |
@@ -73,6 +74,7 @@ Unset means the component applies its documented default or requires an explicit
 | `PURSERS_TIER_MAX` | Wait bridge | unset | Maximum dispatch tier accepted by the seat. |
 | `PURSERS_WAIT_BRIDGE_COMMAND` | ACP | `pursers-wait-bridge` | Wait-bridge executable started by ACP. |
 | `PURSERS_WAIT_MODE` | Wait bridge | `push` | Wait transport preference (`push` or compatibility mode). |
+| `PURSERS_WAIT_RECONCILE_INTERVAL_S` | Client | `30` seconds | Interval between current-state claimability scans while a Client wait remains open. |
 | `SHELL` | ACP | inherited | User shell passed to Personal setup subprocesses. |
 | `STORE_BACKEND` | Central | `sqlite` | Central storage backend; only SQLite is supported. |
 | `SYSTEMROOT` | ACP | inherited | Windows system root passed to Personal setup subprocesses. |

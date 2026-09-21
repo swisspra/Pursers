@@ -217,7 +217,10 @@ class LocalSubscriptionAdapter:
 
     async def ticket_list(self, **_arguments: Any) -> dict[str, Any]:
         self.ticket_list_calls += 1
-        raise AssertionError("default wait must not call ticket_list")
+        result = await self.raw_client.call_tool(
+            "ticket_list", {"board_id": "pursers", **_arguments}
+        )
+        return dict(result.structured_content or {})
 
     async def board_catchup(self, **_arguments: Any) -> dict[str, Any]:
         self.catchup_calls += 1
@@ -1673,6 +1676,156 @@ def test_event_wait_closes_stream_before_printing_result(tmp_path: Path) -> None
     assert [event["id"] for event in result["events"]] == ["EV-ready"]
 
 
+class ReconcileWaitClient:
+    def __init__(self, *, agent_id: str = "AI-worker") -> None:
+        self.identity = SimpleNamespace(agent_id=agent_id)
+        self.tickets: list[dict[str, Any]] = []
+        self.ready = asyncio.Event()
+        self.release = asyncio.Event()
+        self.ticket_list_calls: list[dict[str, Any]] = []
+
+    async def ticket_list(self, **arguments: Any) -> dict[str, Any]:
+        self.ticket_list_calls.append(arguments)
+        return {"tickets": list(self.tickets)}
+
+    async def events(
+        self,
+        from_cursor: int | None = None,
+        *,
+        only_mine: bool = True,
+        kinds: frozenset[str] | None = None,
+        resource_subscriptions: tuple[str, ...] | None = None,
+        acknowledge: bool = True,
+        touch: bool | None = None,
+        cursor_callback: Any = None,
+    ):
+        self.ready.set()
+        await self.release.wait()
+        if False:
+            yield {}
+
+
+def _run_generated_wait(
+    generated: Any,
+    client: ReconcileWaitClient,
+    *,
+    submitted: bool = False,
+) -> dict[str, Any]:
+    output = io.StringIO()
+    with redirect_stdout(output):
+        asyncio.run(generated._cmd_wait(
+            client,
+            "pursers",
+            41,
+            1,
+            submitted=submitted,
+            poll_fallback=False,
+            submitted_relevant_kinds=REVIEWER_WAIT_KINDS if submitted else None,
+            dispatch_kinds=WORKER_WAIT_KINDS,
+        ))
+    return json.loads(output.getvalue())
+
+
+def test_wait_reconciles_broadcast_after_transient_route_failure(
+    tmp_path: Path,
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path / "seat", client="goose"))
+        / "bin" / "board.py",
+        "board_reconcile_route_failure",
+    )
+    client = ReconcileWaitClient()
+    client.tickets = [{
+        "ticket_id": "TK-route-recovered",
+        "status": "open",
+        "target_url": "pursers/packages/central",
+        "dispatch_state": {
+            "state": "broadcast",
+            "kind": "work",
+            "reason": "no_candidates_remaining",
+        },
+        "payload_ref": "board://pursers/ticket/TK-route-recovered",
+    }]
+
+    result = _run_generated_wait(generated, client)
+
+    assert result["timed_out"] is False
+    assert result["reason"] == "broadcast"
+    assert result["events"][0]["ticket_id"] == "TK-route-recovered"
+    assert result["events"][0]["source"] == "wait_reconciliation"
+
+
+def test_wait_reconciles_broadcast_that_appears_during_subscription(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def exercise() -> dict[str, Any]:
+        generated = load_generated(
+            seat_new.generate(args(tmp_path / "seat", client="goose"))
+            / "bin" / "board.py",
+            "board_reconcile_live_broadcast",
+        )
+        monkeypatch.setattr(
+            generated, "WAIT_RECONCILE_INTERVAL_S", 0.02, raising=False
+        )
+        client = ReconcileWaitClient()
+        output = io.StringIO()
+
+        async def wait() -> None:
+            with redirect_stdout(output):
+                await generated._cmd_wait(
+                    client,
+                    "pursers",
+                    52,
+                    1,
+                    poll_fallback=False,
+                    dispatch_kinds=WORKER_WAIT_KINDS,
+                )
+
+        waiting = asyncio.create_task(wait())
+        await asyncio.wait_for(client.ready.wait(), timeout=0.5)
+        client.tickets = [{
+            "ticket_id": "TK-live-broadcast",
+            "status": "open",
+            "dispatch_state": {"state": "broadcast", "kind": "work"},
+        }]
+        await asyncio.wait_for(waiting, timeout=1.5)
+        client.release.set()
+        return json.loads(output.getvalue())
+
+    result = asyncio.run(exercise())
+
+    assert result["timed_out"] is False
+    assert result["reason"] == "broadcast"
+    assert result["events"][0]["ticket_id"] == "TK-live-broadcast"
+    assert result["events"][0]["source"] == "wait_reconciliation"
+
+
+def test_reviewer_wait_reconciles_submission_that_predates_startup(
+    tmp_path: Path,
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path / "seat", role="reviewer", client="goose"))
+        / "bin" / "board.py",
+        "board_reconcile_existing_submission",
+    )
+    client = ReconcileWaitClient(agent_id="AI-reviewer")
+    client.tickets = [{
+        "ticket_id": "TK-existing-submission",
+        "status": "submitted",
+        "target_url": "pursers/packages/central",
+        "dispatch_state": {"state": "broadcast", "kind": "review"},
+        "review_state": "unclaimed",
+    }]
+
+    result = _run_generated_wait(generated, client, submitted=True)
+
+    assert result["timed_out"] is False
+    assert result["reason"] == "broadcast"
+    assert result["events"][0]["ticket_id"] == "TK-existing-submission"
+    assert result["events"][0]["source"] == "wait_reconciliation"
+
+
 async def build_local_central(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from pursers_central import central
 
@@ -1947,7 +2100,7 @@ def test_goose_generated_wait_60_second_idle_is_pure_and_rearms(
                 assert result["timed_out"] is True
                 assert result["events"] == []
                 assert result["new_seq"] == cursor
-                assert adapter.ticket_list_calls == 0
+                assert adapter.ticket_list_calls >= 1
                 assert adapter.catchup_calls == 0
                 assert adapter.events_calls == [
                     {
@@ -2067,7 +2220,7 @@ def test_reviewer_wait_submitted_wakes_on_real_central_event(
                 assert len(result["events"]) == 1
                 assert result["events"][0]["ticket_id"] == ticket_id
                 assert result["events"][0]["status_to"] == "submitted"
-                assert adapter.ticket_list_calls == 0
+                assert adapter.ticket_list_calls >= 1
                 assert adapter.catchup_calls == 0
                 assert adapter.events_calls[0]["only_mine"] is False
                 assert adapter.events_calls[0]["touch"] is False
@@ -2918,6 +3071,8 @@ def test_generated_claim_refuses_operator_checkout_before_board_mutation(
     assert result["error"] == {
         "code": "operator_checkout_read_only",
         "message": "operator checkout is read-only for seats",
+        "retryable": False,
+        "retry_policy": "requires_registry_or_ticket_correction",
     }
 
 
@@ -2991,11 +3146,21 @@ def test_generated_claim_routes_matching_seat_owned_clone(
 
 
 @pytest.mark.parametrize(
-    ("target_url", "make_git", "expected_code"),
+    ("target_url", "make_git", "expected_code", "retryable"),
     [
-        ("https://[", True, "target_url_malformed"),
-        ("https://example.test/acme/unknown", True, "repository_url_not_registered"),
-        ("https://example.test/acme/alpha", False, "routed_repository_unavailable"),
+        ("https://[", True, "target_url_malformed", False),
+        (
+            "https://example.test/acme/unknown",
+            True,
+            "repository_url_not_registered",
+            False,
+        ),
+        (
+            "https://example.test/acme/alpha",
+            False,
+            "routed_repository_unavailable",
+            True,
+        ),
     ],
 )
 def test_generated_claim_refuses_invalid_repository_route_before_claim(
@@ -3005,6 +3170,7 @@ def test_generated_claim_refuses_invalid_repository_route_before_claim(
     target_url: str,
     make_git: bool,
     expected_code: str,
+    retryable: bool,
 ) -> None:
     from pursers_client import (
         parse_project_registry,
@@ -3082,6 +3248,12 @@ def test_generated_claim_refuses_invalid_repository_route_before_claim(
     assert claims == []
     assert result["claim_refused"] is True
     assert result["error"]["code"] == expected_code
+    assert result["error"]["retryable"] is retryable
+    assert result["error"]["retry_policy"] == (
+        "reconcile_after_repository_available"
+        if retryable
+        else "requires_registry_or_ticket_correction"
+    )
 
 
 def test_generated_claim_accepts_exact_registered_repository_url(
