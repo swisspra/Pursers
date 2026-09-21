@@ -4,10 +4,10 @@ This Zed extension starts `pursers-mcp` and connects Zed's Agent Panel to one Pu
 
 ## Install
 
-1. Install [uv](https://docs.astral.sh/uv/) and restart Zed so `uvx` is on its `PATH`.
+1. Install [uv](https://docs.astral.sh/uv/) and restart Zed so `uvx` is on its `PATH`. If uv is installed somewhere unusual, note the absolute path to its `uvx` executable for `uvx_path` below.
 2. Run `pursers-central init DIR`. This creates `DIR/worker.jwt`.
 3. In Zed, run `zed: install dev extension` and select this directory.
-4. Open the Pursers context-server configure form.
+4. For a first-time setup, open the Pursers context-server configure form.
 
 For a registry release, install `Pursers` from Zed Extensions instead of step 3.
 
@@ -22,14 +22,16 @@ Set these required fields:
 Optional fields:
 
 - `ca_file`: a CA certificate file for a TLS endpoint.
-- `uvx_path`: another uvx executable path or command name.
+- `uvx_path`: an absolute path to the uvx executable. Use this override when automatic lookup cannot see an unusual uv installation.
 - `package_spec`: another package version or a local `pursers-client` checkout for development.
 
-The release default is `pursers-client==0.1.1`. The launched command is:
+The release default is `pursers-client==0.1.1`. Automatic lookup resolves `uvx` to an absolute path before launch. For example, the launched command on a Homebrew system may be:
 
 ```text
-uvx --from pursers-client==0.1.1 pursers-mcp --central-url URL --board BOARD_ID --token-file PATH [--ca-file PATH]
+/opt/homebrew/bin/uvx --from pursers-client==0.1.1 pursers-mcp --central-url URL --board BOARD_ID --token-file PATH [--ca-file PATH]
 ```
+
+For an existing setup, edit `context_servers.pursers` in `settings.json` directly. The Configure dialog can show `default_settings.json` instead of the saved values, and Save replaces the existing entry verbatim. Do not save placeholder values; if the form omits `uvx_path`, Zed deletes that override. Uninstalling the extension clears `context_servers` entirely, so restore the Pursers settings after reinstalling.
 
 ## Verify
 

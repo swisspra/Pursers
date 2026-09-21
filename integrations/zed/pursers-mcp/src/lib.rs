@@ -20,19 +20,54 @@ struct PursersSettings {
 }
 
 trait UvxProbe {
-    fn verify(&self, command: &str) -> Result<()>;
+    fn resolve(&self, configured_path: Option<&str>) -> Result<String>;
 }
 
 struct ZedProcessProbe;
 
 impl UvxProbe for ZedProcessProbe {
-    fn verify(&self, command: &str) -> Result<()> {
-        let output = Command::new(command).arg("--version").output();
+    fn resolve(&self, configured_path: Option<&str>) -> Result<String> {
+        let command = match configured_path {
+            Some(path) if is_absolute_path(path) => path.to_owned(),
+            Some(_) => return Err(INSTALL_UV_MESSAGE.to_owned()),
+            None => locate_uvx()?,
+        };
+
+        let output = Command::new(&command).arg("--version").output();
         match output {
-            Ok(output) if output.status == Some(0) => Ok(()),
+            Ok(output) if output.status == Some(0) => Ok(command),
             Ok(_) | Err(_) => Err(INSTALL_UV_MESSAGE.to_owned()),
         }
     }
+}
+
+fn locate_uvx() -> Result<String> {
+    let (shell, args): (&str, &[&str]) = match zed::current_platform().0 {
+        zed::Os::Mac | zed::Os::Linux => ("/bin/sh", &["-c", "command -v uvx"]),
+        zed::Os::Windows => ("where.exe", &["uvx.exe"]),
+    };
+    let output = Command::new(shell).args(args.iter().copied()).output();
+    let path = match output {
+        Ok(output) if output.status == Some(0) => {
+            String::from_utf8(output.stdout).ok().and_then(|stdout| {
+                stdout
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .map(str::trim)
+                    .map(str::to_owned)
+            })
+        }
+        Ok(_) | Err(_) => None,
+    }
+    .filter(|path| is_absolute_path(path))
+    .ok_or_else(|| INSTALL_UV_MESSAGE.to_owned())?;
+    Ok(path)
+}
+
+fn is_absolute_path(path: &str) -> bool {
+    path.starts_with('/')
+        || (path.as_bytes().get(1) == Some(&b':')
+            && matches!(path.as_bytes().get(2), Some(b'\\' | b'/')))
 }
 
 struct PursersExtension;
@@ -92,11 +127,15 @@ fn build_command(settings: &PursersSettings, probe: &impl UvxProbe) -> Result<Co
     require_value("token_file", &settings.token_file)?;
 
     let ca_file = optional_value("ca_file", settings.ca_file.as_deref())?;
-    let uvx = optional_value("uvx_path", settings.uvx_path.as_deref())?.unwrap_or("uvx");
+    let configured_uvx = optional_value("uvx_path", settings.uvx_path.as_deref())?;
     let package_spec = optional_value("package_spec", settings.package_spec.as_deref())?
         .unwrap_or(DEFAULT_PACKAGE_SPEC);
 
-    probe.verify(uvx)?;
+    let uvx = probe.resolve(configured_uvx)?;
+    if !is_absolute_path(&uvx) {
+        return Err(INSTALL_UV_MESSAGE.to_owned());
+    }
+    println!("Pursers resolved uvx executable: {uvx}");
 
     let mut args = vec![
         "--from".to_owned(),
@@ -114,7 +153,7 @@ fn build_command(settings: &PursersSettings, probe: &impl UvxProbe) -> Result<Co
     }
 
     Ok(Command {
-        command: uvx.to_owned(),
+        command: uvx,
         args,
         env: Vec::new(),
     })
@@ -140,16 +179,26 @@ mod tests {
     struct Available;
 
     impl UvxProbe for Available {
-        fn verify(&self, _command: &str) -> Result<()> {
-            Ok(())
+        fn resolve(&self, configured_path: Option<&str>) -> Result<String> {
+            Ok(configured_path
+                .unwrap_or("/opt/homebrew/bin/uvx")
+                .to_owned())
         }
     }
 
     struct Missing;
 
     impl UvxProbe for Missing {
-        fn verify(&self, _command: &str) -> Result<()> {
+        fn resolve(&self, _configured_path: Option<&str>) -> Result<String> {
             Err(INSTALL_UV_MESSAGE.to_owned())
+        }
+    }
+
+    struct BareName;
+
+    impl UvxProbe for BareName {
+        fn resolve(&self, _configured_path: Option<&str>) -> Result<String> {
+            Ok("uvx".to_owned())
         }
     }
 
@@ -168,6 +217,8 @@ mod tests {
     fn settings_should_build_exact_contract_arguments() {
         let command = build_command(&settings(), &Available).expect("valid command");
 
+        assert_eq!(command.command, "/opt/homebrew/bin/uvx");
+        assert_ne!(command.command, "uvx");
         assert_eq!(
             command.args,
             [
@@ -194,6 +245,13 @@ mod tests {
     }
 
     #[test]
+    fn bare_name_uvx_should_never_be_returned_in_the_command() {
+        let error = build_command(&settings(), &BareName).expect_err("uvx must be absolute");
+
+        assert_eq!(error, INSTALL_UV_MESSAGE);
+    }
+
+    #[test]
     fn empty_token_file_should_be_rejected() {
         let mut settings = settings();
         settings.token_file = "  ".to_owned();
@@ -213,6 +271,40 @@ mod tests {
 
         assert_eq!(command.command, "/opt/uv/bin/uvx");
         assert_eq!(command.args[1], "/workspace/pursers/packages/client");
+    }
+
+    #[test]
+    fn explicit_uvx_path_should_be_passed_to_the_probe_unchanged() {
+        use std::cell::RefCell;
+
+        struct RecordingProbe<'a>(&'a RefCell<Vec<Option<String>>>);
+
+        impl UvxProbe for RecordingProbe<'_> {
+            fn resolve(&self, configured_path: Option<&str>) -> Result<String> {
+                self.0.borrow_mut().push(configured_path.map(str::to_owned));
+                Ok(configured_path.expect("configured path").to_owned())
+            }
+        }
+
+        let calls = RefCell::new(Vec::new());
+        let mut settings = settings();
+        settings.uvx_path = Some("/custom path/bin/uvx".to_owned());
+
+        let command = build_command(&settings, &RecordingProbe(&calls)).expect("valid command");
+
+        assert_eq!(command.command, "/custom path/bin/uvx");
+        assert_eq!(
+            calls.into_inner(),
+            [Some("/custom path/bin/uvx".to_owned())]
+        );
+    }
+
+    #[test]
+    fn absolute_path_validation_should_reject_bare_names() {
+        assert!(is_absolute_path("/opt/homebrew/bin/uvx"));
+        assert!(is_absolute_path(r"C:\Tools\uvx.exe"));
+        assert!(!is_absolute_path("uvx"));
+        assert!(!is_absolute_path("bin/uvx"));
     }
 
     #[test]
