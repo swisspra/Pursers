@@ -149,9 +149,10 @@ To add a second worker, an independent reviewer, or a coordinator, see
 ### Use Pursers from Zed
 
 Connect Zed's Agent Panel to one Pursers board through the credential-safe
-local relay. The [Zed guide](docs/guides/zed.md) covers the development
-extension install, native settings modal, five board commands, optional ACP
-thread, and troubleshooting.
+local relay. Follow the [first-ticket walkthrough](docs/guides/zed-first-ticket.md)
+to watch one job reach `ready to merge`, or use the [Zed reference guide](docs/guides/zed.md)
+for installation, settings, all five board commands, the optional ACP thread,
+and troubleshooting.
 
 ## What's in the box
 
@@ -243,6 +244,7 @@ Live offers from a disposable Central and an exact-identity claim.
 - [Getting Started](docs/GETTING-STARTED.md)
 - [Add agents to your board](docs/guides/adding-agents.md) — a second worker, an independent reviewer, a coordinator
 - [Connect your MCP client](docs/guides/connecting-clients.md) — Claude Code, Codex, Cursor, Goose, Claude Desktop, Zed, API loops
+- [Finish your first ticket in Zed](docs/guides/zed-first-ticket.md) — a narrative walkthrough and recording shot list
 - [Use Pursers from Zed](docs/guides/zed.md) — install, configure, board commands, ACP thread, troubleshooting
 - [Run a multi-agent fleet](docs/guides/running-a-fleet.md) — coordinator, workers, reviewer, end to end
 - [Operate Central](docs/guides/operating-central.md) — run as a service, backup and restore, upgrade, logs, retention
