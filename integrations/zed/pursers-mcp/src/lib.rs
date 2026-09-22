@@ -10,7 +10,7 @@ use zed_extension_api::{
 };
 
 const CONTEXT_SERVER_ID: &str = "pursers";
-const DEFAULT_PACKAGE_SPEC: &str = "pursers-client==0.1.2";
+const DEFAULT_PACKAGE_SPEC: &str = "pursers-client==0.1.3";
 const UV_REPOSITORY: &str = "astral-sh/uv";
 const UV_CACHE_DIR: &str = "uv-cache";
 const INSTALL_UV_MESSAGE: &str = "As a fallback, install uv from https://docs.astral.sh/uv/ or set uvx_path to its absolute uvx executable, then restart Zed.";
