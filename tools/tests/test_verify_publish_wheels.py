@@ -154,3 +154,77 @@ def test_publish_workflow_checks_pypi_before_both_uploads() -> None:
     assert workflow.index("--verify-pypi") < workflow.index("Publish to PyPI")
     bridge = workflow.split("publish-wait-bridge:", 1)[1]
     assert bridge.index("--verify-pypi") < bridge.index("Publish to PyPI")
+
+
+def test_publish_workflow_serializes_new_version_check_and_upload() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[2] / ".github/workflows/publish-pypi.yml"
+    ).read_text(encoding="utf-8")
+
+    concurrency = "concurrency:\n  group: publish-pypi\n  cancel-in-progress: false"
+    assert workflow.count(concurrency) == 1
+    assert workflow.index(concurrency) < workflow.index("jobs:")
+
+
+def test_serialized_later_run_rejects_artifact_published_by_first_run(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    first_run = tmp_path / "first"
+    second_run = tmp_path / "second"
+    first_run.mkdir()
+    second_run.mkdir()
+    first_wheel = _wheel(
+        first_run, "pursers-client", "3", {"client.py": b"first run\n"}
+    )
+    second_wheel = _wheel(
+        second_run, "pursers-client", "3", {"client.py": b"second run\n"}
+    )
+    assert first_wheel.name == second_wheel.name
+
+    published: bytes | None = None
+
+    def release(*_args, **_kwargs):
+        if published is None:
+            return None
+        return _published_release(first_wheel, published)
+
+    def download(_url: str) -> bytes:
+        assert published is not None
+        return published
+
+    monkeypatch.setattr(
+        verify_publish_wheels,
+        "_pypi_release",
+        release,
+    )
+    monkeypatch.setattr(verify_publish_wheels, "_download", download)
+
+    assert (
+        main(
+            [
+                "--wheel-dir",
+                str(first_run),
+                "--generators-only",
+                "--verify-pypi",
+            ]
+        )
+        == 0
+    )
+
+    # The concurrency group makes the later dispatch wait. Its pre-upload
+    # check therefore runs only after the first dispatch has published.
+    published = first_wheel.read_bytes()
+    assert (
+        main(
+            [
+                "--wheel-dir",
+                str(second_run),
+                "--generators-only",
+                "--verify-pypi",
+            ]
+        )
+        != 0
+    )
+    error = capsys.readouterr().err
+    assert "published wheel content mismatch for pursers-client==3" in error
+    assert "bump the version" in error

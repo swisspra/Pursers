@@ -18,6 +18,13 @@ on:
 permissions:
   contents: read
 
+# Keep the PyPI check and upload in one repository-wide critical section. A
+# second manual run must not observe a new version before the first run uploads
+# different bytes for that same version.
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
 jobs:
   publish-main:
     runs-on: ubuntu-latest
