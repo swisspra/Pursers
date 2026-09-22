@@ -1,6 +1,6 @@
 # Pursers for Zed
 
-This Zed extension starts `pursers-mcp` and connects Zed's Agent Panel to one Pursers board. The Python server is installed and run by `uvx`; it is not bundled in the extension.
+This Zed extension starts `pursers-mcp` and connects Zed's Agent Panel to one Pursers board. The Python server is installed and run by `uvx`; neither the server nor a uv binary is bundled in the extension.
 
 ## Install
 
@@ -10,7 +10,9 @@ This Zed extension starts `pursers-mcp` and connects Zed's Agent Panel to one Pu
    **External Agents**, and run `/setup`.
 4. Accept the confirmation. Pursers creates `~/.pursers/central`, starts Central in the background, and adds the real board tools to the same chat.
 
-For a registry release, install `Pursers` from Zed Extensions instead of step 3.
+For a registry release, install `Pursers` from Zed Extensions instead of step 1.
+
+No separate uv installation is required. The extension prefers an existing `uvx`; when none is visible to Zed, it downloads the matching uv release asset from `astral-sh/uv`, verifies the published SHA-256 checksum, and caches it in the extension's private directory. Installing [uv](https://docs.astral.sh/uv/) yourself remains optional if you want to control the executable.
 
 The MCP extension is available to Zed's native agent, not to external ACP
 agents. Check before typing: the native thread title and composer say **New Zed
@@ -36,13 +38,13 @@ Optional fields:
 
 - `token_file`: a worker JWT path for a Central you already run. The local default is `~/.pursers/central/worker.jwt`; do not paste a token value.
 - `ca_file`: a CA certificate file for a TLS endpoint.
-- `uvx_path`: an absolute path to the uvx executable. Use this override when automatic lookup cannot see an unusual uv installation.
+- `uvx_path`: an absolute path to the uvx executable. Use this optional override to choose a specific uv installation.
 - `package_spec`: another package version or a local `pursers-client` checkout for development.
 
-The release default is `pursers-client==0.1.1`. Automatic lookup resolves `uvx` to an absolute path before launch. For example, the launched command on a Homebrew system may be:
+The release default is `pursers-client==0.1.2`. System lookup and the managed download both resolve `uvx` to an absolute path before launch. For example, the launched command on a Homebrew system may be:
 
 ```text
-/opt/homebrew/bin/uvx --from pursers-client==0.1.1 pursers-mcp --central-url URL --board BOARD_ID [--token-file PATH] [--ca-file PATH]
+/opt/homebrew/bin/uvx --from pursers-client==0.1.2 pursers-mcp --central-url URL --board BOARD_ID [--token-file PATH] [--ca-file PATH]
 ```
 
 For an existing setup, edit `context_servers.pursers` in `settings.json` directly. The Configure dialog can show `default_settings.json` instead of the saved values, and Save replaces the existing entry verbatim. Do not save placeholder values; if the form omits `uvx_path`, Zed deletes that override. Uninstalling the extension clears `context_servers` entirely, so restore the Pursers settings after reinstalling.
@@ -66,7 +68,8 @@ These Rust checks stay outside `tools/ci_manifest.py`: that manifest inventories
 
 ## Troubleshoot
 
-- Setup reports that `uvx` is unavailable: let the extension's uv installation finish, then restart the Pursers server. Set `uvx_path` only for a development override.
+- A uv download fails: check the Zed log for the network, platform, archive, or checksum error. Retry when online, install uv manually, or set `uvx_path` as a fallback.
+- A checksum mismatch: remove the named cached archive and restart Zed. The extension refuses to run an unverified download.
 - A required setting is empty: open Configure and set the named field.
 - Central is unreachable on the local defaults: run `/setup` and accept the confirmation.
 - Central is reachable but the board is missing: run `/setup`; after confirmation it uses the local `admin.jwt` to create the board and onboard the caller.
