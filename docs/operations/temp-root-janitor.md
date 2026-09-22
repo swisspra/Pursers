@@ -28,7 +28,7 @@ python3 tools/tmp_janitor.py --discover-pursers-under /private/tmp
 | Flag | Meaning |
 | --- | --- |
 | `--root` | An exact directory to inspect. Repeat it once per managed root. Mutually exclusive with discovery. |
-| `--discover-pursers-under` | Explicitly scan the direct children of one absolute, real parent. Only `pursers-review-*`, `pursers-fullgate-*`, and `pursers-packaging-gate.*` basenames are eligible. Unrelated names, nested paths, symlinks, and filesystem roots are excluded. |
+| `--discover-pursers-under` | Explicitly scan the direct children of one absolute, real parent. Only `pursers-review-*` and `pursers-packaging-gate.*` basenames proven by current producers are eligible. Unrelated names, nested paths, symlinks, and filesystem roots are excluded. |
 | `--older-than-hours` | Minimum age before a root is eligible. Default `1.0`. |
 | `--delete` | Actually remove the selected roots. Without it the command only reports. |
 

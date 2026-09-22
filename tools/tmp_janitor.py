@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -26,7 +27,7 @@ OWNER_FILE = ".pursers-tmp-owner-pid"
 OWNER_LOCK_FILE = ".owner.json"
 LSOF_EXECUTABLE = shutil.which("lsof") or "/usr/sbin/lsof"
 PURSERS_ROOT_NAME = re.compile(
-    r"(?:pursers-review-|pursers-fullgate-|pursers-packaging-gate\.)"
+    r"(?:pursers-review-|pursers-packaging-gate\.)"
     r"[A-Za-z0-9][A-Za-z0-9._-]*\Z"
 )
 TEMP_ENV_PATTERN = re.compile(
@@ -431,6 +432,85 @@ def _same_tree(inspection: Inspection) -> bool:
     )
 
 
+def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:
+    return first.st_dev == second.st_dev and first.st_ino == second.st_ino
+
+
+def _directory_open_flags() -> int:
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    return flags
+
+
+def _entry_matches_fd(parent_fd: int, name: str, directory_fd: int) -> bool:
+    try:
+        entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        opened = os.fstat(directory_fd)
+    except OSError:
+        return False
+    return stat.S_ISDIR(entry.st_mode) and _same_inode(entry, opened)
+
+
+class _RemovalRaceError(RuntimeError):
+    """An entry changed while descriptor-bound removal was in progress."""
+
+
+def _remove_tree_contents(directory_fd: int) -> None:
+    """Remove children through a verified directory descriptor.
+
+    Recursive traversal never resolves the quarantined root pathname again.
+    Every directory is opened without following symlinks and checked against
+    the entry observed by ``scandir`` before its contents are touched.
+    """
+    with os.scandir(directory_fd) as entries:
+        snapshot = list(entries)
+    for entry in snapshot:
+        observed = entry.stat(follow_symlinks=False)
+        if stat.S_ISDIR(observed.st_mode):
+            try:
+                child_fd = os.open(
+                    entry.name,
+                    _directory_open_flags(),
+                    dir_fd=directory_fd,
+                )
+            except OSError as exc:
+                raise _RemovalRaceError(
+                    f"cannot open directory {entry.name!r}: {exc}"
+                ) from exc
+            try:
+                opened = os.fstat(child_fd)
+                if not _same_inode(observed, opened):
+                    raise _RemovalRaceError(
+                        f"directory {entry.name!r} changed before removal"
+                    )
+                _remove_tree_contents(child_fd)
+                if not _entry_matches_fd(directory_fd, entry.name, child_fd):
+                    raise _RemovalRaceError(
+                        f"directory {entry.name!r} changed during removal"
+                    )
+                os.rmdir(entry.name, dir_fd=directory_fd)
+            finally:
+                os.close(child_fd)
+            continue
+
+        try:
+            current = os.stat(
+                entry.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise _RemovalRaceError(
+                f"cannot recheck entry {entry.name!r}: {exc}"
+            ) from exc
+        same_kind = stat.S_IFMT(observed.st_mode) == stat.S_IFMT(current.st_mode)
+        if not _same_inode(observed, current) or not same_kind:
+            raise _RemovalRaceError(f"entry {entry.name!r} changed before removal")
+        os.unlink(entry.name, dir_fd=directory_fd)
+
+
 def _restore_quarantined(quarantine: Path, original: Path) -> str:
     if original.exists() or original.is_symlink():
         return f"changed entry retained at quarantine path {quarantine}"
@@ -441,35 +521,105 @@ def _restore_quarantined(quarantine: Path, original: Path) -> str:
     return "changed entry restored without deletion"
 
 
-def _quarantine_and_remove(inspection: Inspection) -> tuple[bool, str]:
-    """Atomically detach the inspected inode before recursive deletion."""
+def _quarantine_and_remove(
+    inspection: Inspection,
+    *,
+    runner: RunCommand = subprocess.run,
+) -> tuple[bool, str]:
+    """Detach, reprobe, and remove only the inspected directory inode."""
     parent = inspection.path.parent
-    quarantine = parent / (
+    quarantine_name = (
         f".pursers-tmp-janitor-{inspection.path.name}-{os.getpid()}-{time.time_ns()}"
     )
+    quarantine = parent / quarantine_name
     try:
-        os.rename(inspection.path, quarantine)
+        parent_fd = os.open(parent, _directory_open_flags())
     except OSError as exc:
-        return False, f"cannot quarantine candidate: {exc}"
+        return False, f"cannot open candidate parent: {exc}"
 
     try:
-        moved = quarantine.lstat()
-    except OSError as exc:
-        return False, f"cannot verify quarantined candidate: {exc}"
-    if (
-        quarantine.is_symlink()
-        or moved.st_dev != inspection.device
-        or moved.st_ino != inspection.inode
-    ):
-        restoration = _restore_quarantined(quarantine, inspection.path)
-        return False, f"candidate changed during quarantine; {restoration}"
+        try:
+            before = os.stat(
+                inspection.path.name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            return False, f"cannot recheck candidate before quarantine: {exc}"
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or before.st_dev != inspection.device
+            or before.st_ino != inspection.inode
+        ):
+            return False, "candidate changed before quarantine"
+        try:
+            os.rename(
+                inspection.path.name,
+                quarantine_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            return False, f"cannot quarantine candidate: {exc}"
 
-    try:
-        shutil.rmtree(quarantine)
-    except OSError as exc:
-        restoration = _restore_quarantined(quarantine, inspection.path)
-        return False, f"recursive removal failed: {exc}; {restoration}"
-    return True, "deleted"
+        try:
+            directory_fd = os.open(
+                quarantine_name,
+                _directory_open_flags(),
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            restoration = _restore_quarantined(quarantine, inspection.path)
+            return False, (
+                f"candidate changed during quarantine: cannot open quarantined "
+                f"candidate: {exc}; {restoration}"
+            )
+        try:
+            moved = os.fstat(directory_fd)
+            if (
+                moved.st_dev != inspection.device
+                or moved.st_ino != inspection.inode
+                or not _entry_matches_fd(parent_fd, quarantine_name, directory_fd)
+            ):
+                restoration = _restore_quarantined(quarantine, inspection.path)
+                return False, f"candidate changed during quarantine; {restoration}"
+
+            try:
+                active, reason = process_use_state(quarantine, runner=runner)
+            except OSError as exc:
+                active, reason = None, f"cannot run in-use probes: {exc}"
+            if not _entry_matches_fd(parent_fd, quarantine_name, directory_fd):
+                return False, "quarantine pathname changed during final safety probes"
+            if active is None or active:
+                restoration = _restore_quarantined(quarantine, inspection.path)
+                state = "unknown" if active is None else "in use"
+                return False, (
+                    f"post-quarantine safety check {state}: {reason}; {restoration}"
+                )
+
+            try:
+                _remove_tree_contents(directory_fd)
+            except (OSError, _RemovalRaceError) as exc:
+                if _entry_matches_fd(parent_fd, quarantine_name, directory_fd):
+                    restoration = _restore_quarantined(quarantine, inspection.path)
+                    return False, f"descriptor-bound removal failed: {exc}; {restoration}"
+                return False, (
+                    "descriptor-bound removal stopped after quarantine pathname changed: "
+                    f"{exc}"
+                )
+
+            if not _entry_matches_fd(parent_fd, quarantine_name, directory_fd):
+                return False, "quarantine pathname changed during descriptor-bound removal"
+            try:
+                os.rmdir(quarantine_name, dir_fd=parent_fd)
+            except OSError as exc:
+                restoration = _restore_quarantined(quarantine, inspection.path)
+                return False, f"cannot remove empty quarantined root: {exc}; {restoration}"
+            return True, "deleted"
+        finally:
+            os.close(directory_fd)
+    finally:
+        os.close(parent_fd)
 
 
 def run(
@@ -523,7 +673,7 @@ def run(
         if not final.selected or not _same_tree(final):
             print(f"SKIP {inspection.path} reason=final safety check failed: {final.reason}")
             continue
-        removed, removal_reason = _quarantine_and_remove(final)
+        removed, removal_reason = _quarantine_and_remove(final, runner=runner)
         if not removed:
             print(f"SKIP {inspection.path} reason={removal_reason}")
             continue
