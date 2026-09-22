@@ -99,8 +99,24 @@ including the token-file placeholder.
 
 Back in **Settings → AI → MCP Servers**, Pursers should show a green state dot.
 
-Then open the Agent Panel, start a thread, and type `/`. Five Pursers commands
-appear:
+Then open the Agent Panel and start a **Zed Agent** thread, not an agent listed
+under **External Agents**. You can tell before typing: the native thread says
+**New Zed Agent Thread** at the top and **Message the Zed Agent** in the
+composer. An external thread names its provider there instead, such as **New
+Codex Thread** and **Message Codex**.
+
+Zed does not give its MCP context servers to external ACP agents. Real Zed
+1.20.2 runs checked Goose 1.51.0, Codex ACP, and Claude Agent ACP; each showed
+only its own commands or skills under `/`, with no Pursers prompts. If you pick
+one of those threads, the Pursers commands are absent and the relay never
+starts. A Zed log line beginning
+`WARN [agent_servers::acp] Responding to ACP request` confirms that the thread
+is on the external ACP path; it does not mean the extension failed. Use the
+native Zed Agent for this extension, or use the
+[shipped Pursers ACP agent](zed.md#optional-use-a-pursers-acp-thread) for a
+supported external-agent workflow.
+
+In the Zed Agent thread, type `/`. Five Pursers commands appear:
 
 | Command | What it does |
 | --- | --- |
@@ -225,6 +241,7 @@ every step left evidence you can read.
 | A fresh Configure dialog shows `pursers-local` instead of your working values | That dialog always starts from the shipped example. Cancel without saving and edit the Pursers object in `settings.json`; saving would replace the whole entry verbatim. |
 | Zed's log says `Pursers settings are invalid: missing field central_url` | Zed passed the extension nothing. Usually your `context_servers` entry is empty or was wiped — check `settings.json` before you check anything else. |
 | Pursers has no state dot and no log output at all | The project is in Restricted Mode, which blocks every MCP server. Click **Trust and Continue** in the banner. |
+| Pursers is connected, but `/` shows no Pursers commands and the relay never starts | The thread title or composer names an external ACP agent. Start a **Zed Agent** thread, or select the shipped `pursers-acp` agent for a dedicated external-agent workflow. The log prefix `WARN [agent_servers::acp] Responding to ACP request` confirms this path. |
 | Your configuration vanished | Uninstalling the extension empties `context_servers`. Copy the entry out of `settings.json` before you uninstall anything. |
 | A command is missing from `/` | Check for a green state dot. If another MCP server uses the same prompt name, Zed prefixes ours: `/pursers.board`. |
 

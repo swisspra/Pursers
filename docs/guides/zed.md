@@ -98,6 +98,28 @@ response starts with the configured board ID and shows a compact status
 summary. After that, edit the Pursers object in `settings.json` instead of
 reopening and saving the modal.
 
+> [!IMPORTANT]
+> Start a **Zed Agent** thread when you want the Pursers MCP extension. Do not
+> choose a provider under **External Agents**: those are ACP agents with their
+> own tools, and Zed does not give them its MCP context servers. Check before
+> typing: the thread title and composer say **New Zed Agent Thread** and
+> **Message the Zed Agent** for the native agent; an external thread names its
+> agent instead, such as **New Codex Thread** and **Message Codex**.
+>
+> Real Zed 1.20.2 runs checked Goose 1.51.0, Codex ACP, and Claude Agent ACP.
+> Each showed only its own commands or skills under `/`; none received the
+> Pursers prompts. In the wrong thread there is no `/board`, `/create`, or other
+> Pursers command, and the Pursers relay never starts. Zed's log identifies the
+> external-agent path. One real run logged this exact line:
+>
+> ```text
+> WARN [agent_servers::acp] Responding to ACP request `terminal/wait_for_exit` with error: Error { code: -32800: Request cancelled, message: "Request cancelled", data: None }
+> ```
+>
+> This is thread routing, not an extension failure. To keep Pursers inside an external-agent workflow, use the
+> [Pursers ACP thread](#optional-use-a-pursers-acp-thread), which is the
+> supported external-agent path.
+
 ![Zed MCP Servers settings showing Pursers connected with a green state dot and extension badge](../media/zed/mcp-servers-connected-dark.png)
 
 ![Zed Agent Panel showing a compact Pursers board summary and Needs you ticket list](../media/zed/agent-board-summary-dark.png)
@@ -230,6 +252,7 @@ questions must arrive in Zed.
 | A private TLS endpoint fails certificate validation. | Set `ca_file` to the private CA certificate file. Do not disable certificate verification. |
 | A tool reports a timeout. | Check Central health and retry the bounded command. Keep `/watch` active instead of using an unbounded tool call; the relay caps each wait below Zed's 60-second default. |
 | Pursers has no state dot at all and no log output. | The project is in Restricted Mode. Click **Trust and Continue** in the banner at the top of the workspace. |
+| Pursers has a green state dot, but `/` shows no Pursers commands and the relay never starts. | Check the thread title and composer. If they name Goose, Codex, Claude Agent, or another external agent, start a **Zed Agent** thread instead. For an external-agent workflow, use the shipped `pursers-acp` agent. A Zed log line beginning `WARN [agent_servers::acp] Responding to ACP request` confirms the external ACP path. |
 | A command is missing. | Confirm the Pursers MCP server has a green state dot. Restart it after changing settings. If a prompt name collides, look for the server-prefixed form such as `/pursers.board`. |
 
 Zed 1.20.2 speaks MCP `2025-11-25`. Pursers Central also supports newer MCP

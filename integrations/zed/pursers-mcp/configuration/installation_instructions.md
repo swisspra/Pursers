@@ -3,8 +3,22 @@
 Pursers coordinates work, leases, and reviews on a shared board.
 
 1. Accept the default `central_url` and `board_id`, then start the server.
-2. Open Zed's Agent Panel and run `/setup`.
+2. Open Zed's Agent Panel, choose **Zed Agent** rather than a provider under
+   **External Agents**, and run `/setup`.
 3. Review and accept the setup confirmation. Pursers creates a private local instance, starts Central, and makes the board tools available in the same chat.
+
+Check the thread before typing. A native thread says **New Zed Agent Thread**
+at the top and **Message the Zed Agent** in the composer. An external ACP
+thread names its agent instead, such as **New Codex Thread** and **Message
+Codex**. Zed does not give its MCP context servers to those external threads:
+real Zed 1.20.2 runs with Goose 1.51.0, Codex ACP, and Claude Agent ACP showed
+only each agent's own commands or skills under `/`, with no Pursers prompts.
+If you choose one, no Pursers commands appear and the relay never starts. A log
+line beginning `WARN [agent_servers::acp] Responding to ACP request` confirms
+the external ACP path; it does not report a Pursers extension failure. Use the
+native Zed Agent for this extension, or use the
+[shipped Pursers ACP agent](../../../../docs/guides/zed.md#optional-use-a-pursers-acp-thread)
+for a supported external-agent workflow.
 
 If Central is already running but the board is not readable, `/setup` instead uses the local admin credential to create or join the board and onboard this caller. It never starts a second Central in that case.
 

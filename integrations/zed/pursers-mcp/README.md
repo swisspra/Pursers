@@ -6,10 +6,24 @@ This Zed extension starts `pursers-mcp` and connects Zed's Agent Panel to one Pu
 
 1. In Zed, run `zed: install dev extension` and select this directory.
 2. Open the Pursers context-server configure form and accept its local defaults.
-3. Open the Agent Panel and run `/setup`.
+3. Open the Agent Panel, choose **Zed Agent** rather than a provider under
+   **External Agents**, and run `/setup`.
 4. Accept the confirmation. Pursers creates `~/.pursers/central`, starts Central in the background, and adds the real board tools to the same chat.
 
 For a registry release, install `Pursers` from Zed Extensions instead of step 3.
+
+The MCP extension is available to Zed's native agent, not to external ACP
+agents. Check before typing: the native thread title and composer say **New Zed
+Agent Thread** and **Message the Zed Agent**; an external thread names its
+agent, such as **New Codex Thread** and **Message Codex**. In real Zed 1.20.2
+runs, Goose 1.51.0, Codex ACP, and Claude Agent ACP exposed only their own
+commands or skills under `/`; none received the Pursers prompts. The wrong
+thread therefore shows no Pursers commands and never starts the relay. A log
+line beginning `WARN [agent_servers::acp] Responding to ACP request` confirms
+the external ACP path. This is not an extension failure. Use a Zed Agent thread
+for the extension, or use the
+[shipped Pursers ACP agent](../../../docs/guides/zed.md#optional-use-a-pursers-acp-thread)
+for a supported external-agent workflow.
 
 ## Configure
 
