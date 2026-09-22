@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
+import json
 import os
 import re
 import shutil
@@ -21,7 +23,12 @@ from typing import Callable, Sequence
 
 
 OWNER_FILE = ".pursers-tmp-owner-pid"
+OWNER_LOCK_FILE = ".owner.json"
 LSOF_EXECUTABLE = shutil.which("lsof") or "/usr/sbin/lsof"
+PURSERS_ROOT_NAME = re.compile(
+    r"(?:pursers-review-|pursers-fullgate-|pursers-packaging-gate\.)"
+    r"[A-Za-z0-9][A-Za-z0-9._-]*\Z"
+)
 TEMP_ENV_PATTERN = re.compile(
     r"(?:^|\s)(?:TMPDIR|TMP|TEMP|TEMPDIR|PYTEST_DEBUG_TEMPROOT)="
 )
@@ -164,6 +171,41 @@ def _owner_file_state(path: Path) -> tuple[bool | None, str]:
     return True, f"owner pid {pid} is live"
 
 
+def _owner_lock_state(path: Path) -> tuple[bool | None, str]:
+    """Honor the advisory owner lock used by managed Pursers temp roots."""
+    marker = path / OWNER_LOCK_FILE
+    try:
+        marker.lstat()
+    except FileNotFoundError:
+        return False, "no owner lock"
+    except OSError as exc:
+        return None, f"cannot inspect {OWNER_LOCK_FILE}: {exc}"
+    if marker.is_symlink() or not marker.is_file():
+        return None, f"cannot validate {OWNER_LOCK_FILE}"
+
+    try:
+        with marker.open("r+", encoding="utf-8") as owner:
+            try:
+                payload = json.load(owner)
+            except (OSError, json.JSONDecodeError):
+                return None, f"cannot validate {OWNER_LOCK_FILE}"
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema") != 1
+                or not isinstance(payload.get("pid"), int)
+                or isinstance(payload.get("pid"), bool)
+                or payload["pid"] <= 0
+            ):
+                return None, f"cannot validate {OWNER_LOCK_FILE}"
+            try:
+                fcntl.flock(owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True, f"owner lock for pid {payload['pid']} is held"
+    except OSError as exc:
+        return None, f"cannot inspect {OWNER_LOCK_FILE}: {exc}"
+    return False, f"owner lock for pid {payload['pid']} is not held"
+
+
 def _lsof_use_state(
     command: list[str],
     *,
@@ -201,6 +243,10 @@ def process_use_state(
     marker_active, marker_reason = _owner_file_state(path)
     if marker_active is None or marker_active:
         return marker_active, marker_reason
+
+    lock_active, lock_reason = _owner_lock_state(path)
+    if lock_active is None or lock_active:
+        return lock_active, lock_reason
 
     root_active, root_reason = _lsof_use_state(
         [LSOF_EXECUTABLE, "-nP", "-F", "pfn", os.fspath(path)],
@@ -261,7 +307,46 @@ def process_use_state(
             if any(character.isspace() for character in raw_value):
                 return None, f"live pid {pid_text} has an ambiguous temp environment"
 
+    if lock_reason != "no owner lock":
+        return False, lock_reason
     return False, marker_reason
+
+
+def discover_pursers_roots(parent: Path) -> list[Path]:
+    """Return allowlisted real directories that are direct children of parent."""
+    if not parent.is_absolute():
+        raise ValueError("discovery parent must be an absolute path")
+    if parent == Path(parent.anchor):
+        raise ValueError("refusing to discover beneath a filesystem root")
+    try:
+        parent_stat = parent.lstat()
+    except OSError as exc:
+        raise ValueError(f"cannot inspect discovery parent: {exc}") from exc
+    if parent.is_symlink() or not parent.is_dir():
+        raise ValueError("discovery parent must be a real directory, not a symlink")
+
+    roots: list[Path] = []
+    try:
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                if not PURSERS_ROOT_NAME.fullmatch(entry.name):
+                    continue
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+                candidate = parent / entry.name
+                try:
+                    current_parent = candidate.parent.lstat()
+                except OSError:
+                    continue
+                if (
+                    current_parent.st_dev != parent_stat.st_dev
+                    or current_parent.st_ino != parent_stat.st_ino
+                ):
+                    continue
+                roots.append(candidate)
+    except OSError as exc:
+        raise ValueError(f"cannot enumerate discovery parent: {exc}") from exc
+    return sorted(roots, key=lambda path: path.name)
 
 
 def inspect_candidate(
@@ -346,6 +431,47 @@ def _same_tree(inspection: Inspection) -> bool:
     )
 
 
+def _restore_quarantined(quarantine: Path, original: Path) -> str:
+    if original.exists() or original.is_symlink():
+        return f"changed entry retained at quarantine path {quarantine}"
+    try:
+        os.rename(quarantine, original)
+    except OSError as exc:
+        return f"cannot restore changed entry from {quarantine}: {exc}"
+    return "changed entry restored without deletion"
+
+
+def _quarantine_and_remove(inspection: Inspection) -> tuple[bool, str]:
+    """Atomically detach the inspected inode before recursive deletion."""
+    parent = inspection.path.parent
+    quarantine = parent / (
+        f".pursers-tmp-janitor-{inspection.path.name}-{os.getpid()}-{time.time_ns()}"
+    )
+    try:
+        os.rename(inspection.path, quarantine)
+    except OSError as exc:
+        return False, f"cannot quarantine candidate: {exc}"
+
+    try:
+        moved = quarantine.lstat()
+    except OSError as exc:
+        return False, f"cannot verify quarantined candidate: {exc}"
+    if (
+        quarantine.is_symlink()
+        or moved.st_dev != inspection.device
+        or moved.st_ino != inspection.inode
+    ):
+        restoration = _restore_quarantined(quarantine, inspection.path)
+        return False, f"candidate changed during quarantine; {restoration}"
+
+    try:
+        shutil.rmtree(quarantine)
+    except OSError as exc:
+        restoration = _restore_quarantined(quarantine, inspection.path)
+        return False, f"recursive removal failed: {exc}; {restoration}"
+    return True, "deleted"
+
+
 def run(
     roots: Sequence[Path],
     *,
@@ -397,7 +523,10 @@ def run(
         if not final.selected or not _same_tree(final):
             print(f"SKIP {inspection.path} reason=final safety check failed: {final.reason}")
             continue
-        shutil.rmtree(final.path)
+        removed, removal_reason = _quarantine_and_remove(final)
+        if not removed:
+            print(f"SKIP {inspection.path} reason={removal_reason}")
+            continue
         selected += 1
         total += final.allocated_bytes
         print(f"DELETED {final.path} bytes={final.allocated_bytes}")
@@ -409,12 +538,21 @@ def run(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--root",
         action="append",
-        required=True,
         type=Path,
         help="exact temporary directory to inspect; repeat for each managed root",
+    )
+    source.add_argument(
+        "--discover-pursers-under",
+        type=Path,
+        metavar="ABSOLUTE_PARENT",
+        help=(
+            "opt in to direct-child discovery under one exact parent; only known "
+            "Pursers review/gate basenames are eligible"
+        ),
     )
     parser.add_argument("--older-than-hours", type=float, default=1.0)
     parser.add_argument(
@@ -429,7 +567,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         seconds = int(args.older_than_hours * 3600)
-        return run(args.root, older_than_seconds=seconds, delete=args.delete)
+        roots = (
+            discover_pursers_roots(args.discover_pursers_under)
+            if args.discover_pursers_under is not None
+            else args.root
+        )
+        return run(roots, older_than_seconds=seconds, delete=args.delete)
     except (OSError, ValueError) as exc:
         print(f"temp janitor error: {exc}", file=sys.stderr)
         return 1
