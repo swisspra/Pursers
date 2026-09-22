@@ -62,11 +62,19 @@ class FakeClient:
 
 
 class ExistingIdentityClient(FakeClient):
-    def __init__(self, names: list[str], principal_id: str) -> None:
+    def __init__(
+        self,
+        names: list[str],
+        principal_id: str,
+        *,
+        lifecycle_statuses: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.names = names
         self.principal_id = principal_id
         self.agent_ids = [f"AI-existing-{index}" for index, _ in enumerate(names)]
+        self.lifecycle_statuses = lifecycle_statuses or ["active"] * len(names)
+        assert len(self.lifecycle_statuses) == len(names)
         self.tool = types.Tool(
             name="ticket_create",
             description="Create work.",
@@ -109,9 +117,13 @@ class ExistingIdentityClient(FakeClient):
                             "agent_id": agent_id,
                             "agent_name": agent_name,
                             "principal_id": self.principal_id,
+                            "lifecycle_status": lifecycle_status,
                         }
-                        for agent_id, agent_name in zip(
-                            self.agent_ids, self.names, strict=True
+                        for agent_id, agent_name, lifecycle_status in zip(
+                            self.agent_ids,
+                            self.names,
+                            self.lifecycle_statuses,
+                            strict=True,
                         )
                     ],
                 }
@@ -393,7 +405,7 @@ async def _existing_central_ambiguous_identity_requires_an_exact_choice(
         "ok": False,
         "error": (
             "Central authenticated principal PR-existing on board existing-board with "
-            "multiple agent names: existing-owner, existing-worker. Retry with "
+            "multiple active agent names: existing-owner, existing-worker. Retry with "
             "agent_name set to one of those exact names."
         ),
     }
@@ -402,7 +414,7 @@ async def _existing_central_ambiguous_identity_requires_an_exact_choice(
         "ticket_create", {"agent_name": "someone-else", "title": "First ticket"}
     )
     assert invalid.is_error
-    assert "agent_name someone-else is not one of its agent names" in (
+    assert "agent_name someone-else is not one of its active agent names" in (
         invalid.structured_content["error"]
     )
 
@@ -503,6 +515,50 @@ async def _setup_does_nothing_without_consent(tmp_path: Path) -> None:
     }
     relay._provision.assert_not_awaited()  # type: ignore[attr-defined]
     assert not (tmp_path / "central").exists()
+
+
+def test_existing_central_ignores_inactive_identities_when_injecting(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_existing_central_ignores_inactive_identities_when_injecting(tmp_path))
+
+
+async def _existing_central_ignores_inactive_identities_when_injecting(
+    tmp_path: Path,
+) -> None:
+    token_file = tmp_path / "existing-worker.jwt"
+    token_file.write_text("opaque-existing-credential", encoding="utf-8")
+    client = ExistingIdentityClient(
+        ["existing-owner", "retired-worker", "stale-worker", "handed-off-worker"],
+        "PR-existing",
+        lifecycle_statuses=["active", "retired", "stale", "handed_off"],
+    )
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        yield client
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="existing-board",
+        token_file=token_file,
+        connection_factory=connect,
+    )
+    tools = await relay.list_tools()
+    assert len(tools) == 1
+    assert "agent_name" not in tools[0].input_schema["properties"]
+    assert "agent_name" not in tools[0].input_schema["required"]
+
+    result = await relay.call_tool("ticket_create", {"title": "First ticket"})
+    assert not result.is_error
+    assert result.structured_content == {
+        "ok": True,
+        "arguments": {
+            "agent_name": "existing-owner",
+            "board_id": "existing-board",
+            "title": "First ticket",
+        },
+    }
 
 
 def test_half_failed_setup_stops_the_started_process(tmp_path: Path) -> None:

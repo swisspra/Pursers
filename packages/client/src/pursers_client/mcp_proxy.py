@@ -349,14 +349,7 @@ class CentralRelay:
             return
         self._identity_discovery_succeeded = True
         self._authenticated_principal_id = self._credential_principal_id()
-        names = board.get("agent_names")
         agent_ids = board.get("agent_ids")
-        if isinstance(names, list):
-            self._principal_agent_names = tuple(
-                dict.fromkeys(name for name in names if isinstance(name, str) and name)
-            )
-        if len(self._principal_agent_names) == 1:
-            self._resolved_agent_name = self._principal_agent_names[0]
         if not isinstance(agent_ids, list) or not agent_ids:
             return
         known_ids = {item for item in agent_ids if isinstance(item, str)}
@@ -375,15 +368,31 @@ class CentralRelay:
         agents = status.get("agents") if status is not None else None
         if not isinstance(agents, list):
             return
+        matching_agents = [
+            agent
+            for agent in agents
+            if isinstance(agent, dict) and agent.get("agent_id") in known_ids
+        ]
         principal_ids = {
             agent.get("principal_id")
-            for agent in agents
-            if isinstance(agent, dict)
-            and agent.get("agent_id") in known_ids
-            and isinstance(agent.get("principal_id"), str)
+            for agent in matching_agents
+            if isinstance(agent.get("principal_id"), str)
         }
-        if len(principal_ids) == 1:
-            self._authenticated_principal_id = principal_ids.pop()
+        if len(principal_ids) != 1:
+            return
+        self._authenticated_principal_id = principal_ids.pop()
+        self._principal_agent_names = tuple(
+            dict.fromkeys(
+                agent["agent_name"]
+                for agent in matching_agents
+                if agent.get("principal_id") == self._authenticated_principal_id
+                and agent.get("lifecycle_status", "active") == "active"
+                and isinstance(agent.get("agent_name"), str)
+                and agent["agent_name"]
+            )
+        )
+        if len(self._principal_agent_names) == 1:
+            self._resolved_agent_name = self._principal_agent_names[0]
 
     def _identity_selection_failure(self, supplied: str | None = None) -> RelayFailure:
         principal = self._authenticated_principal_id or "an unreported principal"
@@ -392,18 +401,19 @@ class CentralRelay:
             if supplied is not None:
                 return RelayFailure(
                     f"Central authenticated principal {principal} on board {self.board}, "
-                    f"but agent_name {supplied} is not one of its agent names: {choices}. "
+                    f"but agent_name {supplied} is not one of its active agent names: "
+                    f"{choices}. "
                     "Retry with agent_name set to one of those exact names."
                 )
             return RelayFailure(
                 f"Central authenticated principal {principal} on board {self.board} "
-                f"with multiple agent names: {choices}. Retry with agent_name set to "
-                "one of those exact names."
+                f"with multiple active agent names: {choices}. Retry with agent_name "
+                "set to one of those exact names."
             )
         return RelayFailure(
             f"Central authenticated principal {principal} on board {self.board}, but it "
-            "holds no agent names there. Ask a board administrator to onboard this "
-            "principal, then retry with that exact agent_name."
+            "holds no active agent names there. Ask a board administrator to onboard "
+            "or reactivate this principal, then retry with that exact agent_name."
         )
 
     async def _upstream_tools(self) -> list[types.Tool]:
@@ -447,13 +457,14 @@ class CentralRelay:
                     if self._principal_agent_names:
                         choices = ", ".join(self._principal_agent_names)
                         agent_schema["description"] = (
-                            "Required when this credential holds several identities. "
+                            "Required when this credential holds several active identities. "
                             f"Choose one exact agent name for board {self.board}: {choices}."
                         )
                     else:
                         agent_schema["description"] = (
-                            "This credential holds no agent name on the configured board. "
-                            "Ask a board administrator to onboard its principal first."
+                            "This credential holds no active agent name on the configured "
+                            "board. Ask a board administrator to onboard or reactivate its "
+                            "principal first."
                         )
             exposed_tools.append(exposed)
         tools = exposed_tools
