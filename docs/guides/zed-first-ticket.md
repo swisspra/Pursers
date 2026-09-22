@@ -106,7 +106,8 @@ Replace the form with your own values:
 there is the single most common way a first install fails.
 
 `setup_root` is needed only when you want `/setup` to create a Central somewhere
-other than `~/.pursers/central`. Point it at an empty directory. Setup refuses a
+other than `~/.pursers/central`. Point it at an absolute path to an empty
+directory; relative paths are rejected before the relay starts. Setup refuses a
 directory that already contains unrelated files or a deployed instance under
 `.private-arm/central-data`, rather than mixing a second Central into that tree.
 For a new local Central in another location, omit `token_file` and configure:

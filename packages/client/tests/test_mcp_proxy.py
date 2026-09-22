@@ -619,6 +619,21 @@ def _offline_first_run_relay(setup_root: Path) -> CentralRelay:
     return relay
 
 
+def test_relative_setup_root_is_rejected_before_filesystem_access() -> None:
+    try:
+        CentralRelay(
+            central_url="http://127.0.0.1:9999",
+            board="first-run-board",
+            setup_root=Path("relative-central"),
+        )
+    except RelayFailure as exc:
+        message = str(exc)
+    else:  # pragma: no cover - protects the fail-closed assertion below
+        raise AssertionError("relative setup_root was accepted")
+
+    assert message == "setup_root must be an absolute path, got relative-central"
+
+
 def test_first_run_refuses_deployed_install_in_target_without_writing(
     tmp_path: Path,
 ) -> None:

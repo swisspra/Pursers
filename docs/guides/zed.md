@@ -64,7 +64,7 @@ you save or cancel it.
 | `board_id` | Yes | The board to use. The local Quickstart default is `pursers-local`. |
 | `token_file` | No | A worker JWT path for a Central you already run. Omit it for `~/.pursers/central/worker.jwt`. Store the path, not the token. |
 | `ca_file` | No | A CA certificate file when Central uses a private TLS certificate. |
-| `setup_root` | No | The directory where `/setup` creates a local Central. It defaults to `~/.pursers/central`; set an empty directory when that path already contains a deployment or unrelated files. |
+| `setup_root` | No | The absolute directory where `/setup` creates a local Central. It defaults to `~/.pursers/central`; set an empty directory when that path already contains a deployment or unrelated files. Relative paths are rejected before launch. |
 | `uvx_path` | No | An absolute path to `uvx`, such as `/opt/homebrew/bin/uvx`, when Zed cannot launch the automatically resolved executable. |
 | `package_spec` | No | A different `pursers-client` version or a local client checkout for development. |
 

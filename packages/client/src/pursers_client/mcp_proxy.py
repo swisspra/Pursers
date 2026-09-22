@@ -180,6 +180,10 @@ class CentralRelay:
         self.central_url = central_mcp_url(central_url)
         self.board = board
         self.setup_root = (setup_root or DEFAULT_INSTANCE_DIR).expanduser()
+        if not self.setup_root.is_absolute():
+            raise RelayFailure(
+                f"setup_root must be an absolute path, got {self.setup_root}"
+            )
         self.token_file = (token_file or self.setup_root / "worker.jwt").expanduser()
         self._token_file_was_overridden = token_file is not None
         self.ca_file = ca_file

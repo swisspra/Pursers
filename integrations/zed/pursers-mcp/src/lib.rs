@@ -127,6 +127,9 @@ fn build_command(settings: &PursersSettings, probe: &impl UvxProbe) -> Result<Co
     require_value("board_id", &settings.board_id)?;
     let ca_file = optional_value("ca_file", settings.ca_file.as_deref())?;
     let setup_root = optional_value("setup_root", settings.setup_root.as_deref())?;
+    if setup_root.is_some_and(|path| !is_absolute_path(path)) {
+        return Err("Pursers setting setup_root must be an absolute path.".to_owned());
+    }
     let configured_uvx = optional_value("uvx_path", settings.uvx_path.as_deref())?;
     let token_file = optional_value("token_file", settings.token_file.as_deref())?;
     let package_spec = optional_value("package_spec", settings.package_spec.as_deref())?
@@ -265,6 +268,19 @@ mod tests {
         let error = build_command(&settings, &Available).expect_err("token file is required");
 
         assert_eq!(error, "Pursers setting token_file cannot be empty.");
+    }
+
+    #[test]
+    fn relative_setup_root_should_be_rejected_before_command_launch() {
+        let mut settings = settings();
+        settings.setup_root = Some("relative-central".to_owned());
+
+        let error = build_command(&settings, &Available).expect_err("setup root must be absolute");
+
+        assert_eq!(
+            error,
+            "Pursers setting setup_root must be an absolute path."
+        );
     }
 
     #[test]
