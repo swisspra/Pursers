@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -24,7 +26,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence, TextIO
 
 
 @dataclass(frozen=True)
@@ -172,6 +174,110 @@ SHA256_MANIFEST_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
 DEFAULT_MIN_FREE_BYTES = 10 * 1024 * 1024 * 1024
 MIN_FREE_BYTES_ENV = "PURSERS_CI_MIN_FREE_BYTES"
 DEFAULT_JOB_CAP = 4
+SCRATCH_PREFIX = "pursers-ci-manifest-"
+SCRATCH_OWNER_FILE = ".owner.json"
+SCRATCH_OWNER_SCHEMA = 1
+
+
+@contextlib.contextmanager
+def _locked_scratch_parent(parent: Path) -> Iterator[None]:
+    """Serialize stale-root sweeping and new-root registration."""
+    descriptor = os.open(parent, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _valid_scratch_owner(handle: TextIO) -> bool:
+    try:
+        handle.seek(0)
+        payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema") == SCRATCH_OWNER_SCHEMA
+        and isinstance(payload.get("pid"), int)
+        and not isinstance(payload.get("pid"), bool)
+        and payload["pid"] > 0
+    )
+
+
+def _sweep_abandoned_scratch(parent: Path) -> None:
+    """Remove only roots whose valid owner lock is no longer held.
+
+    The PID is diagnostic metadata. The advisory lock is the liveness proof: it
+    is released by the kernel on normal exit, exceptions, and SIGKILL, and it
+    cannot mistake an unrelated process that later reuses the same PID for the
+    original owner.
+    """
+    for candidate in sorted(parent.glob(f"{SCRATCH_PREFIX}*")):
+        if candidate.is_symlink() or not candidate.is_dir():
+            continue
+        owner_path = candidate / SCRATCH_OWNER_FILE
+        try:
+            owner = owner_path.open("r+", encoding="utf-8")
+        except (FileNotFoundError, IsADirectoryError, OSError):
+            # Legacy or malformed roots have no trustworthy liveness signal.
+            continue
+        try:
+            try:
+                fcntl.flock(owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue
+            if _valid_scratch_owner(owner):
+                shutil.rmtree(candidate)
+        finally:
+            owner.close()
+
+
+def _scratch_parent() -> Path:
+    configured_tmp = os.environ.get("TMPDIR")
+    parent = (
+        Path(configured_tmp).expanduser().resolve()
+        if configured_tmp
+        else Path(tempfile.gettempdir()).resolve()
+    )
+    parent.mkdir(parents=True, exist_ok=True)
+    return parent
+
+
+def _sweep_scratch_parent() -> None:
+    """Sweep unlocked managed roots before disk-space admission checks."""
+    parent = _scratch_parent()
+    with _locked_scratch_parent(parent):
+        _sweep_abandoned_scratch(parent)
+
+
+@contextlib.contextmanager
+def _owned_scratch_directory(parent: Path) -> Iterator[Path]:
+    """Create an auto-cleaned root that concurrent runners cannot sweep."""
+    with _locked_scratch_parent(parent):
+        _sweep_abandoned_scratch(parent)
+        temporary = tempfile.TemporaryDirectory(prefix=SCRATCH_PREFIX, dir=parent)
+        scratch = Path(temporary.name)
+        owner = (scratch / SCRATCH_OWNER_FILE).open("w+", encoding="utf-8")
+        fcntl.flock(owner.fileno(), fcntl.LOCK_EX)
+        json.dump(
+            {"schema": SCRATCH_OWNER_SCHEMA, "pid": os.getpid()},
+            owner,
+            sort_keys=True,
+        )
+        owner.write("\n")
+        owner.flush()
+        os.fsync(owner.fileno())
+    try:
+        yield scratch
+    finally:
+        try:
+            # Keep the owner lock held until the root itself is gone.
+            temporary.cleanup()
+        finally:
+            fcntl.flock(owner.fileno(), fcntl.LOCK_UN)
+            owner.close()
 
 
 def require_free_space(
@@ -497,19 +603,9 @@ def run_suites(
     if worker_count < 1:
         raise ValueError("--jobs must be at least 1")
 
-    configured_tmp = os.environ.get("TMPDIR")
-    scratch_parent = (
-        Path(configured_tmp).expanduser().resolve()
-        if configured_tmp
-        else Path(tempfile.gettempdir()).resolve()
-    )
-    scratch_parent.mkdir(parents=True, exist_ok=True)
+    scratch_parent = _scratch_parent()
     failures: list[SuiteResult] = []
-    with tempfile.TemporaryDirectory(
-        prefix="pursers-ci-manifest-",
-        dir=scratch_parent,
-    ) as temporary:
-        scratch_root = Path(temporary)
+    with _owned_scratch_directory(scratch_parent) as scratch_root:
         indexed = tuple(
             (suite, scratch_root / f"{index:02d}-{suite.name}")
             for index, suite in enumerate(suites)
@@ -552,29 +648,46 @@ def run_suites(
 
 def run_seat_suites(root: Path, suites: Sequence[Suite] = SUITES) -> None:
     """Run every suite for seat evidence, with release-owned gates reported apart."""
+    scratch_parent = _scratch_parent()
     failures: list[str] = []
-    for suite in suites:
-        print(f"::group::pytest {suite.name} ({suite.path})", flush=True)
-        command = [sys.executable, "-m", "pytest", "-q", pytest_target(suite)]
-        if suite.path == "tools/tests":
-            command.extend(
-                [
-                    "-k",
-                    "not test_integration_files_manifest_matches_the_tree "
-                    "and not test_real_tree_is_clean_and_current_bump_has_zero_diff",
-                ]
+    with _owned_scratch_directory(scratch_parent) as scratch_root:
+        for index, suite in enumerate(suites):
+            scratch = scratch_root / f"{index:02d}-{suite.name}"
+            pytest_tmp = scratch / "pytest-tmp"
+            pytest_cache = scratch / "pytest-cache"
+            pytest_tmp.mkdir(parents=True, exist_ok=True)
+            pytest_cache.mkdir(parents=True, exist_ok=True)
+            print(f"::group::pytest {suite.name} ({suite.path})", flush=True)
+            command = [
+                sys.executable,
+                "-m",
+                "pytest",
+                "-q",
+                "--basetemp",
+                str(pytest_tmp),
+                "-o",
+                f"cache_dir={pytest_cache}",
+                pytest_target(suite),
+            ]
+            if suite.path == "tools/tests":
+                command.extend(
+                    [
+                        "-k",
+                        "not test_integration_files_manifest_matches_the_tree "
+                        "and not test_real_tree_is_clean_and_current_bump_has_zero_diff",
+                    ]
+                )
+            completed = subprocess.run(
+                command,
+                cwd=root / suite.cwd,
+                env=suite_environment(root, scratch),
+                check=False,
             )
-        completed = subprocess.run(
-            command,
-            cwd=root / suite.cwd,
-            env=suite_environment(root),
-            check=False,
-        )
-        print("::endgroup::", flush=True)
-        if completed.returncode != 0:
-            failures.append(
-                f"{suite.name} ({suite.path}) exit={completed.returncode}"
-            )
+            print("::endgroup::", flush=True)
+            if completed.returncode != 0:
+                failures.append(
+                    f"{suite.name} ({suite.path}) exit={completed.returncode}"
+                )
     if failures:
         raise RuntimeError("seat suite failures: " + ", ".join(failures))
 
@@ -667,6 +780,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         configured_minimum = int(
             os.environ.get(MIN_FREE_BYTES_ENV, str(DEFAULT_MIN_FREE_BYTES))
         )
+        if args.command in {"run", "seat-suite-report"}:
+            _sweep_scratch_parent()
         require_free_space(root, configured_minimum)
         validate_manifest(root)
         if args.command != "seat-suite-report":

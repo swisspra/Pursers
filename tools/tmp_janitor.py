@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
+import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -21,7 +24,12 @@ from typing import Callable, Sequence
 
 
 OWNER_FILE = ".pursers-tmp-owner-pid"
+OWNER_LOCK_FILE = ".owner.json"
 LSOF_EXECUTABLE = shutil.which("lsof") or "/usr/sbin/lsof"
+PURSERS_ROOT_NAME = re.compile(
+    r"(?:pursers-review-|pursers-packaging-gate\.)"
+    r"[A-Za-z0-9][A-Za-z0-9._-]*\Z"
+)
 TEMP_ENV_PATTERN = re.compile(
     r"(?:^|\s)(?:TMPDIR|TMP|TEMP|TEMPDIR|PYTEST_DEBUG_TEMPROOT)="
 )
@@ -164,6 +172,41 @@ def _owner_file_state(path: Path) -> tuple[bool | None, str]:
     return True, f"owner pid {pid} is live"
 
 
+def _owner_lock_state(path: Path) -> tuple[bool | None, str]:
+    """Honor the advisory owner lock used by managed Pursers temp roots."""
+    marker = path / OWNER_LOCK_FILE
+    try:
+        marker.lstat()
+    except FileNotFoundError:
+        return False, "no owner lock"
+    except OSError as exc:
+        return None, f"cannot inspect {OWNER_LOCK_FILE}: {exc}"
+    if marker.is_symlink() or not marker.is_file():
+        return None, f"cannot validate {OWNER_LOCK_FILE}"
+
+    try:
+        with marker.open("r+", encoding="utf-8") as owner:
+            try:
+                payload = json.load(owner)
+            except (OSError, json.JSONDecodeError):
+                return None, f"cannot validate {OWNER_LOCK_FILE}"
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema") != 1
+                or not isinstance(payload.get("pid"), int)
+                or isinstance(payload.get("pid"), bool)
+                or payload["pid"] <= 0
+            ):
+                return None, f"cannot validate {OWNER_LOCK_FILE}"
+            try:
+                fcntl.flock(owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True, f"owner lock for pid {payload['pid']} is held"
+    except OSError as exc:
+        return None, f"cannot inspect {OWNER_LOCK_FILE}: {exc}"
+    return False, f"owner lock for pid {payload['pid']} is not held"
+
+
 def _lsof_use_state(
     command: list[str],
     *,
@@ -201,6 +244,10 @@ def process_use_state(
     marker_active, marker_reason = _owner_file_state(path)
     if marker_active is None or marker_active:
         return marker_active, marker_reason
+
+    lock_active, lock_reason = _owner_lock_state(path)
+    if lock_active is None or lock_active:
+        return lock_active, lock_reason
 
     root_active, root_reason = _lsof_use_state(
         [LSOF_EXECUTABLE, "-nP", "-F", "pfn", os.fspath(path)],
@@ -261,7 +308,46 @@ def process_use_state(
             if any(character.isspace() for character in raw_value):
                 return None, f"live pid {pid_text} has an ambiguous temp environment"
 
+    if lock_reason != "no owner lock":
+        return False, lock_reason
     return False, marker_reason
+
+
+def discover_pursers_roots(parent: Path) -> list[Path]:
+    """Return allowlisted real directories that are direct children of parent."""
+    if not parent.is_absolute():
+        raise ValueError("discovery parent must be an absolute path")
+    if parent == Path(parent.anchor):
+        raise ValueError("refusing to discover beneath a filesystem root")
+    try:
+        parent_stat = parent.lstat()
+    except OSError as exc:
+        raise ValueError(f"cannot inspect discovery parent: {exc}") from exc
+    if parent.is_symlink() or not parent.is_dir():
+        raise ValueError("discovery parent must be a real directory, not a symlink")
+
+    roots: list[Path] = []
+    try:
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                if not PURSERS_ROOT_NAME.fullmatch(entry.name):
+                    continue
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+                candidate = parent / entry.name
+                try:
+                    current_parent = candidate.parent.lstat()
+                except OSError:
+                    continue
+                if (
+                    current_parent.st_dev != parent_stat.st_dev
+                    or current_parent.st_ino != parent_stat.st_ino
+                ):
+                    continue
+                roots.append(candidate)
+    except OSError as exc:
+        raise ValueError(f"cannot enumerate discovery parent: {exc}") from exc
+    return sorted(roots, key=lambda path: path.name)
 
 
 def inspect_candidate(
@@ -346,6 +432,196 @@ def _same_tree(inspection: Inspection) -> bool:
     )
 
 
+def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:
+    return first.st_dev == second.st_dev and first.st_ino == second.st_ino
+
+
+def _directory_open_flags() -> int:
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    return flags
+
+
+def _entry_matches_fd(parent_fd: int, name: str, directory_fd: int) -> bool:
+    try:
+        entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        opened = os.fstat(directory_fd)
+    except OSError:
+        return False
+    return stat.S_ISDIR(entry.st_mode) and _same_inode(entry, opened)
+
+
+class _RemovalRaceError(RuntimeError):
+    """An entry changed while descriptor-bound removal was in progress."""
+
+
+def _remove_tree_contents(directory_fd: int) -> None:
+    """Remove children through a verified directory descriptor.
+
+    Recursive traversal never resolves the quarantined root pathname again.
+    Every directory is opened without following symlinks and checked against
+    the entry observed by ``scandir`` before its contents are touched.
+    """
+    with os.scandir(directory_fd) as entries:
+        snapshot = list(entries)
+    for entry in snapshot:
+        observed = entry.stat(follow_symlinks=False)
+        if stat.S_ISDIR(observed.st_mode):
+            try:
+                child_fd = os.open(
+                    entry.name,
+                    _directory_open_flags(),
+                    dir_fd=directory_fd,
+                )
+            except OSError as exc:
+                raise _RemovalRaceError(
+                    f"cannot open directory {entry.name!r}: {exc}"
+                ) from exc
+            try:
+                opened = os.fstat(child_fd)
+                if not _same_inode(observed, opened):
+                    raise _RemovalRaceError(
+                        f"directory {entry.name!r} changed before removal"
+                    )
+                _remove_tree_contents(child_fd)
+                if not _entry_matches_fd(directory_fd, entry.name, child_fd):
+                    raise _RemovalRaceError(
+                        f"directory {entry.name!r} changed during removal"
+                    )
+                os.rmdir(entry.name, dir_fd=directory_fd)
+            finally:
+                os.close(child_fd)
+            continue
+
+        try:
+            current = os.stat(
+                entry.name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise _RemovalRaceError(
+                f"cannot recheck entry {entry.name!r}: {exc}"
+            ) from exc
+        same_kind = stat.S_IFMT(observed.st_mode) == stat.S_IFMT(current.st_mode)
+        if not _same_inode(observed, current) or not same_kind:
+            raise _RemovalRaceError(f"entry {entry.name!r} changed before removal")
+        os.unlink(entry.name, dir_fd=directory_fd)
+
+
+def _restore_quarantined(quarantine: Path, original: Path) -> str:
+    if original.exists() or original.is_symlink():
+        return f"changed entry retained at quarantine path {quarantine}"
+    try:
+        os.rename(quarantine, original)
+    except OSError as exc:
+        return f"cannot restore changed entry from {quarantine}: {exc}"
+    return "changed entry restored without deletion"
+
+
+def _quarantine_and_remove(
+    inspection: Inspection,
+    *,
+    runner: RunCommand = subprocess.run,
+) -> tuple[bool, str]:
+    """Detach, reprobe, and remove only the inspected directory inode."""
+    parent = inspection.path.parent
+    quarantine_name = (
+        f".pursers-tmp-janitor-{inspection.path.name}-{os.getpid()}-{time.time_ns()}"
+    )
+    quarantine = parent / quarantine_name
+    try:
+        parent_fd = os.open(parent, _directory_open_flags())
+    except OSError as exc:
+        return False, f"cannot open candidate parent: {exc}"
+
+    try:
+        try:
+            before = os.stat(
+                inspection.path.name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            return False, f"cannot recheck candidate before quarantine: {exc}"
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or before.st_dev != inspection.device
+            or before.st_ino != inspection.inode
+        ):
+            return False, "candidate changed before quarantine"
+        try:
+            os.rename(
+                inspection.path.name,
+                quarantine_name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            return False, f"cannot quarantine candidate: {exc}"
+
+        try:
+            directory_fd = os.open(
+                quarantine_name,
+                _directory_open_flags(),
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            restoration = _restore_quarantined(quarantine, inspection.path)
+            return False, (
+                f"candidate changed during quarantine: cannot open quarantined "
+                f"candidate: {exc}; {restoration}"
+            )
+        try:
+            moved = os.fstat(directory_fd)
+            if (
+                moved.st_dev != inspection.device
+                or moved.st_ino != inspection.inode
+                or not _entry_matches_fd(parent_fd, quarantine_name, directory_fd)
+            ):
+                restoration = _restore_quarantined(quarantine, inspection.path)
+                return False, f"candidate changed during quarantine; {restoration}"
+
+            try:
+                active, reason = process_use_state(quarantine, runner=runner)
+            except OSError as exc:
+                active, reason = None, f"cannot run in-use probes: {exc}"
+            if not _entry_matches_fd(parent_fd, quarantine_name, directory_fd):
+                return False, "quarantine pathname changed during final safety probes"
+            if active is None or active:
+                restoration = _restore_quarantined(quarantine, inspection.path)
+                state = "unknown" if active is None else "in use"
+                return False, (
+                    f"post-quarantine safety check {state}: {reason}; {restoration}"
+                )
+
+            try:
+                _remove_tree_contents(directory_fd)
+            except (OSError, _RemovalRaceError) as exc:
+                if _entry_matches_fd(parent_fd, quarantine_name, directory_fd):
+                    restoration = _restore_quarantined(quarantine, inspection.path)
+                    return False, f"descriptor-bound removal failed: {exc}; {restoration}"
+                return False, (
+                    "descriptor-bound removal stopped after quarantine pathname changed: "
+                    f"{exc}"
+                )
+
+            if not _entry_matches_fd(parent_fd, quarantine_name, directory_fd):
+                return False, "quarantine pathname changed during descriptor-bound removal"
+            try:
+                os.rmdir(quarantine_name, dir_fd=parent_fd)
+            except OSError as exc:
+                restoration = _restore_quarantined(quarantine, inspection.path)
+                return False, f"cannot remove empty quarantined root: {exc}; {restoration}"
+            return True, "deleted"
+        finally:
+            os.close(directory_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def run(
     roots: Sequence[Path],
     *,
@@ -397,7 +673,10 @@ def run(
         if not final.selected or not _same_tree(final):
             print(f"SKIP {inspection.path} reason=final safety check failed: {final.reason}")
             continue
-        shutil.rmtree(final.path)
+        removed, removal_reason = _quarantine_and_remove(final, runner=runner)
+        if not removed:
+            print(f"SKIP {inspection.path} reason={removal_reason}")
+            continue
         selected += 1
         total += final.allocated_bytes
         print(f"DELETED {final.path} bytes={final.allocated_bytes}")
@@ -409,12 +688,21 @@ def run(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--root",
         action="append",
-        required=True,
         type=Path,
         help="exact temporary directory to inspect; repeat for each managed root",
+    )
+    source.add_argument(
+        "--discover-pursers-under",
+        type=Path,
+        metavar="ABSOLUTE_PARENT",
+        help=(
+            "opt in to direct-child discovery under one exact parent; only known "
+            "Pursers review/gate basenames are eligible"
+        ),
     )
     parser.add_argument("--older-than-hours", type=float, default=1.0)
     parser.add_argument(
@@ -429,7 +717,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         seconds = int(args.older_than_hours * 3600)
-        return run(args.root, older_than_seconds=seconds, delete=args.delete)
+        roots = (
+            discover_pursers_roots(args.discover_pursers_under)
+            if args.discover_pursers_under is not None
+            else args.root
+        )
+        return run(roots, older_than_seconds=seconds, delete=args.delete)
     except (OSError, ValueError) as exc:
         print(f"temp janitor error: {exc}", file=sys.stderr)
         return 1

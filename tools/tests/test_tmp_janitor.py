@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import shutil
 import subprocess
@@ -507,3 +509,225 @@ def test_delete_unlinks_internal_symlink_without_touching_target(
     output = capsys.readouterr().out
     assert f"DELETED {candidate}" in output
     assert "reclaimed_bytes=" in output
+
+
+def test_discovery_selects_only_known_direct_review_and_gate_roots(
+    tmp_path: Path,
+) -> None:
+    expected = [
+        tmp_path / "pursers-packaging-gate.abcdef",
+        tmp_path / "pursers-review-TK-1234.abcdef",
+    ]
+    for candidate in expected:
+        candidate.mkdir()
+    (tmp_path / "pursers-fullgate-TK-1234.abcdef").mkdir()
+    (tmp_path / "letta-trajectories").mkdir()
+    (tmp_path / "pursers-review-").mkdir()
+    nested = tmp_path / "container" / "pursers-review-TK-nested.abcdef"
+    nested.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "pursers-review-TK-link.abcdef").symlink_to(
+        outside, target_is_directory=True
+    )
+
+    assert tmp_janitor.discover_pursers_roots(tmp_path) == expected
+
+
+def test_discovery_rejects_relative_symlink_and_filesystem_root(
+    tmp_path: Path,
+) -> None:
+    alias = tmp_path.parent / f"{tmp_path.name}-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    try:
+        with pytest.raises(ValueError, match="absolute"):
+            tmp_janitor.discover_pursers_roots(Path("relative"))
+        with pytest.raises(ValueError, match="symlink"):
+            tmp_janitor.discover_pursers_roots(alias)
+        with pytest.raises(ValueError, match="filesystem root"):
+            tmp_janitor.discover_pursers_roots(Path("/"))
+    finally:
+        alias.unlink(missing_ok=True)
+
+
+def test_held_owner_lock_keeps_old_root(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "pursers-review-TK-live.abcdef"
+    candidate.mkdir()
+    owner_path = candidate / tmp_janitor.OWNER_LOCK_FILE
+    owner_path.write_text(
+        json.dumps({"schema": 1, "pid": os.getpid()}), encoding="utf-8"
+    )
+    make_old(candidate)
+
+    with owner_path.open("r+", encoding="utf-8") as owner:
+        fcntl.flock(owner.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = tmp_janitor.inspect_candidate(
+            candidate, older_than_seconds=3_600, runner=idle_runner
+        )
+
+    assert result.selected is False
+    assert "owner lock" in result.reason
+    assert "held" in result.reason
+
+
+def test_malformed_owner_lock_fails_closed(tmp_path: Path) -> None:
+    candidate = tmp_path / "pursers-review-TK-ambiguous.abcdef"
+    candidate.mkdir()
+    (candidate / tmp_janitor.OWNER_LOCK_FILE).write_text("not-json", encoding="utf-8")
+    make_old(candidate)
+
+    result = tmp_janitor.inspect_candidate(
+        candidate, older_than_seconds=3_600, runner=idle_runner
+    )
+
+    assert result.selected is False
+    assert "in-use state unknown" in result.reason
+    assert f"cannot validate {tmp_janitor.OWNER_LOCK_FILE}" in result.reason
+
+
+def test_symlink_substitution_during_quarantine_is_not_deleted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate = tmp_path / "pursers-review-TK-race.abcdef"
+    candidate.mkdir()
+    (candidate / "payload").write_text("old", encoding="utf-8")
+    target = tmp_path / "protected"
+    target.mkdir()
+    protected = target / "keep"
+    protected.write_text("keep", encoding="utf-8")
+    parked = tmp_path / "parked-original"
+    make_old(candidate)
+    real_rename = os.rename
+    substituted = False
+
+    def replace_before_quarantine(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal substituted
+        if source == candidate.name and not substituted:
+            substituted = True
+            real_rename(candidate, parked)
+            candidate.symlink_to(target, target_is_directory=True)
+        real_rename(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    monkeypatch.setattr(tmp_janitor.os, "rename", replace_before_quarantine)
+
+    assert tmp_janitor.run(
+        [candidate], older_than_seconds=3_600, delete=True, runner=idle_runner
+    ) == 0
+
+    assert candidate.is_symlink()
+    assert parked.is_dir()
+    assert protected.read_text(encoding="utf-8") == "keep"
+    output = capsys.readouterr().out
+    assert f"SKIP {candidate}" in output
+    assert "changed during quarantine" in output
+    assert "reclaimed_bytes=0 candidates=0" in output
+
+
+def test_live_handle_opened_immediately_before_quarantine_is_not_deleted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate = tmp_path / "pursers-review-TK-live-race.abcdef"
+    candidate.mkdir()
+    payload = candidate / "payload"
+    payload.write_text("must survive while live", encoding="utf-8")
+    make_old(candidate)
+    real_rename = os.rename
+    opened_fd: int | None = None
+
+    def open_before_quarantine(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+    ) -> None:
+        nonlocal opened_fd
+        if source == candidate.name and opened_fd is None:
+            opened_fd = os.open(payload, os.O_RDONLY)
+        real_rename(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    monkeypatch.setattr(tmp_janitor.os, "rename", open_before_quarantine)
+    try:
+        assert tmp_janitor.run(
+            [candidate],
+            older_than_seconds=3_600,
+            delete=True,
+            runner=only_process(os.getpid()),
+        ) == 0
+        assert candidate.is_dir()
+        assert payload.read_text(encoding="utf-8") == "must survive while live"
+        output = capsys.readouterr().out
+        assert f"SKIP {candidate}" in output
+        assert "post-quarantine safety check in use" in output
+        assert "reclaimed_bytes=0 candidates=0" in output
+    finally:
+        if opened_fd is not None:
+            os.close(opened_fd)
+
+
+def test_quarantine_path_replacement_cannot_redirect_recursive_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate = tmp_path / "pursers-review-TK-root-race.abcdef"
+    candidate.mkdir()
+    (candidate / "payload").write_text("old", encoding="utf-8")
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    (protected / "keep").write_text("unrelated", encoding="utf-8")
+    parked = tmp_path / "parked-intended"
+    make_old(candidate)
+    real_remove = tmp_janitor._remove_tree_contents
+    real_rename = os.rename
+    replaced = False
+
+    def replace_quarantine_path(directory_fd: int) -> None:
+        nonlocal replaced
+        if not replaced:
+            quarantine = next(tmp_path.glob(".pursers-tmp-janitor-*"))
+            real_rename(quarantine, parked)
+            real_rename(protected, quarantine)
+            replaced = True
+        real_remove(directory_fd)
+
+    monkeypatch.setattr(
+        tmp_janitor,
+        "_remove_tree_contents",
+        replace_quarantine_path,
+    )
+
+    assert tmp_janitor.run(
+        [candidate], older_than_seconds=3_600, delete=True, runner=idle_runner
+    ) == 0
+
+    quarantine = next(tmp_path.glob(".pursers-tmp-janitor-*"))
+    assert (quarantine / "keep").read_text(encoding="utf-8") == "unrelated"
+    assert parked.is_dir()
+    output = capsys.readouterr().out
+    assert f"SKIP {candidate}" in output
+    assert "quarantine pathname changed" in output
+    assert f"DELETED {candidate}" not in output
+    assert "reclaimed_bytes=0 candidates=0" in output

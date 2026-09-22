@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import stat
@@ -147,6 +148,28 @@ def test_seat_suite_report_runs_every_suite_and_keeps_digest_test_separate(
         "and not test_real_tree_is_clean_and_current_bump_has_zero_diff",
     ]
     assert "-k" not in calls[1]
+
+
+def test_seat_suite_report_cleans_tmpdir_and_avoids_default_pytest_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "checkout"
+    suite_path = root / "packages/example/tests"
+    suite_path.mkdir(parents=True)
+    (suite_path / "test_pass.py").write_text(
+        "def test_pass():\n    assert True\n", encoding="utf-8"
+    )
+    configured_tmp = tmp_path / "seat-tmp"
+    configured_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(configured_tmp))
+
+    run_seat_suites(
+        root,
+        suites=(Suite("example", "packages/example/tests"),),
+    )
+
+    assert list(configured_tmp.iterdir()) == []
+    assert not any(tmp_path.rglob("pytest-of-*"))
 
 
 def test_central_suite_covers_board_move_regression() -> None:
@@ -443,6 +466,108 @@ def test_parallel_runner_isolates_each_suite_tmp_and_cache_dirs(
     assert all("cache_dir=" in " ".join(command) for command in commands)
 
 
+def test_runner_sweeps_dead_scratch_but_preserves_concurrent_live_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured_tmp = tmp_path / "runner-tmp"
+    configured_tmp.mkdir()
+    live = configured_tmp / f"{ci_manifest.SCRATCH_PREFIX}live"
+    dead = configured_tmp / f"{ci_manifest.SCRATCH_PREFIX}dead"
+    live.mkdir()
+    dead.mkdir()
+    live_owner = (live / ci_manifest.SCRATCH_OWNER_FILE).open(
+        "w+", encoding="utf-8"
+    )
+    live_owner.write('{"pid": 1, "schema": 1}\n')
+    live_owner.flush()
+    dead.joinpath(ci_manifest.SCRATCH_OWNER_FILE).write_text(
+        '{"pid": 1, "schema": 1}\n', encoding="utf-8"
+    )
+    fcntl.flock(live_owner.fileno(), fcntl.LOCK_EX)
+
+    def run(_command: list[str], **_kwargs: object) -> SimpleNamespace:
+        assert live.is_dir()
+        assert not dead.exists()
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(ci_manifest.subprocess, "run", run)
+    monkeypatch.setenv("TMPDIR", str(configured_tmp))
+    try:
+        run_suites(
+            tmp_path,
+            suites=(Suite("only", "packages/only/tests"),),
+            jobs=1,
+        )
+        assert live.is_dir()
+        assert not dead.exists()
+    finally:
+        fcntl.flock(live_owner.fileno(), fcntl.LOCK_UN)
+        live_owner.close()
+        ci_manifest.shutil.rmtree(live)
+
+    assert list(configured_tmp.iterdir()) == []
+
+
+@pytest.mark.parametrize("command", [["run", "--jobs", "1"], ["seat-suite-report"]])
+def test_cli_sweeps_dead_scratch_before_low_space_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: list[str],
+) -> None:
+    configured_tmp = tmp_path / "runner-tmp"
+    configured_tmp.mkdir()
+    dead = configured_tmp / f"{ci_manifest.SCRATCH_PREFIX}dead"
+    dead.mkdir()
+    dead.joinpath(ci_manifest.SCRATCH_OWNER_FILE).write_text(
+        '{"pid": 1, "schema": 1}\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("TMPDIR", str(configured_tmp))
+    monkeypatch.setenv(ci_manifest.MIN_FREE_BYTES_ENV, "1")
+    monkeypatch.setattr(ci_manifest, "repository_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        ci_manifest.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(total=1, used=1, free=0),
+    )
+
+    assert ci_manifest.main(command) == 1
+    assert not dead.exists()
+
+
+def test_seat_suite_report_contains_nested_pytest_without_default_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "checkout"
+    suite_path = root / "packages/example/tests"
+    nested_path = root / "nested-tests"
+    suite_path.mkdir(parents=True)
+    nested_path.mkdir()
+    nested_path.joinpath("test_pass.py").write_text(
+        "def test_pass():\n    assert True\n", encoding="utf-8"
+    )
+    suite_path.joinpath("test_nested.py").write_text(
+        "from pathlib import Path\n"
+        "import subprocess\n"
+        "import sys\n\n"
+        "def test_nested(tmp_path):\n"
+        "    result = subprocess.run(\n"
+        "        [sys.executable, '-m', 'pytest', '-q', 'nested-tests',\n"
+        "         '--basetemp', str(tmp_path / 'nested-tmp'), '-o',\n"
+        "         f\"cache_dir={tmp_path / 'nested-cache'}\"],\n"
+        "        cwd=Path(__file__).resolve().parents[3], check=False)\n"
+        "    assert result.returncode == 0\n",
+        encoding="utf-8",
+    )
+    configured_tmp = tmp_path / "seat-tmp"
+    configured_tmp.mkdir()
+    monkeypatch.setenv("TMPDIR", str(configured_tmp))
+
+    run_seat_suites(root, suites=(Suite("example", "packages/example/tests"),))
+
+    assert list(configured_tmp.iterdir()) == []
+    assert not any(tmp_path.rglob("pytest-of-*"))
+
+
 def test_verify_counts_requires_every_suite_to_be_positive() -> None:
     suites = (
         Suite("first", "packages/first/tests"),
@@ -485,6 +610,8 @@ def test_fleet_dashboard_suite_passes_with_read_only_home(
     environment = os.environ.copy()
     environment["HOME"] = str(read_only_home)
     environment["PURSERS_STATE_DIR"] = str(tmp_path / "state")
+    nested_basetemp = tmp_path / "fleet-pytest-tmp"
+    nested_cache = tmp_path / "fleet-pytest-cache"
     try:
         completed = subprocess.run(
             [
@@ -492,6 +619,10 @@ def test_fleet_dashboard_suite_passes_with_read_only_home(
                 "-m",
                 "pytest",
                 "-q",
+                "--basetemp",
+                str(nested_basetemp),
+                "-o",
+                f"cache_dir={nested_cache}",
                 "tools/fleet-dashboard/tests",
             ],
             cwd=REPOSITORY_ROOT,
