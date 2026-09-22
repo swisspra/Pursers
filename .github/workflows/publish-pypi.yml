@@ -9,14 +9,21 @@ name: publish-pypi
 #   pypi-bridge -> pursers-wait-bridge
 # (pending publishers required distinct environments per project; regular
 #  per-project publishers share the `pypi` environment.)
-# skip-existing: already-published versions are skipped, so a run only
-# uploads distributions whose version was bumped.
+# The pre-publish PyPI comparison rejects changed same-version wheels before
+# skip-existing can silently ignore them; only new, bumped versions are uploaded.
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# Keep the PyPI check and upload in one repository-wide critical section. A
+# second manual run must not observe a new version before the first run uploads
+# different bytes for that same version.
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
 
 jobs:
   publish-main:
@@ -76,7 +83,7 @@ jobs:
       - name: Verify component lock and wheel generators
         run: |
           set -euo pipefail
-          python tools/verify_publish_wheels.py --wheel-dir dist
+          python tools/verify_publish_wheels.py --wheel-dir dist --verify-pypi
 
       # PyPI refuses to let a trusted publisher create a new project, so the
       # first pursers-acp upload fails until a pending publisher exists. Upload
@@ -155,7 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           python tools/verify_publish_wheels.py \
-            --wheel-dir dist --generators-only
+            --wheel-dir dist --generators-only --verify-pypi
 
       - name: Publish to PyPI (Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1

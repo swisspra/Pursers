@@ -52,6 +52,12 @@ and the Personal component lock are consumers. Do not edit those pins by hand.
 
 PyPI versions are immutable. If verification fails after a version has been
 published, advance the affected version instead of rebuilding that release.
+The PyPI publishing workflow downloads every same-version wheel already present
+on the index and compares its SHA-256 with the freshly built wheel before any
+upload. A mismatch fails closed even though the publisher uses `skip-existing`;
+the affected distribution must receive a new version. One workflow-level
+concurrency group serializes every manual publish run, so a later dispatch
+cannot perform this check until the earlier run has finished uploading.
 
 ## Home runtime wheelhouse lock
 
