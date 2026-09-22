@@ -7,9 +7,14 @@ import argparse
 import hashlib
 import json
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any, Sequence
+
+from packaging.utils import canonicalize_name, parse_wheel_filename
 
 if __package__:
     from tools.regenerate_component_lock import BUILD_TOOLCHAIN
@@ -19,6 +24,9 @@ else:
 
 class VerificationError(RuntimeError):
     """Raised when a wheel cannot be proven publish-safe."""
+
+
+PYPI_INDEX_URL = "https://pypi.org"
 
 
 def _sha256(path: Path) -> str:
@@ -131,6 +139,103 @@ def verify_publish_wheels(
     return wheels
 
 
+def _pypi_release(
+    distribution: str, version: str, *, index_url: str
+) -> dict[str, Any] | None:
+    project = urllib.parse.quote(distribution, safe="")
+    release = urllib.parse.quote(version, safe="")
+    request = urllib.request.Request(
+        f"{index_url.rstrip('/')}/pypi/{project}/{release}/json",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            document = json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise VerificationError(
+            f"PyPI lookup failed for {distribution}=={version}: HTTP {exc.code}"
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise VerificationError(
+            f"PyPI lookup failed for {distribution}=={version}: {exc}"
+        ) from exc
+    if not isinstance(document, dict):
+        raise VerificationError(
+            f"PyPI returned an invalid release document for {distribution}=={version}"
+        )
+    return document
+
+
+def _download(url: str) -> bytes:
+    request = urllib.request.Request(url, headers={"Accept": "application/octet-stream"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.read()
+    except OSError as exc:
+        raise VerificationError(f"published wheel download failed: {url}: {exc}") from exc
+
+
+def verify_pypi_artifacts(
+    wheels: Sequence[Path], *, index_url: str = PYPI_INDEX_URL
+) -> list[Path]:
+    """Reject changed wheel bytes at a version that PyPI already contains."""
+    verified: list[Path] = []
+    for wheel in wheels:
+        try:
+            distribution, version, _build, _tags = parse_wheel_filename(wheel.name)
+        except ValueError as exc:
+            raise VerificationError(f"invalid wheel filename: {wheel.name}") from exc
+        project = canonicalize_name(distribution)
+        release = _pypi_release(project, str(version), index_url=index_url)
+        if release is None:
+            print(f"pypi_version_new={project}=={version}:{wheel.name}")
+            verified.append(wheel)
+            continue
+        urls = release.get("urls")
+        if not isinstance(urls, list):
+            raise VerificationError(
+                f"PyPI release document has no artifact list for {project}=={version}"
+            )
+        matches = [
+            entry
+            for entry in urls
+            if isinstance(entry, dict)
+            and entry.get("packagetype") == "bdist_wheel"
+            and entry.get("filename") == wheel.name
+        ]
+        if len(matches) != 1:
+            raise VerificationError(
+                f"PyPI {project}=={version} must contain exactly one {wheel.name}; "
+                f"found {len(matches)}"
+            )
+        entry = matches[0]
+        url = entry.get("url")
+        digests = entry.get("digests")
+        published_sha256 = digests.get("sha256") if isinstance(digests, dict) else None
+        if not isinstance(url, str) or not url or not isinstance(published_sha256, str):
+            raise VerificationError(
+                f"PyPI artifact metadata is incomplete for {project}=={version}"
+            )
+        published = _download(url)
+        downloaded_sha256 = hashlib.sha256(published).hexdigest()
+        if downloaded_sha256 != published_sha256:
+            raise VerificationError(
+                f"PyPI artifact digest mismatch for {wheel.name}: "
+                f"{downloaded_sha256} != {published_sha256}"
+            )
+        local_sha256 = _sha256(wheel)
+        if local_sha256 != published_sha256:
+            raise VerificationError(
+                f"published wheel content mismatch for {project}=={version}: "
+                f"built {local_sha256} != PyPI {published_sha256}; bump the version"
+            )
+        print(f"pypi_artifact_match={project}=={version}:{wheel.name}:{local_sha256}")
+        verified.append(wheel)
+    return verified
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Verify freshly built wheels before Trusted Publishing"
@@ -141,11 +246,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="verify the pinned setuptools generator without a Personal lock",
     )
+    parser.add_argument(
+        "--verify-pypi",
+        action="store_true",
+        help="fail when a built wheel differs from the same version on PyPI",
+    )
+    parser.add_argument(
+        "--pypi-index-url",
+        default=PYPI_INDEX_URL,
+        help="base URL providing the PyPI JSON API",
+    )
     args = parser.parse_args(argv)
     try:
         wheels = verify_publish_wheels(
             args.wheel_dir, check_component_lock=not args.generators_only
         )
+        if args.verify_pypi:
+            verify_pypi_artifacts(wheels, index_url=args.pypi_index_url)
     except (OSError, UnicodeError, zipfile.BadZipFile, VerificationError) as exc:
         print(f"publish wheel verification failed: {exc}", file=sys.stderr)
         return 1

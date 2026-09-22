@@ -5,6 +5,7 @@ import json
 import zipfile
 from pathlib import Path
 
+from tools import verify_publish_wheels
 from tools.regenerate_component_lock import BUILD_TOOLCHAIN
 from tools.verify_publish_wheels import main
 
@@ -74,3 +75,82 @@ def test_publish_wheel_gate_names_mismatched_component(
     assert main(["--wheel-dir", str(tmp_path)]) != 0
     error = capsys.readouterr().err
     assert "pursers-client wheel sha256 mismatch" in error
+
+
+def _published_release(wheel: Path, payload: bytes) -> dict[str, object]:
+    return {
+        "urls": [
+            {
+                "packagetype": "bdist_wheel",
+                "filename": wheel.name,
+                "url": "https://files.example.invalid/published.whl",
+                "digests": {"sha256": hashlib.sha256(payload).hexdigest()},
+            }
+        ]
+    }
+
+
+def test_pypi_gate_accepts_identical_published_wheel(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    wheel = _wheel(tmp_path, "pursers-client", "2", {"client.py": b"client\n"})
+    published = wheel.read_bytes()
+    monkeypatch.setattr(
+        verify_publish_wheels,
+        "_pypi_release",
+        lambda *_args, **_kwargs: _published_release(wheel, published),
+    )
+    monkeypatch.setattr(verify_publish_wheels, "_download", lambda _url: published)
+
+    assert (
+        main(["--wheel-dir", str(tmp_path), "--generators-only", "--verify-pypi"])
+        == 0
+    )
+    assert "pypi_artifact_match=pursers-client==2" in capsys.readouterr().out
+
+
+def test_pypi_gate_rejects_changed_content_without_version_bump(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    wheel = _wheel(tmp_path, "pursers-client", "2", {"client.py": b"changed\n"})
+    published = b"published wheel bytes"
+    monkeypatch.setattr(
+        verify_publish_wheels,
+        "_pypi_release",
+        lambda *_args, **_kwargs: _published_release(wheel, published),
+    )
+    monkeypatch.setattr(verify_publish_wheels, "_download", lambda _url: published)
+
+    assert (
+        main(["--wheel-dir", str(tmp_path), "--generators-only", "--verify-pypi"])
+        != 0
+    )
+    error = capsys.readouterr().err
+    assert "published wheel content mismatch for pursers-client==2" in error
+    assert "bump the version" in error
+
+
+def test_pypi_gate_allows_new_version(tmp_path: Path, monkeypatch, capsys) -> None:
+    _wheel(tmp_path, "pursers-client", "3", {"client.py": b"new\n"})
+    monkeypatch.setattr(
+        verify_publish_wheels,
+        "_pypi_release",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert (
+        main(["--wheel-dir", str(tmp_path), "--generators-only", "--verify-pypi"])
+        == 0
+    )
+    assert "pypi_version_new=pursers-client==3" in capsys.readouterr().out
+
+
+def test_publish_workflow_checks_pypi_before_both_uploads() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[2] / ".github/workflows/publish-pypi.yml"
+    ).read_text(encoding="utf-8")
+
+    assert workflow.count("--verify-pypi") == 2
+    assert workflow.index("--verify-pypi") < workflow.index("Publish to PyPI")
+    bridge = workflow.split("publish-wait-bridge:", 1)[1]
+    assert bridge.index("--verify-pypi") < bridge.index("Publish to PyPI")
