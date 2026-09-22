@@ -225,6 +225,34 @@ is not an autonomous fleet operator.
 > activity; Fleet also verifies the pidfile lock and live process, as described
 > in the [Board Butler runbook](tools/board-butler/README.md).
 
+#### Board Butler behaviour checklist
+
+1. **Stale question reconciliation:** in shadow and active modes, an open
+   coordinator question explicitly named by a later decision is reported for
+   coordinator reconciliation. A chronological but unlinked decision reports
+   its missing correlation instead of being guessed as the answer. The butler
+   does not answer or close the question.
+2. **Held-decision travel:** in both modes, a binding decision followed by a
+   later work offer or broadcast is surfaced before another seat re-derives
+   the gate. The butler does not claim, assign, or release the work.
+3. **Standing-rule recurrence:** in both modes, questions from multiple seats
+   that reuse the same exact board-visible identifier are linked to the
+   standing decision. The butler does not infer a match from free-text
+   similarity or enforce the decision on a seat.
+4. **Decision-scope drift:** in both modes, a decision that directs a file
+   change outside the ticket's declared related-file boundary is reported for
+   preflight reconciliation. The butler does not edit the ticket scope or the
+   repository.
+5. **Bounded and fail-closed:** critical coordinator alerts rank first; current
+   observations then displace only older non-critical rows inside the 50-row,
+   4,800-character limit. Incomplete question or ticket projections produce a
+   coverage warning, never a clean finding.
+6. **No added authority:** all observers are read-only in shadow and active
+   modes. Active mode still adds only the two separately authorized safety
+   actions documented above. The butler never deletes files or board data,
+   dispatches cleanup, merges or pushes `main`, tags or publishes, changes
+   membership or the registry, or acts for the operator.
+
 ### Packages
 
 | Package | What it is |

@@ -22,6 +22,64 @@ incomplete evidence also escalates. Mechanical drafts cite one named product or
 repository source: `git merge-base`, `ticket_get`, a ticket annotation, or a
 seat capability row.
 
+## Board-state observations
+
+Every registry refresh also runs one bounded observation engine over Central
+state the butler already reads. `ObservationContext` contains only the current
+question inbox plus full projections of inbox-linked tickets and active tickets
+that have annotations;
+it has no filesystem, process, or host input. `OBSERVATION_RULES` is the rule
+registry. Adding another condition means registering another read-only
+predicate, not adding another action path. `derive_board_observations` gives
+every result a stable key, and `merge_observation_findings` replaces the prior
+derived set with a CAS-protected update to `coordinator_findings`.
+
+Observations are warnings, ordered after every critical coordinator alert.
+Within the observation set, held and repeated decisions rank ahead of inbox and
+scope reconciliation. The state remains bounded to 50 findings and 4,800
+characters: older non-critical rows are removed first, truncation is recorded,
+and a flood of observations cannot displace a critical alert. If the 100-item
+question or ticket-detail projection is incomplete, the butler emits a coverage
+gap and makes no negative claim from the missing records.
+
+The current duties are directly traceable:
+
+1. `stale_open_question` pairs an open question only with an explicit question
+   or message ID in a later decision. Chronology alone produces a named missing-
+   correlation finding, not a reconciliation claim. It asks the coordinator to
+   reconcile the inbox; it does not close or answer anything. Code:
+   `_observe_stale_open_questions`. Tests:
+   `test_stale_open_question_observer_reconciles_explicit_decision` and
+   `test_stale_open_question_observer_refuses_chronology_only_match`.
+2. `held_decision` finds a binding decision followed by another work offer or
+   broadcast in the seven-day replay window, so the decision can travel with
+   the ticket before another seat re-derives it. Code:
+   `_observe_held_decisions`. Test:
+   `test_held_decision_observer_carries_gate_across_later_dispatch`.
+3. `standing_decision_repeated` uses only exact board-visible identifiers such
+   as a repository path or manifest name. Two different seats asking about the
+   same identifier covered by a decision establishes recurrence; free-text
+   semantic similarity is never guessed. Code:
+   `_observe_repeated_standing_decisions`. Test:
+   `test_standing_decision_observer_detects_multiple_seat_relitigation`.
+4. `decision_scope_drift` compares a decision's directed file changes with the
+   ticket's declared related-file boundary and asks the coordinator to
+   reconcile an outside path before final preflight. Code:
+   `_observe_decision_scope_drift`. Test:
+   `test_decision_scope_observer_flags_directed_out_of_boundary_path`.
+5. `observation_replay_metrics` reports the exact number of explicitly linked
+   open questions reconciled and deduplicated later question IDs that repeat an
+   exact decision identifier within seven days. Test:
+   `test_observation_replay_metrics_deduplicate_question_ids`.
+6. `coverage_gap` names an incomplete question or ticket-detail projection and
+   prevents an absence from being reported as proof. Test:
+   `test_observation_coverage_gap_refuses_negative_claim`.
+
+Shadow and active runtime modes observe and report identically. Active mode
+adds only the two existing, separately authorized mechanical actions. No
+observer deletes files or board data, answers a question, merges work, changes
+membership, assigns a seat, dispatches cleanup, or performs an operator action.
+
 Questions that propose proceeding despite a blocked, skipped, failed, or
 never-reached suite use the coverage map declared by `tools/ci_manifest.py`.
 The butler compares the submitted cumulative file list with the quoted suite

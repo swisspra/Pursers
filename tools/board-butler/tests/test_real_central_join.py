@@ -86,8 +86,14 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
         "real-join-admin",
         frozenset({"board:read", "board:write", "board:coordinate"}),
     )
+    butler_principal = central.Principal(
+        principal_id,
+        "board-butler-real-join",
+        frozenset({"board:read", "board:coordinate"}),
+    )
+    current = [admin]
     original_current_principal = central.current_principal
-    central.current_principal = lambda: admin
+    central.current_principal = lambda: current[0]
     try:
         joined = await mcp.call_tool(
             "board_join",
@@ -104,6 +110,105 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
             },
         )
         assert not admitted.is_error
+        current[0] = butler_principal
+        butler_join = await mcp.call_tool(
+            "board_join",
+            {
+                "board_id": "butler-real-join",
+                "agent_name": "board-butler-real-join",
+                "role": "coordinator",
+                "capabilities": dict(butler.BOARD_BUTLER_CAPABILITIES),
+            },
+        )
+        assert not butler_join.is_error
+        butler_agent_id = butler_join.structured_content["agent_id"]
+        current[0] = admin
+        for key, value in (
+            (
+                "project_registry",
+                {
+                    "schema_version": 1,
+                    "projects": {
+                        "butler-real-join": {
+                            "board_id": "butler-real-join",
+                            "work_dir": "/PATH/TO/Pursers",
+                            "status": "active",
+                        }
+                    },
+                },
+            ),
+            (
+                central.PROJECT_COORDINATORS_STATE_KEY,
+                {"butler-real-join": [butler_agent_id]},
+            ),
+        ):
+            updated = await mcp.call_tool(
+                "board_state_update",
+                {
+                    "board_id": "butler-real-join",
+                    "agent_name": "bootstrap-admin",
+                    "key": key,
+                    "value": json.dumps(value),
+                },
+            )
+            assert not updated.is_error
+
+        asked_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        decided_at = asked_at + timedelta(minutes=5)
+
+        def seed_observation(document: dict[str, object]) -> dict[str, object]:
+            document["tickets"]["TK-observed"] = {
+                "ticket_id": "TK-observed",
+                "title": "Real Central observer fixture",
+                "description": "Independently seeded board input",
+                "status": "open",
+                "project": "butler-real-join",
+                "priority": "medium",
+                "created_at": asked_at.isoformat(),
+                "updated_at": decided_at.isoformat(),
+                "related_files": ["tools/board-butler/"],
+                "annotations": [
+                    {
+                        "annotation_id": "AN-observed",
+                        "kind": "decision",
+                        "text": "CQ-observed — retain the existing boundary.",
+                        "by": {
+                            "principal_id": admin.principal_id,
+                            "agent_id": "AI-bootstrap",
+                            "agent_name": "bootstrap-admin",
+                        },
+                        "at": decided_at.isoformat(),
+                    }
+                ],
+                "coordinator_questions": [
+                    {
+                        "question_id": "CQ-observed",
+                        "project": "butler-real-join",
+                        "asker_role": "worker",
+                        "message_id": None,
+                        "in_reply_to": None,
+                        "message": "Which boundary applies?",
+                        "kind": "information",
+                        "state": "open",
+                        "asked_by": {
+                            "agent_id": "AI-worker",
+                            "agent_name": "worker",
+                            "principal_id": "PR-worker",
+                        },
+                        "asked_at": asked_at.isoformat(),
+                        "accepted_by": None,
+                        "accepted_at": None,
+                        "binding": None,
+                        "rebound_at": None,
+                        "answer": None,
+                        "answered_at": None,
+                    }
+                ],
+                "dispatch_history": [],
+            }
+            return {}
+
+        service.mutate("butler-real-join", seed_observation)
     finally:
         central.current_principal = original_current_principal
         task = getattr(service, "recurring_reaper_task", None)
@@ -226,6 +331,29 @@ def test_butler_reaches_first_working_state_against_real_central(
                 "host": None,
                 "max_parallel": 1,
             }
+            context = await backend._observation_context_for_board(
+                "butler-real-join", snapshot, butler.utc_now()
+            )
+            observations = butler.derive_board_observations(context)
+            stale = [
+                row
+                for row in observations
+                if row.get("observer") == "stale_open_question"
+            ]
+            assert context.questions_complete is True
+            assert stale[0]["question_id"] == "CQ-observed"
+            assert stale[0]["annotation_id"] == "AN-observed"
+            await backend._write_observation_findings(
+                "butler-real-join", observations, context.now
+            )
+            stored = await backend.client.board_state_get(butler.STATE_KEY)
+            state = json.loads(stored["state"]["value"])
+            written = [
+                row
+                for row in state["findings"]
+                if row.get("kind") == butler.OBSERVATION_FINDING_KIND
+            ]
+            assert written[0]["observation_key"] == stale[0]["observation_key"]
 
     with _central_process(data_root, port, environment) as url:
         asyncio.run(connect(url))

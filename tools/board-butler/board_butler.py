@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Callable, Mapping, Protocol, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -62,6 +62,9 @@ MAX_PROVIDER_RESPONSE_BYTES = 1_000_000
 MAX_PROVIDER_DRAFT_CHARS = 2_000
 PROVIDER_TIMEOUT_S = 30.0
 QUESTION_EVENT = "coordinator_question_asked"
+OBSERVATION_TICKET_LIMIT = 100
+OBSERVATION_HISTORY_DAYS = 7
+OBSERVATION_FINDING_KIND = "butler_observation"
 PARK_ANNOTATION_MARKER = "board-butler:no-live-candidates"
 REFUSAL_ANNOTATION_MARKER = "board-butler:incapable-target-refusal"
 MIN_AGREEMENT_SAMPLES = 3
@@ -323,6 +326,27 @@ class MechanicalAction:
     observed_cycles: int | None
     reason: str
     annotation_required: bool = True
+
+
+@dataclass(frozen=True)
+class ObservationContext:
+    """One bounded, board-owned input shared by every observer."""
+
+    board_id: str
+    tickets: Mapping[str, Mapping[str, Any]]
+    questions: tuple[Mapping[str, Any], ...]
+    now: datetime
+    questions_complete: bool = True
+    tickets_complete: bool = True
+
+
+@dataclass(frozen=True)
+class ObservationRule:
+    """A read-only predicate registered with the common observation engine."""
+
+    name: str
+    priority: int
+    evaluate: Callable[[ObservationContext], Sequence[Mapping[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -1858,6 +1882,434 @@ async def backfill_retrospective_evaluations(
     return result
 
 
+def _record_time(record: Mapping[str, Any], *keys: str) -> datetime | None:
+    for key in keys:
+        parsed = parse_time(record.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _ticket_decisions(ticket: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    rows = ticket.get("annotations", [])
+    return [
+        row
+        for row in rows
+        if isinstance(row, Mapping) and row.get("kind") == "decision"
+    ] if isinstance(rows, list) else []
+
+
+def _observation_topics(text: Any) -> set[str]:
+    """Return exact board-visible identifiers; never infer a semantic topic."""
+    value = str(text or "")
+    tokens = re.findall(
+        r"(?<![A-Za-z0-9])(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+"
+        r"|(?<![A-Za-z0-9])[A-Z][A-Z0-9_]{4,}(?:\.[A-Za-z0-9]+)?"
+        r"|(?<![A-Za-z0-9])[A-Za-z0-9_.-]+\."
+        r"(?:sha256|toml|json|ya?ml|md|py)(?![A-Za-z0-9])",
+        value,
+    )
+    return {
+        token.strip("`'\".,:;()[]{}").casefold()
+        for token in tokens
+        if token and not token.startswith("/PATH/TO/")
+    }
+
+
+def _directed_paths(text: Any) -> set[str]:
+    value = str(text or "")
+    return {
+        match.group(1).strip("`'\".,:;()[]{}")
+        for match in re.finditer(
+            r"\b(?:change|edit|modify|update|regenerate|write|touch|replace)\w*"
+            r"\b[^\n.]{0,120}?`?"
+            r"((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)`?",
+            value,
+            re.I,
+        )
+        if not match.group(1).startswith("/PATH/TO/")
+    }
+
+
+def _path_is_allowed(path: str, allowed: Sequence[str]) -> bool:
+    normalized = path.strip("/")
+    for entry in allowed:
+        candidate = str(entry).strip("/")
+        if not candidate:
+            continue
+        if normalized == candidate:
+            return True
+        if entry.endswith("/") and normalized.startswith(candidate + "/"):
+            return True
+    return False
+
+
+def _dispatch_time(row: Mapping[str, Any]) -> datetime | None:
+    return _record_time(row, "at", "offered_at", "occurred_at", "updated_at")
+
+
+def _dispatch_after(
+    ticket: Mapping[str, Any], start: datetime, cutoff: datetime
+) -> list[Mapping[str, Any]]:
+    history = ticket.get("dispatch_history", [])
+    if not isinstance(history, list):
+        return []
+    return [
+        row
+        for row in history
+        if isinstance(row, Mapping)
+        and row.get("kind", "work") == "work"
+        and row.get("state") in {"offered", "broadcast"}
+        and (stamp := _dispatch_time(row)) is not None
+        and stamp > start
+        and stamp >= cutoff
+    ]
+
+
+def _binding_decision(text: Any) -> bool:
+    return bool(
+        re.search(
+            r"\b(?:do not|must not|cannot|blocked|wait|hold|only)\b.{0,180}"
+            r"\b(?:until|before|after|unless|first|land|merge|approve)\b"
+            r"|\b(?:until|unless|only after)\b.{0,180}\b(?:merge|land|approve|complete)\w*\b",
+            str(text or ""),
+            re.I | re.S,
+        )
+    )
+
+
+def _questions_for_ticket(
+    context: ObservationContext, ticket_id: str
+) -> list[Mapping[str, Any]]:
+    return [
+        row
+        for row in context.questions
+        if str(row.get("ticket_id", "")) == ticket_id
+    ]
+
+
+def _question_matches_decision_identifiers(
+    question: Mapping[str, Any], decision: Mapping[str, Any]
+) -> bool:
+    """Match only exact board-visible identifiers, never prose similarity."""
+    decision_topics = _observation_topics(decision.get("text"))
+    return bool(decision_topics & _observation_topics(question.get("message")))
+
+
+def _observe_stale_open_questions(
+    context: ObservationContext,
+) -> list[Mapping[str, Any]]:
+    observations: list[Mapping[str, Any]] = []
+    for ticket_id, ticket in context.tickets.items():
+        questions = [
+            row
+            for row in _questions_for_ticket(context, ticket_id)
+            if row.get("state") == "open"
+        ]
+        if not questions:
+            continue
+        decisions = sorted(
+            _ticket_decisions(ticket),
+            key=lambda row: _record_time(row, "at") or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        matched_questions: set[str] = set()
+        # Explicit identifiers are authoritative even if timestamps were
+        # redacted from a historical projection.
+        for question in questions:
+            question_id = str(question.get("question_id", ""))
+            message_id = str(question.get("message_id") or "")
+            decision = next(
+                (
+                    row
+                    for row in decisions
+                    if question_id in str(row.get("text", ""))
+                    or (message_id and message_id in str(row.get("text", "")))
+                    if (
+                        (asked_at := _record_time(question, "asked_at")) is None
+                        or (decided_at := _record_time(row, "at")) is None
+                        or decided_at > asked_at
+                    )
+                ),
+                None,
+            )
+            if decision is None:
+                continue
+            annotation_id = str(decision.get("annotation_id", ""))
+            matched_questions.add(question_id)
+            observations.append(
+                {
+                    "level": "warn",
+                    "ticket_id": ticket_id,
+                    "question_id": question_id,
+                    "annotation_id": annotation_id,
+                    "message": "An open coordinator question has an explicit later decision annotation.",
+                    "evidence": f"question_id={question_id}; annotation_id={annotation_id}; match=explicit-id",
+                    "next_action": "Coordinator: reconcile the inbox state; the butler does not answer or close it.",
+                    "reconciled": True,
+                }
+            )
+        # A later decision without an explicit question or message ID may be
+        # an answer, but chronology alone cannot prove that relationship.
+        # Report the missing correlation instead of silently pairing records.
+        for question in questions:
+            question_id = str(question.get("question_id", ""))
+            if question_id in matched_questions:
+                continue
+            asked_at = _record_time(question, "asked_at")
+            later_decisions = [
+                row
+                for row in decisions
+                if asked_at is not None
+                and (decided_at := _record_time(row, "at")) is not None
+                and decided_at > asked_at
+            ]
+            if not later_decisions:
+                continue
+            observations.append(
+                {
+                    "level": "info",
+                    "ticket_id": ticket_id,
+                    "question_id": question_id,
+                    "message": "A later decision exists, but board state does not explicitly link it to this open question.",
+                    "evidence": f"question_id={question_id}; missing=question-or-message-id-in-decision",
+                    "next_action": "Coordinator: add an explicit correlation before reconciling the inbox; chronology is not treated as an answer.",
+                    "reconciled": False,
+                }
+            )
+    return observations
+
+
+def _observe_held_decisions(
+    context: ObservationContext,
+) -> list[Mapping[str, Any]]:
+    observations: list[Mapping[str, Any]] = []
+    cutoff = context.now - timedelta(days=OBSERVATION_HISTORY_DAYS)
+    terminal = {"closed", "canceled", "rejected"}
+    for ticket_id, ticket in context.tickets.items():
+        if ticket.get("status") in terminal:
+            continue
+        questions = _questions_for_ticket(context, ticket_id)
+        for decision in _ticket_decisions(ticket):
+            if not _binding_decision(decision.get("text")):
+                continue
+            decided_at = _record_time(decision, "at")
+            if decided_at is None:
+                continue
+            dispatches = _dispatch_after(ticket, decided_at, cutoff)
+            if not dispatches:
+                continue
+            annotation_id = str(decision.get("annotation_id", ""))
+            rediscovery_ids = [
+                str(row.get("question_id", ""))
+                for row in questions
+                if (asked_at := _record_time(row, "asked_at")) is not None
+                and asked_at > decided_at
+                and asked_at >= cutoff
+                and _question_matches_decision_identifiers(row, decision)
+            ]
+            observations.append(
+                {
+                    "level": "warn",
+                    "ticket_id": ticket_id,
+                    "annotation_id": annotation_id,
+                    "message": "A binding decision was followed by another work dispatch and must travel with the ticket.",
+                    "evidence": f"annotation_id={annotation_id}; later_dispatches={len(dispatches)}",
+                    "next_action": "Show this held decision before the next seat derives the same gate again.",
+                    "rediscovery_question_ids": rediscovery_ids,
+                }
+            )
+    return observations
+
+
+def _observe_repeated_standing_decisions(
+    context: ObservationContext,
+) -> list[Mapping[str, Any]]:
+    observations: list[Mapping[str, Any]] = []
+    cutoff = context.now - timedelta(days=OBSERVATION_HISTORY_DAYS)
+    recent_questions = [
+        row
+        for row in context.questions
+        if (asked_at := _record_time(row, "asked_at")) is not None
+        and asked_at >= cutoff
+    ]
+    for ticket_id, ticket in context.tickets.items():
+        for decision in _ticket_decisions(ticket):
+            topics = _observation_topics(decision.get("text"))
+            if not topics:
+                continue
+            matches = [
+                row
+                for row in recent_questions
+                if topics & _observation_topics(row.get("message"))
+            ]
+            askers = {
+                str((row.get("asked_by") or {}).get("agent_id", ""))
+                for row in matches
+                if isinstance(row.get("asked_by"), Mapping)
+            }
+            if len(matches) < 2 or len(askers - {""}) < 2:
+                continue
+            decided_at = _record_time(decision, "at")
+            rediscovery_ids = [
+                str(row.get("question_id", ""))
+                for row in matches
+                if decided_at is not None
+                and (_record_time(row, "asked_at") or decided_at) > decided_at
+            ]
+            annotation_id = str(decision.get("annotation_id", ""))
+            observations.append(
+                {
+                    "level": "warn",
+                    "ticket_id": ticket_id,
+                    "annotation_id": annotation_id,
+                    "message": "Multiple seats re-escalated an exact board identifier covered by a standing decision.",
+                    "evidence": f"annotation_id={annotation_id}; questions={len(matches)}; topic={sorted(topics)[0]}",
+                    "next_action": "Surface the standing decision with later matching offers; do not act for the operator.",
+                    "rediscovery_question_ids": rediscovery_ids,
+                }
+            )
+    return observations
+
+
+def _observe_decision_scope_drift(
+    context: ObservationContext,
+) -> list[Mapping[str, Any]]:
+    observations: list[Mapping[str, Any]] = []
+    for ticket_id, ticket in context.tickets.items():
+        allowed = [
+            str(path)
+            for path in ticket.get("related_files", [])
+            if isinstance(path, str)
+        ]
+        target = ticket.get("target_url")
+        if isinstance(target, str) and "/" in target:
+            allowed.append(target)
+        if not allowed:
+            continue
+        for decision in _ticket_decisions(ticket):
+            outside = sorted(
+                path
+                for path in _directed_paths(decision.get("text"))
+                if not _path_is_allowed(path, allowed)
+            )
+            if not outside:
+                continue
+            annotation_id = str(decision.get("annotation_id", ""))
+            observations.append(
+                {
+                    "level": "warn",
+                    "ticket_id": ticket_id,
+                    "annotation_id": annotation_id,
+                    "message": "A decision directs a file change outside the ticket's declared related-file boundary.",
+                    "evidence": f"annotation_id={annotation_id}; outside={','.join(outside[:3])}",
+                    "next_action": "Coordinator: reconcile the decision and ticket boundary before final preflight.",
+                }
+            )
+    return observations
+
+
+OBSERVATION_RULES: tuple[ObservationRule, ...] = (
+    ObservationRule("stale_open_question", 1, _observe_stale_open_questions),
+    ObservationRule("held_decision", 0, _observe_held_decisions),
+    ObservationRule("standing_decision_repeated", 0, _observe_repeated_standing_decisions),
+    ObservationRule("decision_scope_drift", 1, _observe_decision_scope_drift),
+)
+
+
+def derive_board_observations(
+    context: ObservationContext,
+    rules: Sequence[ObservationRule] = OBSERVATION_RULES,
+) -> list[dict[str, Any]]:
+    """Apply registered read-only observers and return stable finding rows."""
+    findings: list[dict[str, Any]] = []
+    for rule in rules:
+        for candidate in rule.evaluate(context):
+            identifiers = {
+                key: candidate[key]
+                for key in ("ticket_id", "question_id", "annotation_id")
+                if candidate.get(key)
+            }
+            material = json.dumps(
+                [context.board_id, rule.name, identifiers],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            row = {
+                "kind": OBSERVATION_FINDING_KIND,
+                "level": str(candidate.get("level", "warn")),
+                "board_id": context.board_id,
+                "observer": rule.name,
+                "observer_priority": rule.priority,
+                "observation_key": hashlib.sha256(material.encode("utf-8")).hexdigest()[:20],
+                "message": str(candidate.get("message", "")),
+                "evidence": str(candidate.get("evidence", "")),
+                "next_action": str(candidate.get("next_action", "")),
+                "mode": "shadow-observation",
+                "observed_at": context.now.isoformat(),
+                **identifiers,
+            }
+            if isinstance(candidate.get("rediscovery_question_ids"), list):
+                row["rediscovery_question_ids"] = sorted(
+                    {
+                        str(value)
+                        for value in candidate["rediscovery_question_ids"]
+                        if value
+                    }
+                )
+            if isinstance(candidate.get("reconciled"), bool):
+                row["reconciled"] = candidate["reconciled"]
+            findings.append(row)
+    if not context.questions_complete or not context.tickets_complete:
+        missing = []
+        if not context.questions_complete:
+            missing.append("question_inbox")
+        if not context.tickets_complete:
+            missing.append("ticket_details")
+        findings.append(
+            {
+                "kind": OBSERVATION_FINDING_KIND,
+                "level": "warn",
+                "board_id": context.board_id,
+                "observer": "coverage_gap",
+                "observer_priority": 0,
+                "observation_key": hashlib.sha256(
+                    f"{context.board_id}:coverage_gap".encode("utf-8")
+                ).hexdigest()[:20],
+                "message": "Board Butler observation coverage is incomplete; no negative conclusion is valid.",
+                "evidence": f"missing={','.join(missing)}",
+                "next_action": "Restore the missing board projection and rerun observation.",
+                "mode": "shadow-observation",
+                "observed_at": context.now.isoformat(),
+            }
+        )
+    return findings
+
+
+def observation_replay_metrics(
+    context: ObservationContext, findings: Sequence[Mapping[str, Any]]
+) -> dict[str, int]:
+    reconciled = {
+        str(row.get("question_id"))
+        for row in findings
+        if row.get("observer") == "stale_open_question"
+        and row.get("reconciled") is True
+        and row.get("question_id")
+    }
+    rediscovery = {
+        str(question_id)
+        for row in findings
+        for question_id in row.get("rediscovery_question_ids", [])
+        if question_id
+    }
+    return {
+        "open_questions": sum(
+            1 for row in context.questions if row.get("state") == "open"
+        ),
+        "reconciled_open_questions": len(reconciled),
+        "repeat_rediscovery_escalations": len(rediscovery),
+    }
+
+
 def rate_limit_reason(
     state: Mapping[str, Any],
     board_id: str,
@@ -1953,6 +2405,78 @@ def merge_finding(
         result["truncation"]["findings"] += 1
     if len(json.dumps(result, sort_keys=True, separators=(",", ":"))) > MAX_STATE_CHARS:
         raise ValueError("coordinator_findings has no bounded room for a butler draft")
+    return result
+
+
+def merge_observation_findings(
+    state: Mapping[str, Any], findings: Sequence[Mapping[str, Any]], now: datetime
+) -> dict[str, Any]:
+    """Replace derived observations without ever evicting a critical alert."""
+    result = dict(state)
+    rows = [
+        dict(item)
+        for item in state.get("findings", [])
+        if isinstance(item, Mapping)
+        and item.get("kind") != OBSERVATION_FINDING_KIND
+    ]
+    unique = {
+        str(item.get("observation_key")): dict(item)
+        for item in findings
+        if isinstance(item, Mapping) and item.get("observation_key")
+    }
+    # Lower-priority observations are appended first. Bounded removal takes
+    # the oldest non-critical row, so priority 0 observations survive longest.
+    observations = sorted(
+        unique.values(),
+        key=lambda item: (
+            -int(item.get("observer_priority", 9)),
+            str(item.get("observer", "")),
+            str(item.get("observation_key", "")),
+        ),
+    )
+    critical = [item for item in rows if item.get("level") == "critical"]
+    ordinary = [item for item in rows if item.get("level") != "critical"]
+    ordinary_and_observed = ordinary + observations
+    capacity = max(0, MAX_FINDINGS - len(critical))
+    selected = critical + ordinary_and_observed[-capacity:] if capacity else critical
+    omitted = max(0, len(rows) + len(observations) - len(selected))
+    result["findings"] = selected
+    result["generated_at"] = now.isoformat()
+    truncation = dict(result.get("truncation", {}))
+    truncation["findings"] = int(truncation.get("findings", 0) or 0) + omitted
+    result["truncation"] = truncation
+    board_butler = dict(result.get("board_butler", {}))
+    board_butler["observations"] = {
+        "derived": len(observations),
+        "retained": sum(
+            item.get("kind") == OBSERVATION_FINDING_KIND
+            for item in result["findings"]
+        ),
+        "updated_at": now.isoformat(),
+    }
+    result["board_butler"] = board_butler
+    while len(json.dumps(result, sort_keys=True, separators=(",", ":"))) > MAX_STATE_CHARS:
+        removable = next(
+            (
+                index
+                for index, item in enumerate(result["findings"])
+                if item.get("level") != "critical"
+            ),
+            None,
+        )
+        if removable is None:
+            # The prior critical-only state was already accepted by Central;
+            # retain it byte-for-byte rather than displacing an alert or
+            # attempting an oversized observation update.
+            return dict(state)
+        result["findings"].pop(removable)
+        result["truncation"]["findings"] += 1
+    retained = sum(
+        item.get("kind") == OBSERVATION_FINDING_KIND
+        for item in result["findings"]
+    )
+    if isinstance(result.get("board_butler"), dict):
+        result["board_butler"]["observations"]["retained"] = retained
     return result
 
 
@@ -2645,6 +3169,138 @@ class CentralBackend:
                     result[ticket_id] = ticket
         return result
 
+    async def _observation_context_for_board(
+        self, board_id: str, snapshot: Mapping[str, Any], now: datetime
+    ) -> ObservationContext:
+        """Read one bounded board projection; no host or filesystem input."""
+        from pursers_client import BoardClient
+
+        questions: list[Mapping[str, Any]] = []
+        tickets: dict[str, Mapping[str, Any]] = {}
+        questions_complete = True
+        tickets_complete = not (
+            snapshot.get("truncated") is True
+            and snapshot.get("coordination_tickets_complete") is not True
+        )
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
+            allow_takeover=True,
+        ) as client:
+            question_rows: dict[str, Mapping[str, Any]] = {}
+            for question_state in ("open", "accepted", "answered"):
+                try:
+                    inbox = await client.board_question_inbox(
+                        state=question_state, limit=100
+                    )
+                except Exception:
+                    questions_complete = False
+                    continue
+                inbox_rows = inbox.get("questions", [])
+                visible = (
+                    [row for row in inbox_rows if isinstance(row, Mapping)]
+                    if isinstance(inbox_rows, list)
+                    else []
+                )
+                total = inbox.get("total")
+                if not isinstance(total, int) or total != len(visible):
+                    questions_complete = False
+                for row in visible:
+                    question_id = row.get("question_id")
+                    if isinstance(question_id, str) and question_id:
+                        question_rows[question_id] = row
+            questions = list(question_rows.values())
+
+            compact = snapshot.get(
+                "coordination_tickets", snapshot.get("tickets", [])
+            )
+            compact_rows = [
+                row for row in compact if isinstance(row, Mapping)
+            ] if isinstance(compact, list) else []
+            question_ticket_ids = [
+                str(row.get("ticket_id"))
+                for row in questions
+                if row.get("ticket_id")
+            ]
+            active_ticket_ids = [
+                str(row.get("ticket_id"))
+                for row in sorted(
+                    compact_rows,
+                    key=lambda row: str(row.get("updated_at", "")),
+                    reverse=True,
+                )
+                if row.get("ticket_id")
+                and isinstance(row.get("annotation_count"), int)
+                and not isinstance(row.get("annotation_count"), bool)
+                and row.get("annotation_count", 0) > 0
+            ]
+            ordered_ids = list(dict.fromkeys(question_ticket_ids + active_ticket_ids))
+            if len(ordered_ids) > OBSERVATION_TICKET_LIMIT:
+                tickets_complete = False
+            for ticket_id in ordered_ids[:OBSERVATION_TICKET_LIMIT]:
+                try:
+                    payload = await client.ticket_get(
+                        ticket_id, view="full", include_dispatch_history=True
+                    )
+                except Exception:
+                    tickets_complete = False
+                    continue
+                ticket = payload.get("ticket", {})
+                if isinstance(ticket, Mapping):
+                    tickets[ticket_id] = ticket
+                    if int(ticket.get("annotations_omitted_count", 0) or 0) > 0:
+                        tickets_complete = False
+                else:
+                    tickets_complete = False
+        return ObservationContext(
+            board_id=board_id,
+            tickets=tickets,
+            questions=tuple(questions),
+            now=now,
+            questions_complete=questions_complete,
+            tickets_complete=tickets_complete,
+        )
+
+    async def _write_observation_findings(
+        self,
+        board_id: str,
+        findings: Sequence[Mapping[str, Any]],
+        now: datetime,
+    ) -> None:
+        from pursers_client import BoardClient
+
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
+            allow_takeover=True,
+        ) as client:
+            try:
+                raw = await client.board_state_get(STATE_KEY)
+            except Exception as exc:
+                if "state key not found" not in str(exc).lower():
+                    raise
+                raw = {}
+            state, previous_value = _decode_state(raw)
+            merged = merge_observation_findings(state, findings, now)
+            expected = (
+                hashlib.sha256(previous_value.encode("utf-8")).hexdigest()
+                if previous_value is not None
+                else None
+            )
+            await client.board_state_update(
+                STATE_KEY,
+                json.dumps(merged, sort_keys=True, separators=(",", ":")),
+                expected_sha256=expected,
+            )
+
     async def _execute_mechanical_action(self, action: MechanicalAction) -> None:
         from pursers_client import BoardClient
 
@@ -2828,6 +3484,16 @@ class CentralBackend:
                 reader, self.args.home_board
             )
         active_boards = {project.board_id for project in projects}
+        observation_contexts = {
+            board_id: await self._observation_context_for_board(
+                board_id, snapshots[board_id], now
+            )
+            for board_id in sorted(active_boards)
+        }
+        observations = {
+            board_id: derive_board_observations(context)
+            for board_id, context in observation_contexts.items()
+        }
         configured = (
             set(self.args.act_on_board)
             if getattr(self.args, "runtime_mode", "shadow") == "active"
@@ -2896,11 +3562,25 @@ class CentralBackend:
             ]
         )
         await coordinator["run"](coordinator_args)
+        if not self.args.dry_run:
+            for board_id in sorted(active_boards):
+                await self._write_observation_findings(
+                    board_id, observations[board_id], now
+                )
         return {
             "active_boards": sorted(active_boards),
             "acting_boards": sorted(acting_boards),
             "ignored_acting_boards": sorted(configured - active_boards),
             "actions": [action.kind for action in actions],
+            "observations": {
+                board_id: {
+                    "findings": len(observations[board_id]),
+                    **observation_replay_metrics(
+                        observation_contexts[board_id], observations[board_id]
+                    ),
+                }
+                for board_id in sorted(active_boards)
+            },
             "refreshed_at": now.isoformat(),
         }
 
