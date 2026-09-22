@@ -31,6 +31,13 @@ WORK_DIR_OWNERS = frozenset({"operator", "fleet"})
 CATCHUP_PAGE_LIMIT = 100
 MAX_CATCHUP_PAGES_PER_BOARD = 8
 MAX_EVENTS_PER_BOARD = 1
+WAIT_RECONCILE_LIMIT = 100
+try:
+    WAIT_RECONCILE_INTERVAL_S = max(
+        1.0, float(os.environ.get("PURSERS_WAIT_RECONCILE_INTERVAL_S", "30"))
+    )
+except ValueError:
+    WAIT_RECONCILE_INTERVAL_S = 30.0
 
 
 class RegistryRoutingError(ValueError):
@@ -280,6 +287,33 @@ def resolve_registry_target(
             else None
         ),
     }
+
+
+def permanent_registry_claim_refusal(
+    registry: dict[str, Any], board_id: str, target_url: str
+) -> dict[str, str] | None:
+    """Return a permanent worker-claim refusal for an unchanged route.
+
+    Repository availability is deliberately not inspected here.  A registered
+    fleet clone that has not appeared yet is transient and must remain visible
+    so a later wait can observe it after provisioning completes.
+    """
+    try:
+        route = resolve_registry_target(registry, board_id, target_url)
+    except RegistryRoutingError as exc:
+        return {"code": exc.code, "message": str(exc)}
+    work_dir = route.get("work_dir")
+    operator_dir = route.get("operator_work_dir")
+    if (
+        isinstance(work_dir, str)
+        and isinstance(operator_dir, str)
+        and Path(work_dir).resolve() == Path(operator_dir).resolve()
+    ):
+        return {
+            "code": "operator_checkout_read_only",
+            "message": "operator checkout is read-only for seats",
+        }
+    return None
 
 
 def active_registry_boards(registry: dict[str, Any], home_board: str) -> list[str]:
@@ -563,6 +597,17 @@ async def wait_for_boards(
                     identities[board_id],
                     submitted=submitted,
                 )
+                if (
+                    relevant
+                    and not submitted
+                    and not held_update
+                    and registry is not None
+                    and permanent_registry_claim_refusal(
+                        registry, board_id, str(ticket.get("target_url", ""))
+                    )
+                    is not None
+                ):
+                    relevant = False
                 if relevant and isinstance(dispatch_state, dict):
                     state = dispatch_state.get("state")
                     offer_kind = "review" if submitted else "work"
@@ -677,6 +722,100 @@ async def wait_for_boards(
             "reason": reason,
         }
 
+    async def reconcile(raw: Client, board_id: str) -> list[dict[str, Any]]:
+        """Project current claimable state that has no usable journal cue."""
+        arguments: dict[str, Any] = {
+            "board_id": board_id,
+            "status": "submitted" if submitted else "open",
+            "include_closed": False,
+            "limit": WAIT_RECONCILE_LIMIT,
+        }
+        if submitted:
+            arguments["review_unclaimed_only"] = True
+        try:
+            listed = BoardClient._decode(
+                await raw.call_tool("ticket_list", arguments)
+            )
+        except (BoardClientError, AttributeError, NotImplementedError):
+            return []
+        mine = identities[board_id]
+        expected_status = "submitted" if submitted else "open"
+        offer_key = "review_offer" if submitted else "work_offer"
+        offered_kind = REVIEW_OFFERED if submitted else TICKET_OFFERED
+        found: list[dict[str, Any]] = []
+        for ticket in listed.get("tickets", []):
+            if not isinstance(ticket, dict) or ticket.get("status") != expected_status:
+                continue
+            ticket_id = ticket.get("ticket_id")
+            if not isinstance(ticket_id, str) or not ticket_id:
+                continue
+            offer = ticket.get(offer_key)
+            offered_to_me = (
+                isinstance(offer, dict) and offer.get("agent_id") == mine
+            )
+            dispatch_state = ticket.get("dispatch_state")
+            if isinstance(dispatch_state, dict):
+                broadcast = dispatch_state.get("state") == "broadcast"
+                if submitted and isinstance(ticket.get("review_lease"), dict):
+                    broadcast = False
+                if not offered_to_me and not broadcast:
+                    continue
+            elif submitted and isinstance(ticket.get("review_lease"), dict):
+                continue
+            work_dir = work_dirs.get(board_id)
+            target = str(ticket.get("target_url", ""))
+            routing_error = None
+            if registry is not None:
+                if (
+                    not submitted
+                    and permanent_registry_claim_refusal(
+                        registry, board_id, target
+                    )
+                    is not None
+                ):
+                    continue
+                try:
+                    work_dir = resolve_registry_target(
+                        registry, board_id, target
+                    )["work_dir"]
+                except RegistryRoutingError as exc:
+                    work_dir = None
+                    routing_error = {"code": exc.code, "message": str(exc)}
+            elif target:
+                work_dir = project_work_dirs.get(
+                    target.split("/", 1)[0].casefold(), work_dir
+                )
+            event: dict[str, Any] = {
+                "kind": offered_kind if offered_to_me else "ticket_backlog",
+                "source": "wait_reconciliation",
+                "board_id": board_id,
+                "ticket_id": ticket_id,
+                "status": expected_status,
+                "reason": "offer" if offered_to_me else "broadcast",
+                "work_dir": work_dir,
+            }
+            if routing_error is not None:
+                event["routing_error"] = routing_error
+            for key in ("target_url", "payload_ref", "updated_at"):
+                if ticket.get(key) is not None:
+                    event[key] = ticket[key]
+            if offered_to_me:
+                event["offer"] = {
+                    "ticket_id": ticket_id,
+                    "board_id": board_id,
+                    "expires_at": offer.get("expires_at"),
+                    "tier": ticket.get("tier", 2),
+                    "skills_required": list(ticket.get("skills_required") or []),
+                }
+            found.append(event)
+        return found[:MAX_EVENTS_PER_BOARD]
+
+    async def reconcile_all(raw: Client) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
+        for board_id in active:
+            found.extend(await reconcile(raw, board_id))
+        return found
+
     if poll_fallback:
         deadline = started + timeout_s
         while time.monotonic() < deadline:
@@ -694,6 +833,9 @@ async def wait_for_boards(
                 events.extend(board_events)
                 pending = pending or board_pending
             if events or pending:
+                return response(events)
+            events.extend(await reconcile_all(client._client))
+            if events:
                 return response(events)
             await asyncio.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
         return response([])
@@ -720,14 +862,43 @@ async def wait_for_boards(
                             pending = pending or board_pending
                         if events or pending:
                             return response(events)
-                        async for _cue in subscription:
-                            pending = False
-                            for board_id in active:
-                                board_events, board_pending = await drain(raw, board_id)
-                                events.extend(board_events)
-                                pending = pending or board_pending
-                            if events or pending:
-                                return response(events)
+                        events.extend(await reconcile_all(raw))
+                        if events:
+                            return response(events)
+                        deadline = started + timeout_s
+                        pending_cue = asyncio.create_task(anext(subscription))
+                        try:
+                            while True:
+                                remaining = deadline - time.monotonic()
+                                if remaining <= 0:
+                                    break
+                                done, _ = await asyncio.wait(
+                                    {pending_cue},
+                                    timeout=min(WAIT_RECONCILE_INTERVAL_S, remaining),
+                                )
+                                if not done:
+                                    events.extend(await reconcile_all(raw))
+                                    if events:
+                                        return response(events)
+                                    continue
+                                try:
+                                    pending_cue.result()
+                                except StopAsyncIteration:
+                                    break
+                                pending = False
+                                for board_id in active:
+                                    board_events, board_pending = await drain(raw, board_id)
+                                    events.extend(board_events)
+                                    pending = pending or board_pending
+                                if events or pending:
+                                    return response(events)
+                                pending_cue = asyncio.create_task(anext(subscription))
+                        finally:
+                            if not pending_cue.done():
+                                pending_cue.cancel()
+                                await asyncio.gather(
+                                    pending_cue, return_exceptions=True
+                                )
     except TimeoutError:
         pass
     return response(events)

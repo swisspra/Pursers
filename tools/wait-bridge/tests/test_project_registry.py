@@ -169,12 +169,10 @@ class ProjectRegistryTests(unittest.IsolatedAsyncioTestCase):
             }]},
             registry,
             claimable=True,
-        )["events"][0]
-        self.assertNotIn("work_dir", refused)
-        self.assertTrue(refused["claim_refused"])
-        self.assertEqual(
-            refused["claim_refusal_code"], "repository_url_not_registered"
         )
+        self.assertEqual(refused["events"], [])
+        self.assertTrue(refused["timed_out"])
+        self.assertEqual(refused["reason"], "timeout")
 
     async def test_registry_parse_active_filter_dedupe_and_home_inclusion(self) -> None:
         client = FakeRegistryClient(json.dumps(REGISTRY))

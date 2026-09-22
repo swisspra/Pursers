@@ -156,7 +156,7 @@ def test_registry_rejects_malformed_repository_target_with_stable_error(
     assert "credential-free HTTPS repository URL" in str(caught.value)
 
 
-def test_registry_wait_isolates_malformed_target_from_other_board() -> None:
+def test_registry_wait_omits_permanent_route_failure_from_other_board() -> None:
     identities = {"alpha": "AI-alpha", "beta": "AI-beta"}
     tickets = {
         "alpha": {
@@ -214,6 +214,7 @@ def test_registry_wait_isolates_malformed_target_from_other_board() -> None:
             "beta": {
                 "board_id": "beta",
                 "work_dir": "/repo/beta",
+                "fleet_clone_dir": "/fleet/beta",
                 "status": "active",
             },
         },
@@ -238,15 +239,8 @@ def test_registry_wait_isolates_malformed_target_from_other_board() -> None:
     ))
 
     events = {event["board_id"]: event for event in response["events"]}
-    assert events["alpha"]["routing_error"] == {
-        "code": "target_url_malformed",
-        "message": (
-            "target_url must be a valid legacy project/path or credential-free "
-            "HTTPS repository URL"
-        ),
-    }
-    assert events["alpha"]["work_dir"] is None
-    assert events["beta"]["work_dir"] == "/repo/beta"
+    assert "alpha" not in events
+    assert events["beta"]["work_dir"] == "/fleet/beta"
 
 
 def test_registry_refuses_ambiguous_legacy_alias_on_shared_board() -> None:
@@ -533,6 +527,81 @@ def test_registry_wait_returns_only_this_seats_dispatch_offer(
     assert not [arguments for name, arguments in calls if name == "board_join"]
 
 
+@pytest.mark.parametrize(
+    ("submitted", "status", "kind"),
+    [
+        (False, "open", "work"),
+        (True, "submitted", "review"),
+    ],
+)
+def test_registry_wait_reconciles_preexisting_broadcast_before_blocking(
+    submitted: bool, status: str, kind: str
+) -> None:
+    calls: list[str] = []
+
+    def result(value: dict) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_error=False, structured_content={"result": value}, content=[]
+        )
+
+    class Raw:
+        async def call_tool(self, name, arguments, **_kwargs):
+            calls.append(name)
+            if name == "board_catchup":
+                return result({
+                    "events": [],
+                    "next_cursor": arguments["cursor"],
+                    "has_more": False,
+                })
+            if name == "ticket_list":
+                return result({
+                    "tickets": [{
+                        "ticket_id": f"TK-{kind}-broadcast",
+                        "status": status,
+                        "target_url": "home/item",
+                        "dispatch_state": {
+                            "state": "broadcast",
+                            "kind": kind,
+                        },
+                    }]
+                })
+            raise AssertionError(name)
+
+    client = SimpleNamespace(
+        board_id="pursers",
+        agent_name=f"{kind}-agent",
+        identity=SimpleNamespace(agent_id=f"AI-{kind}"),
+        generation_token="gen",
+        _client=Raw(),
+    )
+
+    response = asyncio.run(registry_module.wait_for_boards(
+        client,
+        ["pursers"],
+        73,
+        1,
+        kinds=SUBMITTED_RELEVANT_KINDS if submitted else DISPATCH_KINDS,
+        submitted=submitted,
+        poll_fallback=True,
+        work_dirs={"pursers": "/repo/home"},
+    ))
+
+    assert response["timed_out"] is False
+    assert response["new_seq"] == {"pursers": 73}
+    assert response["reason"] == "broadcast"
+    assert response["events"] == [{
+        "kind": "ticket_backlog",
+        "source": "wait_reconciliation",
+        "board_id": "pursers",
+        "ticket_id": f"TK-{kind}-broadcast",
+        "status": status,
+        "reason": "broadcast",
+        "work_dir": "/repo/home",
+        "target_url": "home/item",
+    }]
+    assert calls == ["board_catchup", "ticket_list"]
+
+
 def test_registry_wait_preserves_collision_refusal_without_takeover() -> None:
     calls: list[tuple[str, dict]] = []
 
@@ -681,6 +750,8 @@ def test_registry_wait_resyncs_compacted_cursor_without_spinning(monkeypatch) ->
 
         async def call_tool(self, name, arguments, **_kwargs):
             nonlocal catchup_calls
+            if name == "ticket_list":
+                return result({"tickets": []})
             assert name == "board_catchup"
             catchup_calls += 1
             return result({

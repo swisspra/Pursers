@@ -98,6 +98,7 @@ from pursers_client import (
     human_form_safety,
     REQUEST_STATE_TTL_S,
     load_or_create_request_state_keys,
+    permanent_registry_claim_refusal,
     parse_project_registry,
     registry_work_dirs,
     resolve_registry_target,
@@ -242,6 +243,14 @@ except ValueError:
     BACKLOG_RESURFACE_INTERVAL_S = 600.0
 if BACKLOG_RESURFACE_INTERVAL_S <= 0:
     BACKLOG_RESURFACE_INTERVAL_S = 600.0
+try:
+    BACKLOG_SCAN_INTERVAL_S = float(
+        os.environ.get("PURSERS_BACKLOG_SCAN_INTERVAL_S", "30")
+    )
+except ValueError:
+    BACKLOG_SCAN_INTERVAL_S = 30.0
+if BACKLOG_SCAN_INTERVAL_S <= 0:
+    BACKLOG_SCAN_INTERVAL_S = 30.0
 CLAIMABLE_RELEVANT_KINDS = frozenset(
     {"ticket_created"}
 )
@@ -1742,6 +1751,16 @@ def _enrich_registry_routes(
         board_id = enriched.get("board_id")
         route_error = None
         target_url = enriched.get("target_url")
+        if (
+            claimable
+            and isinstance(board_id, str)
+            and isinstance(target_url, str)
+            and permanent_registry_claim_refusal(
+                registry, board_id, target_url
+            )
+            is not None
+        ):
+            continue
         if isinstance(board_id, str) and isinstance(target_url, str):
             try:
                 route = resolve_registry_target(registry, board_id, target_url)
@@ -1777,6 +1796,13 @@ def _enrich_registry_routes(
                 "operator checkout is read-only for seats"
             )
         events.append(enriched)
+    if result.get("events") and not events:
+        return {
+            **result,
+            "events": [],
+            "timed_out": True,
+            "reason": "timeout",
+        }
     return {**result, "events": events}
 
 
@@ -5097,7 +5123,8 @@ def _next_backlog_scan_at(
         for key, (_fingerprint, surfaced_at) in _BACKLOG_SEEN.items()
         if key[:3] == (board_id, wait_for, my_agent_id)
     ]
-    return min(due) if due else now + BACKLOG_RESURFACE_INTERVAL_S
+    next_scan = now + BACKLOG_SCAN_INTERVAL_S
+    return min([next_scan, *due]) if due else next_scan
 
 
 def _guard_immediate_synthetic_events(
@@ -6460,9 +6487,7 @@ async def _wait_for_work_many(
             )
             if "tickets" in snapshot:
                 ticket_snapshots[board_id] = snapshot["tickets"]
-            backlog_due_by_board[board_id] = (
-                now + BACKLOG_RESURFACE_INTERVAL_S
-            )
+            backlog_due_by_board[board_id] = now + BACKLOG_SCAN_INTERVAL_S
             found.extend({**event, "board_id": board_id} for event in queued)
         return found, ticket_snapshots
 
@@ -6939,7 +6964,7 @@ async def _wait_for_work(
             BOARD_ID,
             ticket_snapshot=snapshot,
         )
-        backlog_due = now + BACKLOG_RESURFACE_INTERVAL_S
+        backlog_due = now + BACKLOG_SCAN_INTERVAL_S
         return queued, snapshot.get("tickets")
 
     def maintenance_due_in(now: float, remaining: float) -> float:

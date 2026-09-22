@@ -46,6 +46,58 @@ import central  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 
 
+def test_registry_route_enrichment_omits_permanent_and_keeps_transient() -> None:
+    registry = {
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "pursers",
+                "work_dir": "/operator/alpha",
+                "fleet_clone_dir": "/fleet/alpha",
+                "status": "active",
+            }
+        },
+    }
+    result = {
+        "events": [
+            {
+                "board_id": "pursers",
+                "ticket_id": "TK-permanent",
+                "target_url": "unknown/task",
+            },
+            {
+                "board_id": "pursers",
+                "ticket_id": "TK-transient",
+                "target_url": "alpha/task",
+            },
+        ],
+        "timed_out": False,
+        "reason": "broadcast",
+    }
+
+    enriched = wait_server._enrich_registry_routes(
+        result, registry, claimable=True
+    )
+
+    assert [event["ticket_id"] for event in enriched["events"]] == [
+        "TK-transient"
+    ]
+    assert enriched["events"][0]["work_dir"] == "/fleet/alpha"
+
+    refused_only = wait_server._enrich_registry_routes(
+        {
+            "events": [result["events"][0]],
+            "timed_out": False,
+            "reason": "broadcast",
+        },
+        registry,
+        claimable=True,
+    )
+    assert refused_only["events"] == []
+    assert refused_only["timed_out"] is True
+    assert refused_only["reason"] == "timeout"
+
+
 class InProcessBoardClient:
     """Minimal BoardClient-compatible adapter over a real in-process Central."""
 
@@ -1800,6 +1852,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(wait_server, "WAIT_MODE", "poll"),
             patch.object(wait_server, "BACKLOG_RESURFACE_INTERVAL_S", 0.5),
+            patch.object(wait_server, "BACKLOG_SCAN_INTERVAL_S", 0.5),
             patch.object(wait_server.time, "monotonic", clock.monotonic),
             patch.object(wait_server.asyncio, "sleep", clock.sleep),
         ):
@@ -1817,6 +1870,33 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         # First return, second entry scan, and the resurfacing cadence each
         # perform one list. Offer reconciliation reuses the matching scan.
         self.assertEqual(client.ticket_list_calls, 3)
+
+    async def test_idle_wait_detects_new_broadcast_on_scan_interval(self) -> None:
+        clock = ManualClock()
+        client = ScriptedBoardClient([])
+
+        async def sleep(delay: float) -> None:
+            clock.now += delay
+            client._tickets = [{
+                "ticket_id": "TK-new-broadcast",
+                "status": "open",
+                "dispatch_state": {"state": "broadcast", "kind": "work"},
+            }]
+
+        with (
+            patch.object(wait_server, "WAIT_MODE", "poll"),
+            patch.object(wait_server, "BACKLOG_SCAN_INTERVAL_S", 0.5),
+            patch.object(wait_server.time, "monotonic", clock.monotonic),
+            patch.object(wait_server.asyncio, "sleep", sleep),
+        ):
+            result = await wait_server._wait_for_work(
+                client, since_seq=0, timeout_s=2, only_mine=True
+            )
+
+        self.assertEqual(result["reason"], "backlog")
+        self.assertEqual(result["events"][0]["ticket_id"], "TK-new-broadcast")
+        self.assertEqual(result["waited_s"], 0.5)
+        self.assertEqual(client.ticket_list_calls, 2)
 
 
 if __name__ == "__main__":

@@ -80,6 +80,12 @@ from typing import Any
 ROLE = '{role}'
 REPO_LEAF = {repo_leaf}
 DEFAULT_WAIT_S = {wait_timeout}
+try:
+    WAIT_RECONCILE_INTERVAL_S = max(
+        1.0, float(os.environ.get("PURSERS_WAIT_RECONCILE_INTERVAL_S", "30"))
+    )
+except ValueError:
+    WAIT_RECONCILE_INTERVAL_S = 30.0
 TICKET_SUBMIT_NOTES_MAX_CHARS = 5_000
 HELD_TICKET_KINDS = frozenset({
     "ticket_annotated",
@@ -1023,7 +1029,13 @@ def _print(value: Any) -> None:
 
 
 async def _event_for_seat(
-    client: Any, event: dict[str, Any], *, submitted: bool, board_id: str
+    client: Any,
+    event: dict[str, Any],
+    *,
+    submitted: bool,
+    board_id: str,
+    registry: dict[str, Any] | None = None,
+    registry_target_resolver: Any = None,
 ) -> dict[str, Any] | None:
     ticket_id = event.get("ticket_id")
     if not ticket_id:
@@ -1082,6 +1094,15 @@ async def _event_for_seat(
         kind in HELD_TICKET_KINDS
         or (submitted and kind in REVIEW_LEASE_KINDS)
     )
+    if (
+        not submitted
+        and not held_update
+        and _permanent_wait_route_refusal(
+            ticket, board_id, registry, registry_target_resolver
+        )
+        is not None
+    ):
+        return None
     if not isinstance(state, dict):
         if held_update:
             return {**event, "reason": "held_ticket_update"}
@@ -1147,6 +1168,123 @@ async def _event_for_seat(
             "skills_required": list(ticket.get("skills_required") or []),
         }
     return selected
+
+
+def _permanent_wait_route_refusal(
+    ticket: dict[str, Any],
+    board_id: str,
+    registry: dict[str, Any] | None,
+    registry_target_resolver: Any,
+) -> dict[str, str] | None:
+    """Classify unchanged route failures that cannot become claimable alone."""
+    if registry is None or registry_target_resolver is None:
+        return None
+    try:
+        route = registry_target_resolver(
+            registry, board_id, str(ticket.get("target_url", ""))
+        )
+    except ValueError as exc:
+        return {
+            "code": str(getattr(exc, "code", "project_route_invalid")),
+            "message": str(exc),
+        }
+    routed = route.get("work_dir")
+    operator_dir = route.get("operator_work_dir")
+    if not isinstance(routed, str) or not isinstance(operator_dir, str):
+        return None
+    seat_repo = Path(__file__).resolve().parents[1] / str(REPO_LEAF or "")
+    project_name = str(route.get("project", ""))
+    aliases = {
+        project_name.casefold(),
+        Path(operator_dir).name.casefold(),
+    }
+    if (
+        REPO_LEAF
+        and str(REPO_LEAF).casefold() in aliases
+        and (seat_repo / ".git").exists()
+    ):
+        return None
+    if Path(routed).resolve() == Path(operator_dir).resolve():
+        return {
+            "code": "operator_checkout_read_only",
+            "message": "operator checkout is read-only for seats",
+        }
+    return None
+
+
+async def _reconcile_wait_backlog(
+    client: Any,
+    board_id: str,
+    *,
+    submitted: bool,
+    registry: dict[str, Any] | None = None,
+    registry_target_resolver: Any = None,
+) -> list[dict[str, Any]]:
+    """Read claimable state that may predate, or never emit to, this wait."""
+    arguments: dict[str, Any] = {
+        "status": "submitted" if submitted else "open",
+        "include_closed": False,
+        "limit": 100,
+    }
+    if submitted:
+        arguments["review_unclaimed_only"] = True
+    try:
+        listed = await client.ticket_list(**arguments)
+    except (AttributeError, NotImplementedError):
+        return []
+    mine = client.identity.agent_id
+    expected_status = "submitted" if submitted else "open"
+    offer_key = "review_offer" if submitted else "work_offer"
+    offered_kind = "review_offered" if submitted else "ticket_offered"
+    reconciled: list[dict[str, Any]] = []
+    for ticket in listed.get("tickets", []):
+        if not isinstance(ticket, dict) or ticket.get("status") != expected_status:
+            continue
+        ticket_id = ticket.get("ticket_id")
+        if not isinstance(ticket_id, str) or not ticket_id:
+            continue
+        offer = ticket.get(offer_key)
+        offered_to_me = (
+            isinstance(offer, dict) and offer.get("agent_id") == mine
+        )
+        state = ticket.get("dispatch_state")
+        if isinstance(state, dict):
+            broadcast = state.get("state") == "broadcast"
+            if submitted and isinstance(ticket.get("review_lease"), dict):
+                broadcast = False
+            if not offered_to_me and not broadcast:
+                continue
+        elif submitted and isinstance(ticket.get("review_lease"), dict):
+            continue
+        if (
+            not submitted
+            and _permanent_wait_route_refusal(
+                ticket, board_id, registry, registry_target_resolver
+            )
+            is not None
+        ):
+            continue
+        event: dict[str, Any] = {
+            "kind": offered_kind if offered_to_me else "ticket_backlog",
+            "source": "wait_reconciliation",
+            "board_id": board_id,
+            "ticket_id": ticket_id,
+            "status": expected_status,
+            "reason": "offer" if offered_to_me else "broadcast",
+        }
+        for key in ("target_url", "payload_ref", "updated_at"):
+            if ticket.get(key) is not None:
+                event[key] = ticket[key]
+        if offered_to_me:
+            event["offer"] = {
+                "ticket_id": ticket_id,
+                "board_id": board_id,
+                "expires_at": offer.get("expires_at"),
+                "tier": ticket.get("tier", 2),
+                "skills_required": list(ticket.get("skills_required") or []),
+            }
+        reconciled.append(event)
+    return reconciled[:1]
 
 
 async def _cmd_wait(
@@ -1230,6 +1368,23 @@ async def _cmd_wait(
         nonlocal cursor
         cursor = max(cursor, int(value))
 
+    reconciled = await _reconcile_wait_backlog(
+        client,
+        board_id,
+        submitted=submitted,
+        registry=registry,
+        registry_target_resolver=registry_target_resolver,
+    )
+    if reconciled:
+        _print({
+            "new_seq": cursor,
+            "events": reconciled,
+            "waited_s": round(time.monotonic() - started, 2),
+            "timed_out": False,
+            "reason": reconciled[0]["reason"],
+        })
+        return
+
     if poll_fallback:
         deadline = started + max(1, timeout_s)
         while time.monotonic() < deadline and not events:
@@ -1241,11 +1396,24 @@ async def _cmd_wait(
                 if event.get("kind") not in kinds:
                     continue
                 selected = await _event_for_seat(
-                    client, event, submitted=submitted, board_id=board_id
+                    client,
+                    event,
+                    submitted=submitted,
+                    board_id=board_id,
+                    registry=registry,
+                    registry_target_resolver=registry_target_resolver,
                 )
                 if selected is not None:
                     events.append(selected)
                     break
+            if not events:
+                events.extend(await _reconcile_wait_backlog(
+                    client,
+                    board_id,
+                    submitted=submitted,
+                    registry=registry,
+                    registry_target_resolver=registry_target_resolver,
+                ))
             if not events:
                 await asyncio.sleep(min(2.0, max(0, deadline - time.monotonic())))
     else:
@@ -1259,31 +1427,57 @@ async def _cmd_wait(
                 "pursers_client lacks the approved pure subscription API: "
                 + ", ".join(missing)
             )
-        try:
-            async with asyncio.timeout(timeout_s):
-                event_stream = client.events(
-                    from_cursor=cursor,
-                    only_mine=not submitted,
-                    kinds=kinds,
-                    resource_subscriptions=(journal_uri, seat_uri),
-                    acknowledge=False,
-                    touch=False,
-                    cursor_callback=remember_cursor,
-                )
-                async with aclosing(event_stream):
-                    async for event in event_stream:
-                        selected = await _event_for_seat(
-                            client, event, submitted=submitted, board_id=board_id
-                        )
-                        if selected is None:
-                            continue
+        deadline = started + timeout_s
+        event_stream = client.events(
+            from_cursor=cursor,
+            only_mine=not submitted,
+            kinds=kinds,
+            resource_subscriptions=(journal_uri, seat_uri),
+            acknowledge=False,
+            touch=False,
+            cursor_callback=remember_cursor,
+        )
+        async with aclosing(event_stream):
+            pending = asyncio.create_task(anext(event_stream))
+            try:
+                while not events:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    done, _ = await asyncio.wait(
+                        {pending},
+                        timeout=min(WAIT_RECONCILE_INTERVAL_S, remaining),
+                    )
+                    if not done:
+                        events.extend(await _reconcile_wait_backlog(
+                            client,
+                            board_id,
+                            submitted=submitted,
+                            registry=registry,
+                            registry_target_resolver=registry_target_resolver,
+                        ))
+                        continue
+                    try:
+                        event = pending.result()
+                    except StopAsyncIteration:
+                        break
+                    selected = await _event_for_seat(
+                        client,
+                        event,
+                        submitted=submitted,
+                        board_id=board_id,
+                        registry=registry,
+                        registry_target_resolver=registry_target_resolver,
+                    )
+                    if selected is not None:
                         events.append(selected)
                         remember_cursor(event.get("seq", cursor))
-                        # One cue is intentional: callers refetch authoritative
-                        # state, then re-arm from the returned cursor.
                         break
-        except TimeoutError:
-            pass
+                    pending = asyncio.create_task(anext(event_stream))
+            finally:
+                if not pending.done():
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
 
     timed_out = not events
     reason = events[0].get("reason", "held_ticket_update") if events else "timeout"
@@ -1487,6 +1681,7 @@ async def _execute(args: argparse.Namespace) -> None:
             def refuse_route(
                 ticket_id: str, code: str, message: str
             ) -> None:
+                retryable = code == "routed_repository_unavailable"
                 _print({
                     "ok": False,
                     "board_id": target_board,
@@ -1495,6 +1690,12 @@ async def _execute(args: argparse.Namespace) -> None:
                     "error": {
                         "code": code,
                         "message": message,
+                        "retryable": retryable,
+                        "retry_policy": (
+                            "reconcile_after_repository_available"
+                            if retryable
+                            else "requires_registry_or_ticket_correction"
+                        ),
                     },
                 })
 
