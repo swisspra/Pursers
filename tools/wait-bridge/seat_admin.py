@@ -118,6 +118,7 @@ class LiveBackend:
             self.token,
             board_id,
             agent_name=self.admin_name,
+            allow_takeover=True,
         )
 
     async def registry(self) -> dict[str, Any]:

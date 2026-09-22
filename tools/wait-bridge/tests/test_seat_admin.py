@@ -198,6 +198,153 @@ def invoke(backend: StrictFakeBackend, *arguments: str) -> str:
 
 
 class SeatAdminTests(unittest.TestCase):
+    def test_live_backend_reuses_admin_for_sequential_adds(self) -> None:
+        state = StrictFakeBackend()
+        active_admins: dict[tuple[str, str], str] = {}
+        constructor_calls: list[dict[str, Any]] = []
+
+        class CollisionAwareClient:
+            def __init__(
+                self,
+                _url: str,
+                token: str,
+                board_id: str,
+                *,
+                agent_name: str,
+                allow_takeover: bool = False,
+            ) -> None:
+                self.token = token
+                self.board_id = board_id
+                self.agent_name = agent_name
+                self.allow_takeover = allow_takeover
+                constructor_calls.append(
+                    {
+                        "token": token,
+                        "board_id": board_id,
+                        "agent_name": agent_name,
+                        "allow_takeover": allow_takeover,
+                    }
+                )
+
+            async def __aenter__(self) -> "CollisionAwareClient":
+                seat = (self.board_id, self.agent_name)
+                owner = active_admins.get(seat)
+                if owner is not None and owner != self.token:
+                    raise seat_admin.BoardClientError(
+                        "admin seat belongs to a different authenticated principal"
+                    )
+                if owner is not None and not self.allow_takeover:
+                    raise seat_admin.BoardClientError(
+                        "seat name already active under this principal; "
+                        "choose another name or pass allow_takeover=true"
+                    )
+                active_admins[seat] = self.token
+                return self
+
+            async def __aexit__(self, *_args: Any) -> None:
+                return None
+
+            async def board_state_get(self, key: str) -> dict[str, Any]:
+                document = REGISTRY if key == "project_registry" else state.seats
+                return {"state": {"value": json.dumps(document)}}
+
+            async def board_state_update(
+                self, key: str, value: str
+            ) -> dict[str, bool]:
+                if key != seat_admin.SEAT_REGISTRY_KEY:
+                    raise AssertionError(key)
+                await state.write_seat_registry(json.loads(value))
+                return {"ok": True}
+
+            async def board_members(self) -> dict[str, Any]:
+                return await state.members(self.board_id)
+
+            async def board_snapshot(self, **_kwargs: Any) -> dict[str, Any]:
+                return await state.snapshot(self.board_id)
+
+            async def board_member_add(
+                self, principal_id: str, *, role: str = "member"
+            ) -> dict[str, bool]:
+                if role != "member":
+                    raise AssertionError(role)
+                await state.member_add(self.board_id, principal_id)
+                return {"ok": True}
+
+            async def board_member_set_role(
+                self, principal_id: str, role: str
+            ) -> dict[str, bool]:
+                await state.member_set_role(self.board_id, principal_id, role)
+                return {"ok": True}
+
+        backend = seat_admin.LiveBackend(
+            "https://central.example/mcp",
+            "PR-admin-token",
+            "home",
+            "seat-admin",
+            CollisionAwareClient,
+        )
+
+        worker = invoke(
+            backend,
+            "add",
+            "--name",
+            "worker-b",
+            "--role",
+            "worker",
+            "--boards",
+            "board-one",
+            "--principal",
+            "PR-new-worker",
+            "--token-path",
+            "/tokens/worker-b.jwt",
+        )
+        reviewer = invoke(
+            backend,
+            "add",
+            "--name",
+            "reviewer-b",
+            "--role",
+            "reviewer",
+            "--boards",
+            "board-one",
+            "--principal",
+            "PR-new-reviewer",
+            "--token-path",
+            "/tokens/reviewer-b.jwt",
+        )
+
+        self.assertIn("worker-b", worker)
+        self.assertIn("reviewer-b", reviewer)
+        self.assertEqual(state.seats["seats"]["worker-b"]["role"], "worker")
+        self.assertEqual(state.seats["seats"]["reviewer-b"]["role"], "reviewer")
+        self.assertTrue(constructor_calls)
+        self.assertTrue(all(call["allow_takeover"] for call in constructor_calls))
+        with self.assertRaisesRegex(seat_admin.RegistryError, "pass --force"):
+            invoke(
+                backend,
+                "add",
+                "--name",
+                "worker-b",
+                "--role",
+                "worker",
+                "--principal",
+                "PR-new-worker",
+                "--token-path",
+                "/tokens/worker-b.jwt",
+            )
+
+        other_principal = seat_admin.LiveBackend(
+            "https://central.example/mcp",
+            "PR-other-token",
+            "home",
+            "seat-admin",
+            CollisionAwareClient,
+        )
+        with self.assertRaisesRegex(
+            seat_admin.BoardClientError, "different authenticated principal"
+        ):
+            asyncio.run(other_principal.members("home"))
+
     def test_packaged_client_adapter_forwards_admin_calls(self) -> None:
         board = seat_admin.SeatBoardClient(
             "https://central.example/mcp",
