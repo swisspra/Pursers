@@ -1895,6 +1895,189 @@ def test_findings_merge_refuses_to_displace_a_full_critical_set() -> None:
         )
 
 
+def board_observation_context() -> Any:
+    decision_at = NOW - butler.timedelta(hours=2)
+    offered_at = NOW - butler.timedelta(hours=1)
+    tickets = {
+        "TK-held": {
+            "status": "open",
+            "related_files": [
+                "tools/board-butler/",
+                "tools/aionui-extension/INTEGRATION_FILES.sha256",
+            ],
+            "annotations": [
+                {
+                    "annotation_id": "AN-held",
+                    "kind": "decision",
+                    "text": (
+                        "Do not proceed until dependency merge lands; workers never "
+                        "regenerate tools/aionui-extension/INTEGRATION_FILES.sha256."
+                    ),
+                    "at": decision_at.isoformat(),
+                },
+                {
+                    "annotation_id": "AN-scope",
+                    "kind": "decision",
+                    "text": "Update packages/central/src/pursers_central/central.py.",
+                    "at": (decision_at + butler.timedelta(minutes=5)).isoformat(),
+                },
+            ],
+            "dispatch_history": [
+                {
+                    "state": "offered",
+                    "kind": "work",
+                    "agent_id": "AI-second",
+                    "offered_at": offered_at.isoformat(),
+                }
+            ],
+        },
+        "TK-stale": {
+            "status": "open",
+            "related_files": [],
+            "annotations": [
+                {
+                    "annotation_id": "AN-answer",
+                    "kind": "decision",
+                    "text": "CQ-stale — use the approved base.",
+                    "at": (NOW - butler.timedelta(minutes=10)).isoformat(),
+                }
+            ],
+            "dispatch_history": [],
+        },
+    }
+    questions = (
+        {
+            "ticket_id": "TK-stale",
+            "question_id": "CQ-stale",
+            "state": "open",
+            "message": "Which base is approved?",
+            "asked_at": (NOW - butler.timedelta(hours=1)).isoformat(),
+            "asked_by": {"agent_id": "AI-first"},
+        },
+        {
+            "ticket_id": "TK-held",
+            "question_id": "CQ-repeat-1",
+            "state": "answered",
+            "message": "May I regenerate tools/aionui-extension/INTEGRATION_FILES.sha256?",
+            "asked_at": (NOW - butler.timedelta(minutes=50)).isoformat(),
+            "asked_by": {"agent_id": "AI-second"},
+        },
+        {
+            "ticket_id": "TK-held",
+            "question_id": "CQ-repeat-2",
+            "state": "open",
+            "message": "Must I regenerate tools/aionui-extension/INTEGRATION_FILES.sha256?",
+            "asked_at": (NOW - butler.timedelta(minutes=20)).isoformat(),
+            "asked_by": {"agent_id": "AI-third"},
+        },
+    )
+    return butler.ObservationContext(
+        board_id="pursers", tickets=tickets, questions=questions, now=NOW
+    )
+
+
+def test_stale_open_question_observer_reconciles_explicit_decision() -> None:
+    context = board_observation_context()
+    findings = butler.derive_board_observations(context)
+    stale = [row for row in findings if row["observer"] == "stale_open_question"]
+
+    assert [(row["question_id"], row["annotation_id"]) for row in stale] == [
+        ("CQ-stale", "AN-answer")
+    ]
+
+
+def test_held_decision_observer_carries_gate_across_later_dispatch() -> None:
+    findings = butler.derive_board_observations(board_observation_context())
+    held = [row for row in findings if row["observer"] == "held_decision"]
+
+    assert len(held) == 1
+    assert held[0]["annotation_id"] == "AN-held"
+    assert held[0]["rediscovery_question_ids"] == ["CQ-repeat-1", "CQ-repeat-2"]
+
+
+def test_standing_decision_observer_detects_multiple_seat_relitigation() -> None:
+    findings = butler.derive_board_observations(board_observation_context())
+    repeated = [
+        row for row in findings if row["observer"] == "standing_decision_repeated"
+    ]
+
+    assert len(repeated) == 1
+    assert "integration_files.sha256" in repeated[0]["evidence"]
+
+
+def test_decision_scope_observer_flags_directed_out_of_boundary_path() -> None:
+    context = board_observation_context()
+    findings = butler.derive_board_observations(context)
+    drift = [row for row in findings if row["observer"] == "decision_scope_drift"]
+
+    assert len(drift) == 1
+    assert drift[0]["annotation_id"] == "AN-scope"
+    assert "packages/central/src/pursers_central/central.py" in drift[0]["evidence"]
+
+
+def test_observation_replay_metrics_deduplicate_question_ids() -> None:
+    context = board_observation_context()
+
+    findings = butler.derive_board_observations(context)
+    metrics = butler.observation_replay_metrics(context, findings)
+
+    assert metrics == {
+        "open_questions": 2,
+        "reconciled_open_questions": 1,
+        "repeat_rediscovery_escalations": 2,
+    }
+
+
+def test_observation_coverage_gap_refuses_negative_claim() -> None:
+    context = butler.ObservationContext(
+        board_id="pursers",
+        tickets={},
+        questions=(),
+        now=NOW,
+        questions_complete=False,
+        tickets_complete=False,
+    )
+
+    findings = butler.derive_board_observations(context)
+
+    assert len(findings) == 1
+    assert findings[0]["observer"] == "coverage_gap"
+    assert findings[0]["evidence"] == "missing=question_inbox,ticket_details"
+
+
+def test_observation_flood_never_evicts_critical_alert() -> None:
+    critical = {
+        "kind": "privacy-leak-suspect",
+        "level": "critical",
+        "ticket_id": "TK-critical",
+        "message": "must survive",
+    }
+    state = {
+        "schema_version": 2,
+        "generated_at": NOW.isoformat(),
+        "findings": [critical],
+        "truncation": {"findings": 0},
+    }
+    observations = [
+        {
+            "kind": butler.OBSERVATION_FINDING_KIND,
+            "level": "warn",
+            "observer": "held_decision",
+            "observer_priority": 0,
+            "observation_key": f"observation-{index}",
+            "message": "x" * 200,
+        }
+        for index in range(200)
+    ]
+
+    merged = butler.merge_observation_findings(state, observations, NOW)
+
+    assert critical in merged["findings"]
+    assert len(merged["findings"]) <= butler.MAX_FINDINGS
+    assert len(json.dumps(merged, sort_keys=True, separators=(",", ":"))) <= butler.MAX_STATE_CHARS
+    assert merged["truncation"]["findings"] > 0
+
+
 def test_module_has_no_question_answer_claim_submit_or_assign_path() -> None:
     source = MODULE_PATH.read_text(encoding="utf-8")
     forbidden = (
@@ -2176,6 +2359,17 @@ def test_registry_refresh_runs_real_derivation_for_two_active_boards_twice(
             "parse_args": parse_args,
             "run": run,
         },
+    )
+
+    async def observation_context(
+        board_id: str, _snapshot: Mapping[str, Any], now: Any
+    ) -> Any:
+        return butler.ObservationContext(
+            board_id=board_id, tickets={}, questions=(), now=now
+        )
+
+    monkeypatch.setattr(
+        backend, "_observation_context_for_board", observation_context
     )
     first = asyncio.run(backend.refresh_registry_findings(NOW))
     second = asyncio.run(
