@@ -156,7 +156,7 @@ def test_registry_rejects_malformed_repository_target_with_stable_error(
     assert "credential-free HTTPS repository URL" in str(caught.value)
 
 
-def test_registry_wait_isolates_malformed_target_from_other_board() -> None:
+def test_registry_wait_omits_permanent_route_failure_from_other_board() -> None:
     identities = {"alpha": "AI-alpha", "beta": "AI-beta"}
     tickets = {
         "alpha": {
@@ -214,6 +214,7 @@ def test_registry_wait_isolates_malformed_target_from_other_board() -> None:
             "beta": {
                 "board_id": "beta",
                 "work_dir": "/repo/beta",
+                "fleet_clone_dir": "/fleet/beta",
                 "status": "active",
             },
         },
@@ -238,15 +239,8 @@ def test_registry_wait_isolates_malformed_target_from_other_board() -> None:
     ))
 
     events = {event["board_id"]: event for event in response["events"]}
-    assert events["alpha"]["routing_error"] == {
-        "code": "target_url_malformed",
-        "message": (
-            "target_url must be a valid legacy project/path or credential-free "
-            "HTTPS repository URL"
-        ),
-    }
-    assert events["alpha"]["work_dir"] is None
-    assert events["beta"]["work_dir"] == "/repo/beta"
+    assert "alpha" not in events
+    assert events["beta"]["work_dir"] == "/fleet/beta"
 
 
 def test_registry_refuses_ambiguous_legacy_alias_on_shared_board() -> None:

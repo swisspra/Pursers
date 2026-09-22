@@ -98,6 +98,7 @@ from pursers_client import (
     human_form_safety,
     REQUEST_STATE_TTL_S,
     load_or_create_request_state_keys,
+    permanent_registry_claim_refusal,
     parse_project_registry,
     registry_work_dirs,
     resolve_registry_target,
@@ -1750,6 +1751,16 @@ def _enrich_registry_routes(
         board_id = enriched.get("board_id")
         route_error = None
         target_url = enriched.get("target_url")
+        if (
+            claimable
+            and isinstance(board_id, str)
+            and isinstance(target_url, str)
+            and permanent_registry_claim_refusal(
+                registry, board_id, target_url
+            )
+            is not None
+        ):
+            continue
         if isinstance(board_id, str) and isinstance(target_url, str):
             try:
                 route = resolve_registry_target(registry, board_id, target_url)
@@ -1785,6 +1796,13 @@ def _enrich_registry_routes(
                 "operator checkout is read-only for seats"
             )
         events.append(enriched)
+    if result.get("events") and not events:
+        return {
+            **result,
+            "events": [],
+            "timed_out": True,
+            "reason": "timeout",
+        }
     return {**result, "events": events}
 
 

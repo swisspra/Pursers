@@ -289,6 +289,33 @@ def resolve_registry_target(
     }
 
 
+def permanent_registry_claim_refusal(
+    registry: dict[str, Any], board_id: str, target_url: str
+) -> dict[str, str] | None:
+    """Return a permanent worker-claim refusal for an unchanged route.
+
+    Repository availability is deliberately not inspected here.  A registered
+    fleet clone that has not appeared yet is transient and must remain visible
+    so a later wait can observe it after provisioning completes.
+    """
+    try:
+        route = resolve_registry_target(registry, board_id, target_url)
+    except RegistryRoutingError as exc:
+        return {"code": exc.code, "message": str(exc)}
+    work_dir = route.get("work_dir")
+    operator_dir = route.get("operator_work_dir")
+    if (
+        isinstance(work_dir, str)
+        and isinstance(operator_dir, str)
+        and Path(work_dir).resolve() == Path(operator_dir).resolve()
+    ):
+        return {
+            "code": "operator_checkout_read_only",
+            "message": "operator checkout is read-only for seats",
+        }
+    return None
+
+
 def active_registry_boards(registry: dict[str, Any], home_board: str) -> list[str]:
     selected = {home_board}
     selected.update(
@@ -570,6 +597,17 @@ async def wait_for_boards(
                     identities[board_id],
                     submitted=submitted,
                 )
+                if (
+                    relevant
+                    and not submitted
+                    and not held_update
+                    and registry is not None
+                    and permanent_registry_claim_refusal(
+                        registry, board_id, str(ticket.get("target_url", ""))
+                    )
+                    is not None
+                ):
+                    relevant = False
                 if relevant and isinstance(dispatch_state, dict):
                     state = dispatch_state.get("state")
                     offer_kind = "review" if submitted else "work"
@@ -728,6 +766,14 @@ async def wait_for_boards(
             target = str(ticket.get("target_url", ""))
             routing_error = None
             if registry is not None:
+                if (
+                    not submitted
+                    and permanent_registry_claim_refusal(
+                        registry, board_id, target
+                    )
+                    is not None
+                ):
+                    continue
                 try:
                     work_dir = resolve_registry_target(
                         registry, board_id, target

@@ -26,7 +26,12 @@ CLIENT_SRC = ROOT.parents[1] / "packages" / "client" / "src"
 CENTRAL_SRC = ROOT.parents[1] / "packages" / "central" / "src"
 sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(CENTRAL_SRC))
-from pursers_client import REVIEWER_WAIT_KINDS, WORKER_WAIT_KINDS  # noqa: E402
+from pursers_client import (  # noqa: E402
+    REVIEWER_WAIT_KINDS,
+    WORKER_WAIT_KINDS,
+    parse_project_registry,
+    resolve_registry_target,
+)
 
 SPEC = importlib.util.spec_from_file_location("seat_new", ROOT / "seat_new.py")
 assert SPEC and SPEC.loader
@@ -1710,6 +1715,8 @@ def _run_generated_wait(
     client: ReconcileWaitClient,
     *,
     submitted: bool = False,
+    registry: dict[str, Any] | None = None,
+    registry_target_resolver: Any = None,
 ) -> dict[str, Any]:
     output = io.StringIO()
     with redirect_stdout(output):
@@ -1722,6 +1729,8 @@ def _run_generated_wait(
             poll_fallback=False,
             submitted_relevant_kinds=REVIEWER_WAIT_KINDS if submitted else None,
             dispatch_kinds=WORKER_WAIT_KINDS,
+            registry=registry,
+            registry_target_resolver=registry_target_resolver,
         ))
     return json.loads(output.getvalue())
 
@@ -1753,6 +1762,66 @@ def test_wait_reconciles_broadcast_after_transient_route_failure(
     assert result["reason"] == "broadcast"
     assert result["events"][0]["ticket_id"] == "TK-route-recovered"
     assert result["events"][0]["source"] == "wait_reconciliation"
+
+
+def test_wait_reconciliation_omits_permanent_route_until_ticket_changes(
+    tmp_path: Path,
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path / "seat", client="goose"))
+        / "bin" / "board.py",
+        "board_reconcile_permanent_route_failure",
+    )
+    client = ReconcileWaitClient()
+    client.tickets = [{
+        "ticket_id": "TK-invalid-route",
+        "status": "open",
+        "target_url": "unknown/task",
+        "updated_at": "2026-09-22T00:00:00Z",
+        "dispatch_state": {"state": "broadcast", "kind": "work"},
+    }]
+    registry = parse_project_registry({
+        "state": {"value": json.dumps({
+            "schema_version": 1,
+            "projects": {
+                "alpha": {
+                    "board_id": "pursers",
+                    "work_dir": "/operator/alpha",
+                    "fleet_clone_dir": str(tmp_path / "fleet-alpha"),
+                    "status": "active",
+                }
+            },
+        })}
+    })
+
+    initial_wait = _run_generated_wait(generated, client)
+    refusal = generated._permanent_wait_route_refusal(
+        client.tickets[0], "pursers", registry, resolve_registry_target
+    )
+    immediate_rearm = _run_generated_wait(
+        generated,
+        client,
+        registry=registry,
+        registry_target_resolver=resolve_registry_target,
+    )
+
+    assert initial_wait["events"][0]["ticket_id"] == "TK-invalid-route"
+    assert refusal is not None
+    assert refusal["code"] == "project_route_not_registered"
+    assert immediate_rearm["events"] == []
+    assert immediate_rearm["timed_out"] is True
+
+    client.tickets[0]["target_url"] = "alpha/task"
+    client.tickets[0]["updated_at"] = "2026-09-22T00:01:00Z"
+    recovered = _run_generated_wait(
+        generated,
+        client,
+        registry=registry,
+        registry_target_resolver=resolve_registry_target,
+    )
+
+    assert recovered["events"][0]["ticket_id"] == "TK-invalid-route"
+    assert recovered["events"][0]["target_url"] == "alpha/task"
 
 
 def test_wait_reconciles_broadcast_that_appears_during_subscription(
@@ -3256,7 +3325,7 @@ def test_generated_claim_refuses_invalid_repository_route_before_claim(
     )
 
 
-def test_generated_claim_accepts_exact_registered_repository_url(
+def test_generated_claim_recovers_after_registered_repository_appears(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from pursers_client import (
@@ -3268,7 +3337,6 @@ def test_generated_claim_accepts_exact_registered_repository_url(
 
     claims: list[str] = []
     fleet = tmp_path / "fleet-alpha"
-    (fleet / ".git").mkdir(parents=True)
     registry = {
         "schema_version": 1,
         "projects": {
@@ -3328,7 +3396,20 @@ def test_generated_claim_accepts_exact_registered_repository_url(
     monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
     monkeypatch.setenv("ONBOARD_AGENT_NAME", "worker-agent")
 
-    asyncio.run(generated._execute(generated._parser().parse_args(["claim", "TK-url"])))
+    parsed = generated._parser().parse_args(["claim", "TK-url"])
+    asyncio.run(generated._execute(parsed))
+
+    unavailable = json.loads(capsys.readouterr().out)
+    assert claims == []
+    assert unavailable["error"] == {
+        "code": "routed_repository_unavailable",
+        "message": "registered fleet repository is missing or is not a git checkout",
+        "retryable": True,
+        "retry_policy": "reconcile_after_repository_available",
+    }
+
+    (fleet / ".git").mkdir(parents=True)
+    asyncio.run(generated._execute(parsed))
 
     result = json.loads(capsys.readouterr().out)
     assert claims == ["TK-url"]

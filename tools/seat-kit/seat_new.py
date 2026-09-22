@@ -1029,7 +1029,13 @@ def _print(value: Any) -> None:
 
 
 async def _event_for_seat(
-    client: Any, event: dict[str, Any], *, submitted: bool, board_id: str
+    client: Any,
+    event: dict[str, Any],
+    *,
+    submitted: bool,
+    board_id: str,
+    registry: dict[str, Any] | None = None,
+    registry_target_resolver: Any = None,
 ) -> dict[str, Any] | None:
     ticket_id = event.get("ticket_id")
     if not ticket_id:
@@ -1088,6 +1094,15 @@ async def _event_for_seat(
         kind in HELD_TICKET_KINDS
         or (submitted and kind in REVIEW_LEASE_KINDS)
     )
+    if (
+        not submitted
+        and not held_update
+        and _permanent_wait_route_refusal(
+            ticket, board_id, registry, registry_target_resolver
+        )
+        is not None
+    ):
+        return None
     if not isinstance(state, dict):
         if held_update:
             return {**event, "reason": "held_ticket_update"}
@@ -1155,8 +1170,55 @@ async def _event_for_seat(
     return selected
 
 
+def _permanent_wait_route_refusal(
+    ticket: dict[str, Any],
+    board_id: str,
+    registry: dict[str, Any] | None,
+    registry_target_resolver: Any,
+) -> dict[str, str] | None:
+    """Classify unchanged route failures that cannot become claimable alone."""
+    if registry is None or registry_target_resolver is None:
+        return None
+    try:
+        route = registry_target_resolver(
+            registry, board_id, str(ticket.get("target_url", ""))
+        )
+    except ValueError as exc:
+        return {
+            "code": str(getattr(exc, "code", "project_route_invalid")),
+            "message": str(exc),
+        }
+    routed = route.get("work_dir")
+    operator_dir = route.get("operator_work_dir")
+    if not isinstance(routed, str) or not isinstance(operator_dir, str):
+        return None
+    seat_repo = Path(__file__).resolve().parents[1] / str(REPO_LEAF or "")
+    project_name = str(route.get("project", ""))
+    aliases = {
+        project_name.casefold(),
+        Path(operator_dir).name.casefold(),
+    }
+    if (
+        REPO_LEAF
+        and str(REPO_LEAF).casefold() in aliases
+        and (seat_repo / ".git").exists()
+    ):
+        return None
+    if Path(routed).resolve() == Path(operator_dir).resolve():
+        return {
+            "code": "operator_checkout_read_only",
+            "message": "operator checkout is read-only for seats",
+        }
+    return None
+
+
 async def _reconcile_wait_backlog(
-    client: Any, board_id: str, *, submitted: bool
+    client: Any,
+    board_id: str,
+    *,
+    submitted: bool,
+    registry: dict[str, Any] | None = None,
+    registry_target_resolver: Any = None,
 ) -> list[dict[str, Any]]:
     """Read claimable state that may predate, or never emit to, this wait."""
     arguments: dict[str, Any] = {
@@ -1193,6 +1255,14 @@ async def _reconcile_wait_backlog(
             if not offered_to_me and not broadcast:
                 continue
         elif submitted and isinstance(ticket.get("review_lease"), dict):
+            continue
+        if (
+            not submitted
+            and _permanent_wait_route_refusal(
+                ticket, board_id, registry, registry_target_resolver
+            )
+            is not None
+        ):
             continue
         event: dict[str, Any] = {
             "kind": offered_kind if offered_to_me else "ticket_backlog",
@@ -1299,7 +1369,11 @@ async def _cmd_wait(
         cursor = max(cursor, int(value))
 
     reconciled = await _reconcile_wait_backlog(
-        client, board_id, submitted=submitted
+        client,
+        board_id,
+        submitted=submitted,
+        registry=registry,
+        registry_target_resolver=registry_target_resolver,
     )
     if reconciled:
         _print({
@@ -1322,14 +1396,23 @@ async def _cmd_wait(
                 if event.get("kind") not in kinds:
                     continue
                 selected = await _event_for_seat(
-                    client, event, submitted=submitted, board_id=board_id
+                    client,
+                    event,
+                    submitted=submitted,
+                    board_id=board_id,
+                    registry=registry,
+                    registry_target_resolver=registry_target_resolver,
                 )
                 if selected is not None:
                     events.append(selected)
                     break
             if not events:
                 events.extend(await _reconcile_wait_backlog(
-                    client, board_id, submitted=submitted
+                    client,
+                    board_id,
+                    submitted=submitted,
+                    registry=registry,
+                    registry_target_resolver=registry_target_resolver,
                 ))
             if not events:
                 await asyncio.sleep(min(2.0, max(0, deadline - time.monotonic())))
@@ -1367,7 +1450,11 @@ async def _cmd_wait(
                     )
                     if not done:
                         events.extend(await _reconcile_wait_backlog(
-                            client, board_id, submitted=submitted
+                            client,
+                            board_id,
+                            submitted=submitted,
+                            registry=registry,
+                            registry_target_resolver=registry_target_resolver,
                         ))
                         continue
                     try:
@@ -1375,7 +1462,12 @@ async def _cmd_wait(
                     except StopAsyncIteration:
                         break
                     selected = await _event_for_seat(
-                        client, event, submitted=submitted, board_id=board_id
+                        client,
+                        event,
+                        submitted=submitted,
+                        board_id=board_id,
+                        registry=registry,
+                        registry_target_resolver=registry_target_resolver,
                     )
                     if selected is not None:
                         events.append(selected)
