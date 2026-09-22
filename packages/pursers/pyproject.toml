@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
-  "pursers-central==0.1.1",
+  "pursers-central==0.1.2",
   "pursers-client==0.1.3",
   "pursers-personal==5.0.4",
   "pursers-personal-import==5.0.0",

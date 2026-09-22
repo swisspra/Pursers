@@ -9,11 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [5.0.4] - 2026-09-22
 
-This release includes `pursers-central==0.1.1`,
+This release includes `pursers-central==0.1.2`,
 `pursers-client==0.1.3`, `pursers-personal-import==5.0.0`,
 `pursers-personal==5.0.4`, `pursers==5.0.4`,
 `pursers-wait-bridge==0.1.1`, and
-`pursers-acp==0.1.1`.
+`pursers-acp==0.1.2`.
 
 ### Added
 

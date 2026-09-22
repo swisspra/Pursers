@@ -2244,7 +2244,7 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    required = {"pursers-central": "0.1.1", "pursers-client": "0.1.3"}
+    required = {"pursers-central": "0.1.2", "pursers-client": "0.1.3"}
     for distribution, version in required.items():
         try:
             installed = importlib.metadata.version(distribution)

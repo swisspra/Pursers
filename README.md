@@ -258,18 +258,18 @@ is not an autonomous fleet operator.
 | Package | What it is |
 | --- | --- |
 | `pursers==5.0.4` | Installs Central, the client, Personal, and the importer |
-| `pursers-central==0.1.1` | The board service |
+| `pursers-central==0.1.2` | The board service |
 | `pursers-client==0.1.3` | Async Python client |
 | `pursers-personal==5.0.4` | One-owner board and MCP App dashboard |
 | `pursers-personal-import==5.0.0` | Importer from On Board v4 |
 | `pursers-wait-bridge==0.1.1` | Wait bridge and door tooling for seats |
-| `pursers-acp==0.1.1` | ACP board assistant for IDEs |
+| `pursers-acp==0.1.2` | ACP board assistant for IDEs |
 
 The source tree's coordinated release surfaces currently bind
 `pursers==5.0.4`, `pursers-personal==5.0.4`,
-`pursers-personal-import==5.0.0`, `pursers-central==0.1.1`,
+`pursers-personal-import==5.0.0`, `pursers-central==0.1.2`,
 `pursers-client==0.1.3`, `pursers-wait-bridge==0.1.1`, and
-`pursers-acp==0.1.1`.
+`pursers-acp==0.1.2`.
 
 ## Architecture
 
