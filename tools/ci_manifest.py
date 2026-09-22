@@ -234,6 +234,24 @@ def _sweep_abandoned_scratch(parent: Path) -> None:
             owner.close()
 
 
+def _scratch_parent() -> Path:
+    configured_tmp = os.environ.get("TMPDIR")
+    parent = (
+        Path(configured_tmp).expanduser().resolve()
+        if configured_tmp
+        else Path(tempfile.gettempdir()).resolve()
+    )
+    parent.mkdir(parents=True, exist_ok=True)
+    return parent
+
+
+def _sweep_scratch_parent() -> None:
+    """Sweep unlocked managed roots before disk-space admission checks."""
+    parent = _scratch_parent()
+    with _locked_scratch_parent(parent):
+        _sweep_abandoned_scratch(parent)
+
+
 @contextlib.contextmanager
 def _owned_scratch_directory(parent: Path) -> Iterator[Path]:
     """Create an auto-cleaned root that concurrent runners cannot sweep."""
@@ -585,13 +603,7 @@ def run_suites(
     if worker_count < 1:
         raise ValueError("--jobs must be at least 1")
 
-    configured_tmp = os.environ.get("TMPDIR")
-    scratch_parent = (
-        Path(configured_tmp).expanduser().resolve()
-        if configured_tmp
-        else Path(tempfile.gettempdir()).resolve()
-    )
-    scratch_parent.mkdir(parents=True, exist_ok=True)
+    scratch_parent = _scratch_parent()
     failures: list[SuiteResult] = []
     with _owned_scratch_directory(scratch_parent) as scratch_root:
         indexed = tuple(
@@ -636,13 +648,7 @@ def run_suites(
 
 def run_seat_suites(root: Path, suites: Sequence[Suite] = SUITES) -> None:
     """Run every suite for seat evidence, with release-owned gates reported apart."""
-    configured_tmp = os.environ.get("TMPDIR")
-    scratch_parent = (
-        Path(configured_tmp).expanduser().resolve()
-        if configured_tmp
-        else Path(tempfile.gettempdir()).resolve()
-    )
-    scratch_parent.mkdir(parents=True, exist_ok=True)
+    scratch_parent = _scratch_parent()
     failures: list[str] = []
     with _owned_scratch_directory(scratch_parent) as scratch_root:
         for index, suite in enumerate(suites):
@@ -774,6 +780,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         configured_minimum = int(
             os.environ.get(MIN_FREE_BYTES_ENV, str(DEFAULT_MIN_FREE_BYTES))
         )
+        if args.command in {"run", "seat-suite-report"}:
+            _sweep_scratch_parent()
         require_free_space(root, configured_minimum)
         validate_manifest(root)
         if args.command != "seat-suite-report":
