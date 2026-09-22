@@ -59,6 +59,7 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
     ),
     "client": (
         "server.json",
+        "integrations/zed/pursers-mcp/src/lib.rs",
         "packages/central/pyproject.toml",
         "packages/client/pyproject.toml",
         "packages/personal/pyproject.toml",

@@ -105,6 +105,9 @@ def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
     assert "pursers-client==0.1.0a25" in planned[
         root / "packages/central/pyproject.toml"
     ]
+    assert 'DEFAULT_PACKAGE_SPEC: &str = "pursers-client==0.1.0a25"' in planned[
+        root / "integrations/zed/pursers-mcp/src/lib.rs"
+    ]
     assert 'SOURCE_VERSION = "0.1.0a18"' in planned[
         root / "tools/wait-bridge/pursers_wait_server.py"
     ]
@@ -340,6 +343,46 @@ def test_check_detects_central_client_dependency_drift(tmp_path: Path) -> None:
         f"packages/central/pyproject.toml: missing pursers-client=={client}" in error
         for error in errors
     )
+
+
+def test_check_detects_zed_default_package_spec_drift(tmp_path: Path) -> None:
+    root = _fixture_repository(tmp_path)
+    manifest = load_versions(root / "tools/release_versions.toml")
+    client = manifest.packages["client"]
+    source = root / "integrations/zed/pursers-mcp/src/lib.rs"
+    source.write_text(
+        source.read_text().replace(
+            f'DEFAULT_PACKAGE_SPEC: &str = "pursers-client=={client}"',
+            'DEFAULT_PACKAGE_SPEC: &str = "pursers-client==0.0.1a1"',
+        ),
+        encoding="utf-8",
+    )
+
+    errors = release_train.check(root, manifest)
+
+    assert (
+        "integrations/zed/pursers-mcp/src/lib.rs: "
+        f"missing client version {client}"
+    ) in errors
+
+
+def test_client_bump_rewrites_zed_default_package_spec_on_disk(tmp_path: Path) -> None:
+    root = _fixture_repository(tmp_path)
+    current = load_versions(root / "tools/release_versions.toml")
+    next_client = release_train._alpha_next(current.packages["client"])
+    target = release_train.bumped_versions(
+        current,
+        (f"client={next_client}",),
+        None,
+    )
+
+    for path, content in release_train.plan_bump(root, current, target).items():
+        path.write_text(content, encoding="utf-8")
+
+    source = (root / "integrations/zed/pursers-mcp/src/lib.rs").read_text(
+        encoding="utf-8"
+    )
+    assert f'DEFAULT_PACKAGE_SPEC: &str = "pursers-client=={next_client}"' in source
 
 
 def test_real_tree_is_clean_and_current_bump_has_zero_diff() -> None:
