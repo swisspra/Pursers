@@ -7,6 +7,72 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.4] - 2026-09-22
+
+This release includes `pursers-central==0.1.2`,
+`pursers-client==0.1.3`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.0.4`, `pursers==5.0.4`,
+`pursers-wait-bridge==0.1.1`, and
+`pursers-acp==0.1.2`.
+
+### Added
+
+- Zed: `/setup` now provisions a local Central, creates or joins the configured
+  board, and refreshes the real board tools in the same chat after explicit
+  confirmation. The managed identity is supplied automatically, so the first
+  `/create` does not require an internal agent name. A new end-to-end guide
+  follows one ticket from installation through an independent approval.
+- Zed: when no system `uvx` is available, the extension downloads the matching
+  `uv` release asset, verifies its published SHA-256 checksum, caches it in the
+  extension's private directory, and launches the resolved absolute executable.
+  An explicit `uvx_path` remains available for operator-managed installations.
+- Board Butler: add a bounded, read-only Board Observer that carries held
+  decisions forward, reconciles explicitly linked open questions, reports
+  repeated standing decisions and scope drift, and fails closed when its board
+  projection is incomplete. Shadow and active modes observe identically; this
+  adds no new autonomous action class.
+- Operations: add a fail-closed temporary-root janitor for abandoned Pursers
+  test directories. It checks age, owner processes, locks, open files,
+  environment references, and working directories before quarantining and
+  deleting an exact root. CI now refuses to start with less than 10 GB free
+  instead of failing later with a misleading test error.
+
+### Changed
+
+- Zed: local setup accepts only an absolute `setup_root`, refuses unrelated or
+  incomplete directories, and reports the exact reusable layout it expects.
+  Connections to an existing Central can create or join a missing board after
+  confirmation and can reuse the authenticated principal's single active seat;
+  ambiguous identities are listed instead of guessed.
+- Zed documentation now distinguishes native Zed Agent threads, where MCP
+  context servers are available, from external ACP-agent threads, where the
+  extension is intentionally absent. It also records the Configure dialog's
+  replacement behavior, uninstall cleanup, Restricted Mode, and the supported
+  recovery paths observed in real installs.
+- Release publishing now builds and verifies the complete seven-wheel cohort
+  before upload, including filenames, wheel generators, embedded component-lock
+  digests, dependency pins, and already-published artifact bytes.
+- Board Butler's operator guide now documents shadow behavior, bounded findings,
+  the active-mode authorization and hold/veto controls, registry-wide refresh,
+  service status, and the fail-closed emergency stop.
+
+### Fixed
+
+- Zed now launches the context server through a verified absolute executable
+  path. A bare `uvx` could pass the probe but still fail when Zed spawned it,
+  leaving only a broken-pipe error.
+- Zed's packaged extension and runtime consumers now pin the current client
+  cohort, avoiding installation of a one-release-old client.
+- Worker waits periodically reconcile current claimable state with the journal,
+  so an offer or broadcast that predates the subscription still reaches an idle
+  seat. Permanently unsafe repository routes remain filtered, while a clone that
+  has not appeared yet remains retryable.
+- Seat administration can reuse the same authenticated principal after an
+  interrupted or stale onboarding attempt instead of rejecting the existing
+  seat name, while retaining the board's takeover checks.
+- Worker startup reports invalid configuration and permission failures as
+  concise configuration errors instead of uncaught tracebacks.
+
 ## [5.0.3] - 2026-09-21
 
 This release includes `pursers-central==0.1.1`,

@@ -16,7 +16,7 @@ gates every change on evidence, and nothing is lost when a chat ends.
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)
 
-<sub>main: <code>5.0.3</code></sub>
+<sub>main: <code>5.0.4</code></sub>
 
 </div>
 
@@ -257,19 +257,19 @@ is not an autonomous fleet operator.
 
 | Package | What it is |
 | --- | --- |
-| `pursers==5.0.3` | Installs Central, the client, Personal, and the importer |
-| `pursers-central==0.1.1` | The board service |
-| `pursers-client==0.1.2` | Async Python client |
-| `pursers-personal==5.0.3` | One-owner board and MCP App dashboard |
+| `pursers==5.0.4` | Installs Central, the client, Personal, and the importer |
+| `pursers-central==0.1.2` | The board service |
+| `pursers-client==0.1.3` | Async Python client |
+| `pursers-personal==5.0.4` | One-owner board and MCP App dashboard |
 | `pursers-personal-import==5.0.0` | Importer from On Board v4 |
-| `pursers-wait-bridge==0.1.0` | Wait bridge and door tooling for seats |
-| `pursers-acp==0.1.1` | ACP board assistant for IDEs |
+| `pursers-wait-bridge==0.1.1` | Wait bridge and door tooling for seats |
+| `pursers-acp==0.1.2` | ACP board assistant for IDEs |
 
 The source tree's coordinated release surfaces currently bind
-`pursers==5.0.3`, `pursers-personal==5.0.3`,
-`pursers-personal-import==5.0.0`, `pursers-central==0.1.1`,
-`pursers-client==0.1.2`, `pursers-wait-bridge==0.1.0`, and
-`pursers-acp==0.1.1`.
+`pursers==5.0.4`, `pursers-personal==5.0.4`,
+`pursers-personal-import==5.0.0`, `pursers-central==0.1.2`,
+`pursers-client==0.1.3`, `pursers-wait-bridge==0.1.1`, and
+`pursers-acp==0.1.2`.
 
 ## Architecture
 

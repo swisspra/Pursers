@@ -34,7 +34,7 @@ from mcp.server.mcpserver import MCPServer
 from . import PRODUCT_VERSION
 from .artifacts import import_verified_component, verify_component_artifacts
 
-PINNED_CLIENT_VERSION = "0.1.2"
+PINNED_CLIENT_VERSION = "0.1.3"
 MAX_EVENTS = 200
 MAX_TICKETS = 500
 MAX_TICKET_ANNOTATIONS = 8
