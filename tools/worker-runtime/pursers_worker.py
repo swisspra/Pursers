@@ -2627,7 +2627,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("config", type=Path)
     args = parser.parse_args(argv)
-    asyncio.run(async_main(args.config))
+    try:
+        asyncio.run(async_main(args.config))
+    except (ValueError, PermissionError) as exc:
+        parser.exit(2, f"configuration error: {exc}\n")
 
 
 if __name__ == "__main__":
