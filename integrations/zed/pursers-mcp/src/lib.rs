@@ -15,6 +15,7 @@ struct PursersSettings {
     board_id: String,
     token_file: Option<String>,
     ca_file: Option<String>,
+    setup_root: Option<String>,
     uvx_path: Option<String>,
     package_spec: Option<String>,
 }
@@ -125,6 +126,7 @@ fn build_command(settings: &PursersSettings, probe: &impl UvxProbe) -> Result<Co
     require_value("central_url", &settings.central_url)?;
     require_value("board_id", &settings.board_id)?;
     let ca_file = optional_value("ca_file", settings.ca_file.as_deref())?;
+    let setup_root = optional_value("setup_root", settings.setup_root.as_deref())?;
     let configured_uvx = optional_value("uvx_path", settings.uvx_path.as_deref())?;
     let token_file = optional_value("token_file", settings.token_file.as_deref())?;
     let package_spec = optional_value("package_spec", settings.package_spec.as_deref())?
@@ -150,6 +152,9 @@ fn build_command(settings: &PursersSettings, probe: &impl UvxProbe) -> Result<Co
     }
     if let Some(ca_file) = ca_file {
         args.extend(["--ca-file".to_owned(), ca_file.to_owned()]);
+    }
+    if let Some(setup_root) = setup_root {
+        args.extend(["--setup-root".to_owned(), setup_root.to_owned()]);
     }
 
     Ok(Command {
@@ -208,6 +213,7 @@ mod tests {
             board_id: "example-board".to_owned(),
             token_file: Some("/credentials/worker.jwt".to_owned()),
             ca_file: Some("/credentials/ca.pem".to_owned()),
+            setup_root: None,
             uvx_path: None,
             package_spec: None,
         }
@@ -266,11 +272,18 @@ mod tests {
         let mut settings = settings();
         settings.package_spec = Some("/workspace/pursers/packages/client".to_owned());
         settings.uvx_path = Some("/opt/uv/bin/uvx".to_owned());
+        settings.setup_root = Some("/workspace/local-central".to_owned());
 
         let command = build_command(&settings, &Available).expect("valid overrides");
 
         assert_eq!(command.command, "/opt/uv/bin/uvx");
         assert_eq!(command.args[1], "/workspace/pursers/packages/client");
+        assert!(
+            command
+                .args
+                .windows(2)
+                .any(|args| args == ["--setup-root", "/workspace/local-central"])
+        );
     }
 
     #[test]
@@ -334,6 +347,13 @@ mod tests {
                 .expect("required array")
                 .iter()
                 .any(|value| value == "token_file")
+        );
+        assert!(
+            !schema["required"]
+                .as_array()
+                .expect("required array")
+                .iter()
+                .any(|value| value == "setup_root")
         );
         assert_eq!(defaults.board_id, "pursers-local");
         assert_eq!(defaults.token_file, None);

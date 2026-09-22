@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import pursers_client.mcp_proxy as mcp_proxy
 from mcp import Client, StdioServerParameters, types
 from mcp.server.mcpserver import MCPServer
 from pursers_client.mcp_proxy import (
@@ -20,6 +21,7 @@ from pursers_client.mcp_proxy import (
     RelayFailure,
     build_server,
     central_mcp_url,
+    parser,
 )
 
 
@@ -592,6 +594,152 @@ async def _half_failed_setup_stops_the_started_process(tmp_path: Path) -> None:
         raise AssertionError("setup unexpectedly succeeded")
 
     relay._stop_central.assert_awaited_once_with(process)  # type: ignore[attr-defined]
+
+
+def _offline_first_run_relay(setup_root: Path) -> CentralRelay:
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="first-run-board",
+        setup_root=setup_root,
+        uvx_path="/usr/bin/true",
+    )
+    process = SimpleNamespace(pid=43210, returncode=None)
+    relay._upstream_tools = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[OSError("Central is not running"), []]
+    )
+    relay._port_is_open = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    relay._run_init = AsyncMock()  # type: ignore[method-assign]
+    relay._start_central = AsyncMock(  # type: ignore[method-assign]
+        return_value=(process, setup_root / "central.log")
+    )
+    relay._wait_for_central = AsyncMock(  # type: ignore[method-assign]
+        return_value="admin-token"
+    )
+    relay._create_board = AsyncMock()  # type: ignore[method-assign]
+    return relay
+
+
+def test_first_run_refuses_deployed_install_in_target_without_writing(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_first_run_refuses_deployed_install_in_target_without_writing(tmp_path))
+
+
+async def _first_run_refuses_deployed_install_in_target_without_writing(
+    tmp_path: Path,
+) -> None:
+    setup_root = tmp_path / "occupied-central"
+    deployed = setup_root / ".private-arm" / "central-data"
+    deployed.mkdir(parents=True)
+    marker = deployed / "profile.env"
+    marker.write_text("PURSERS_BOARD_ID=production\n", encoding="utf-8")
+    before = marker.read_bytes()
+    relay = _offline_first_run_relay(setup_root)
+
+    try:
+        await relay._provision()
+    except RelayFailure as exc:
+        message = str(exc)
+    else:  # pragma: no cover - protects the no-write assertions below
+        raise AssertionError("setup unexpectedly accepted a deployed target")
+
+    assert str(setup_root) in message
+    assert str(deployed) in message
+    assert "setup_root" in message
+    assert marker.read_bytes() == before
+    relay._run_init.assert_not_awaited()  # type: ignore[attr-defined]
+    relay._start_central.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+def test_first_run_refuses_unrelated_occupied_target_without_writing(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_first_run_refuses_unrelated_occupied_target_without_writing(tmp_path))
+
+
+async def _first_run_refuses_unrelated_occupied_target_without_writing(
+    tmp_path: Path,
+) -> None:
+    setup_root = tmp_path / "occupied-central"
+    setup_root.mkdir()
+    marker = setup_root / "deployment-script.sh"
+    marker.write_text("#!/bin/sh\n", encoding="utf-8")
+    relay = _offline_first_run_relay(setup_root)
+
+    try:
+        await relay._provision()
+    except RelayFailure as exc:
+        message = str(exc)
+    else:  # pragma: no cover - protects the no-write assertions below
+        raise AssertionError("setup unexpectedly accepted an occupied target")
+
+    assert str(setup_root) in message
+    assert "already occupied" in message
+    assert "setup_root" in message
+    assert marker.read_text(encoding="utf-8") == "#!/bin/sh\n"
+    relay._run_init.assert_not_awaited()  # type: ignore[attr-defined]
+    relay._start_central.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+def test_first_run_succeeds_at_configured_setup_root(tmp_path: Path) -> None:
+    asyncio.run(_first_run_succeeds_at_configured_setup_root(tmp_path))
+
+
+async def _first_run_succeeds_at_configured_setup_root(tmp_path: Path) -> None:
+    setup_root = tmp_path / "chosen-central"
+    args = parser().parse_args(
+        [
+            "--central-url",
+            "http://127.0.0.1:9999",
+            "--board",
+            "first-run-board",
+            "--setup-root",
+            str(setup_root),
+        ]
+    )
+    assert args.setup_root == setup_root
+    relay = _offline_first_run_relay(args.setup_root)
+
+    result = await relay._provision()
+
+    assert result["token_file"] == str(setup_root / "worker.jwt")
+    assert result["log_file"] == str(setup_root / "central.log")
+    relay._run_init.assert_awaited_once_with("/usr/bin/true", 9999)  # type: ignore[attr-defined]
+
+
+def test_first_run_succeeds_at_genuinely_empty_default_root(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    asyncio.run(
+        _first_run_succeeds_at_genuinely_empty_default_root(tmp_path, monkeypatch)
+    )
+
+
+async def _first_run_succeeds_at_genuinely_empty_default_root(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    setup_root = tmp_path / ".pursers" / "central"
+    setup_root.mkdir(parents=True)
+    assert list(setup_root.iterdir()) == []
+    monkeypatch.setattr(mcp_proxy, "DEFAULT_INSTANCE_DIR", setup_root)
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="first-run-board",
+        uvx_path="/usr/bin/true",
+    )
+    prepared = _offline_first_run_relay(relay.setup_root)
+    relay._upstream_tools = prepared._upstream_tools  # type: ignore[method-assign]
+    relay._port_is_open = prepared._port_is_open  # type: ignore[method-assign]
+    relay._run_init = prepared._run_init  # type: ignore[method-assign]
+    relay._start_central = prepared._start_central  # type: ignore[method-assign]
+    relay._wait_for_central = prepared._wait_for_central  # type: ignore[method-assign]
+    relay._create_board = prepared._create_board  # type: ignore[method-assign]
+
+    result = await relay._provision()
+
+    assert relay.setup_root == setup_root
+    assert result["token_file"] == str(setup_root / "worker.jwt")
+    relay._run_init.assert_awaited_once_with("/usr/bin/true", 9999)  # type: ignore[attr-defined]
 
 
 def test_setup_switches_tools_and_emits_wire_notification(tmp_path: Path) -> None:

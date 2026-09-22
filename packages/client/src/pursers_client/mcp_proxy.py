@@ -559,6 +559,7 @@ class CentralRelay:
             board_available, board_error = await self._board_access()
         return {
             "ok": True,
+            "setup_root": str(self.setup_root),
             "uvx": {"available": uvx is not None, "path": uvx},
             "central": {
                 "reachable": central_reachable,
@@ -620,10 +621,33 @@ class CentralRelay:
         managed = [profile, *credentials]
         existing = [path for path in managed if path.exists()]
         if not existing:
+            if not self.setup_root.exists():
+                return False
+            deployed_root = self.setup_root / ".private-arm" / "central-data"
+            if deployed_root.exists():
+                raise RelayFailure(
+                    f"the setup directory {self.setup_root} contains a deployed Pursers "
+                    f"instance at {deployed_root}; automatic setup will not write beside "
+                    "it. Set setup_root to an empty directory"
+                )
+            try:
+                occupied = any(self.setup_root.iterdir())
+            except OSError as exc:
+                raise RelayFailure(
+                    f"the setup directory {self.setup_root} is not readable; set "
+                    "setup_root to an empty writable directory"
+                ) from exc
+            if occupied:
+                raise RelayFailure(
+                    f"the setup directory {self.setup_root} is already occupied by "
+                    "something other than a complete Pursers instance; set setup_root "
+                    "to an empty directory"
+                )
             return False
         if len(existing) != len(managed):
             raise RelayFailure(
-                "the local setup directory is incomplete; move it aside and retry setup"
+                f"the setup directory {self.setup_root} contains an incomplete Pursers "
+                "instance; move it aside or set setup_root to an empty directory"
             )
         try:
             values = dict(
@@ -1009,6 +1033,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--board", required=True)
     command.add_argument("--token-file", type=Path)
     command.add_argument("--ca-file", type=Path)
+    command.add_argument("--setup-root", type=Path)
     command.add_argument("--tools", choices=("default", "all"), default="default")
     command.add_argument("--version", action="version", version=f"pursers-mcp {package_version()}")
     return command
@@ -1024,6 +1049,7 @@ def main(argv: list[str] | None = None) -> None:
             token_file=args.token_file,
             ca_file=args.ca_file,
             tools_mode=args.tools,
+            setup_root=args.setup_root,
         )
     except RelayFailure as exc:
         print(f"pursers-mcp: {exc}", file=sys.stderr, flush=True)

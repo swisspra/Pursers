@@ -105,6 +105,20 @@ Replace the form with your own values:
 `/PATH/TO/PURSERS/worker.jwt`, which is an example, not a path — leaving it
 there is the single most common way a first install fails.
 
+`setup_root` is needed only when you want `/setup` to create a Central somewhere
+other than `~/.pursers/central`. Point it at an empty directory. Setup refuses a
+directory that already contains unrelated files or a deployed instance under
+`.private-arm/central-data`, rather than mixing a second Central into that tree.
+For a new local Central in another location, omit `token_file` and configure:
+
+```json
+{
+  "central_url": "http://127.0.0.1:8766/mcp",
+  "board_id": "pursers-local",
+  "setup_root": "/absolute/path/to/an-empty-central-directory"
+}
+```
+
 If the relay does not start, set `uvx_path` to the full path printed by
 `which uvx`. When Zed cannot launch a bare `uvx` name, it says nothing useful:
 the server never answers and eventually times out.

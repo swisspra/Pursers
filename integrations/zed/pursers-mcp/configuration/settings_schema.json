@@ -25,6 +25,11 @@
       "minLength": 1,
       "description": "Optional CA certificate file for a TLS Central endpoint."
     },
+    "setup_root": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional directory where first-run setup creates the local Central. Defaults to ~/.pursers/central. Choose an empty directory when that location already contains a deployment or unrelated files."
+    },
     "uvx_path": {
       "type": "string",
       "minLength": 1,

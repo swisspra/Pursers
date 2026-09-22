@@ -64,6 +64,7 @@ you save or cancel it.
 | `board_id` | Yes | The board to use. The local Quickstart default is `pursers-local`. |
 | `token_file` | No | A worker JWT path for a Central you already run. Omit it for `~/.pursers/central/worker.jwt`. Store the path, not the token. |
 | `ca_file` | No | A CA certificate file when Central uses a private TLS certificate. |
+| `setup_root` | No | The directory where `/setup` creates a local Central. It defaults to `~/.pursers/central`; set an empty directory when that path already contains a deployment or unrelated files. |
 | `uvx_path` | No | An absolute path to `uvx`, such as `/opt/homebrew/bin/uvx`, when Zed cannot launch the automatically resolved executable. |
 | `package_spec` | No | A different `pursers-client` version or a local client checkout for development. |
 
@@ -82,6 +83,12 @@ Central running in the background, and create the configured board. Declining
 or cancelling makes no changes. After you accept, Zed receives
 `notifications/tools/list_changed` and the board tools appear in the same chat.
 The setup result names `~/.pursers/central/central.log` for troubleshooting.
+
+Setup refuses to write into a non-empty directory that is not already a complete,
+reusable local Central. This includes a deployed instance under
+`.private-arm/central-data`: that nested layout uses different credential and state
+paths, so setup does not guess how to reuse it or write a second instance beside it.
+Choose an empty `setup_root` explicitly instead.
 
 If Central is already running but the configured board is not readable, the
 same setup tools remain available. After confirmation, `/setup` uses the local
