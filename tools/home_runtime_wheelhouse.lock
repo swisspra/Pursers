@@ -1,7 +1,7 @@
 # Pursers Home runtime wheelhouse lock. Regenerate deliberately; do not hand-edit.
 # schema: 2
 # python: 3.12
-# source-requirements-sha256: 0073efb6c8ee3dc9a245ef188f423e47010dbf010baa510783fa104530b22f56
+# source-requirements-sha256: af549726834cb78da7b2b8383f9017542439e98302068fc40a9235a074686916
 
 # platform: linux-x86_64
 annotated-types==0.8.0 --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
