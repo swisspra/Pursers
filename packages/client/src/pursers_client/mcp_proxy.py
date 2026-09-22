@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -23,7 +25,6 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.server import NotificationOptions
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, Field
-
 
 LOG = logging.getLogger("pursers-mcp")
 SETUP_STATUS_TOOL = "pursers_setup_status"
@@ -187,6 +188,11 @@ class CentralRelay:
         self._uvx_path = uvx_path
         self._known_tools: dict[str, types.Tool] = {}
         self._local_identity_tools: set[str] = set()
+        self._identity_selection_tools: set[str] = set()
+        self._resolved_agent_name: str | None = None
+        self._principal_agent_names: tuple[str, ...] = ()
+        self._authenticated_principal_id: str | None = None
+        self._identity_discovery_succeeded = False
         self._reported_error: str | None = None
 
     @asynccontextmanager
@@ -270,30 +276,198 @@ class CentralRelay:
             ),
         ]
 
+    @staticmethod
+    def _result_payload(result: types.CallToolResult) -> dict[str, Any] | None:
+        payload = result.structured_content
+        if isinstance(payload, dict):
+            return payload
+        for item in result.content:
+            text = getattr(item, "text", None)
+            if not isinstance(text, str):
+                continue
+            try:
+                decoded = json.loads(text)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(decoded, dict):
+                return decoded
+        return None
+
+    def _credential_principal_id(self) -> str | None:
+        # board_list has already made Central authenticate this token. Decoding
+        # its public claims here only reproduces Central's stable display ID; it
+        # never grants authority or substitutes for server verification.
+        try:
+            token = _read_token(self.token_file)
+            encoded = token.split(".")[1]
+            padded = encoded + "=" * (-len(encoded) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(padded))
+        except (
+            IndexError,
+            OSError,
+            RelayFailure,
+            UnicodeError,
+            ValueError,
+        ):
+            return None
+        if not isinstance(claims, dict):
+            return None
+        client_id = claims.get("client_id") or "-"
+        issuer = claims.get("iss") or "-"
+        subject = claims.get("sub") or "-"
+        if not all(isinstance(item, str) and item for item in (client_id, issuer, subject)):
+            return None
+        canonical = json.dumps([client_id, issuer, subject], separators=(",", ":"))
+        return "PR-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    async def _discover_existing_identity(self) -> None:
+        self._resolved_agent_name = None
+        self._principal_agent_names = ()
+        self._authenticated_principal_id = None
+        self._identity_discovery_succeeded = False
+        try:
+            boards_result = await self._retrying(
+                lambda client: client.call_tool("board_list", {})
+            )
+        except Exception:
+            return
+        if boards_result.is_error:
+            return
+        payload = self._result_payload(boards_result)
+        boards = payload.get("boards") if payload is not None else None
+        if not isinstance(boards, list):
+            return
+        board = next(
+            (
+                item
+                for item in boards
+                if isinstance(item, dict) and item.get("board_id") == self.board
+            ),
+            None,
+        )
+        if board is None:
+            return
+        self._identity_discovery_succeeded = True
+        self._authenticated_principal_id = self._credential_principal_id()
+        agent_ids = board.get("agent_ids")
+        if not isinstance(agent_ids, list) or not agent_ids:
+            return
+        known_ids = {item for item in agent_ids if isinstance(item, str)}
+        try:
+            status_result = await self._retrying(
+                lambda client: client.call_tool(
+                    "board_status",
+                    {"board_id": self.board, "include_retired": True},
+                )
+            )
+        except Exception:
+            return
+        if status_result.is_error:
+            return
+        status = self._result_payload(status_result)
+        agents = status.get("agents") if status is not None else None
+        if not isinstance(agents, list):
+            return
+        matching_agents = [
+            agent
+            for agent in agents
+            if isinstance(agent, dict) and agent.get("agent_id") in known_ids
+        ]
+        principal_ids = {
+            agent.get("principal_id")
+            for agent in matching_agents
+            if isinstance(agent.get("principal_id"), str)
+        }
+        if len(principal_ids) != 1:
+            return
+        self._authenticated_principal_id = principal_ids.pop()
+        self._principal_agent_names = tuple(
+            dict.fromkeys(
+                agent["agent_name"]
+                for agent in matching_agents
+                if agent.get("principal_id") == self._authenticated_principal_id
+                and agent.get("lifecycle_status", "active") == "active"
+                and isinstance(agent.get("agent_name"), str)
+                and agent["agent_name"]
+            )
+        )
+        if len(self._principal_agent_names) == 1:
+            self._resolved_agent_name = self._principal_agent_names[0]
+
+    def _identity_selection_failure(self, supplied: str | None = None) -> RelayFailure:
+        principal = self._authenticated_principal_id or "an unreported principal"
+        if self._principal_agent_names:
+            choices = ", ".join(self._principal_agent_names)
+            if supplied is not None:
+                return RelayFailure(
+                    f"Central authenticated principal {principal} on board {self.board}, "
+                    f"but agent_name {supplied} is not one of its active agent names: "
+                    f"{choices}. "
+                    "Retry with agent_name set to one of those exact names."
+                )
+            return RelayFailure(
+                f"Central authenticated principal {principal} on board {self.board} "
+                f"with multiple active agent names: {choices}. Retry with agent_name "
+                "set to one of those exact names."
+            )
+        return RelayFailure(
+            f"Central authenticated principal {principal} on board {self.board}, but it "
+            "holds no active agent names there. Ask a board administrator to onboard "
+            "or reactivate this principal, then retry with that exact agent_name."
+        )
+
     async def _upstream_tools(self) -> list[types.Tool]:
         result = await self._retrying(lambda client: client.list_tools())
         tools = result.tools
         if self.tools_mode == "default":
             tools = [tool for tool in tools if tool.name in DEFAULT_TOOLS]
         self._local_identity_tools = set()
-        if not self._token_file_was_overridden:
-            exposed_tools: list[types.Tool] = []
-            for tool in tools:
-                schema = tool.input_schema
-                properties = schema.get("properties", {})
-                if "agent_name" not in properties:
-                    exposed_tools.append(tool)
-                    continue
+        self._identity_selection_tools = set()
+        if self._token_file_was_overridden:
+            await self._discover_existing_identity()
+        else:
+            self._resolved_agent_name = SETUP_AGENT_NAME
+            self._principal_agent_names = (SETUP_AGENT_NAME,)
+            self._authenticated_principal_id = None
+            self._identity_discovery_succeeded = True
+        exposed_tools: list[types.Tool] = []
+        for tool in tools:
+            schema = tool.input_schema
+            properties = schema.get("properties", {})
+            if "agent_name" not in properties:
+                exposed_tools.append(tool)
+                continue
+            exposed = tool.model_copy(deep=True)
+            required = exposed.input_schema.get("required")
+            if self._resolved_agent_name is not None:
                 self._local_identity_tools.add(tool.name)
-                exposed = tool.model_copy(deep=True)
                 exposed.input_schema["properties"].pop("agent_name")
-                required = exposed.input_schema.get("required")
                 if isinstance(required, list):
                     exposed.input_schema["required"] = [
                         name for name in required if name != "agent_name"
                     ]
-                exposed_tools.append(exposed)
-            tools = exposed_tools
+            elif self._identity_discovery_succeeded:
+                self._identity_selection_tools.add(tool.name)
+                if isinstance(required, list):
+                    exposed.input_schema["required"] = [
+                        name for name in required if name != "agent_name"
+                    ]
+                agent_schema = exposed.input_schema["properties"].get("agent_name")
+                if isinstance(agent_schema, dict):
+                    if self._principal_agent_names:
+                        choices = ", ".join(self._principal_agent_names)
+                        agent_schema["description"] = (
+                            "Required when this credential holds several active identities. "
+                            f"Choose one exact agent name for board {self.board}: {choices}."
+                        )
+                    else:
+                        agent_schema["description"] = (
+                            "This credential holds no active agent name on the configured "
+                            "board. Ask a board administrator to onboard or reactivate its "
+                            "principal first."
+                        )
+            exposed_tools.append(exposed)
+        tools = exposed_tools
         self._known_tools = {tool.name: tool for tool in tools}
         return tools
 
@@ -680,7 +854,8 @@ class CentralRelay:
         if "board_id" in properties and "board_id" not in arguments:
             arguments = {"board_id": self.board, **arguments}
         if name in self._local_identity_tools and "agent_name" not in arguments:
-            arguments = {"agent_name": SETUP_AGENT_NAME, **arguments}
+            assert self._resolved_agent_name is not None
+            arguments = {"agent_name": self._resolved_agent_name, **arguments}
         if name in WAIT_TOOL_NAMES:
             for key in ("timeout_s", "wait_seconds", "timeout"):
                 if key not in properties:
@@ -704,6 +879,18 @@ class CentralRelay:
             return self._json_result(await self._setup_status())
         if name == SETUP_TOOL:
             return await self._perform_setup(_context)
+        if name in self._identity_selection_tools:
+            supplied = arguments.get("agent_name")
+            if not isinstance(supplied, str) or not supplied:
+                failure = self._identity_selection_failure()
+                return self._json_result(
+                    {"ok": False, "error": str(failure)}, is_error=True
+                )
+            if supplied not in self._principal_agent_names:
+                failure = self._identity_selection_failure(supplied)
+                return self._json_result(
+                    {"ok": False, "error": str(failure)}, is_error=True
+                )
         payload = self._arguments_for(name, dict(arguments))
         try:
             return await self._retrying(

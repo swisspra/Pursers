@@ -94,6 +94,15 @@ With the managed local token, Pursers also supplies the setup identity behind
 the scenes. The first `/create` therefore works without asking you to discover
 or enter an `agent_name`.
 
+The same applies when `token_file` points at a Central you already run and that
+credential holds exactly one active agent name on the configured board: the
+relay discovers and supplies that name. Retired, stale, and handed-off names
+are not usable choices. If the principal holds several active names, the tool
+describes the exact choices and requires you to select one; if it holds none,
+the error names the authenticated principal and tells you to ask a board
+administrator to onboard or reactivate it. The relay never guesses or injects
+an identity the credential cannot currently use.
+
 Save the modal once. In **Settings → AI → MCP Servers**, confirm that Pursers
 has a green state dot. Open the Agent Panel and run `/board`. A successful
 response starts with the configured board ID and shows a compact status
@@ -224,7 +233,7 @@ questions must arrive in Zed.
 | A fresh Configure dialog shows the shipped `pursers-local` example instead of the working values. | This is how the extension dialog opens: it does not hydrate from saved settings. Cancel without saving and edit the Pursers object in `settings.json`. Saving the modal writes its box back verbatim, deleting omitted keys and replacing saved values with the examples shown. |
 | The Pursers configuration disappeared after uninstalling the extension. | Uninstalling empties `context_servers`. Restore the entry you copied from `settings.json`; there is no undo in the UI. |
 | Setup reports that `uvx` is unavailable. | Let the extension's uv installation finish, then restart the Pursers server. Set `uvx_path` only for a development override. |
-| Authentication fails or the token file is rejected. | Confirm that `token_file` points to the correct `worker.jwt`, that the file is readable by your account, and that it contains one credential line. Do not paste the token into the modal. |
+| Authentication fails or the token file is rejected. | Confirm that `token_file` points to the correct `worker.jwt`, that the file is readable by your account, and that it contains one credential line. Do not paste the token into the modal. If that principal holds several active agent names on the board, select one of the exact names shown by the tool. |
 | Central is unreachable on the local defaults. | Run `/setup` and accept the confirmation. |
 | Central is reachable but the configured board is missing. | Run `/setup` and accept the confirmation. Pursers uses the local `admin.jwt` to create the board and onboard the caller, then refreshes the tools in the same chat. |
 | Central says the principal is not a board member. | Run `/setup`. If the local admin credential cannot admit this principal, the result tells a board administrator to run `board_invite_create`, then tells you to redeem it with `board_join` as `zed-local-owner` with role `worker`. |

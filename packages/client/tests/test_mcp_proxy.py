@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -12,7 +13,6 @@ from unittest.mock import AsyncMock
 
 from mcp import Client, StdioServerParameters, types
 from mcp.server.mcpserver import MCPServer
-
 from pursers_client.mcp_proxy import (
     SETUP_STATUS_TOOL,
     SETUP_TOOL,
@@ -27,6 +27,13 @@ def _result(value: str) -> types.CallToolResult:
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=value)],
         structuredContent={"value": value},
+    )
+
+
+def _json_result(value: dict[str, Any]) -> types.CallToolResult:
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=json.dumps(value))],
+        structuredContent=value,
     )
 
 
@@ -52,6 +59,76 @@ class FakeClient:
         payload = arguments or {}
         self.calls.append((name, payload))
         return _result(payload.get("board_id", "missing"))
+
+
+class ExistingIdentityClient(FakeClient):
+    def __init__(
+        self,
+        names: list[str],
+        principal_id: str,
+        *,
+        lifecycle_statuses: list[str] | None = None,
+    ) -> None:
+        super().__init__()
+        self.names = names
+        self.principal_id = principal_id
+        self.agent_ids = [f"AI-existing-{index}" for index, _ in enumerate(names)]
+        self.lifecycle_statuses = lifecycle_statuses or ["active"] * len(names)
+        assert len(self.lifecycle_statuses) == len(names)
+        self.tool = types.Tool(
+            name="ticket_create",
+            description="Create work.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "board_id": {"type": "string"},
+                    "agent_name": {"type": "string"},
+                    "title": {"type": "string"},
+                },
+                "required": ["board_id", "agent_name", "title"],
+            },
+        )
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any] | None = None, **_kwargs: Any
+    ) -> types.CallToolResult:
+        payload = arguments or {}
+        self.calls.append((name, payload))
+        if name == "board_list":
+            return _json_result(
+                {
+                    "ok": True,
+                    "boards": [
+                        {
+                            "board_id": "existing-board",
+                            "agent_ids": self.agent_ids,
+                            "agent_names": self.names,
+                        }
+                    ],
+                }
+            )
+        if name == "board_status":
+            return _json_result(
+                {
+                    "ok": True,
+                    "board_id": "existing-board",
+                    "agents": [
+                        {
+                            "agent_id": agent_id,
+                            "agent_name": agent_name,
+                            "principal_id": self.principal_id,
+                            "lifecycle_status": lifecycle_status,
+                        }
+                        for agent_id, agent_name, lifecycle_status in zip(
+                            self.agent_ids,
+                            self.names,
+                            self.lifecycle_statuses,
+                            strict=True,
+                        )
+                    ],
+                }
+            )
+        return _json_result({"ok": True, "arguments": payload})
 
 
 def test_central_mcp_url_normalizes_only_an_empty_path() -> None:
@@ -90,6 +167,7 @@ async def _relay_preserves_central_tool_and_supplies_configured_board(
         result = await relay.call_tool("board_status", {})
         assert not result.is_error
         assert client.calls == [
+            ("board_list", {}),
             ("board_status", {"board_id": "board-from-config"}),
             ("board_status", {"board_id": "board-from-config"}),
         ]
@@ -131,9 +209,10 @@ async def _token_file_is_reread_after_401(tmp_path: Path) -> None:
     try:
         tools = await relay.list_tools()
         assert [tool.name for tool in tools] == ["board_status"]
-        assert len(fingerprints) == 3
+        assert len(fingerprints) == 4
         assert fingerprints[0] != fingerprints[1]
         assert fingerprints[1] == fingerprints[2]
+        assert fingerprints[2] == fingerprints[3]
     finally:
         await relay.aclose()
 
@@ -241,6 +320,118 @@ async def _local_setup_identity_is_hidden_and_injected(tmp_path: Path) -> None:
     )
 
 
+def test_existing_central_single_identity_is_hidden_and_injected(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_existing_central_single_identity_is_hidden_and_injected(tmp_path))
+
+
+async def _existing_central_single_identity_is_hidden_and_injected(
+    tmp_path: Path,
+) -> None:
+    token_file = tmp_path / "existing-worker.jwt"
+    token_file.write_text("opaque-existing-credential", encoding="utf-8")
+    client = ExistingIdentityClient(["existing-owner"], "PR-existing")
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        yield client
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="existing-board",
+        token_file=token_file,
+        connection_factory=connect,
+    )
+    tools = await relay.list_tools()
+    assert len(tools) == 1
+    assert "agent_name" not in tools[0].input_schema["properties"]
+    assert "agent_name" not in tools[0].input_schema["required"]
+
+    result = await relay.call_tool("ticket_create", {"title": "First ticket"})
+    assert not result.is_error
+    assert result.structured_content == {
+        "ok": True,
+        "arguments": {
+            "agent_name": "existing-owner",
+            "board_id": "existing-board",
+            "title": "First ticket",
+        },
+    }
+    assert client.calls[-1] == (
+        "ticket_create",
+        {
+            "agent_name": "existing-owner",
+            "board_id": "existing-board",
+            "title": "First ticket",
+        },
+    )
+
+
+def test_existing_central_ambiguous_identity_requires_an_exact_choice(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_existing_central_ambiguous_identity_requires_an_exact_choice(tmp_path))
+
+
+async def _existing_central_ambiguous_identity_requires_an_exact_choice(
+    tmp_path: Path,
+) -> None:
+    token_file = tmp_path / "existing-worker.jwt"
+    token_file.write_text("opaque-existing-credential", encoding="utf-8")
+    client = ExistingIdentityClient(
+        ["existing-owner", "existing-worker"], "PR-existing"
+    )
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        yield client
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="existing-board",
+        token_file=token_file,
+        connection_factory=connect,
+    )
+    tools = await relay.list_tools()
+    assert len(tools) == 1
+    agent_schema = tools[0].input_schema["properties"]["agent_name"]
+    assert "agent_name" not in tools[0].input_schema["required"]
+    assert "existing-owner, existing-worker" in agent_schema["description"]
+
+    missing = await relay.call_tool("ticket_create", {"title": "First ticket"})
+    assert missing.is_error
+    assert missing.structured_content == {
+        "ok": False,
+        "error": (
+            "Central authenticated principal PR-existing on board existing-board with "
+            "multiple active agent names: existing-owner, existing-worker. Retry with "
+            "agent_name set to one of those exact names."
+        ),
+    }
+
+    invalid = await relay.call_tool(
+        "ticket_create", {"agent_name": "someone-else", "title": "First ticket"}
+    )
+    assert invalid.is_error
+    assert "agent_name someone-else is not one of its active agent names" in (
+        invalid.structured_content["error"]
+    )
+
+    selected = await relay.call_tool(
+        "ticket_create", {"agent_name": "existing-worker", "title": "First ticket"}
+    )
+    assert not selected.is_error
+    assert selected.structured_content == {
+        "ok": True,
+        "arguments": {
+            "agent_name": "existing-worker",
+            "board_id": "existing-board",
+            "title": "First ticket",
+        },
+    }
+
+
 def test_wait_timeout_is_capped_at_fifty_seconds(tmp_path: Path) -> None:
     token_file = tmp_path / "credential.jwt"
     token_file.write_text("opaque-test-credential", encoding="utf-8")
@@ -324,6 +515,50 @@ async def _setup_does_nothing_without_consent(tmp_path: Path) -> None:
     }
     relay._provision.assert_not_awaited()  # type: ignore[attr-defined]
     assert not (tmp_path / "central").exists()
+
+
+def test_existing_central_ignores_inactive_identities_when_injecting(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_existing_central_ignores_inactive_identities_when_injecting(tmp_path))
+
+
+async def _existing_central_ignores_inactive_identities_when_injecting(
+    tmp_path: Path,
+) -> None:
+    token_file = tmp_path / "existing-worker.jwt"
+    token_file.write_text("opaque-existing-credential", encoding="utf-8")
+    client = ExistingIdentityClient(
+        ["existing-owner", "retired-worker", "stale-worker", "handed-off-worker"],
+        "PR-existing",
+        lifecycle_statuses=["active", "retired", "stale", "handed_off"],
+    )
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        yield client
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="existing-board",
+        token_file=token_file,
+        connection_factory=connect,
+    )
+    tools = await relay.list_tools()
+    assert len(tools) == 1
+    assert "agent_name" not in tools[0].input_schema["properties"]
+    assert "agent_name" not in tools[0].input_schema["required"]
+
+    result = await relay.call_tool("ticket_create", {"title": "First ticket"})
+    assert not result.is_error
+    assert result.structured_content == {
+        "ok": True,
+        "arguments": {
+            "agent_name": "existing-owner",
+            "board_id": "existing-board",
+            "title": "First ticket",
+        },
+    }
 
 
 def test_half_failed_setup_stops_the_started_process(tmp_path: Path) -> None:
