@@ -228,9 +228,10 @@ is not an autonomous fleet operator.
 #### Board Butler behaviour checklist
 
 1. **Stale question reconciliation:** in shadow and active modes, an open
-   coordinator question followed by one explicit or unambiguous decision is
-   reported for coordinator reconciliation. The butler does not answer or
-   close the question.
+   coordinator question explicitly named by a later decision is reported for
+   coordinator reconciliation. A chronological but unlinked decision reports
+   its missing correlation instead of being guessed as the answer. The butler
+   does not answer or close the question.
 2. **Held-decision travel:** in both modes, a binding decision followed by a
    later work offer or broadcast is surfaced before another seat re-derives
    the gate. The butler does not claim, assign, or release the work.

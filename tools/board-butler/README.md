@@ -44,11 +44,13 @@ gap and makes no negative claim from the missing records.
 
 The current duties are directly traceable:
 
-1. `stale_open_question` pairs an open question with an explicit question ID in
-   a later decision, or with one unambiguous latest-open-question/next-decision
-   pair. It asks the coordinator to reconcile the inbox; it does not close or
-   answer anything. Code: `_observe_stale_open_questions`. Test:
-   `test_stale_open_question_observer_reconciles_explicit_decision`.
+1. `stale_open_question` pairs an open question only with an explicit question
+   or message ID in a later decision. Chronology alone produces a named missing-
+   correlation finding, not a reconciliation claim. It asks the coordinator to
+   reconcile the inbox; it does not close or answer anything. Code:
+   `_observe_stale_open_questions`. Tests:
+   `test_stale_open_question_observer_reconciles_explicit_decision` and
+   `test_stale_open_question_observer_refuses_chronology_only_match`.
 2. `held_decision` finds a binding decision followed by another work offer or
    broadcast in the seven-day replay window, so the decision can travel with
    the ticket before another seat re-derives it. Code:
@@ -65,9 +67,9 @@ The current duties are directly traceable:
    reconcile an outside path before final preflight. Code:
    `_observe_decision_scope_drift`. Test:
    `test_decision_scope_observer_flags_directed_out_of_boundary_path`.
-5. `observation_replay_metrics` reports the exact number of open questions
-   reconciled and deduplicated later question IDs that represent repeat
-   rediscovery within seven days. Test:
+5. `observation_replay_metrics` reports the exact number of explicitly linked
+   open questions reconciled and deduplicated later question IDs that repeat an
+   exact decision identifier within seven days. Test:
    `test_observation_replay_metrics_deduplicate_question_ids`.
 6. `coverage_gap` names an incomplete question or ticket-detail projection and
    prevents an absence from being reported as proof. Test:

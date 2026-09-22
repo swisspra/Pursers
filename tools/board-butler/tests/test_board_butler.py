@@ -1970,6 +1970,14 @@ def board_observation_context() -> Any:
             "asked_at": (NOW - butler.timedelta(minutes=20)).isoformat(),
             "asked_by": {"agent_id": "AI-third"},
         },
+        {
+            "ticket_id": "TK-held",
+            "question_id": "CQ-unrelated",
+            "state": "open",
+            "message": "Which deployment window applies?",
+            "asked_at": (NOW - butler.timedelta(minutes=15)).isoformat(),
+            "asked_by": {"agent_id": "AI-fourth"},
+        },
     )
     return butler.ObservationContext(
         board_id="pursers", tickets=tickets, questions=questions, now=NOW
@@ -1984,6 +1992,48 @@ def test_stale_open_question_observer_reconciles_explicit_decision() -> None:
     assert [(row["question_id"], row["annotation_id"]) for row in stale] == [
         ("CQ-stale", "AN-answer")
     ]
+    assert stale[0]["reconciled"] is True
+
+
+def test_stale_open_question_observer_refuses_chronology_only_match() -> None:
+    context = butler.ObservationContext(
+        board_id="pursers",
+        tickets={
+            "TK-unlinked": {
+                "annotations": [
+                    {
+                        "annotation_id": "AN-later",
+                        "kind": "decision",
+                        "text": "Use the current approved base.",
+                        "at": (NOW - butler.timedelta(minutes=10)).isoformat(),
+                    }
+                ]
+            }
+        },
+        questions=(
+            {
+                "ticket_id": "TK-unlinked",
+                "question_id": "CQ-unlinked",
+                "state": "open",
+                "message": "Which base applies?",
+                "asked_at": (NOW - butler.timedelta(hours=1)).isoformat(),
+            },
+        ),
+        now=NOW,
+    )
+
+    findings = butler.derive_board_observations(context)
+    stale = [row for row in findings if row["observer"] == "stale_open_question"]
+
+    assert len(stale) == 1
+    assert stale[0]["question_id"] == "CQ-unlinked"
+    assert stale[0]["reconciled"] is False
+    assert stale[0]["evidence"].endswith(
+        "missing=question-or-message-id-in-decision"
+    )
+    assert butler.observation_replay_metrics(context, findings)[
+        "reconciled_open_questions"
+    ] == 0
 
 
 def test_held_decision_observer_carries_gate_across_later_dispatch() -> None:
@@ -2022,7 +2072,7 @@ def test_observation_replay_metrics_deduplicate_question_ids() -> None:
     metrics = butler.observation_replay_metrics(context, findings)
 
     assert metrics == {
-        "open_questions": 2,
+        "open_questions": 3,
         "reconciled_open_questions": 1,
         "repeat_rediscovery_escalations": 2,
     }

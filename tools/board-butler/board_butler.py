@@ -1988,6 +1988,14 @@ def _questions_for_ticket(
     ]
 
 
+def _question_matches_decision_identifiers(
+    question: Mapping[str, Any], decision: Mapping[str, Any]
+) -> bool:
+    """Match only exact board-visible identifiers, never prose similarity."""
+    decision_topics = _observation_topics(decision.get("text"))
+    return bool(decision_topics & _observation_topics(question.get("message")))
+
+
 def _observe_stale_open_questions(
     context: ObservationContext,
 ) -> list[Mapping[str, Any]]:
@@ -2005,7 +2013,6 @@ def _observe_stale_open_questions(
             key=lambda row: _record_time(row, "at") or datetime.min.replace(tzinfo=timezone.utc),
         )
         matched_questions: set[str] = set()
-        matched_decisions: set[str] = set()
         # Explicit identifiers are authoritative even if timestamps were
         # redacted from a historical projection.
         for question in questions:
@@ -2029,7 +2036,6 @@ def _observe_stale_open_questions(
                 continue
             annotation_id = str(decision.get("annotation_id", ""))
             matched_questions.add(question_id)
-            matched_decisions.add(annotation_id)
             observations.append(
                 {
                     "level": "warn",
@@ -2039,47 +2045,35 @@ def _observe_stale_open_questions(
                     "message": "An open coordinator question has an explicit later decision annotation.",
                     "evidence": f"question_id={question_id}; annotation_id={annotation_id}; match=explicit-id",
                     "next_action": "Coordinator: reconcile the inbox state; the butler does not answer or close it.",
+                    "reconciled": True,
                 }
             )
-        # When identifiers are absent, pair only the latest single unmatched
-        # question before a decision. One decision is never projected as the
-        # answer to multiple questions.
-        for decision in decisions:
-            annotation_id = str(decision.get("annotation_id", ""))
-            if annotation_id in matched_decisions:
+        # A later decision without an explicit question or message ID may be
+        # an answer, but chronology alone cannot prove that relationship.
+        # Report the missing correlation instead of silently pairing records.
+        for question in questions:
+            question_id = str(question.get("question_id", ""))
+            if question_id in matched_questions:
                 continue
-            decided_at = _record_time(decision, "at")
-            if decided_at is None:
-                continue
-            candidates = [
+            asked_at = _record_time(question, "asked_at")
+            later_decisions = [
                 row
-                for row in questions
-                if str(row.get("question_id", "")) not in matched_questions
-                and (asked_at := _record_time(row, "asked_at")) is not None
-                and asked_at < decided_at
+                for row in decisions
+                if asked_at is not None
+                and (decided_at := _record_time(row, "at")) is not None
+                and decided_at > asked_at
             ]
-            if not candidates:
+            if not later_decisions:
                 continue
-            latest = max(candidates, key=lambda row: _record_time(row, "asked_at") or decided_at)
-            latest_at = _record_time(latest, "asked_at")
-            if latest_at is None or sum(
-                1
-                for row in candidates
-                if _record_time(row, "asked_at") == latest_at
-            ) != 1:
-                continue
-            question_id = str(latest.get("question_id", ""))
-            matched_questions.add(question_id)
-            matched_decisions.add(annotation_id)
             observations.append(
                 {
-                    "level": "warn",
+                    "level": "info",
                     "ticket_id": ticket_id,
                     "question_id": question_id,
-                    "annotation_id": annotation_id,
-                    "message": "An open coordinator question is followed by one unambiguous decision annotation.",
-                    "evidence": f"question_id={question_id}; annotation_id={annotation_id}; match=single-latest-open",
-                    "next_action": "Coordinator: verify and reconcile the inbox state; the butler does not answer or close it.",
+                    "message": "A later decision exists, but board state does not explicitly link it to this open question.",
+                    "evidence": f"question_id={question_id}; missing=question-or-message-id-in-decision",
+                    "next_action": "Coordinator: add an explicit correlation before reconciling the inbox; chronology is not treated as an answer.",
+                    "reconciled": False,
                 }
             )
     return observations
@@ -2111,6 +2105,7 @@ def _observe_held_decisions(
                 if (asked_at := _record_time(row, "asked_at")) is not None
                 and asked_at > decided_at
                 and asked_at >= cutoff
+                and _question_matches_decision_identifiers(row, decision)
             ]
             observations.append(
                 {
@@ -2261,6 +2256,8 @@ def derive_board_observations(
                         if value
                     }
                 )
+            if isinstance(candidate.get("reconciled"), bool):
+                row["reconciled"] = candidate["reconciled"]
             findings.append(row)
     if not context.questions_complete or not context.tickets_complete:
         missing = []
@@ -2294,7 +2291,9 @@ def observation_replay_metrics(
     reconciled = {
         str(row.get("question_id"))
         for row in findings
-        if row.get("observer") == "stale_open_question" and row.get("question_id")
+        if row.get("observer") == "stale_open_question"
+        and row.get("reconciled") is True
+        and row.get("question_id")
     }
     rediscovery = {
         str(question_id)
