@@ -172,9 +172,58 @@ parts that are tested but not yet proven against every real host or provider.
 | **Personal import** (`pursers-personal-import`) | One-way, reviewable import from On Board v4 with retry and rollback. |
 | **ACP agent** (`pursers-acp`) | Board assistant for ACP IDE hosts such as Zed: your tickets and offers, board status, permission-gated create and annotate, and live watch. *Preview.* |
 | **Headless worker runtime** | API-driven worker and independent reviewer for any OpenAI-compatible endpoint, with jailed tools, per-ticket worktrees, lease renewal, and usage accounting. *Preview.* |
-| **Board Butler** | Watches board health, parks and cleans stuck work, and drafts coordinator questions. Ships in shadow mode; active mode needs explicit authorization. *Preview.* |
+| **Board Butler** | Refreshes coordinator findings and drafts evidence-backed responses to coordinator questions. A separately authorized active mode can perform two narrow safety actions. *Preview.* |
 | **Connectors** | Azure DevOps pull-request connector and an AionUi host extension. *Preview.* |
 | **Board move** | Export and import a board between Central instances. |
+
+### What Board Butler does
+
+Board Butler is a coordinator-side observer with two narrow safety actions; it
+is not an autonomous fleet operator.
+
+- **Watches:** on each bounded refresh it runs the real coordinator derivation
+  for every active board in `project_registry` and refreshes that board's
+  findings. Inactive registry projects are ignored
+  (`CentralBackend.refresh_registry_findings` in the
+  [implementation](tools/board-butler/board_butler.py), exercised across two
+  boards in the [tests](tools/board-butler/tests/test_board_butler.py)).
+- **Drafts and escalates:** it listens for coordinator questions through the
+  journal push stream, checks current product or repository evidence, and
+  stores a rate-limited draft, durable hold, and evaluation record. Approval or
+  decision questions, scope changes, gate waivers, release actions, membership
+  or registry changes, and incomplete evidence stay with a human. The butler
+  records the reason for escalation; it does not send the answer
+  (`process_question` and `classify_question` in the
+  [implementation](tools/board-butler/board_butler.py), with escalation cases
+  and the absent answer path enforced by the
+  [tests](tools/board-butler/tests/test_board_butler.py)).
+- **Shadow versus active:** shadow is the default and performs no ticket
+  action. Active mode additionally requires a separate owned mode-`0600`
+  authorization, at least one `--act-on-board`, an active registry board, an
+  enabled action class, and a durable hold that expires without a veto. Only
+  then may it park an open ticket after repeated `no_live_candidates` cycles
+  when no live `can_work=true` seat exists, or annotate refusal of a proposed
+  escalation target that is missing or cannot work. It neither cancels the
+  ticket nor assigns the target (`plan_mechanical_actions` and
+  `refresh_registry_findings` in the
+  [implementation](tools/board-butler/board_butler.py), covered by the
+  [mechanical-action tests](tools/board-butler/tests/test_board_butler.py)).
+- **Never does:** it does not merge or push `main`, tag or publish a release,
+  change membership or the project registry, claim/assign/submit work, or
+  answer a blocked seat's question. Those are operator or coordinator duties;
+  the test suite explicitly rejects claim, assign, submit, and question-answer
+  paths in the module
+  ([test](tools/board-butler/tests/test_board_butler.py)).
+
+> **Stale-log finding:** the reported stale `butler.out.log` is a legacy-file
+> mismatch, not a liveness defect. The current launch job and checked-in
+> [service template](tools/board-butler/com.pursers.board-butler.plist.template)
+> send both output streams to `board-butler.log`; on 2026-09-22 that configured
+> log and `runtime.json` advanced together while `butler.out.log` did not.
+> Check the installed job's `StandardOutPath` before treating an old filename
+> as service status. `runtime.json` reports PID, mode, start time, and last
+> activity; Fleet also verifies the pidfile lock and live process, as described
+> in the [Board Butler runbook](tools/board-butler/README.md).
 
 ### Packages
 
