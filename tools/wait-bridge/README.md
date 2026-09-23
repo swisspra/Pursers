@@ -411,6 +411,7 @@ joins another board.
 On a fresh board, `add` creates the registry only if the key is still absent;
 a concurrent creator wins and the command exits without overwriting it. The
 same installed command therefore handles both bootstrap and later edits.
+
 `add` refuses an existing name unless `--force` is supplied. All mutations
 refuse malformed current state, unknown names, relative work directories, and
 empty board IDs before writing. Repository URLs must be credential-free HTTPS
