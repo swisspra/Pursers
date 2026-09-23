@@ -1716,7 +1716,11 @@ def _registry_boards(registry: dict[str, Any]) -> list[str]:
         board_id = project["board_id"]
         if allowed is not None and board_id not in allowed:
             continue
-        if project["status"] == "active" and board_id not in seen:
+        if (
+            project["status"] == "active"
+            and project.get("fleet", True)
+            and board_id not in seen
+        ):
             selected.append(board_id)
             seen.add(board_id)
     return selected
@@ -5733,6 +5737,16 @@ async def _a2a_wait_impl(
     heartbeat runs during the wait. During work outside a2a_wait, renew the
     claim directly. See WORKER-DIRECTIVE.md step DO.
     """
+    # The process-level seat scope is authoritative.  A registry seat must not
+    # be narrowed accidentally by a generated prompt or host that serializes
+    # the currently known board list.  Re-resolving the sentinel on every call
+    # also picks up projects activated after the seat started.
+    configured_scope = os.environ.get("PURSERS_BOARDS", "").strip().casefold()
+    if configured_scope == "registry":
+        boards = "registry"
+    elif configured_scope == "home":
+        boards = [BOARD_ID]
+
     if boards == "registry":
         try:
             registry = await _read_project_registry(client)
@@ -6171,6 +6185,13 @@ async def _wait_for_work_many(
         )
         if joined.get("agent_id") != expected_id:
             raise BoardClientError("server returned an unexpected per-board agent_id")
+        if joined.get("principal_id") != client.identity.principal_id:
+            raise BoardClientError("server returned an unexpected per-board principal_id")
+        if joined.get("agent_name") != call_agent_name:
+            raise BoardClientError("server returned an unexpected per-board agent_name")
+        # Role and capabilities are board-scoped policy.  The join refresh sends
+        # this seat's requested values, but an existing membership may retain
+        # independently configured values and must drive routing on that board.
         views[board_id] = view
         agent_ids[board_id] = expected_id
         wait_for_by_board[board_id] = _resolve_wait_for(

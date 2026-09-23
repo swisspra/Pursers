@@ -1498,6 +1498,28 @@ async def _execute(args: argparse.Namespace) -> None:
         )
     if ROLE != "worker" and args.command == "reject" and not args.fix.strip():
         raise ValueError("reject fix_instructions must be non-empty")
+    registry_mode = (
+        os.environ.get("PURSERS_BOARDS", "").strip().casefold() == "registry"
+    )
+    routed_commands = {
+        "get",
+        "claim",
+        "renew",
+        "submit",
+        "review-claim",
+        "review-release",
+        "verify",
+        "approve",
+        "reject",
+    }
+    if (
+        registry_mode
+        and args.command in routed_commands
+        and not getattr(args, "board", None)
+    ):
+        raise ValueError(
+            f"{args.command} requires --board <event-board-id> in registry mode"
+        )
     loaded = _load_client()
     legacy_client_only = not isinstance(loaded, tuple)
     if legacy_client_only:
@@ -1554,6 +1576,7 @@ async def _execute(args: argparse.Namespace) -> None:
     token = os.environ["ONBOARD_CENTRAL_TOKEN"]
     board_id = os.environ["ONBOARD_BOARD_ID"]
     agent_name = os.environ["ONBOARD_AGENT_NAME"]
+
     async with BoardClient(
         central_url,
         token,

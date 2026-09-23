@@ -425,6 +425,49 @@ class ManualClock:
 
 
 class PushWaitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_registry_environment_cannot_be_narrowed_to_one_board(self) -> None:
+        registry = {
+            "schema_version": 1,
+            "projects": {
+                "home": {
+                    "board_id": wait_server.BOARD_ID,
+                    "work_dir": "/synthetic/home",
+                    "status": "active",
+                },
+                "alpha": {
+                    "board_id": "alpha",
+                    "work_dir": "/synthetic/alpha",
+                    "status": "active",
+                },
+            },
+        }
+        captured: dict[str, Any] = {}
+
+        async def wait_many(_client: object, **arguments: Any) -> dict[str, Any]:
+            captured.update(arguments)
+            return {
+                "new_seq": {wait_server.BOARD_ID: 9, "alpha": 4},
+                "events": [],
+                "timed_out": True,
+                "reason": "timeout",
+            }
+
+        with (
+            patch.dict(os.environ, {"PURSERS_BOARDS": "registry"}),
+            patch.object(wait_server, "_read_project_registry", return_value=registry),
+            patch.object(wait_server, "_wait_for_work_many", side_effect=wait_many),
+        ):
+            result = await wait_server._a2a_wait_impl(
+                object(),
+                boards=[wait_server.BOARD_ID],
+                since_seq={wait_server.BOARD_ID: 9},
+                timeout_s=1,
+                wait_for="claimable",
+            )
+
+        self.assertEqual(captured["boards"], [wait_server.BOARD_ID, "alpha"])
+        self.assertEqual(result["new_seq"], {wait_server.BOARD_ID: 9, "alpha": 4})
+
     async def test_worker_and_reviewer_held_event_wake_matrix(self) -> None:
         client = SimpleNamespace(board_id=wait_server.BOARD_ID)
         for wait_for, mine in (

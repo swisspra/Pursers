@@ -769,6 +769,61 @@ def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
     }
 
 
+def test_agent_scope_uses_durable_registry_mode_and_observed_coverage() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+
+    def row(board_id: str) -> dict:
+        return {
+            "label": board_id,
+            "board_id": board_id,
+            "snapshot": {
+                "agents": [{
+                    "principal_id": "PR-registry",
+                    "agent_name": "worker-registry",
+                    "agent_id": f"AI-{board_id}",
+                    "last_activity_at": now.isoformat(),
+                    "lifecycle_status": "active",
+                    "role": "worker",
+                }],
+                "tickets": [],
+            },
+            "events": [],
+        }
+
+    definition = {
+        "worker-registry": {
+            "principal_id": "PR-registry",
+            "role": "worker",
+            "board_mode": "registry",
+        }
+    }
+    partial = dashboard.aggregate_fleet(
+        [row("pursers")],
+        stale_seconds=300,
+        now=now,
+        seat_definitions=definition,
+        active_registry_boards=["alpha", "pursers"],
+    )["agents"][0]["board_scope"]
+    assert partial == {
+        "mode": "registry",
+        "status": "partial",
+        "active_boards": ["alpha", "pursers"],
+        "joined_boards": ["pursers"],
+        "missing_boards": ["alpha"],
+        "extra_boards": [],
+    }
+
+    full = dashboard.aggregate_fleet(
+        [row("pursers"), row("alpha")],
+        stale_seconds=300,
+        now=now,
+        seat_definitions=definition,
+        active_registry_boards=["alpha", "pursers"],
+    )["agents"][0]["board_scope"]
+    assert full["status"] == "full"
+    assert full["missing_boards"] == []
+
+
 def test_retired_and_stale_seats_are_outside_active_pool() -> None:
     now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
     rows = [
@@ -7567,14 +7622,21 @@ def _extract_js_function(html: str, name: str) -> str:
     return match.group(0)
 
 
-def _run_js_with_seats(esc_fn: str, render_fn: str, seats: list[dict], fallback: str = "worker") -> str:
+def _run_js_with_seats(
+    esc_fn: str,
+    render_fn: str,
+    seats: list[dict],
+    fallback: str = "worker",
+    scope: dict | None = None,
+) -> str:
     """Execute renderRoleChips with given seats in node and return stdout."""
     seats_json = json.dumps(seats)
     fallback_json = json.dumps(fallback)
+    scope_json = json.dumps(scope)
     script = (
         f"{esc_fn};\n"
         f"{render_fn};\n"
-        f"console.log(renderRoleChips({seats_json},{fallback_json}));\n"
+        f"console.log(renderRoleChips({seats_json},{fallback_json},{scope_json}));\n"
     )
     result = subprocess.run(
         ["node", "-e", script],
@@ -7631,13 +7693,23 @@ def test_render_role_chips_differing_roles_produce_labeled_per_board_chips(_role
 
 
 def test_render_role_chips_identical_roles_collapse_to_single_chip(_role_chip_js):
-    """Identical roles on every board collapse to one '(all boards)' chip."""
+    """Only verified full registry coverage earns the '(all boards)' chip."""
     esc_fn, render_fn = _role_chip_js
     seats = [
         {"board_id": "board-a", "role": "worker"},
         {"board_id": "board-b", "role": "worker"},
     ]
-    html = _run_js_with_seats(esc_fn, render_fn, seats)
+    html = _run_js_with_seats(
+        esc_fn,
+        render_fn,
+        seats,
+        scope={
+            "mode": "registry",
+            "status": "full",
+            "active_boards": ["board-a", "board-b"],
+            "joined_boards": ["board-a", "board-b"],
+        },
+    )
 
     # Single role-chip span
     assert html.count('class="role-chip"') == 1
@@ -7646,6 +7718,41 @@ def test_render_role_chips_identical_roles_collapse_to_single_chip(_role_chip_js
     # Board names are in the title attribute
     assert "board-a" in html
     assert "board-b" in html
+
+
+def test_render_role_chips_one_board_never_claims_all_boards(_role_chip_js):
+    esc_fn, render_fn = _role_chip_js
+    html = _run_js_with_seats(
+        esc_fn,
+        render_fn,
+        [{"board_id": "pursers", "role": "worker"}],
+        scope={
+            "mode": "registry",
+            "status": "full",
+            "active_boards": ["pursers"],
+            "joined_boards": ["pursers"],
+        },
+    )
+    assert "(all boards)" not in html
+    assert '<span class="chip-board">pursers</span>' in html
+
+
+def test_render_role_chips_partial_registry_names_missing_board(_role_chip_js):
+    esc_fn, render_fn = _role_chip_js
+    html = _run_js_with_seats(
+        esc_fn,
+        render_fn,
+        [{"board_id": "pursers", "role": "worker"}],
+        scope={
+            "mode": "registry",
+            "status": "partial",
+            "active_boards": ["pursers", "alpha"],
+            "joined_boards": ["pursers"],
+            "missing_boards": ["alpha"],
+        },
+    )
+    assert "(all boards)" not in html
+    assert "partial registry · missing alpha" in html
 
 
 def test_render_role_chips_hostile_board_names_are_escaped(_role_chip_js):
