@@ -85,6 +85,7 @@ Normative JSON Schemas are committed beside this document:
 - [`schemas/autonomous-butler-state-v1.schema.json`](schemas/autonomous-butler-state-v1.schema.json)
 - [`schemas/autonomous-butler-executor-v1.schema.json`](schemas/autonomous-butler-executor-v1.schema.json)
 - [`schemas/autonomous-butler-audit-v1.schema.json`](schemas/autonomous-butler-audit-v1.schema.json)
+- [`schemas/autonomous-butler-model-v1.schema.json`](schemas/autonomous-butler-model-v1.schema.json)
 
 All schemas reject unknown fields. Identifiers are opaque bounded strings;
 secret references are `secret_ref` identifiers, never paths or values. Times
@@ -98,10 +99,14 @@ sum-of-roles concurrency limits that portable JSON Schema cannot express.
 ### Configuration and immutable envelope
 
 `autonomous_butler_config_v1` is stored per board under coordinator-managed
-state. The mutable desired section selects `shadow` or `autonomous`, runner,
-counts, cooldowns, budgets, and connector enablement. The human-owned envelope
-contains approved template IDs, connector IDs, and maximums. Butler may reduce
-desired values or request an allowed value; it cannot edit the envelope.
+state. Its required top-level `enabled` boolean is the one authoritative
+per-board enable signal. `desired.mode=autonomous` requires `enabled=true` and
+an `authorization`; `enabled=false` requires `desired.mode=shadow`. The mutable
+desired section selects mode, runner, counts, cooldowns, budgets, and connector
+enablement. The human-owned envelope contains approved template IDs, connector
+IDs, and maximums. Butler may reduce desired values or request an allowed value;
+it cannot edit the envelope. There is no second enable flag in legacy config,
+authorization, local files, or runtime state.
 
 The config references human-owned `host_runtime` values. Its
 `agent_process_ceiling` caps the combined worker, reviewer, and ACP-worker
@@ -186,7 +191,12 @@ accepted/pending/applying ----------> cancelled
 request. `succeeded` requires product-produced actual state proving the effect.
 `cancelled` while applying means cancellation was requested; the result must
 say whether the executor reached a commit point. Terminal states never reopen.
-Every transition records the prior revision, actor, reason code, and audit ID.
+Every command snapshot has a required typed `transition` record containing
+`prior_revision`, `current_revision`, `actor_id`, `reason_code`, `audit_id`, and
+`occurred_at`. `current_revision` equals the command's top-level `revision`;
+accepted creation uses prior revision zero, and every later transition advances
+exactly one revision. The linked audit record has the same actor, reason, and
+command ID. Missing or inconsistent transition evidence rejects the write.
 
 The command ID is the idempotency key. Replays with identical canonical bytes
 return the existing command. Reuse with different bytes is rejected. Commands
@@ -257,14 +267,29 @@ Decision, deliverable, approval, waiver, scope, version, release, merge,
 membership, registry, secret, and ambiguous questions always escalate. Butler
 cannot answer a question it asked or one concerning approval of its own work.
 
-The direct API and ACP adapters implement the same request/result contract:
-board and question IDs, policy digest, evidence references, maximum output and
-usage, deadline, cancellation token, and a task-specific schema. Returned text
-cannot choose tools or authority. The deterministic layer verifies citations,
+The direct API and ACP adapters implement the same strict
+`autonomous_butler_model_v1` request/result envelope. A request binds its ID,
+board, subject, task kind, policy digest, bounded task input plus its canonical
+digest, evidence references, output byte cap, token/cost maxima, deadline,
+opaque cancellation token, and the ID plus SHA-256 of the task-specific output
+schema. A result binds the same request, board, and
+policy digest; returns bounded `proposal_json` or a typed failure; carries
+bounded citation references; and reports measured input, output, total-token,
+and cost usage. `measured=false`, missing usage, arithmetic inconsistency, or
+usage beyond the reservation fails closed in semantic validation. The proposal
+JSON text is parsed only after its byte cap and must validate against the
+request's exact task schema before any policy decision; it cannot choose tools
+or authority. The common `task_input` itself is strict: bounded instruction,
+observation references, and constraints only.
+
+Cancellation is keyed only by the request's opaque cancellation token. The
+adapter checks it before provider dispatch and before returning a proposal;
+late provider output is discarded. The deterministic layer verifies citations,
 redacts, applies the hold/veto window, rechecks question state and CAS, and only
-then calls Central's answer path. Timeout, malformed output, missing usage,
-policy digest drift, or cancellation yields a fixed escalation without a
-partial answer.
+then calls Central's answer path. Timeout, malformed output, policy-digest
+drift, cancellation, missing citations, or provider error yields a result with
+`proposal_json=null`, a fixed bounded `reason_code`, and a typed error category/code/
+retryability record, never a partial answer.
 
 Provider selection is per board. Provider credentials are resolved in the
 adapter process from private references and are absent from task packets,
@@ -276,19 +301,26 @@ policy, authority, or replay identity.
 Each connector declaration fixes transport (`stdio` or `streamable_http`), MCP
 protocol revision, endpoint/command reference, secret reference, exact tool and
 resource allowlists, input/output byte limits, timeout, concurrency, and rate
-limit. Unknown protocol revisions and transports fail validation. HTTP must use
-TLS except explicit loopback; redirects, DNS rebinding, and credential forwarding
-to another origin are rejected. Stdio uses an approved executable reference,
-not a shell string.
+limit. Every tool entry is a typed declaration with `effect=read_only|mutating`,
+`replay=safe_with_stable_call_id|never`, and a nullable
+`stable_call_id_field`. Safe replay requires a named field; `never` requires
+null. The call ID is derived once from board, connector, command/operation, tool
+name, and canonical arguments, is persisted before dispatch, and is supplied in
+that declared input field. A changed payload under the same call ID is a policy
+violation. Unknown protocol revisions and transports fail validation. HTTP must
+use TLS except explicit loopback; redirects, DNS rebinding, and credential
+forwarding to another origin are rejected. Stdio uses an approved executable
+reference, not a shell string.
 
 Discovery is filtered before exposure to the planner. A requested name and
 argument object are validated against both the declaration and discovered
 schema. Results are capped before full parsing, stripped of untrusted `_meta`
 authority hints, redacted, and stored only as bounded evidence. Tool output
 cannot add another tool call, change policy, or become a command. Cancellation
-and timeout terminate only that call. Reconnect uses bounded backoff and does
-not replay a mutating tool unless its declaration marks it idempotent and
-provides a stable call ID.
+and timeout terminate only that call. Reconnect uses bounded backoff. A
+mutating tool declared `replay=never` is never retried after an ambiguous
+result; one declared `safe_with_stable_call_id` may be queried or replayed only
+with the persisted identical stable call ID and canonical bytes.
 
 Risky tools require the separately implemented command/config policy gate from
 `TK-9a70ac2d1bfa`; an allowlist alone is insufficient. Connector health is an
@@ -299,10 +331,25 @@ observation with last-success and last-failure times, never proof of authority.
 `autonomous_butler_executor_v1` defines requests and results. Allowed actions
 are `inspect`, `start`, `drain`, and `stop`; there is no arbitrary command.
 Requests bind board, operation ID, seat/template IDs, expected seat generation,
-deadline, and authorization fingerprint. The executor independently loads the
-approved template, verifies its digest and local ceiling, uses private paths,
-and returns opaque process/checkout handles. Results never include environment,
-command lines containing secrets, credential contents, or private paths.
+deadline, and authorization fingerprint. Every request also carries required
+`caller_auth` using `local_ed25519_v1`: allowlisted local `key_id`, single-use
+nonce, signing time, canonical request digest, and Ed25519 signature. The digest
+is SHA-256 over RFC 8785 canonical JSON of the request with `caller_auth`
+omitted. The signature covers the ASCII context `pursers-executor-v1`, a zero
+byte, the 64-hex digest, a zero byte, and the UTF-8 `key_id`, `nonce`, and
+`signed_at` values separated by zero bytes. The executor accepts
+only keys pinned in operator-owned local configuration, rejects timestamps
+outside the configured narrow skew window, and durably reserves `(key_id,
+nonce)` before mutation. Nonce reuse with different bytes is a policy breach;
+an identical `operation_id` plus digest returns the stored result with
+`replayed=true`. Result envelopes repeat the verified request digest. Transport
+must be an owner-only local Unix socket; TCP and inherited board credentials
+are forbidden.
+
+The executor independently loads the approved template, verifies its digest and
+local ceiling, uses private paths, and returns opaque process/checkout handles.
+Results never include environment, command lines containing secrets,
+credential contents, or private paths.
 
 The executor cannot onboard a new principal or issue a credential. A template
 must already bind an administrator-created principal and credential reference.
@@ -386,7 +433,7 @@ confirmation behavior must satisfy WCAG 2.1 AA tests in the Fleet ticket.
 | `TK-9a70ac2d1bfa` | config, command lifecycle, immutable envelope, CAS rules | durable typed commands/config writes and risky-action policy gate |
 | `TK-44fe76f801a1` | connector declaration and isolation rules | provider-neutral MCP v2 adapters, health, allowlists, redaction |
 | `TK-24a185575384` | desired/actual model, state machine, ceilings, reconciliation | convergent board reconciler using executor operations |
-| `TK-e226eae0e17b` | common model request/result contract | direct API and ACP adapters with identical policy boundary |
+| `TK-e226eae0e17b` | strict `autonomous_butler_model_v1` request/result contract | direct API and ACP adapters with identical policy boundary |
 | `TK-3d68c7f28774` | executor schema and lifecycle limits | host-local idempotent inspect/start/drain/stop service |
 | `TK-f0c240e31c94` | all schemas and dashboard truth contract | CAS-safe Fleet surfaces, controls, accessibility and secret-redaction tests |
 | `TK-e15da805bb28` | all independently approved implementations | end-to-end proof from ticket arrival through independent review |
@@ -401,6 +448,11 @@ Unit/property tests validate every schema, unknown-key rejection, bounds,
 cross-field counts, immutable-envelope checks, and redaction corpus. State
 machine tests cover every legal transition and reject terminal reopening,
 stale CAS, changed idempotency payloads, ceiling increases, and false success.
+Contract-negative fixtures additionally reject autonomous mode without the
+required enable/authorization pair, model results without measured usage,
+connector safe replay without a stable call-ID field, executor requests without
+caller authentication, nonce or signature, and command snapshots without the
+complete prior/current transition record.
 
 Integration tests use fake direct-API, ACP, MCP stdio, MCP HTTP, Central, and
 executor servers. They cover cancellation, disconnect after commit, discovery
@@ -435,6 +487,9 @@ review; and proves Butler never receives work/review/merge/release authority.
   merge, publish, and release remain outside Butler.
 - Direct API, ACP, MCP, Fleet, and the host executor cannot bypass the same
   deterministic policy envelope.
+- The common model adapter, connector replay declaration, executor caller
+  authentication, autonomous enable signal, and command transition evidence
+  are strict committed schemas rather than prose-only promises.
 - Failure and replay rules cover ambiguous external effects and restart.
 - Successor tickets have non-overlapping outputs and named dependencies.
 - The design contains no credential value, private host path, version bump, or

@@ -9,10 +9,23 @@
   "$defs": {
     "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "callerAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheme", "key_id", "nonce", "signed_at", "request_digest_sha256", "signature_base64"],
+      "properties": {
+        "scheme": {"const": "local_ed25519_v1"},
+        "key_id": {"$ref": "#/$defs/id"},
+        "nonce": {"$ref": "#/$defs/id"},
+        "signed_at": {"type": "string", "format": "date-time"},
+        "request_digest_sha256": {"$ref": "#/$defs/sha256"},
+        "signature_base64": {"type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$"}
+      }
+    },
     "request": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "message_type", "operation_id", "board_id", "action", "seat_id", "template_id", "template_digest_sha256", "expected_seat_generation", "authorization_fingerprint_sha256", "deadline"],
+      "required": ["schema", "schema_version", "message_type", "operation_id", "board_id", "action", "seat_id", "template_id", "template_digest_sha256", "expected_seat_generation", "authorization_fingerprint_sha256", "deadline", "caller_auth"],
       "properties": {
         "schema": {"const": "autonomous_butler_executor_v1"},
         "schema_version": {"const": 1},
@@ -25,19 +38,22 @@
         "template_digest_sha256": {"$ref": "#/$defs/sha256"},
         "expected_seat_generation": {"type": "integer", "minimum": 1},
         "authorization_fingerprint_sha256": {"$ref": "#/$defs/sha256"},
-        "deadline": {"type": "string", "format": "date-time"}
+        "deadline": {"type": "string", "format": "date-time"},
+        "caller_auth": {"$ref": "#/$defs/callerAuth"}
       }
     },
     "result": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "message_type", "operation_id", "board_id", "outcome", "committed", "observed_at"],
+      "required": ["schema", "schema_version", "message_type", "operation_id", "board_id", "request_digest_sha256", "replayed", "outcome", "committed", "observed_at"],
       "properties": {
         "schema": {"const": "autonomous_butler_executor_v1"},
         "schema_version": {"const": 1},
         "message_type": {"const": "result"},
         "operation_id": {"$ref": "#/$defs/id"},
         "board_id": {"$ref": "#/$defs/id"},
+        "request_digest_sha256": {"$ref": "#/$defs/sha256"},
+        "replayed": {"type": "boolean"},
         "outcome": {"enum": ["succeeded", "rejected", "failed", "cancelled", "unknown"]},
         "committed": {"type": "boolean"},
         "observed_at": {"type": "string", "format": "date-time"},

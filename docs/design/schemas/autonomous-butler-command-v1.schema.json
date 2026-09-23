@@ -4,7 +4,7 @@
   "title": "Autonomous Butler durable command v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "schema_version", "command_id", "board_id", "kind", "actor_id", "created_at", "expected_config_revision", "payload", "state", "revision"],
+  "required": ["schema", "schema_version", "command_id", "board_id", "kind", "actor_id", "created_at", "expected_config_revision", "payload", "state", "revision", "transition"],
   "properties": {
     "schema": {"const": "autonomous_butler_command_v1"},
     "schema_version": {"const": 1},
@@ -29,6 +29,7 @@
     },
     "state": {"enum": ["accepted", "validating", "pending", "applying", "succeeded", "rejected", "failed", "cancelled"]},
     "revision": {"type": "integer", "minimum": 1},
+    "transition": {"$ref": "#/$defs/transition"},
     "seat_generation": {"type": "integer", "minimum": 1},
     "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
     "result_ref": {"$ref": "#/$defs/id"},
@@ -37,6 +38,19 @@
   },
   "$defs": {
     "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
-    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prior_revision", "current_revision", "actor_id", "reason_code", "audit_id", "occurred_at"],
+      "properties": {
+        "prior_revision": {"type": "integer", "minimum": 0},
+        "current_revision": {"type": "integer", "minimum": 1},
+        "actor_id": {"$ref": "#/$defs/id"},
+        "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+        "audit_id": {"$ref": "#/$defs/id"},
+        "occurred_at": {"type": "string", "format": "date-time"}
+      }
+    }
   }
 }

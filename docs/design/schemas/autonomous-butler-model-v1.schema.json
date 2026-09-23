@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pursers.invalid/schemas/autonomous-butler-model-v1.schema.json",
+  "title": "Autonomous Butler common model adapter envelope v1",
+  "oneOf": [
+    {"$ref": "#/$defs/request"},
+    {"$ref": "#/$defs/result"}
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "usageLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_input_tokens", "max_output_tokens", "max_cost_microunits"],
+      "properties": {
+        "max_input_tokens": {"type": "integer", "minimum": 1, "maximum": 10000000},
+        "max_output_tokens": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "max_cost_microunits": {"type": "integer", "minimum": 0, "maximum": 1000000000000}
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_tokens", "output_tokens", "total_tokens", "cost_microunits", "measured"],
+      "properties": {
+        "input_tokens": {"type": "integer", "minimum": 0, "maximum": 10000000},
+        "output_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "total_tokens": {"type": "integer", "minimum": 0, "maximum": 11000000},
+        "cost_microunits": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "measured": {"const": true}
+      }
+    },
+    "taskSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_id", "schema_sha256"],
+      "properties": {
+        "schema_id": {"$ref": "#/$defs/id"},
+        "schema_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "taskInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instruction", "observation_refs", "constraints"],
+      "properties": {
+        "instruction": {"type": "string", "minLength": 1, "maxLength": 20000},
+        "observation_refs": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "constraints": {"type": "array", "maxItems": 100, "items": {"type": "string", "minLength": 1, "maxLength": 500}}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "code", "retryable"],
+      "properties": {
+        "category": {"enum": ["cancelled", "timeout", "provider", "malformed", "policy", "budget"]},
+        "code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+        "retryable": {"type": "boolean"}
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "message_type", "request_id", "board_id", "subject_id", "task_kind", "policy_digest_sha256", "task_input", "task_input_digest_sha256", "task_schema", "evidence_refs", "max_output_bytes", "usage_limit", "deadline", "cancellation_token"],
+      "properties": {
+        "schema": {"const": "autonomous_butler_model_v1"},
+        "schema_version": {"const": 1},
+        "message_type": {"const": "request"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "board_id": {"$ref": "#/$defs/id"},
+        "subject_id": {"$ref": "#/$defs/id"},
+        "task_kind": {"enum": ["answer_question", "classify_command", "plan_reconciliation"]},
+        "policy_digest_sha256": {"$ref": "#/$defs/sha256"},
+        "task_input": {"$ref": "#/$defs/taskInput"},
+        "task_input_digest_sha256": {"$ref": "#/$defs/sha256"},
+        "task_schema": {"$ref": "#/$defs/taskSchema"},
+        "evidence_refs": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "usage_limit": {"$ref": "#/$defs/usageLimit"},
+        "deadline": {"type": "string", "format": "date-time"},
+        "cancellation_token": {"$ref": "#/$defs/id"}
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "message_type", "request_id", "board_id", "policy_digest_sha256", "outcome", "proposal_json", "citations", "usage", "completed_at", "error"],
+      "properties": {
+        "schema": {"const": "autonomous_butler_model_v1"},
+        "schema_version": {"const": 1},
+        "message_type": {"const": "result"},
+        "request_id": {"$ref": "#/$defs/id"},
+        "board_id": {"$ref": "#/$defs/id"},
+        "policy_digest_sha256": {"$ref": "#/$defs/sha256"},
+        "outcome": {"enum": ["succeeded", "escalated", "cancelled", "failed"]},
+        "proposal_json": {"oneOf": [{"type": "string", "minLength": 2, "maxLength": 1048576}, {"type": "null"}]},
+        "citations": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "usage": {"$ref": "#/$defs/usage"},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+        "provider_request_ref": {"$ref": "#/$defs/id"},
+        "error": {"oneOf": [{"$ref": "#/$defs/error"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"outcome": {"const": "succeeded"}}, "required": ["outcome"]},
+          "then": {"properties": {"proposal_json": {"type": "string", "minLength": 2}, "error": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"outcome": {"enum": ["escalated", "cancelled", "failed"]}}, "required": ["outcome"]},
+          "then": {"required": ["reason_code"], "properties": {"proposal_json": {"type": "null"}, "error": {"$ref": "#/$defs/error"}}}
+        },
+        {
+          "if": {"properties": {"outcome": {"const": "cancelled"}}, "required": ["outcome"]},
+          "then": {"properties": {"error": {"properties": {"category": {"const": "cancelled"}}, "required": ["category"]}}}
+        }
+      ]
+    }
+  }
+}

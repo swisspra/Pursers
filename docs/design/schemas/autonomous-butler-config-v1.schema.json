@@ -4,17 +4,28 @@
   "title": "Autonomous Butler board configuration v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "schema_version", "board_id", "revision", "host_runtime", "desired", "envelope"],
+  "required": ["schema", "schema_version", "board_id", "revision", "enabled", "host_runtime", "desired", "envelope"],
   "properties": {
     "schema": {"const": "autonomous_butler_config_v1"},
     "schema_version": {"const": 1},
     "board_id": {"$ref": "#/$defs/id"},
     "revision": {"type": "integer", "minimum": 1},
+    "enabled": {"type": "boolean"},
     "host_runtime": {"$ref": "#/$defs/hostRuntime"},
     "desired": {"$ref": "#/$defs/desired"},
     "envelope": {"$ref": "#/$defs/envelope"},
     "authorization": {"$ref": "#/$defs/authorization"}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"desired": {"properties": {"mode": {"const": "autonomous"}}, "required": ["mode"]}}},
+      "then": {"properties": {"enabled": {"const": true}}, "required": ["authorization"]}
+    },
+    {
+      "if": {"properties": {"enabled": {"const": false}}, "required": ["enabled"]},
+      "then": {"properties": {"desired": {"properties": {"mode": {"const": "shadow"}}, "required": ["mode"]}}}
+    }
+  ],
   "$defs": {
     "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -64,7 +75,7 @@
         "protocol_revision": {"type": "string", "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}$"},
         "endpoint_ref": {"$ref": "#/$defs/id"},
         "secret_ref": {"oneOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
-        "tools": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "tools": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/toolDeclaration"}},
         "resources": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 300}},
         "risky_tools": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
         "limits": {
@@ -80,6 +91,31 @@
           }
         }
       }
+    },
+    "toolDeclaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "effect", "replay", "stable_call_id_field"],
+      "properties": {
+        "name": {"$ref": "#/$defs/id"},
+        "effect": {"enum": ["read_only", "mutating"]},
+        "replay": {"enum": ["safe_with_stable_call_id", "never"]},
+        "stable_call_id_field": {"oneOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"replay": {"const": "safe_with_stable_call_id"}}, "required": ["replay"]},
+          "then": {"properties": {"stable_call_id_field": {"$ref": "#/$defs/id"}}}
+        },
+        {
+          "if": {"properties": {"replay": {"const": "never"}}, "required": ["replay"]},
+          "then": {"properties": {"stable_call_id_field": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"effect": {"const": "read_only"}}, "required": ["effect"]},
+          "then": {"properties": {"replay": {"const": "safe_with_stable_call_id"}}}
+        }
+      ]
     },
     "desired": {
       "type": "object",
