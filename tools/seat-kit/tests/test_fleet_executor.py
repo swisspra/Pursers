@@ -445,6 +445,60 @@ def test_file_lease_provider_fails_closed_on_stale_or_missing_state(tmp_path: Pa
     assert provider.observe("pursers", "missing") == executor.LeaseObservation(False)
 
 
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"stale_after": "2030-01-01T12:01:00+00:00", "review": False},
+        {
+            "stale_after": "2030-01-01T12:01:00+00:00",
+            "work": 0,
+            "review": False,
+        },
+        {
+            "stale_after": "2030-01-01T12:01:00+00:00",
+            "work": False,
+            "review": False,
+            "unexpected": False,
+        },
+    ],
+)
+def test_file_lease_provider_rejects_incomplete_or_mistyped_records(
+    tmp_path: Path, record: dict[str, Any]
+) -> None:
+    path = tmp_path / "leases.json"
+    path.write_text(
+        json.dumps({"boards": {"pursers": {"seats": {"worker-a": record}}}}),
+        encoding="utf-8",
+    )
+    provider = executor.FileLeaseProvider(path, clock=lambda: NOW)
+    assert provider.observe("pursers", "worker-a") == executor.LeaseObservation(False)
+
+
+def test_file_lease_provider_rejects_untrusted_file_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "leases.json"
+    path.write_text(
+        json.dumps(
+            {
+                "boards": {
+                    "pursers": {
+                        "seats": {
+                            "worker-a": {
+                                "stale_after": "2030-01-01T12:01:00+00:00",
+                                "work": False,
+                                "review": False,
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o666)
+    provider = executor.FileLeaseProvider(path, clock=lambda: NOW)
+    assert provider.observe("pursers", "worker-a") == executor.LeaseObservation(False)
+
+
 def test_registry_readiness_checks_every_selected_active_board(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     seat_root = tmp_path / "seat"
@@ -524,10 +578,33 @@ def test_registry_readiness_fails_closed_on_stale_or_untrusted_snapshot(
 def test_systemd_adapter_uses_argument_vector_and_detects_unit_drift(tmp_path: Path) -> None:
     calls: list[list[str]] = []
 
+    proc = tmp_path / "proc" / "123"
+    proc.mkdir(parents=True)
+    (proc / "exe").symlink_to(Path(sys.executable).resolve())
+    (proc / "cmdline").write_bytes(
+        b"\0".join(item.encode() for item in (sys.executable, "-c", "raise SystemExit(0)"))
+        + b"\0"
+    )
+    (proc / "stat").write_text(
+        "123 (python worker) " + " ".join(["S", *("0" for _ in range(18)), "456"]),
+        encoding="utf-8",
+    )
+
     def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         if "show" in command:
-            return subprocess.CompletedProcess(command, 0, "loaded\nactive\nrunning\n123\n", "")
+            unit_name = command[3]
+            control_group = f"/test.slice/{unit_name}"
+            (proc / "cgroup").write_text(f"0::{control_group}\n", encoding="utf-8")
+            unit_path = tmp_path / "systemd" / unit_name
+            output = (
+                "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=123\n"
+                f"FragmentPath={unit_path}\nDropInPaths=\n"
+                f"ExecStart={{ path={sys.executable} ; argv[]={sys.executable} -c "
+                '"raise SystemExit(0)" ; ignore_errors=no ; start_time=[n/a] ; }}\n'
+                f"ControlGroup={control_group}\n"
+            )
+            return subprocess.CompletedProcess(command, 0, output, "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
     repository = tmp_path / "repository"
@@ -542,6 +619,7 @@ def test_systemd_adapter_uses_argument_vector_and_detects_unit_drift(tmp_path: P
         tmp_path / "drain",
         {"credential.worker-a": tmp_path / "worker-a.env"},
         runner=runner,
+        proc_root=tmp_path / "proc",
     )
     (tmp_path / "worker-a.env").write_text("", encoding="utf-8")
     adapter.instantiate("worker-a", template)
@@ -556,6 +634,46 @@ def test_systemd_adapter_uses_argument_vector_and_detects_unit_drift(tmp_path: P
     assert f'EnvironmentFile="{tmp_path / "worker-a.env"}"' in unit.read_text()
     unit.write_text(unit.read_text() + "# drift\n", encoding="utf-8")
     assert adapter.inspect("worker-a", template).identity_verified is False
+
+
+def test_systemd_adapter_rejects_effective_dropin_execstart_drift(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    seat = tmp_path / "seat"
+    repository.mkdir()
+    seat.mkdir()
+    template = executor.SeatTemplate.from_record(
+        "worker-standard", template_record(repository, seat)
+    )
+    unit_dir = tmp_path / "systemd"
+    unit_name = executor.SystemdUserAdapter._unit_name("worker-a")
+
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        if "show" not in command:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        output = (
+            "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=4321\n"
+            f"FragmentPath={unit_dir / unit_name}\n"
+            f"DropInPaths={unit_dir / (unit_name + '.d') / 'override.conf'}\n"
+            "ExecStart={ path=/usr/bin/false ; argv[]=/usr/bin/false ; "
+            "ignore_errors=no ; start_time=[n/a] ; }\n"
+            f"ControlGroup=/test.slice/{unit_name}\n"
+        )
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    adapter = executor.SystemdUserAdapter(
+        unit_dir,
+        tmp_path / "drain",
+        {"credential.worker-a": tmp_path / "worker-a.env"},
+        runner=runner,
+        proc_root=tmp_path / "proc",
+    )
+    (tmp_path / "worker-a.env").write_text("", encoding="utf-8")
+    adapter.instantiate("worker-a", template)
+    observation = adapter.inspect("worker-a", template)
+    assert observation.running
+    assert not observation.ready
+    assert not observation.identity_verified
+    assert observation.process_ref is None
 
 
 def test_systemd_unit_names_do_not_alias_colon_and_dash_seat_ids() -> None:

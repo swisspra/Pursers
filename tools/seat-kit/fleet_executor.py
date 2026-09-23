@@ -17,6 +17,7 @@ import hmac
 import json
 import os
 import re
+import shlex
 import sqlite3
 import stat
 import subprocess
@@ -286,23 +287,72 @@ class ReceiptPublisher(Protocol):
 class FileLeaseProvider:
     """Read a bounded, product-produced lease snapshot without board credentials."""
 
-    def __init__(self, path: Path, *, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        clock: Callable[[], float] = time.time,
+        max_bytes: int = 1024 * 1024,
+    ) -> None:
         self.path = path
         self.clock = clock
+        self.max_bytes = max_bytes
 
     def observe(self, board_id: str, seat_id: str) -> LeaseObservation:
         try:
-            value = json.loads(self.path.read_text(encoding="utf-8"))
-            record = value["boards"][board_id]["seats"][seat_id]
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(self.path, flags)
+            try:
+                info = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or info.st_nlink != 1
+                    or info.st_size > self.max_bytes
+                    or info.st_mode & 0o022
+                ):
+                    raise PolicyError("lease_snapshot_untrusted")
+                raw = os.read(descriptor, self.max_bytes + 1)
+                if len(raw) > self.max_bytes or os.read(descriptor, 1):
+                    raise PolicyError("lease_snapshot_untrusted")
+            finally:
+                os.close(descriptor)
+            value = json.loads(raw)
+            if not isinstance(value, dict) or set(value) != {"boards"}:
+                raise PolicyError("lease_snapshot_invalid")
+            boards = value["boards"]
+            if not isinstance(boards, dict):
+                raise PolicyError("lease_snapshot_invalid")
+            board = boards[board_id]
+            if not isinstance(board, dict) or set(board) != {"seats"}:
+                raise PolicyError("lease_snapshot_invalid")
+            seats = board["seats"]
+            if not isinstance(seats, dict):
+                raise PolicyError("lease_snapshot_invalid")
+            record = seats[seat_id]
+            if (
+                not isinstance(record, dict)
+                or set(record) != {"stale_after", "work", "review"}
+                or not isinstance(record["work"], bool)
+                or not isinstance(record["review"], bool)
+            ):
+                raise PolicyError("lease_snapshot_invalid")
             stale_after = _parse_time(record["stale_after"], "stale_after").timestamp()
             if stale_after < self.clock():
                 return LeaseObservation(False)
             return LeaseObservation(
                 True,
-                live_work=record.get("work") is True,
-                live_review=record.get("review") is True,
+                live_work=record["work"],
+                live_review=record["review"],
             )
-        except (OSError, KeyError, TypeError, json.JSONDecodeError, PolicyError):
+        except (
+            OSError,
+            KeyError,
+            TypeError,
+            UnicodeError,
+            json.JSONDecodeError,
+            PolicyError,
+        ):
             return LeaseObservation(False)
 
 
@@ -578,11 +628,13 @@ class SystemdUserAdapter:
         credential_paths: Mapping[str, Path],
         *,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        proc_root: Path = Path("/proc"),
     ) -> None:
         self.unit_dir = unit_dir
         self.drain_dir = drain_dir
         self.credential_paths = credential_paths
         self.runner = runner
+        self.proc_root = proc_root
 
     @staticmethod
     def _unit_name(seat_id: str) -> str:
@@ -617,6 +669,67 @@ class SystemdUserAdapter:
             ["systemctl", "--user", *args], check=False, text=True, capture_output=True
         )
 
+    @staticmethod
+    def _show_properties(output: str) -> dict[str, str]:
+        properties: dict[str, str] = {}
+        for line in output.splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or not key or key in properties:
+                raise ValueError("systemd_show_invalid")
+            properties[key] = value
+        return properties
+
+    @staticmethod
+    def _execstart_matches(value: str, command: tuple[str, ...]) -> bool:
+        match = re.fullmatch(
+            r"\{ path=(.+?) ; argv\[\]=(.+?) ; ignore_errors=(?:yes|no) ;.*\}",
+            value,
+        )
+        if match is None:
+            return False
+        try:
+            path = shlex.split(match.group(1))
+            argv = shlex.split(match.group(2))
+        except ValueError:
+            return False
+        return path == [command[0]] and tuple(argv) == command
+
+    def _process_identity(
+        self,
+        pid: int,
+        template: SeatTemplate,
+        control_group: str,
+    ) -> str | None:
+        try:
+            process = self.proc_root / str(pid)
+            executable = (process / "exe").resolve(strict=True)
+            expected_executable = Path(template.command[0]).resolve(strict=True)
+            command = (process / "cmdline").read_bytes().split(b"\0")
+            if command and command[-1] == b"":
+                command.pop()
+            argv = tuple(item.decode("utf-8") for item in command)
+            cgroups = (process / "cgroup").read_text(encoding="utf-8").splitlines()
+            cgroup_paths = {
+                line.split(":", 2)[2]
+                for line in cgroups
+                if line.count(":") == 2
+            }
+            stat_value = (process / "stat").read_text(encoding="utf-8")
+            close = stat_value.rfind(")")
+            remaining = stat_value[close + 2 :].split() if close >= 0 else []
+            start_ticks = remaining[19]
+            if (
+                executable != expected_executable
+                or argv != template.command
+                or not control_group
+                or control_group not in cgroup_paths
+                or not start_ticks.isdigit()
+            ):
+                return None
+            return start_ticks
+        except (OSError, UnicodeError, IndexError, ValueError):
+            return None
+
     def inspect(self, seat_id: str, template: SeatTemplate) -> ServiceObservation:
         unit_path = self._unit_path(seat_id)
         unit_exists = unit_path.is_file() and not unit_path.is_symlink()
@@ -629,21 +742,59 @@ class SystemdUserAdapter:
             )
         except OSError:
             pass
+        property_names = (
+            "LoadState",
+            "ActiveState",
+            "SubState",
+            "MainPID",
+            "FragmentPath",
+            "DropInPaths",
+            "ExecStart",
+            "ControlGroup",
+        )
         result = self._run(
             "show",
             self._unit_name(seat_id),
-            "--property=LoadState,ActiveState,SubState,MainPID",
-            "--value",
+            *(f"--property={name}" for name in property_names),
+            "--no-pager",
         )
         if result.returncode != 0:
             return ServiceObservation(unit_exists, False, False, identity)
-        values = result.stdout.splitlines()
-        if len(values) != 4:
+        try:
+            properties = self._show_properties(result.stdout)
+        except ValueError:
             return ServiceObservation(True, False, False, False)
-        load, active, sub, pid = values
+        if set(properties) != set(property_names):
+            return ServiceObservation(True, False, False, False)
+        load = properties["LoadState"]
+        active = properties["ActiveState"]
+        sub = properties["SubState"]
+        pid = properties["MainPID"]
+        try:
+            fragment = Path(properties["FragmentPath"]).resolve(strict=True)
+        except OSError:
+            fragment = Path()
+        identity = (
+            identity
+            and fragment == unit_path.resolve()
+            and not properties["DropInPaths"]
+            and self._execstart_matches(properties["ExecStart"], template.command)
+        )
         running = active in {"active", "activating"}
         ready = active == "active" and sub == "running" and pid.isdigit() and int(pid) > 0
-        process_ref = f"systemd:{self._unit_name(seat_id)}:{pid}" if ready else None
+        process_ref = None
+        if running or ready:
+            start_ticks = (
+                self._process_identity(int(pid), template, properties["ControlGroup"])
+                if pid.isdigit() and int(pid) > 0
+                else None
+            )
+            identity = identity and start_ticks is not None
+            ready = ready and identity
+            if identity and start_ticks is not None:
+                process_ref = (
+                    f"systemd:{self._unit_name(seat_id)}:{pid}:{start_ticks}"
+                )
         return ServiceObservation(load == "loaded", running, ready, identity, process_ref)
 
     def instantiate(self, seat_id: str, template: SeatTemplate) -> None:
@@ -885,6 +1036,13 @@ class FleetExecutor:
         ):
             raise PolicyError("seat_identity_or_template_drift")
         observation = self.adapter.inspect(seat_id, template)
+        if (
+            seat
+            and observation.running
+            and seat["process_ref"]
+            and seat["process_ref"] != observation.process_ref
+        ):
+            raise PolicyError("process_identity_unknown")
         if action == "inspect":
             if observation.exists and not observation.identity_verified:
                 raise PolicyError("process_identity_unknown")
