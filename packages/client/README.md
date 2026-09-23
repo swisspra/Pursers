@@ -22,11 +22,12 @@ uvx --from pursers-client==<VERSION> pursers-mcp \
   --board <BOARD_ID> \
   [--token-file /PATH/TO/credential.jwt] \
   [--repository-root /PATH/TO/WORK]
+  [--tools default|worker|reviewer|all]
 ```
 
 Use `--ca-file /PATH/TO/private-ca.pem` when Central uses a private TLS CA.
-`--central-url` accepts either the Central origin or its `/mcp` endpoint. The
-When `--token-file` is omitted it defaults to
+`--central-url` accepts either the Central origin or its `/mcp` endpoint. When
+`--token-file` is omitted it defaults to
 `~/.pursers/central/worker.jwt`. The token file is read without logging its contents, checked again before every
 upstream connection generation, and re-read after an HTTP 401. Keep it private
 (mode `0600`). The relay writes only MCP JSON-RPC frames to stdout; connection
@@ -55,6 +56,21 @@ and signs the preflight with its file-held credential. The repository path and
 credential are never forwarded to the MCP host or Central. Caller-supplied
 `submission_preflight` is rejected, and Central continues to reject raw code
 submissions without a valid clone-owned proof.
+External execution hosts should instead use a role profile:
+
+- `--tools worker` exposes only `ticket_get`, `ticket_claim`, `lease_renew`,
+  `ticket_submit`, `ticket_unclaim`, `ticket_annotate`, `ticket_question_ask`,
+  and `ticket_request_human`.
+- `--tools reviewer` exposes only `dispatch_my_offers`, `ticket_get`,
+  `ticket_review_claim`, `lease_renew`, `ticket_review`,
+  `ticket_review_release`, `ticket_annotate`, `ticket_question_ask`, and
+  `ticket_request_human`.
+
+The relay verifies that the credential owns an active seat matching the role
+profile and limits identity selection to matching seats. An unknown profile or
+a worker/reviewer mismatch fails closed before any board action. Profiles only
+reduce the visible tool schemas; Central remains the authority for every call,
+and the bearer token remains confined to the relay process.
 Wait calls are capped at 50 seconds, below Zed's 60-second default, and their
 upstream cursor result is preserved for the next call. Each request owns an
 independent upstream SDK context, so a long-running wait cannot block another

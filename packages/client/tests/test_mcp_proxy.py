@@ -19,8 +19,10 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pursers_central import central as central_module
 from pursers_client.mcp_proxy import (
+    REVIEWER_TOOLS,
     SETUP_STATUS_TOOL,
     SETUP_TOOL,
+    WORKER_TOOLS,
     CentralRelay,
     RelayFailure,
     build_server,
@@ -84,13 +86,16 @@ class ExistingIdentityClient(FakeClient):
         principal_id: str,
         *,
         lifecycle_statuses: list[str] | None = None,
+        roles: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.names = names
         self.principal_id = principal_id
         self.agent_ids = [f"AI-existing-{index}" for index, _ in enumerate(names)]
         self.lifecycle_statuses = lifecycle_statuses or ["active"] * len(names)
+        self.roles = roles or ["worker"] * len(names)
         assert len(self.lifecycle_statuses) == len(names)
+        assert len(self.roles) == len(names)
         self.tool = types.Tool(
             name="ticket_create",
             description="Create work.",
@@ -134,11 +139,13 @@ class ExistingIdentityClient(FakeClient):
                             "agent_name": agent_name,
                             "principal_id": self.principal_id,
                             "lifecycle_status": lifecycle_status,
+                            "role": role,
                         }
-                        for agent_id, agent_name, lifecycle_status in zip(
+                        for agent_id, agent_name, lifecycle_status, role in zip(
                             self.agent_ids,
                             self.names,
                             self.lifecycle_statuses,
+                            self.roles,
                             strict=True,
                         )
                     ],
@@ -390,7 +397,7 @@ async def _verified_submit_runs_through_real_relay_and_central(
         central_url="http://127.0.0.1:9999",
         board="relay-board",
         token_file=token_file,
-        tools_mode="all",
+        tools_mode="worker",
         connection_factory=connect,
         repository_roots=[allowed_root],
     )
@@ -483,6 +490,122 @@ async def _verified_submit_runs_through_real_relay_and_central(
         "remote_ref": "origin/codex/TK-relay",
         "remote_tip": remote_sha,
     }
+
+def test_worker_and_reviewer_profiles_are_exact_and_materially_smaller(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_worker_and_reviewer_profiles_are_exact_and_materially_smaller(tmp_path))
+
+
+async def _worker_and_reviewer_profiles_are_exact_and_materially_smaller(
+    tmp_path: Path,
+) -> None:
+    assert len(WORKER_TOOLS) == 8
+    assert len(REVIEWER_TOOLS) == 9
+    token_file = tmp_path / "credential.jwt"
+    token_file.write_text("opaque-test-credential", encoding="utf-8")
+    profile_names = WORKER_TOOLS | REVIEWER_TOOLS
+    admin_names = {f"admin_only_{index:02d}" for index in range(53 - len(profile_names))}
+    all_names = sorted(profile_names | admin_names)
+
+    class ProfileClient(ExistingIdentityClient):
+        def __init__(self, role: str) -> None:
+            super().__init__([f"{role}-seat"], "PR-profile", roles=[role])
+
+        async def list_tools(self, **_kwargs: Any) -> types.ListToolsResult:
+            return types.ListToolsResult(
+                tools=[
+                    types.Tool(
+                        name=name,
+                        description=f"Schema for {name} with representative detail.",
+                        inputSchema={
+                            "type": "object",
+                            "properties": {
+                                "agent_name": {"type": "string"},
+                                "board_id": {"type": "string"},
+                                "ticket_id": {"type": "string"},
+                                "notes": {"type": "string"},
+                            },
+                            "required": ["agent_name", "board_id", "ticket_id"],
+                        },
+                    )
+                    for name in all_names
+                ]
+            )
+
+    async def listed(mode: str, role: str) -> list[types.Tool]:
+        client = ProfileClient(role)
+
+        @asynccontextmanager
+        async def connect(_token: str):
+            yield client
+
+        relay = CentralRelay(
+            central_url="http://127.0.0.1:9999",
+            board="existing-board",
+            token_file=token_file,
+            tools_mode=mode,
+            connection_factory=connect,
+        )
+        return await relay.list_tools()
+
+    worker = await listed("worker", "worker")
+    reviewer = await listed("reviewer", "reviewer")
+    unfiltered = await listed("all", "worker")
+
+    assert {tool.name for tool in worker} == WORKER_TOOLS
+    assert {tool.name for tool in reviewer} == REVIEWER_TOOLS
+    assert len(unfiltered) == 53
+    assert not ({tool.name for tool in worker} & admin_names)
+    assert not ({tool.name for tool in reviewer} & admin_names)
+
+    def schema_bytes(tools: list[types.Tool]) -> int:
+        payload = [
+            tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for tool in tools
+        ]
+        return len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+
+    all_bytes = schema_bytes(unfiltered)
+    assert schema_bytes(worker) < all_bytes / 2
+    assert schema_bytes(reviewer) < all_bytes / 2
+
+
+def test_role_profile_rejects_an_incompatible_active_seat(tmp_path: Path) -> None:
+    asyncio.run(_role_profile_rejects_an_incompatible_active_seat(tmp_path))
+
+
+async def _role_profile_rejects_an_incompatible_active_seat(tmp_path: Path) -> None:
+    token_file = tmp_path / "credential.jwt"
+    token_file.write_text("opaque-test-credential", encoding="utf-8")
+    client = ExistingIdentityClient(["worker-seat"], "PR-worker", roles=["worker"])
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        yield client
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="existing-board",
+        token_file=token_file,
+        tools_mode="reviewer",
+        connection_factory=connect,
+    )
+    with pytest.raises(
+        RelayFailure,
+        match=r"--tools reviewer requires an active reviewer seat",
+    ):
+        await relay._upstream_tools()
+
+
+def test_unknown_tool_profile_is_rejected_before_connection(tmp_path: Path) -> None:
+    with pytest.raises(RelayFailure, match=r"--tools must be one of"):
+        CentralRelay(
+            central_url="http://127.0.0.1:9999",
+            board="existing-board",
+            token_file=tmp_path / "credential.jwt",
+            tools_mode="administrator",
+        )
 
 
 def test_local_setup_identity_is_hidden_and_injected(tmp_path: Path) -> None:
