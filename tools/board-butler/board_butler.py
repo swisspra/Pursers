@@ -21,6 +21,7 @@ import json
 import os
 import re
 import runpy
+import socket
 import stat
 import subprocess
 import sys
@@ -1107,6 +1108,253 @@ def _model_payload(value: Any, limit: int, secret: str) -> tuple[Any, str]:
     return clean, hashlib.sha256(clean_raw).hexdigest()
 
 
+def _connector_http_origin(value: str) -> tuple[str, str, int]:
+    parsed = urllib.parse.urlsplit(value)
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ConnectorConfigError("resolved HTTP endpoint is invalid") from exc
+    return parsed.scheme.casefold(), (parsed.hostname or "").casefold(), port
+
+
+async def _resolve_connector_addresses(host: str, port: int) -> tuple[str, ...]:
+    try:
+        records = await asyncio.to_thread(
+            socket.getaddrinfo,
+            host,
+            port,
+            socket.AF_UNSPEC,
+            socket.SOCK_STREAM,
+        )
+        addresses = {
+            str(ipaddress.ip_address(record[4][0].split("%", 1)[0]))
+            for record in records
+        }
+    except (OSError, ValueError) as exc:
+        raise ConnectorConfigError("resolved HTTP endpoint address is unavailable") from exc
+    if not addresses:
+        raise ConnectorConfigError("resolved HTTP endpoint address is unavailable")
+    parsed = [ipaddress.ip_address(address) for address in addresses]
+    if _is_loopback_host(host):
+        if any(not address.is_loopback for address in parsed):
+            raise ConnectorConfigError("resolved loopback HTTP endpoint escaped loopback")
+    elif any(not address.is_global for address in parsed):
+        raise ConnectorConfigError("resolved HTTP endpoint address is not public")
+    return tuple(
+        str(address)
+        for address in sorted(parsed, key=lambda item: (item.version, item.packed))
+    )
+
+
+def _pinned_http_transport(
+    origin_url: str,
+    pinned_address: str,
+    max_output_bytes: int,
+) -> Any:
+    """Create an HTTP transport that pins DNS and bounds MCP wire frames."""
+    import httpx2
+
+    origin = _connector_http_origin(origin_url)
+
+    class BoundedResponseStream(httpx2.AsyncByteStream):
+        def __init__(self, stream: Any, *, event_stream: bool) -> None:
+            self._stream = stream
+            self._event_stream = event_stream
+            self._total = 0
+            self._frame = 0
+            self._tail = b""
+
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            async for chunk in self._stream:
+                if self._event_stream:
+                    for byte in chunk:
+                        self._frame += 1
+                        self._tail = (self._tail + bytes((byte,)))[-4:]
+                        delimiter = 0
+                        if self._tail.endswith(b"\r\n\r\n"):
+                            delimiter = 4
+                        elif self._tail.endswith(b"\n\n") or self._tail.endswith(b"\r\r"):
+                            delimiter = 2
+                        if delimiter:
+                            if self._frame - delimiter > max_output_bytes:
+                                raise ConnectorResultError(
+                                    "connector frame exceeded the output byte limit"
+                                )
+                            self._frame = 0
+                            self._tail = b""
+                        elif self._frame > max_output_bytes + 4:
+                            raise ConnectorResultError(
+                                "connector frame exceeded the output byte limit"
+                            )
+                else:
+                    self._total += len(chunk)
+                    if self._total > max_output_bytes:
+                        raise ConnectorResultError(
+                            "connector frame exceeded the output byte limit"
+                        )
+                yield chunk
+
+        async def aclose(self) -> None:
+            await self._stream.aclose()
+
+    class PinnedTransport(httpx2.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self._transport = httpx2.AsyncHTTPTransport(trust_env=False)
+
+        async def handle_async_request(self, request: Any) -> Any:
+            if _connector_http_origin(str(request.url)) != origin:
+                raise ConnectorDenied("connector HTTP origin changed")
+            extensions = dict(request.extensions)
+            if origin[0] == "https":
+                extensions["sni_hostname"] = origin[1]
+            pinned_request = httpx2.Request(
+                request.method,
+                request.url.copy_with(host=pinned_address),
+                headers=request.headers,
+                stream=request.stream,
+                extensions=extensions,
+            )
+            response = await self._transport.handle_async_request(pinned_request)
+            event_stream = response.headers.get("content-type", "").casefold().startswith(
+                "text/event-stream"
+            )
+            return httpx2.Response(
+                response.status_code,
+                headers=response.headers,
+                stream=BoundedResponseStream(
+                    response.stream,
+                    event_stream=event_stream,
+                ),
+                extensions=response.extensions,
+                request=request,
+            )
+
+        async def aclose(self) -> None:
+            await self._transport.aclose()
+
+    return PinnedTransport()
+
+
+@asynccontextmanager
+async def _bounded_stdio_client(
+    server: Any,
+    *,
+    errlog: Any,
+    max_output_bytes: int,
+) -> AsyncIterator[Any]:
+    """MCP SDK stdio transport with a raw newline-frame limit before parsing."""
+    import anyio
+    from mcp.client import stdio as sdk_stdio
+
+    command = sdk_stdio._get_executable_command(server.command)
+    process = await sdk_stdio._create_platform_compatible_process(
+        command=command,
+        args=server.args,
+        env=sdk_stdio.get_default_environment() | (server.env or {}),
+        errlog=errlog,
+        cwd=server.cwd,
+    )
+    read_writer, read_stream = anyio.create_memory_object_stream(0)
+    write_stream, write_reader = anyio.create_memory_object_stream(0)
+    shutting_down = False
+    writer_done = anyio.Event()
+
+    async def stdout_reader() -> None:
+        assert process.stdout
+        buffer = bytearray()
+        frame_rejected = False
+        try:
+            async with read_writer:
+                try:
+                    while True:
+                        chunk = await process.stdout.receive()
+                        buffer.extend(chunk)
+                        while True:
+                            newline = buffer.find(b"\n")
+                            if newline < 0:
+                                break
+                            raw_line = bytes(buffer[:newline])
+                            del buffer[: newline + 1]
+                            if len(raw_line) > max_output_bytes:
+                                frame_rejected = True
+                                await read_writer.send(
+                                    ConnectorResultError(
+                                        "connector frame exceeded the output byte limit"
+                                    )
+                                )
+                                return
+                            line = raw_line.decode(
+                                server.encoding,
+                                errors=server.encoding_error_handler,
+                            )
+                            await read_writer.send(sdk_stdio._parse_line(line))
+                        if len(buffer) > max_output_bytes:
+                            frame_rejected = True
+                            await read_writer.send(
+                                ConnectorResultError(
+                                    "connector frame exceeded the output byte limit"
+                                )
+                            )
+                            return
+                finally:
+                    if not frame_rejected:
+                        await sdk_stdio._drain_stdout(process)
+        except (
+            anyio.EndOfStream,
+            anyio.ClosedResourceError,
+            anyio.BrokenResourceError,
+        ):
+            pass
+        except (ConnectionError, OSError):
+            if not shutting_down:
+                raise
+
+    async def stdin_writer() -> None:
+        assert process.stdin
+        try:
+            async with write_reader:
+                async for session_message in write_reader:
+                    payload = session_message.message.model_dump_json(
+                        by_alias=True,
+                        exclude_unset=True,
+                    )
+                    data = (payload + "\n").encode(
+                        encoding=server.encoding,
+                        errors=server.encoding_error_handler,
+                    )
+                    await process.stdin.send(data)
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError, OSError):
+            await read_writer.aclose()
+        finally:
+            writer_done.set()
+
+    async def shutdown() -> None:
+        read_stream.close()
+        write_stream.close()
+        with anyio.move_on_after(sdk_stdio._WRITER_FLUSH_TIMEOUT):
+            await writer_done.wait()
+        await sdk_stdio._stop_server_process(process)
+        await sdk_stdio._aclose_all(
+            read_stream,
+            write_stream,
+            read_writer,
+            write_reader,
+        )
+        await anyio.lowlevel.checkpoint()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(stdout_reader)
+        task_group.start_soon(stdin_writer)
+        try:
+            yield read_stream, write_stream
+        finally:
+            shutting_down = True
+            with anyio.CancelScope(shield=True):
+                await shutdown()
+            task_group.cancel_scope.cancel()
+    await anyio.lowlevel.cancel_shielded_checkpoint()
+
+
 class ConnectorRuntime:
     """Board-scoped, fail-closed MCP v2 client boundary.
 
@@ -1158,6 +1406,8 @@ class ConnectorRuntime:
         self._slots = asyncio.Semaphore(declaration.limits.max_concurrency)
         self._rate_lock = asyncio.Lock()
         self._rate_events: deque[float] = deque()
+        self._http_pin_lock = asyncio.Lock()
+        self._http_address_pins: dict[str, tuple[str, ...]] = {}
         now = utc_now().isoformat()
         self._health = ConnectorHealth(declaration.connector_id, "unknown", now)
 
@@ -1193,6 +1443,16 @@ class ConnectorRuntime:
                 raise ConnectorConfigError("connector secret reference is invalid")
         return endpoint, secret
 
+    async def _pin_http_endpoint(self, endpoint: HttpConnectorEndpoint) -> str:
+        _scheme, host, port = _connector_http_origin(endpoint.url)
+        async with self._http_pin_lock:
+            resolved = await _resolve_connector_addresses(host, port)
+            previous = self._http_address_pins.get(endpoint.url)
+            if previous is not None and previous != resolved:
+                raise ConnectorConfigError("resolved HTTP endpoint address changed")
+            self._http_address_pins[endpoint.url] = resolved
+            return resolved[0]
+
     @asynccontextmanager
     async def _default_client(
         self,
@@ -1207,8 +1467,6 @@ class ConnectorRuntime:
         timeout_s = declaration.limits.timeout_ms / 1_000
         async with AsyncExitStack() as stack:
             if isinstance(endpoint, StdioConnectorEndpoint):
-                from mcp.client.stdio import stdio_client
-
                 environment = (
                     {endpoint.secret_env_name: secret} if declaration.secret_ref else None
                 )
@@ -1220,7 +1478,11 @@ class ConnectorRuntime:
                 )
                 error_sink = open(os.devnull, "w", encoding="utf-8")
                 stack.callback(error_sink.close)
-                transport = stdio_client(server, errlog=error_sink)
+                transport = _bounded_stdio_client(
+                    server,
+                    errlog=error_sink,
+                    max_output_bytes=declaration.limits.max_output_bytes,
+                )
                 client = Client(
                     transport,
                     mode=declaration.protocol_revision,
@@ -1240,12 +1502,18 @@ class ConnectorRuntime:
                     headers[endpoint.secret_header] = (
                         f"{endpoint.secret_prefix} {secret}".strip()
                     )
+                pinned_address = await self._pin_http_endpoint(endpoint)
                 http_client = await stack.enter_async_context(
                     httpx2.AsyncClient(
                         headers=headers,
                         follow_redirects=False,
                         trust_env=False,
                         timeout=httpx2.Timeout(timeout_s),
+                        transport=_pinned_http_transport(
+                            endpoint.url,
+                            pinned_address,
+                            declaration.limits.max_output_bytes,
+                        ),
                     )
                 )
                 transport = streamable_http_client(

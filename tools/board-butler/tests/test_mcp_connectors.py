@@ -681,3 +681,236 @@ def test_real_sdk_streamable_http_transport(tmp_path: Path) -> None:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+
+
+def test_http_dns_pin_rejects_rebinding(monkeypatch: pytest.MonkeyPatch) -> None:
+    addresses = iter(
+        [
+            ("93.184.216.34",),
+            ("93.184.216.35",),
+        ]
+    )
+
+    async def resolve(_host: str, _port: int) -> tuple[str, ...]:
+        return next(addresses)
+
+    monkeypatch.setattr(butler, "_resolve_connector_addresses", resolve)
+    endpoint = butler.HttpConnectorEndpoint("https://connector.example/mcp")
+    connector = butler.ConnectorRuntime(
+        board_id="board-http-pin",
+        project_id="project-one",
+        actor_id="butler-one",
+        policy_digest_sha256=SHA,
+        declaration=_transport_declaration("streamable_http"),
+        approved_connector_ids=["connector:test"],
+        endpoint_resolver=lambda _ref: endpoint,
+        secret_resolver=lambda _ref: "",
+        persistence=butler.InMemoryConnectorPersistence(),
+    )
+
+    async def scenario() -> None:
+        assert await connector._pin_http_endpoint(endpoint) == "93.184.216.34"
+        with pytest.raises(butler.ConnectorConfigError, match="address changed"):
+            await connector._pin_http_endpoint(endpoint)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("host", "address", "message"),
+    [
+        ("connector.example", "127.0.0.1", "not public"),
+        ("localhost", "93.184.216.34", "escaped loopback"),
+    ],
+)
+def test_http_address_policy_rejects_private_or_loopback_escape(
+    host: str,
+    address: str,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        butler.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (
+                socket.AF_INET,
+                socket.SOCK_STREAM,
+                socket.IPPROTO_TCP,
+                "",
+                (address, 443),
+            )
+        ],
+    )
+    with pytest.raises(butler.ConnectorConfigError, match=message):
+        asyncio.run(butler._resolve_connector_addresses(host, 443))
+
+
+@pytest.mark.parametrize(
+    ("content_type", "wire_body"),
+    [
+        ("application/json", b'{"result":"' + (b"x" * 200) + b'"}'),
+        ("text/event-stream", b"event: message\ndata: " + (b"x" * 200) + b"\n\n"),
+    ],
+)
+def test_http_transport_pins_address_and_bounds_frames_before_parsing(
+    content_type: str,
+    wire_body: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx2
+    import mcp.client.streamable_http as sdk_http
+
+    parser_calls = 0
+    original_parser = sdk_http.jsonrpc_message_adapter.validate_json
+
+    def counted_parser(*args, **kwargs):
+        nonlocal parser_calls
+        parser_calls += 1
+        return original_parser(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sdk_http.jsonrpc_message_adapter,
+        "validate_json",
+        counted_parser,
+    )
+
+    class Stream(httpx2.AsyncByteStream):
+        def __init__(self, body: bytes) -> None:
+            self.body = body
+
+        async def __aiter__(self):
+            yield self.body
+
+        async def aclose(self) -> None:
+            return None
+
+    class InnerTransport:
+        request = None
+
+        async def handle_async_request(self, request):
+            self.request = request
+            return httpx2.Response(
+                200,
+                headers={"content-type": content_type},
+                stream=Stream(wire_body),
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        transport = butler._pinned_http_transport(
+            "https://connector.example/mcp",
+            "93.184.216.34",
+            64,
+        )
+        inner = InnerTransport()
+        transport._transport = inner
+        request = httpx2.Request(
+            "POST",
+            "https://connector.example/mcp",
+            headers={"host": "connector.example", "authorization": "Bearer private"},
+            stream=Stream(b"{}"),
+        )
+        response = await transport.handle_async_request(request)
+        with pytest.raises(butler.ConnectorResultError, match="frame exceeded"):
+            body = await response.aread()
+            sdk_http.jsonrpc_message_adapter.validate_json(body, by_name=False)
+        assert parser_calls == 0
+        assert str(inner.request.url).startswith("https://93.184.216.34/")
+        assert inner.request.headers["host"] == "connector.example"
+        assert inner.request.extensions["sni_hostname"] == "connector.example"
+
+    asyncio.run(scenario())
+
+
+def test_http_transport_rejects_cross_origin_before_forwarding_credentials() -> None:
+    import httpx2
+
+    class Stream(httpx2.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"{}"
+
+        async def aclose(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        transport = butler._pinned_http_transport(
+            "https://connector.example/mcp",
+            "93.184.216.34",
+            64,
+        )
+        request = httpx2.Request(
+            "POST",
+            "https://redirected.example/mcp",
+            headers={"authorization": "Bearer private"},
+            stream=Stream(),
+        )
+        with pytest.raises(butler.ConnectorDenied, match="origin changed"):
+            await transport.handle_async_request(request)
+        await transport.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_stdio_oversize_frame_is_stopped_before_sdk_parser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "oversize_stdio_server.py"
+    script.write_text(
+        "import sys, time\n"
+        "sys.stdout.write('{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"data\":\"' "
+        "+ 'x' * 4096 + '\"}}\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    import mcp.client.stdio as sdk_stdio
+
+    parser_calls = 0
+    original_parser = sdk_stdio._parse_line
+
+    def counted_parser(line: str):
+        nonlocal parser_calls
+        parser_calls += 1
+        return original_parser(line)
+
+    monkeypatch.setattr(sdk_stdio, "_parse_line", counted_parser)
+    value = declaration(transport="stdio", output_bytes=128)
+    declared = butler.ConnectorDeclaration(
+        value.connector_id,
+        value.enabled,
+        value.transport,
+        value.protocol_revision,
+        value.endpoint_ref,
+        None,
+        (value.tools[0],),
+        (),
+        frozenset(),
+        value.limits,
+    )
+
+    async def scenario() -> None:
+        connector = butler.ConnectorRuntime(
+            board_id="board-stdio-oversize",
+            project_id="project-one",
+            actor_id="butler-one",
+            policy_digest_sha256=SHA,
+            declaration=declared,
+            approved_connector_ids=["connector:test"],
+            endpoint_resolver=lambda _ref: butler.StdioConnectorEndpoint(
+                sys.executable,
+                (str(script),),
+            ),
+            secret_resolver=lambda _ref: "",
+            persistence=butler.InMemoryConnectorPersistence(),
+        )
+        with pytest.raises(
+            (butler.ConnectorResultError, butler.ConnectorProtocolError)
+        ):
+            await connector.discover("stdio-oversize")
+
+    asyncio.run(scenario())
+    assert parser_calls == 0

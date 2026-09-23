@@ -96,8 +96,13 @@ an executable and argument vector, never a shell command, and suppresses the
 untrusted child stderr stream. Streamable HTTP requires TLS except on explicit
 loopback, rejects URL credentials, query strings, and fragments, ignores ambient
 proxy settings, and disables redirect following so credentials cannot move to
-another origin. Unsupported transports and protocol revisions fail validation
-before connection.
+another origin. Hostnames are resolved to public addresses (or canonical
+loopback), pinned for the runtime, and connected by IP while preserving the
+original TLS hostname and `Host` header. A changed resolution, private/special
+destination, loopback escape, or cross-origin request fails closed. Both stdio
+newline frames and HTTP JSON/SSE frames are byte-bounded before the MCP parser
+or model construction runs. Unsupported transports and protocol revisions fail
+validation before connection.
 
 Discovery is filtered against the exact declared tool and resource allowlists
 before it is returned to a planner. Tool calls are validated against the
