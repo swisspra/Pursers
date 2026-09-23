@@ -2274,7 +2274,9 @@ class TaskSchemaRegistry:
         import jsonschema
 
         try:
-            jsonschema.Draft202012Validator(schema).validate(value)
+            jsonschema.Draft202012Validator(
+                schema, format_checker=jsonschema.FormatChecker()
+            ).validate(value)
         except jsonschema.ValidationError as exc:
             raise ModelRunnerFailure("malformed", "task_schema_rejected") from exc
 
@@ -2390,10 +2392,11 @@ class DirectAPIModelBackend:
             raise ModelRunnerFailure(
                 "provider", "direct_provider_error", retryable=True
             ) from exc
-        if not isinstance(document, Mapping) or set(payload) != {
-            "proposal",
-            "citations",
-        }:
+        if (
+            not isinstance(document, Mapping)
+            or not isinstance(payload, Mapping)
+            or set(payload) != {"proposal", "citations"}
+        ):
             raise ModelRunnerFailure("malformed", "invalid_backend_payload")
         if document.get("model") != self.runtime.model:
             raise ModelRunnerFailure("policy", "model_mismatch")

@@ -186,6 +186,41 @@ def test_common_runner_fails_closed_for_digest_schema_citation_and_usage() -> No
     ] == "unmeasured_usage"
 
 
+def test_common_runner_enforces_task_schema_formats() -> None:
+    schemas = butler.TaskSchemaRegistry()
+    digest = schemas.register(
+        "formatted-answer:v1",
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["address"],
+            "properties": {"address": {"type": "string", "format": "ipv4"}},
+        },
+    )
+    backend = FakeBackend(
+        butler.ModelBackendResponse(
+            proposal_json='{"address":"999.999.999.999"}',
+            citations=("evidence:one",),
+            usage=backend_response().usage,
+            provider_request_ref="provider:one",
+        )
+    )
+
+    result = asyncio.run(
+        runner(backend, schemas).run(
+            model_request(
+                digest,
+                task_schema={
+                    "schema_id": "formatted-answer:v1",
+                    "schema_sha256": digest,
+                },
+            )
+        )
+    )
+
+    assert result["reason_code"] == "task_schema_rejected"
+
+
 def test_crash_result_is_stored_before_reply_and_replayed(tmp_path: Path) -> None:
     schemas, digest = registry()
     backend = FakeBackend(error=RuntimeError("secret provider detail"))
@@ -428,6 +463,47 @@ def test_direct_api_backend_rejects_credential_echo_without_persisting_it() -> N
 
     assert result["reason_code"] == "provider_credential_echo"
     assert secret not in json.dumps(result)
+
+
+def test_direct_api_backend_normalizes_non_object_content_as_malformed() -> None:
+    schemas, digest = registry()
+    DirectHandler.response_payload = {
+        "id": "provider:direct-three",
+        "model": "exact-model",
+        "usage": {
+            "prompt_tokens": 9,
+            "completion_tokens": 3,
+            "total_tokens": 12,
+            "cost_microunits": 4,
+            "measured": True,
+        },
+        "choices": [
+            {"message": {"content": json.dumps(["proposal", "citations"])}}
+        ],
+    }
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        runtime = butler.ProviderRuntime(
+            endpoint=f"http://127.0.0.1:{server.server_port}",
+            model="exact-model",
+            credential="provider-secret-value",
+            draft_path="v1/chat/completions",
+            draft_protocol="openai_chat_completions_v1",
+        )
+        result = asyncio.run(
+            runner(butler.DirectAPIModelBackend(runtime), schemas).run(
+                model_request(digest)
+            )
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert result["reason_code"] == "invalid_backend_payload"
+    assert result["error"]["category"] == "malformed"
 
 
 def test_acp_backend_uses_no_mcp_servers_and_normalizes_result(tmp_path: Path) -> None:
