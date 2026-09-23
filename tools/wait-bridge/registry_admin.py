@@ -331,6 +331,7 @@ async def run(args: argparse.Namespace, client_factory: ClientFactory = BoardCli
         token,
         HOME_BOARD_ID,
         agent_name=args.agent_name,
+        allow_takeover=True,
     ) as client:
         await execute(args, client)
 

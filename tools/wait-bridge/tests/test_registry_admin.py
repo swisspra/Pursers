@@ -7,19 +7,27 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CLIENT_SRC = ROOT.parents[1] / "packages" / "client" / "src"
+REPOSITORY = ROOT.parents[1]
+CLIENT_SRC = REPOSITORY / "packages" / "client" / "src"
+CENTRAL_SRC = REPOSITORY / "packages" / "central" / "src" / "pursers_central"
 sys.path.insert(0, str(CLIENT_SRC))
+sys.path.insert(0, str(CENTRAL_SRC))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
+import central  # noqa: E402
+import pursers_client.client as client_module  # noqa: E402
 import registry_admin  # noqa: E402
+from pursers_client import BoardClient, BoardClientError  # noqa: E402
 
 
 INITIAL = {
@@ -330,6 +338,100 @@ class RegistryAdminTests(unittest.TestCase):
                 "SECRET",
             ),
             "request [REDACTED] failed",
+        )
+
+
+class RegistryAdminRealCentralTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(dir=ROOT)
+        self.root = Path(self.temporary.name)
+        jwks = self.root / "jwks.json"
+        jwks.write_text('{"keys": []}', encoding="utf-8")
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "CENTRAL_AUTH_MODE": "jwt",
+                "CENTRAL_JWT_ISSUER": "https://issuer.example",
+                "CENTRAL_JWT_AUDIENCE": "http://localhost:8765/mcp",
+                "CENTRAL_JWKS_PATH": str(jwks),
+                "CENTRAL_ADMISSION": "invite",
+                "STORE_BACKEND": "sqlite",
+                "ONBOARD_CENTRAL_TOKEN": "TOKEN_PLACEHOLDER",
+            },
+        )
+        self.environment.start()
+        self.mcp, self.store = central.build_server(
+            "localhost", 8765, self.root / "data"
+        )
+        scopes = frozenset({"board:read", "board:write"})
+        self.owner = central.Principal("PR-registry-owner", "registry-owner", scopes)
+        self.stranger = central.Principal(
+            "PR-registry-stranger", "registry-stranger", scopes
+        )
+        self.principal = self.owner
+        self.original_current_principal = central.current_principal
+        central.current_principal = lambda: self.principal
+
+    async def asyncTearDown(self) -> None:
+        central.current_principal = self.original_current_principal
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    @asynccontextmanager
+    async def _http(self):
+        yield object()
+
+    def _client_factory(self, *args: Any, **kwargs: Any) -> BoardClient:
+        client = BoardClient(*args, **kwargs)
+        client._http = self._http  # type: ignore[method-assign]
+        return client
+
+    async def test_sequential_commands_reuse_default_name_and_deny_stranger(
+        self,
+    ) -> None:
+        with patch.object(
+            client_module, "streamable_http_client", return_value=self.mcp
+        ):
+            async with self._client_factory(
+                "http://central.invalid/mcp",
+                "TOKEN_PLACEHOLDER",
+                registry_admin.HOME_BOARD_ID,
+                agent_name="project-registry-admin",
+                allow_takeover=True,
+            ) as client:
+                await client.board_state_update(
+                    registry_admin.REGISTRY_KEY,
+                    json.dumps(INITIAL),
+                )
+
+            show_output = io.StringIO()
+            with redirect_stdout(show_output):
+                await registry_admin.run(parse("show"), self._client_factory)
+            pause_output = io.StringIO()
+            with redirect_stdout(pause_output):
+                await registry_admin.run(
+                    parse("pause", "alpha"), self._client_factory
+                )
+
+            self.principal = self.stranger
+            with self.assertRaisesRegex(
+                BoardClientError, "board access denied: invite required"
+            ):
+                await registry_admin.run(parse("show"), self._client_factory)
+
+            self.principal = self.owner
+            final_output = io.StringIO()
+            with redirect_stdout(final_output):
+                await registry_admin.run(parse("show"), self._client_factory)
+
+        self.assertEqual(json.loads(show_output.getvalue()), INITIAL)
+        self.assertEqual(
+            json.loads(pause_output.getvalue())["projects"]["alpha"]["status"],
+            "paused",
+        )
+        self.assertEqual(
+            json.loads(final_output.getvalue())["projects"]["alpha"]["status"],
+            "paused",
         )
 
 
