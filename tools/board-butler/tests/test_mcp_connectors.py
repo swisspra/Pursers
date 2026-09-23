@@ -350,6 +350,14 @@ def test_risky_call_requires_typed_policy_gate_and_never_retries() -> None:
             await connector.call_tool("operation-risky", "mutate", {"value": "x"})
         assert calls["count"] == 0
 
+        async def deny(_request: butler.ConnectorPolicyRequest):
+            return butler.ConnectorPolicyDecision(False, "decision-denied", "denied")
+
+        connector, _persistence, calls = runtime([FakeClient()], policy_gate=deny)
+        with pytest.raises(butler.ConnectorDenied, match="denied by policy"):
+            await connector.call_tool("operation-denied", "mutate", {"value": "x"})
+        assert calls["count"] == 0
+
         requests: list[butler.ConnectorPolicyRequest] = []
 
         async def allow(request: butler.ConnectorPolicyRequest):
@@ -365,6 +373,36 @@ def test_risky_call_requires_typed_policy_gate_and_never_retries() -> None:
         assert requests[0].arguments_sha256 == butler.hashlib.sha256(
             butler._canonical_json({"value": "x"})
         ).hexdigest()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("malformed_allowed", ["not-a-bool", 1])
+def test_policy_decision_rejects_truthy_non_booleans_before_dispatch(
+    malformed_allowed: Any,
+) -> None:
+    with pytest.raises(butler.ConnectorConfigError, match="allowed must be boolean"):
+        butler.ConnectorPolicyDecision(
+            malformed_allowed, "decision-malformed", "approved"
+        )
+
+    async def scenario() -> None:
+        malformed = object.__new__(butler.ConnectorPolicyDecision)
+        object.__setattr__(malformed, "allowed", malformed_allowed)
+        object.__setattr__(malformed, "decision_id", "decision-malformed")
+        object.__setattr__(malformed, "reason_code", "approved")
+
+        async def malformed_gate(_request: butler.ConnectorPolicyRequest):
+            return malformed
+
+        client = FakeClient()
+        connector, _persistence, calls = runtime(
+            [client], policy_gate=malformed_gate
+        )
+        with pytest.raises(butler.ConnectorDenied, match="denied by policy"):
+            await connector.call_tool("operation-malformed", "mutate", {"value": "x"})
+        assert calls["count"] == 0
+        assert client.calls == []
 
     asyncio.run(scenario())
 

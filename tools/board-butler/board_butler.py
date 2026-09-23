@@ -974,6 +974,8 @@ class ConnectorPolicyDecision:
     reason_code: str
 
     def __post_init__(self) -> None:
+        if type(self.allowed) is not bool:
+            raise ConnectorConfigError("policy decision allowed must be boolean")
         _connector_id(self.decision_id, "policy decision id")
         if re.fullmatch(r"[a-z][a-z0-9_]{0,79}", self.reason_code) is None:
             raise ConnectorConfigError("policy reason code is invalid")
@@ -1555,7 +1557,10 @@ class ConnectorRuntime:
                     hashlib.sha256(original_bytes).hexdigest(),
                 )
             )
-            if not isinstance(decision, ConnectorPolicyDecision) or not decision.allowed:
+            if (
+                not isinstance(decision, ConnectorPolicyDecision)
+                or decision.allowed is not True
+            ):
                 await self._deny(
                     "call_tool",
                     operation_id,
