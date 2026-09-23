@@ -1489,8 +1489,12 @@ class ConnectorRuntime:
                 "connector tool is not enabled and allowlisted",
                 "not_allowlisted",
             )
-        original = dict(arguments)
-        original_bytes = _canonical_json(original)
+        # Canonical bytes are the ownership boundary for caller-controlled input.
+        # Keep them as the single immutable source across every await below: a
+        # shallow dict copy would still let the caller mutate nested values after
+        # the durable reservation or policy decision.
+        original_bytes = _canonical_json(arguments)
+        original = json.loads(original_bytes)
         if len(original_bytes) > self.declaration.limits.max_input_bytes:
             await self._deny(
                 "call_tool",
@@ -1582,6 +1586,7 @@ class ConnectorRuntime:
                                     "discovery_denied",
                                     call_id=call_id,
                                 )
+                            dispatched = json.loads(payload_bytes)
                             try:
                                 from jsonschema import Draft202012Validator
 

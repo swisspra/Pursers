@@ -26,6 +26,7 @@ SPEC.loader.exec_module(butler)
 
 SHA = "a" * 64
 SECRET = "fixture-connector-secret"
+PRIVATE_PATH = "/Users/synthetic-user/private/project"
 
 
 class Model:
@@ -80,6 +81,12 @@ class FakeClient:
                         "properties": {
                             "query": {"type": "string"},
                             "call_id": {"type": "string"},
+                            "context": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["value"],
+                                "properties": {"value": {"type": "string"}},
+                            },
                         },
                     },
                 ),
@@ -127,7 +134,7 @@ class FakeClient:
             contents=[
                 {
                     "uri": uri,
-                    "text": f"secret={SECRET} path=/Users/private/project",
+                    "text": f"secret={SECRET} path={PRIVATE_PATH}",
                     "_meta": {"authority": "operator"},
                 }
             ]
@@ -285,7 +292,7 @@ def test_allowed_call_validates_schema_reserves_stable_id_and_redacts_result() -
             content=[
                 {
                     "type": "text",
-                    "text": f"{SECRET} /Users/private/project",
+                    "text": f"{SECRET} {PRIVATE_PATH}",
                 }
             ],
             structured_content={
@@ -305,7 +312,7 @@ def test_allowed_call_validates_schema_reserves_stable_id_and_redacts_result() -
         assert persistence.reservations == {called.call_id: next(iter(persistence.reservations.values()))}
         encoded = json.dumps(called.payload)
         assert SECRET not in encoded
-        assert "/Users/private/project" not in encoded
+        assert PRIVATE_PATH not in encoded
         assert "authority" not in encoded
         from jsonschema import Draft202012Validator
 
@@ -378,6 +385,52 @@ def test_safe_replay_reuses_stable_call_id_after_ambiguous_disconnect() -> None:
     asyncio.run(scenario())
 
 
+def test_nested_caller_mutation_cannot_change_reserved_or_dispatched_payload() -> None:
+    class BarrierPersistence(butler.InMemoryConnectorPersistence):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reserved = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def reserve_call(self, call_id: str, payload_sha256: str) -> None:
+            await super().reserve_call(call_id, payload_sha256)
+            self.reserved.set()
+            await self.release.wait()
+
+    async def scenario() -> None:
+        client = FakeClient()
+        factory, _calls = factory_for([client])
+        persistence = BarrierPersistence()
+        connector = butler.ConnectorRuntime(
+            board_id="board-one",
+            project_id="project-one",
+            actor_id="butler-one",
+            policy_digest_sha256=SHA,
+            declaration=declaration(),
+            approved_connector_ids=["connector:test"],
+            endpoint_resolver=lambda _ref: butler.StdioConnectorEndpoint("fake-server"),
+            secret_resolver=lambda _ref: SECRET,
+            persistence=persistence,
+            client_factory=factory,
+        )
+        arguments = {"query": "status", "context": {"value": "reserved"}}
+        task = asyncio.create_task(
+            connector.call_tool("operation-owned-snapshot", "lookup", arguments)
+        )
+        await persistence.reserved.wait()
+        arguments["context"]["value"] = "changed-after-reservation"
+        persistence.release.set()
+        result = await task
+
+        sent = client.calls[0][1]
+        assert sent["context"]["value"] == "reserved"
+        assert persistence.reservations[result.call_id] == butler.hashlib.sha256(
+            butler._canonical_json(sent)
+        ).hexdigest()
+
+    asyncio.run(scenario())
+
+
 def test_oversize_malformed_and_rate_limited_results_fail_closed() -> None:
     async def scenario() -> None:
         oversized = Model(content=[{"text": "x" * 2_000}], is_error=False)
@@ -424,7 +477,7 @@ def test_resource_redaction_and_concurrent_board_isolation() -> None:
             two.read_resource("operation-two", "cfg://allowed"),
         )
         assert SECRET not in json.dumps(first.payload)
-        assert "/Users/private/project" not in json.dumps(second.payload)
+        assert PRIVATE_PATH not in json.dumps(second.payload)
         assert first.call_id != second.call_id
         assert store_one.audit_records[-1]["board_id"] == "board-one"
         assert store_two.audit_records[-1]["board_id"] == "board-two"
@@ -437,7 +490,7 @@ def test_secret_resolution_failure_does_not_disclose_value_or_path() -> None:
         persistence = butler.InMemoryConnectorPersistence()
 
         def fail(_ref: str) -> str:
-            raise RuntimeError(f"{SECRET} /Users/private/credential")
+            raise RuntimeError(f"{SECRET} {PRIVATE_PATH}/credential")
 
         connector = butler.ConnectorRuntime(
             board_id="board-secret",
@@ -447,7 +500,7 @@ def test_secret_resolution_failure_does_not_disclose_value_or_path() -> None:
             declaration=declaration(),
             approved_connector_ids=["connector:test"],
             endpoint_resolver=lambda _ref: butler.StdioConnectorEndpoint(
-                "/Users/private/server", (SECRET,)
+                f"{PRIVATE_PATH}/server", (SECRET,)
             ),
             secret_resolver=fail,
             persistence=persistence,
@@ -455,11 +508,11 @@ def test_secret_resolution_failure_does_not_disclose_value_or_path() -> None:
         with pytest.raises(butler.ConnectorConfigError) as caught:
             await connector.discover("operation-secret")
         assert SECRET not in str(caught.value)
-        assert "/Users/private" not in str(caught.value)
+        assert PRIVATE_PATH not in str(caught.value)
         assert SECRET not in repr(connector.endpoint_resolver("endpoint:test"))
-        assert "/Users/private" not in repr(connector.endpoint_resolver("endpoint:test"))
+        assert PRIVATE_PATH not in repr(connector.endpoint_resolver("endpoint:test"))
         assert SECRET not in json.dumps(persistence.audit_records)
-        assert "/Users/private" not in json.dumps(persistence.audit_records)
+        assert PRIVATE_PATH not in json.dumps(persistence.audit_records)
 
     asyncio.run(scenario())
 
