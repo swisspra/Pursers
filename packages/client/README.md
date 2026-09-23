@@ -20,7 +20,8 @@ Zed and other local MCP hosts:
 uvx --from pursers-client==<VERSION> pursers-mcp \
   --central-url http://127.0.0.1:<PORT> \
   --board <BOARD_ID> \
-  [--token-file /PATH/TO/credential.jwt]
+  [--token-file /PATH/TO/credential.jwt] \
+  [--repository-root /PATH/TO/WORK]
 ```
 
 Use `--ca-file /PATH/TO/private-ca.pem` when Central uses a private TLS CA.
@@ -45,6 +46,15 @@ forwards the principal's Central tool names, descriptions, schemas, and call
 results unchanged. By default it exposes the 18 read/create/annotate,
 question/human-request, evidence, and resumable-watch tools used by the Zed
 flows; pass `--tools all` to expose every tool authorized for the principal.
+When a code ticket requires `branch_and_commit`, start the relay with one or
+more explicit `--repository-root` values and call its wrapped `ticket_submit`
+with `repository` set to the clone-owning checkout. The relay accepts exactly
+one `branch_and_commit: branch/with-slash @ <full-40-hex-sha>` line, resolves
+the checkout beneath an allowed root, checks the exact `origin` branch tip,
+and signs the preflight with its file-held credential. The repository path and
+credential are never forwarded to the MCP host or Central. Caller-supplied
+`submission_preflight` is rejected, and Central continues to reject raw code
+submissions without a valid clone-owned proof.
 Wait calls are capped at 50 seconds, below Zed's 60-second default, and their
 upstream cursor result is preserved for the next call. Each request owns an
 independent upstream SDK context, so a long-running wait cannot block another

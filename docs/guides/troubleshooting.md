@@ -541,6 +541,12 @@ Read the current ticket immediately before submission. Populate every required
 field, keep `files_changed` equal to the exact tip diff, and use the
 clone-owning submit path for a branch/SHA requirement.
 
+For an external MCP host using `pursers-mcp --tools all`, configure the local
+relay with `--repository-root /PATH/TO/WORK` and pass
+`repository: /PATH/TO/WORK/TICKET-CHECKOUT` to `ticket_submit`. Do not pass
+`submission_preflight` or credential content. The relay rejects missing,
+out-of-root, non-Git, and remote-tip-mismatched paths before it calls Central.
+
 **Confirm**
 
 The submit boundary verifies the exact remote branch tip and returns

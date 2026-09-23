@@ -158,6 +158,27 @@ def _sign_submission_preflight(
     return hmac.new(token.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
 
+def signed_remote_submission(
+    repo: Path,
+    notes: str,
+    *,
+    token: str,
+    board_id: str,
+    ticket_id: str,
+    agent_name: str,
+) -> dict[str, str]:
+    """Verify one remote branch tip and sign the result with a held credential."""
+    preflight = verify_remote_submission(repo, notes)
+    preflight["proof"] = _sign_submission_preflight(
+        token,
+        board_id=board_id,
+        ticket_id=ticket_id,
+        agent_name=agent_name,
+        preflight=preflight,
+    )
+    return preflight
+
+
 def expand_response_id_map(value: dict[str, Any]) -> dict[str, Any]:
     """Restore compact response IDs before existing client consumers inspect them."""
     raw_map = value.get("id_map")
@@ -921,13 +942,13 @@ class BoardClient:
                 raise BoardClientError(
                     "submission preflight requires a clone-owning git repository"
                 )
-            submission_preflight = verify_remote_submission(repo, notes)
-            submission_preflight["proof"] = _sign_submission_preflight(
-                self.token,
+            submission_preflight = signed_remote_submission(
+                repo,
+                notes,
+                token=self.token,
                 board_id=self.board_id,
                 ticket_id=ticket_id,
                 agent_name=selected_agent_name,
-                preflight=submission_preflight,
             )
         optional = {
             "summary": summary,

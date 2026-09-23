@@ -26,6 +26,12 @@ from mcp.server import NotificationOptions
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, Field
 
+from .client import (
+    BoardClientError,
+    SUBMIT_BRANCH_LABEL_RE,
+    signed_remote_submission,
+)
+
 LOG = logging.getLogger("pursers-mcp")
 SETUP_STATUS_TOOL = "pursers_setup_status"
 SETUP_TOOL = "pursers_setup"
@@ -55,6 +61,7 @@ DEFAULT_TOOLS = frozenset(
     }
 )
 WAIT_TOOL_NAMES = frozenset({"a2a_wait", "ticket_question_wait"})
+VERIFIED_SUBMIT_TOOL = "ticket_submit"
 MAX_WAIT_SECONDS = 50
 PROMPT_BEHAVIOR_INSTRUCTIONS = (
     "Pursers prompt behavior: board summaries stay on the selected board, report "
@@ -70,6 +77,17 @@ PROMPT_BEHAVIOR_INSTRUCTIONS = (
 
 class RelayFailure(RuntimeError):
     """A safe-to-display relay failure that never contains credential text."""
+
+
+def _relay_failure(exc: BaseException) -> RelayFailure | None:
+    if isinstance(exc, RelayFailure):
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for nested in exc.exceptions:
+            failure = _relay_failure(nested)
+            if failure is not None:
+                return failure
+    return None
 
 
 class SetupConsent(BaseModel):
@@ -176,6 +194,7 @@ class CentralRelay:
         connection_factory: ConnectionFactory | None = None,
         setup_root: Path | None = None,
         uvx_path: str | None = None,
+        repository_roots: list[Path] | tuple[Path, ...] | None = None,
     ) -> None:
         self.central_url = central_mcp_url(central_url)
         self.board = board
@@ -190,6 +209,17 @@ class CentralRelay:
         self.tools_mode = tools_mode
         self._connection_factory = connection_factory or self._http_connection
         self._uvx_path = uvx_path
+        self.repository_roots = tuple(
+            dict.fromkeys(
+                root.expanduser().resolve() for root in (repository_roots or ())
+            )
+        )
+        missing_roots = [root for root in self.repository_roots if not root.is_dir()]
+        if missing_roots:
+            raise RelayFailure(
+                "--repository-root must be an existing directory: "
+                + ", ".join(str(root) for root in missing_roots)
+            )
         self._known_tools: dict[str, types.Tool] = {}
         self._local_identity_tools: set[str] = set()
         self._identity_selection_tools: set[str] = set()
@@ -242,8 +272,9 @@ class CentralRelay:
         return result
 
     def _safe_failure(self, exc: BaseException) -> RelayFailure:
-        if isinstance(exc, RelayFailure):
-            return exc
+        local_failure = _relay_failure(exc)
+        if local_failure is not None:
+            return local_failure
         if _exception_has_status(exc, 401):
             return RelayFailure("Central rejected the credential after one token-file reload")
         return RelayFailure(f"Central is unreachable at {self.central_url}")
@@ -443,6 +474,27 @@ class CentralRelay:
                 continue
             exposed = tool.model_copy(deep=True)
             required = exposed.input_schema.get("required")
+            if tool.name == VERIFIED_SUBMIT_TOOL:
+                submit_properties = exposed.input_schema.setdefault("properties", {})
+                submit_properties.pop("submission_preflight", None)
+                submit_properties["repository"] = {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the clone-owning repository. Required when "
+                        "notes contains branch_and_commit and accepted only beneath a "
+                        "configured --repository-root. The path stays local to the relay."
+                    ),
+                }
+                if isinstance(required, list):
+                    exposed.input_schema["required"] = [
+                        name for name in required if name != "submission_preflight"
+                    ]
+                    required = exposed.input_schema["required"]
+                exposed.description = (
+                    f"{exposed.description} For code submissions, the relay verifies "
+                    "the exact origin branch tip and signs the proof without exposing "
+                    "the bearer credential."
+                )
             if self._resolved_agent_name is not None:
                 self._local_identity_tools.add(tool.name)
                 exposed.input_schema["properties"].pop("agent_name")
@@ -897,6 +949,53 @@ class CentralRelay:
                 break
         return arguments
 
+    def _submission_repository(self, value: Any) -> Path:
+        if not isinstance(value, str) or not value.strip():
+            raise RelayFailure(
+                "code-ticket ticket_submit requires repository set to the "
+                "clone-owning repository path"
+            )
+        if not self.repository_roots:
+            raise RelayFailure(
+                "code-ticket ticket_submit is disabled until the relay is started "
+                "with at least one --repository-root"
+            )
+        repository = Path(value).expanduser().resolve()
+        if not any(repository.is_relative_to(root) for root in self.repository_roots):
+            raise RelayFailure(
+                "repository is outside the configured --repository-root boundary"
+            )
+        if not (repository / ".git").exists():
+            raise RelayFailure(
+                "submission preflight requires a clone-owning git repository"
+            )
+        return repository
+
+    async def _call_verified_submit(
+        self,
+        payload: dict[str, Any],
+        repository: Path,
+        notes: str,
+    ) -> types.CallToolResult:
+        async def submit(client: UpstreamClient) -> types.CallToolResult:
+            try:
+                preflight = signed_remote_submission(
+                    repository,
+                    notes,
+                    token=_read_token(self.token_file),
+                    board_id=str(payload["board_id"]),
+                    ticket_id=str(payload["ticket_id"]),
+                    agent_name=str(payload["agent_name"]),
+                )
+            except BoardClientError as exc:
+                raise RelayFailure(str(exc)) from exc
+            return await client.call_tool(
+                VERIFIED_SUBMIT_TOOL,
+                {**payload, "submission_preflight": preflight},
+            )
+
+        return await self._retrying(submit)
+
     async def call_tool(
         self,
         name: str,
@@ -919,8 +1018,35 @@ class CentralRelay:
                 return self._json_result(
                     {"ok": False, "error": str(failure)}, is_error=True
                 )
-        payload = self._arguments_for(name, dict(arguments))
+        local_arguments = dict(arguments)
+        repository_value = (
+            local_arguments.pop("repository", None)
+            if name == VERIFIED_SUBMIT_TOOL
+            else None
+        )
+        if name == VERIFIED_SUBMIT_TOOL and "submission_preflight" in local_arguments:
+            failure = RelayFailure(
+                "caller-supplied submission_preflight is not accepted; provide the "
+                "clone-owning repository path"
+            )
+            return self._json_result(
+                {"ok": False, "error": str(failure)}, is_error=True
+            )
+        payload = self._arguments_for(name, local_arguments)
         try:
+            if name == VERIFIED_SUBMIT_TOOL:
+                notes = payload.get("notes")
+                code_submission = isinstance(notes, str) and bool(
+                    SUBMIT_BRANCH_LABEL_RE.search(notes)
+                )
+                if code_submission:
+                    repository = self._submission_repository(repository_value)
+                    return await self._call_verified_submit(payload, repository, notes)
+                if repository_value is not None:
+                    raise RelayFailure(
+                        "repository is accepted only when notes contains exactly one "
+                        "branch_and_commit line"
+                    )
             return await self._retrying(
                 lambda client: client.call_tool(name, payload)
             )
@@ -1039,6 +1165,16 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--ca-file", type=Path)
     command.add_argument("--setup-root", type=Path)
     command.add_argument("--tools", choices=("default", "all"), default="default")
+    command.add_argument(
+        "--repository-root",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "directory containing clone-owning repositories permitted for verified "
+            "code submission; repeat for additional roots"
+        ),
+    )
     command.add_argument("--version", action="version", version=f"pursers-mcp {package_version()}")
     return command
 
@@ -1054,6 +1190,7 @@ def main(argv: list[str] | None = None) -> None:
             ca_file=args.ca_file,
             tools_mode=args.tools,
             setup_root=args.setup_root,
+            repository_roots=args.repository_root,
         )
     except RelayFailure as exc:
         print(f"pursers-mcp: {exc}", file=sys.stderr, flush=True)

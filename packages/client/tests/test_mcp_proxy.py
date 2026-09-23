@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,8 +13,11 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pursers_client.mcp_proxy as mcp_proxy
+import pytest
 from mcp import Client, StdioServerParameters, types
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from pursers_central import central as central_module
 from pursers_client.mcp_proxy import (
     SETUP_STATUS_TOOL,
     SETUP_TOOL,
@@ -37,6 +41,16 @@ def _json_result(value: dict[str, Any]) -> types.CallToolResult:
         content=[types.TextContent(type="text", text=json.dumps(value))],
         structuredContent=value,
     )
+
+
+def _git(repository: Path, *arguments: str) -> str:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 class FakeClient:
@@ -260,6 +274,215 @@ async def _default_tool_set_is_curated_and_all_is_opt_in(tmp_path: Path) -> None
         "board_status",
         "journal_compact",
     ]
+
+
+def test_parser_accepts_repeatable_repository_roots() -> None:
+    args = parser().parse_args(
+        [
+            "--central-url",
+            "http://127.0.0.1:8766",
+            "--board",
+            "pursers",
+            "--repository-root",
+            "/PATH/TO/WORK-ONE",
+            "--repository-root",
+            "/PATH/TO/WORK-TWO",
+        ]
+    )
+    assert args.repository_root == [
+        Path("/PATH/TO/WORK-ONE"),
+        Path("/PATH/TO/WORK-TWO"),
+    ]
+
+
+def test_verified_submit_runs_through_real_relay_and_central(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asyncio.run(_verified_submit_runs_through_real_relay_and_central(tmp_path, monkeypatch))
+
+
+async def _verified_submit_runs_through_real_relay_and_central(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jwks_path = tmp_path / "jwks.json"
+    jwks_path.write_text('{"keys": []}', encoding="utf-8")
+    monkeypatch.setenv("CENTRAL_AUTH_MODE", "jwt")
+    monkeypatch.setenv("CENTRAL_JWT_ISSUER", "https://issuer.example")
+    monkeypatch.setenv(
+        "CENTRAL_JWT_AUDIENCE", "http://localhost:8765/mcp"
+    )
+    monkeypatch.setenv("CENTRAL_JWKS_PATH", str(jwks_path))
+    monkeypatch.setenv("CENTRAL_ADMISSION", "invite")
+    monkeypatch.setenv("STORE_BACKEND", "sqlite")
+
+    central, _service = central_module.build_server(
+        "localhost", 8765, tmp_path / "central-data"
+    )
+    principal = central_module.Principal(
+        "PR-relay-worker",
+        "relay-worker",
+        frozenset({"board:read", "board:write"}),
+    )
+    relay_token = "relay-held-token-that-must-not-leak"
+    monkeypatch.setattr(central_module, "current_principal", lambda: principal)
+    monkeypatch.setattr(
+        central_module,
+        "get_access_token",
+        lambda: SimpleNamespace(token=relay_token),
+    )
+
+    async def central_call(name: str, **arguments: Any) -> types.CallToolResult:
+        return await central.call_tool(
+            name, {"board_id": "relay-board", **arguments}
+        )
+
+    joined = await central_call(
+        "board_join",
+        agent_name="relay-worker",
+        role="worker",
+        capabilities={"can_work": True, "can_review": False},
+    )
+    assert not joined.is_error
+    created = await central_call(
+        "ticket_create",
+        agent_name="relay-worker",
+        title="verified relay submission",
+        description="exercise the packaged safe submit boundary",
+        target_url="pursers/packages/client",
+        scope="interactive",
+        required_fields=["branch_and_commit"],
+    )
+    ticket_id = created.structured_content["ticket"]["ticket_id"]
+    claimed = await central_call(
+        "ticket_claim", agent_name="relay-worker", ticket_id=ticket_id
+    )
+    assert not claimed.is_error
+
+    allowed_root = tmp_path / "allowed"
+    allowed_root.mkdir()
+    remote = allowed_root / "remote.git"
+    remote.mkdir()
+    _git(remote, "init", "--bare")
+    repository = allowed_root / "ticket-repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "codex/TK-relay")
+    _git(repository, "config", "user.name", "Relay Test")
+    _git(repository, "config", "user.email", "relay@example.invalid")
+    _git(repository, "remote", "add", "origin", str(remote))
+    (repository / "tracked.txt").write_text("first\n", encoding="utf-8")
+    _git(repository, "add", "tracked.txt")
+    _git(repository, "commit", "-m", "first")
+    stale_sha = _git(repository, "rev-parse", "HEAD")
+    (repository / "tracked.txt").write_text("second\n", encoding="utf-8")
+    _git(repository, "commit", "-am", "second")
+    remote_sha = _git(repository, "rev-parse", "HEAD")
+    _git(repository, "push", "origin", "HEAD:refs/heads/codex/TK-relay")
+
+    token_file = tmp_path / "relay.jwt"
+    token_file.write_text(relay_token, encoding="utf-8")
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        async with Client(central, mode="2026-07-28", cache=None) as client:
+            yield client
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="relay-board",
+        token_file=token_file,
+        tools_mode="all",
+        connection_factory=connect,
+        repository_roots=[allowed_root],
+    )
+    exact_notes = (
+        f"branch_and_commit: codex/TK-relay @ {remote_sha}\n"
+        "test_output: relay integration passed"
+    )
+    with pytest.raises(ToolError, match="raw ticket_submit is unavailable"):
+        await central_call(
+            "ticket_submit",
+            agent_name="relay-worker",
+            ticket_id=ticket_id,
+            summary="raw attempt",
+            notes=exact_notes,
+        )
+
+    try:
+        async with Client(build_server(relay), mode="2026-07-28", cache=None) as host:
+            listed = await host.list_tools()
+            submit_tool = next(
+                tool for tool in listed.tools if tool.name == "ticket_submit"
+            )
+            assert "repository" in submit_tool.input_schema["properties"]
+            assert "submission_preflight" not in submit_tool.input_schema["properties"]
+
+            missing = await host.call_tool(
+                "ticket_submit",
+                {"ticket_id": ticket_id, "summary": "missing", "notes": exact_notes},
+            )
+            assert missing.is_error
+            assert "requires repository" in missing.content[0].text
+
+            outside = tmp_path / "outside"
+            outside.mkdir()
+            out_of_root = await host.call_tool(
+                "ticket_submit",
+                {
+                    "ticket_id": ticket_id,
+                    "summary": "outside",
+                    "notes": exact_notes,
+                    "repository": str(outside),
+                },
+            )
+            assert out_of_root.is_error
+            assert "outside the configured" in out_of_root.content[0].text
+
+            mismatch = await host.call_tool(
+                "ticket_submit",
+                {
+                    "ticket_id": ticket_id,
+                    "summary": "mismatch",
+                    "notes": (
+                        f"branch_and_commit: codex/TK-relay @ {stale_sha}\n"
+                        "test_output: must fail"
+                    ),
+                    "repository": str(repository),
+                },
+            )
+            assert mismatch.is_error
+            assert "mismatched remote branch" in mismatch.content[0].text
+
+            submitted = await host.call_tool(
+                "ticket_submit",
+                {
+                    "ticket_id": ticket_id,
+                    "summary": "verified through relay",
+                    "notes": exact_notes,
+                    "repository": str(repository),
+                },
+            )
+    finally:
+        await relay.aclose()
+
+    assert not submitted.is_error
+    assert submitted.structured_content["ticket"]["status"] == "submitted"
+    serialized = json.dumps(
+        {
+            "tools": [tool.model_dump() for tool in listed.tools],
+            "result": submitted.structured_content,
+        },
+        sort_keys=True,
+    )
+    assert relay_token not in serialized
+    assert str(repository) not in serialized
+    verified = submitted.structured_content["ticket"]["submission_preflight"]
+    assert verified == {
+        "kind": "git-ls-remote-exact-tip-v1",
+        "branch": "codex/TK-relay",
+        "commit": remote_sha,
+        "remote_ref": "origin/codex/TK-relay",
+        "remote_tip": remote_sha,
+    }
 
 
 def test_local_setup_identity_is_hidden_and_injected(tmp_path: Path) -> None:
