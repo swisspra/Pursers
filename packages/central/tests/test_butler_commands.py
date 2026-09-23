@@ -378,6 +378,84 @@ class ButlerCommandTests(unittest.IsolatedAsyncioTestCase):
         for audit in document["butler_audit"]:
             validate_schema("autonomous-butler-control-audit-v2.schema.json", audit)
 
+    async def test_command_replay_precedes_new_command_live_preconditions(self) -> None:
+        self.principal = self.worker
+        expiry = (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat()
+        created = await self.call(
+            "butler_command_submit",
+            agent_name="worker-1",
+            request_id="replay-after-live-state-change",
+            project_id="pursers",
+            sender_channel="a2a",
+            intent="reconcile_now",
+            parameters={},
+            expected_config_revision=1,
+            expires_at=expiry,
+            priority="high",
+        )
+        self.assertFalse(created.is_error)
+
+        self.principal = self.admin
+        current = await self.call("butler_config_get")
+        next_config = copy.deepcopy(current.structured_content["config"])
+        next_config["revision"] = 2
+        next_config["desired"]["cooldowns"]["scale_up_s"] = 31
+        changed = await self.call(
+            "butler_config_set",
+            agent_name="human-admin",
+            mutation_id="advance-config-before-command-replay",
+            sender_channel="human",
+            config=next_config,
+            expected_revision=1,
+        )
+        self.assertFalse(changed.is_error)
+
+        self.principal = self.worker
+        replay_after_config = await self.call(
+            "butler_command_submit",
+            agent_name="worker-1",
+            request_id="replay-after-live-state-change",
+            project_id="pursers",
+            sender_channel="a2a",
+            intent="reconcile_now",
+            parameters={},
+            expected_config_revision=1,
+            expires_at=expiry,
+            priority="high",
+        )
+        self.assertTrue(replay_after_config.structured_content["idempotent_replay"])
+
+        expires_in = (
+            datetime.fromisoformat(expiry) - datetime.now(timezone.utc)
+        ).total_seconds()
+        await asyncio.sleep(max(0.0, expires_in) + 0.05)
+        replay_after_expiry = await self.call(
+            "butler_command_submit",
+            agent_name="worker-1",
+            request_id="replay-after-live-state-change",
+            project_id="pursers",
+            sender_channel="a2a",
+            intent="reconcile_now",
+            parameters={},
+            expected_config_revision=1,
+            expires_at=expiry,
+            priority="high",
+        )
+        self.assertTrue(replay_after_expiry.structured_content["idempotent_replay"])
+        with self.assertRaisesRegex(ToolError, "different canonical bytes"):
+            await self.call(
+                "butler_command_submit",
+                agent_name="worker-1",
+                request_id="replay-after-live-state-change",
+                project_id="pursers",
+                sender_channel="a2a",
+                intent="reconcile_now",
+                parameters={},
+                expected_config_revision=1,
+                expires_at=expiry,
+                priority="normal",
+            )
+
     async def test_wait_wakes_on_revision_and_config_rejects_unknown_fields(self) -> None:
         self.principal = self.worker
         created = await self.call(

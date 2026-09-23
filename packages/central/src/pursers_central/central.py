@@ -12983,9 +12983,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ):
             raise ValueError("expected_config_revision must be non-negative")
         expiry = parse_butler_time("expires_at", expires_at)
-        now_dt = datetime.now(timezone.utc)
-        if expiry <= now_dt or (expiry - now_dt).total_seconds() > 604_800:
-            raise ValueError("expires_at must be in the future and no more than 7 days away")
         principal = current_principal()
         require_board_write_or_coordinate(principal)
         now = time.time()
@@ -13003,19 +13000,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "reconcile_now", "veto_action", "kill"
             }:
                 require_butler_actor(document, principal, agent_name)
-            current_config = document.get("butler_config")
-            current_config_revision = (
-                int(current_config.get("revision", 0))
-                if isinstance(current_config, Mapping)
-                else 0
-            )
-            if current_config_revision != expected_config_revision:
-                raise ValueError(
-                    "Butler command config precondition failed: "
-                    f"expected {expected_config_revision}, current {current_config_revision}"
-                )
-            if current_config is None and intent not in {"kill", "veto_action"}:
-                raise ValueError("Butler config is absent; only kill or veto_action is accepted")
             immutable = {
                 "request_id": request_id,
                 "board_id": board_id,
@@ -13041,6 +13025,24 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "idempotent_replay": True,
                     "event_created": False,
                 }
+            now_dt = datetime.now(timezone.utc)
+            if expiry <= now_dt or (expiry - now_dt).total_seconds() > 604_800:
+                raise ValueError(
+                    "expires_at must be in the future and no more than 7 days away"
+                )
+            current_config = document.get("butler_config")
+            current_config_revision = (
+                int(current_config.get("revision", 0))
+                if isinstance(current_config, Mapping)
+                else 0
+            )
+            if current_config_revision != expected_config_revision:
+                raise ValueError(
+                    "Butler command config precondition failed: "
+                    f"expected {expected_config_revision}, current {current_config_revision}"
+                )
+            if current_config is None and intent not in {"kill", "veto_action"}:
+                raise ValueError("Butler config is absent; only kill or veto_action is accepted")
             if len(commands) >= 10_000:
                 raise ValueError("Butler command store reached its bounded limit")
             audit = append_butler_audit(

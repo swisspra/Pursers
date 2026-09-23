@@ -11,7 +11,7 @@
   "components": {
     "pursers-central": {
       "version": "0.1.2",
-      "wheel_sha256": "a18ba11ec111440135ec1acff7013d9799063189419133102f3d77fa66853948",
+      "wheel_sha256": "c66f3994cf25ce14100496c14f498b9e6b933e265a0d76bc968360a532e34f3b",
       "members": {
         "pursers_central-0.1.2.dist-info/METADATA": "043f59acbf61b328670d998b6c51bae1267aa46311ffda5e46bb4b859af7633a",
         "pursers_central-0.1.2.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
@@ -21,7 +21,7 @@
         "pursers_central/__init__.py": "64a8d177caed7d8db6c7560e4e3ef6b1fc840b70744df22d5466d8147b6f255b",
         "pursers_central/__main__.py": "8bd9f3325a7cbe104d4dca914351cf417eff40812a9972b68b64c783f03ed7de",
         "pursers_central/butler_commands.py": "7a0104469ef2d26425d9268b0e03244561d930ece632e5d90d28a7dfa800409d",
-        "pursers_central/central.py": "1b3d83bd42717854a6046efb867b943c5dbb7b5a3d2ec88498aeb10e54bfdf71",
+        "pursers_central/central.py": "623f7f9d1620c71464d27d6574d8d2d59e64eab5cecabfa1f1889c60d2425403",
         "pursers_central/cursor.py": "6013daec61d8d8caee6e80ea24ffc77cb5ee4d6287c845df2656277c875a8ce9",
         "pursers_central/instance_lock.py": "3127eb46fcb44412e73024a4ca3ae8f4ead35afd8b7c848c70ddfe41ab9aaa6e",
         "pursers_central/journal.py": "9fe448476cfc999667935ea0218a3161385a29ae567de08902c1e3ed98322e30",
