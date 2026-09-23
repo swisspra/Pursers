@@ -75,6 +75,28 @@ from pursers_client import (
     TICKET_UNPARKED,
     REQUEST_STATE_TTL_S,
     load_or_create_request_state_keys,
+    BUTLER_COMMAND_CREATED,
+    BUTLER_COMMAND_TRANSITIONED,
+    BUTLER_CONFIG_CHANGED,
+    BUTLER_EVENT_KINDS,
+)
+
+from butler_commands import (
+    COMMAND_PRIORITIES,
+    COMMAND_SCHEMA,
+    COMMAND_STATES,
+    TERMINAL_COMMAND_STATES,
+    canonical_digest,
+    changed_paths,
+    command_sort_key,
+    parse_time as parse_butler_time,
+    require_identifier as require_butler_identifier,
+    require_reason as require_butler_reason,
+    transition_allowed as butler_transition_allowed,
+    validate_command_parameters,
+    validate_command_result,
+    validate_config as validate_butler_config,
+    validate_config_authority,
 )
 
 from cursor import CursorStore
@@ -1099,6 +1121,7 @@ class CentralJournal(Journal):
             | ARCHIVE_EVENT_KINDS
             | SEAT_IDENTITY_EVENT_KINDS
             | COORDINATOR_MESSAGE_EVENT_KINDS
+            | BUTLER_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         board_id = _require_text("board_id", board_id)
@@ -1569,6 +1592,12 @@ class CentralBoard:
             "memories": [],
             "next_memory_seq": 1,
             "state": {},
+            "butler_commands": {},
+            "butler_audit": [],
+            "next_butler_audit_seq": 1,
+            "butler_config": None,
+            "butler_config_history": [],
+            "butler_config_mutations": {},
         }
 
     def ensure_schema(self, document: dict[str, Any]) -> None:
@@ -1738,6 +1767,27 @@ class CentralBoard:
             for rule, count in allow_counts.items()
         ):
             raise ValueError("board scrub allow counters are invalid")
+        butler_commands = document.setdefault("butler_commands", {})
+        if not isinstance(butler_commands, dict):
+            raise ValueError("Butler commands are invalid")
+        butler_audit = document.setdefault("butler_audit", [])
+        if not isinstance(butler_audit, list):
+            raise ValueError("Butler audit is invalid")
+        next_butler_audit_seq = document.setdefault("next_butler_audit_seq", 1)
+        if (
+            isinstance(next_butler_audit_seq, bool)
+            or not isinstance(next_butler_audit_seq, int)
+            or next_butler_audit_seq < 1
+        ):
+            raise ValueError("Butler audit sequence is invalid")
+        if document.setdefault("butler_config", None) is not None and not isinstance(
+            document["butler_config"], dict
+        ):
+            raise ValueError("Butler config is invalid")
+        if not isinstance(document.setdefault("butler_config_history", []), list):
+            raise ValueError("Butler config history is invalid")
+        if not isinstance(document.setdefault("butler_config_mutations", {}), dict):
+            raise ValueError("Butler config mutations are invalid")
         board_id = document.get("board_id")
         if not isinstance(board_id, str) or not board_id:
             raise ValueError("board document is missing board_id")
@@ -2996,6 +3046,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     join_authorization_log_state: dict[
         tuple[str, str, str], dict[str, int | float]
     ] = {}
+    butler_command_waiters: dict[tuple[str, str], asyncio.Event] = {}
 
     def log_board_join_authorization_failure(
         *,
@@ -5830,6 +5881,194 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         seq = int(document.setdefault("next_annotation_seq", 1))
         document["next_annotation_seq"] = seq + 1
         return f"AN-{seq:012d}"
+
+    def butler_command_uri(board_id: str, command_id: str) -> str:
+        return resource_uri(board_id, "butler-command", command_id)
+
+    def butler_config_uri(board_id: str) -> str:
+        return f"board://{board_id}/butler-config"
+
+    def require_butler_actor(
+        document: dict[str, Any], principal: Principal, agent_name: str
+    ) -> dict[str, Any]:
+        actor = service.member(document, principal, agent_name)
+        membership = service.resolve_board_context(document, principal.principal_id)
+        capabilities = actor.get("capabilities")
+        capabilities = capabilities if isinstance(capabilities, Mapping) else {}
+        if (
+            membership.get("role") != "admin"
+            or actor.get("role") != "coordinator"
+            or capabilities.get("can_work") is not False
+            or capabilities.get("can_review") is not False
+        ):
+            raise PermissionError(
+                "operation requires the board-owned non-working coordinator identity"
+            )
+        if actor.get("lifecycle_status", "active") != "active":
+            raise PermissionError("Board Butler identity is not active")
+        return actor
+
+    def butler_call_actor(
+        document: dict[str, Any], principal: Principal, agent_name: str, now: float
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+        if "board:write" in principal.scopes:
+            return prepare_board_call(document, principal, agent_name, now)
+        actor = coordinator_actor(document, principal, agent_name)
+        return actor, [], []
+
+    def butler_sender(
+        document: dict[str, Any], principal: Principal, actor: Mapping[str, Any],
+        channel: str,
+    ) -> dict[str, Any]:
+        if channel not in {"human", "a2a"}:
+            raise ValueError("sender_channel must be human or a2a")
+        membership = service.resolve_board_context(document, principal.principal_id)
+        if channel == "human":
+            capabilities = actor.get("capabilities")
+            capabilities = capabilities if isinstance(capabilities, Mapping) else {}
+            if membership.get("role") != "admin":
+                raise PermissionError("human command channel requires board-admin membership")
+            if (
+                actor.get("role") == "coordinator"
+                and capabilities.get("can_work") is False
+                and capabilities.get("can_review") is False
+            ):
+                raise PermissionError(
+                    "board-owned Butler identity cannot assert human authority"
+                )
+        return {
+            "principal_id": principal.principal_id,
+            "agent_id": actor["agent_id"],
+            "agent_name": actor["agent_name"],
+            "channel": channel,
+            "membership_role": membership["role"],
+            "seat_role": actor.get("role", "worker"),
+        }
+
+    def append_butler_audit(
+        document: dict[str, Any],
+        *,
+        actor: Mapping[str, Any],
+        category: str,
+        action: str,
+        outcome: str,
+        reason_code: str,
+        now: float,
+        command_id: str | None = None,
+        config_revision: int | None = None,
+        prior_revision: int | None = None,
+        current_revision: int | None = None,
+    ) -> dict[str, Any]:
+        seq = int(document.setdefault("next_butler_audit_seq", 1))
+        document["next_butler_audit_seq"] = seq + 1
+        config = document.get("butler_config")
+        audit = {
+            "schema": "autonomous_butler_control_audit_v2",
+            "schema_version": 2,
+            "audit_id": f"BA-{seq:012d}",
+            "board_id": document["board_id"],
+            "sequence": seq,
+            "occurred_at": iso_at(now),
+            "actor_id": actor["agent_id"],
+            "actor_principal_id": actor["principal_id"],
+            "category": category,
+            "action": action,
+            "outcome": outcome,
+            "reason_code": reason_code,
+            "policy_digest_sha256": canonical_digest(config) if config else "0" * 64,
+            "detail_redacted": True,
+        }
+        for key, value in (
+            ("command_id", command_id),
+            ("config_revision", config_revision),
+            ("prior_revision", prior_revision),
+            ("current_revision", current_revision),
+        ):
+            if value is not None:
+                audit[key] = value
+        document.setdefault("butler_audit", []).append(audit)
+        return audit
+
+    def transition_command(
+        document: dict[str, Any],
+        command: dict[str, Any],
+        *,
+        actor: Mapping[str, Any],
+        target_status: str,
+        reason_code: str,
+        now: float,
+        result: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        current = str(command.get("status"))
+        if target_status not in COMMAND_STATES:
+            raise ValueError("target_status is invalid")
+        if not butler_transition_allowed(current, target_status):
+            raise ValueError(f"command transition {current}->{target_status} is not allowed")
+        prior_revision = int(command["revision"])
+        current_revision = prior_revision + 1
+        audit = append_butler_audit(
+            document,
+            actor=actor,
+            category="command",
+            action=f"command_{target_status}",
+            outcome=(
+                "started"
+                if target_status in {"validating", "pending", "applying"}
+                else "denied"
+                if target_status == "rejected"
+                else target_status
+            ),
+            reason_code=reason_code,
+            now=now,
+            command_id=command["command_id"],
+            prior_revision=prior_revision,
+            current_revision=current_revision,
+        )
+        command["status"] = target_status
+        command["revision"] = current_revision
+        command["updated_at"] = iso_at(now)
+        command["transition"] = {
+            "prior_revision": prior_revision,
+            "current_revision": current_revision,
+            "actor_id": actor["agent_id"],
+            "reason_code": reason_code,
+            "audit_id": audit["audit_id"],
+            "occurred_at": iso_at(now),
+        }
+        command.setdefault("transition_history", []).append(
+            copy.deepcopy(command["transition"])
+        )
+        if result is not None:
+            command["result"] = copy.deepcopy(result)
+        return copy.deepcopy(command), copy.deepcopy(audit)
+
+    def notify_butler_command_waiters(board_id: str, command_id: str) -> None:
+        waiter = butler_command_waiters.pop((board_id, command_id), None)
+        if waiter is not None:
+            waiter.set()
+
+    def visible_butler_command(
+        document: dict[str, Any],
+        principal: Principal,
+        agent_name: str,
+        command_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        actor = service.member(document, principal, agent_name)
+        command = document.setdefault("butler_commands", {}).get(command_id)
+        if command is None:
+            raise ValueError("Butler command not found")
+        membership = service.resolve_board_context(document, principal.principal_id)
+        sender = command.get("sender")
+        own = isinstance(sender, Mapping) and sender.get("principal_id") == principal.principal_id
+        if membership.get("role") != "admin" and not own:
+            raise PermissionError("Butler command is not visible to this principal")
+        projected = copy.deepcopy(command)
+        projected["expired"] = (
+            projected.get("status") not in TERMINAL_COMMAND_STATES
+            and parse_butler_time("expires_at", projected["expires_at"])
+            <= datetime.now(timezone.utc)
+        )
+        return actor, projected
 
     def allocate_admission_revision(document: dict[str, Any]) -> int:
         revision = int(document.setdefault("next_admission_revision", 1))
@@ -12486,6 +12725,707 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "superseded_handoffs": changed["superseded"],
             "event": event,
             "release_events": release_events,
+        }
+
+    @tool()
+    async def butler_config_get(
+        board_id: str,
+        revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Read the current or one retained Autonomous Butler config revision."""
+        board_id = require_id("board_id", board_id)
+        if revision is not None and (
+            isinstance(revision, bool) or not isinstance(revision, int) or revision < 0
+        ):
+            raise ValueError("revision must be a non-negative integer")
+        principal = current_principal()
+        require_scope(principal, "board:read")
+        document = service.load(board_id)
+        service.principal_members(document, principal.principal_id)
+        current = document.get("butler_config")
+        selected = current
+        if revision is not None:
+            if revision == 0:
+                selected = None
+            elif isinstance(current, Mapping) and current.get("revision") == revision:
+                selected = current
+            else:
+                selected = None
+                for entry in document.get("butler_config_history", []):
+                    if entry.get("current_revision") == revision:
+                        selected = entry.get("config")
+                        break
+                if selected is None:
+                    raise ValueError("Butler config revision not found")
+        authorization = selected.get("authorization") if isinstance(selected, Mapping) else None
+        authorization_valid = (
+            isinstance(selected, Mapping)
+            and isinstance(authorization, Mapping)
+            and authorization.get("config_revision") == selected.get("revision")
+            and authorization.get("envelope_fingerprint_sha256")
+            == selected.get("envelope", {}).get("fingerprint_sha256")
+            and parse_butler_time("authorization.expires_at", authorization["expires_at"])
+            > datetime.now(timezone.utc)
+        )
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "effective_mode": (
+                selected.get("desired", {}).get("mode", "shadow")
+                if isinstance(selected, Mapping)
+                and selected.get("enabled") is True
+                and authorization_valid
+                else "shadow"
+            ),
+            "revision": int(selected.get("revision", 0)) if isinstance(selected, Mapping) else 0,
+            "config": copy.deepcopy(selected),
+            "config_digest_sha256": canonical_digest(selected) if selected is not None else None,
+        }
+
+    @tool()
+    async def butler_config_set(
+        board_id: str,
+        agent_name: str,
+        mutation_id: str,
+        sender_channel: str,
+        config: dict[str, Any],
+        expected_revision: int,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """CAS-write one strict Butler config with per-field authority checks."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        mutation_id = require_butler_identifier("mutation_id", mutation_id)
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise ValueError("expected_revision must be a non-negative integer")
+        if len(json.dumps(config, ensure_ascii=False, sort_keys=True).encode("utf-8")) > 262_144:
+            raise ValueError("config exceeds 262144 bytes")
+        validated = validate_butler_config(config, board_id)
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        now = time.time()
+        mutation_payload = {
+            "mutation_id": mutation_id,
+            "sender_channel": sender_channel,
+            "expected_revision": expected_revision,
+            "config": validated,
+        }
+        mutation_digest = canonical_digest(mutation_payload)
+
+        def set_config(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = butler_call_actor(
+                document, principal, agent_name, now
+            )
+            membership = service.resolve_board_context(document, principal.principal_id)
+            if sender_channel == "human":
+                if membership.get("role") != "admin" or "board:write" not in principal.scopes:
+                    raise PermissionError(
+                        "human config channel requires board-admin write authorization"
+                    )
+                capabilities = actor.get("capabilities")
+                capabilities = capabilities if isinstance(capabilities, Mapping) else {}
+                if (
+                    actor.get("role") == "coordinator"
+                    and capabilities.get("can_work") is False
+                    and capabilities.get("can_review") is False
+                ):
+                    raise PermissionError(
+                        "board-owned Butler identity cannot assert human authority"
+                    )
+            elif sender_channel == "a2a":
+                require_butler_actor(document, principal, agent_name)
+            else:
+                raise ValueError("sender_channel must be human or a2a")
+            mutations = document.setdefault("butler_config_mutations", {})
+            existing = mutations.get(mutation_id)
+            if existing is not None:
+                if not hmac.compare_digest(existing["request_digest_sha256"], mutation_digest):
+                    raise ValueError("mutation_id was reused with different canonical bytes")
+                return {
+                    "actor": copy.deepcopy(actor),
+                    "released": released,
+                    "renewed": renewed,
+                    "config": copy.deepcopy(existing["config"]),
+                    "record": copy.deepcopy(existing),
+                    "idempotent_replay": True,
+                    "event_created": False,
+                }
+            before = document.get("butler_config")
+            current_revision = int(before.get("revision", 0)) if isinstance(before, Mapping) else 0
+            if current_revision != expected_revision:
+                raise ValueError(
+                    f"Butler config CAS conflict: expected {expected_revision}, current {current_revision}"
+                )
+            if validated["revision"] != expected_revision + 1:
+                raise ValueError("config revision must advance exactly one")
+            paths = validate_config_authority(before, validated, sender_channel)
+            audit = append_butler_audit(
+                document,
+                actor=actor,
+                category="config",
+                action="config_set",
+                outcome="succeeded",
+                reason_code="config_cas_committed",
+                now=now,
+                config_revision=validated["revision"],
+                prior_revision=current_revision,
+                current_revision=validated["revision"],
+            )
+            before_digest = canonical_digest(before) if before is not None else None
+            after_digest = canonical_digest(validated)
+            history = {
+                "mutation_id": mutation_id,
+                "request_digest_sha256": mutation_digest,
+                "prior_revision": current_revision,
+                "current_revision": validated["revision"],
+                "prior_digest_sha256": before_digest,
+                "current_digest_sha256": after_digest,
+                "changed_paths": paths,
+                "actor_id": actor["agent_id"],
+                "sender_channel": sender_channel,
+                "audit_id": audit["audit_id"],
+                "occurred_at": iso_at(now),
+                "config": copy.deepcopy(validated),
+                "prior_config": copy.deepcopy(before),
+            }
+            document["butler_config"] = copy.deepcopy(validated)
+            document.setdefault("butler_config_history", []).append(history)
+            mutations[mutation_id] = copy.deepcopy(history)
+            if len(document["butler_config_history"]) > 256:
+                document["butler_config_history"] = document["butler_config_history"][-256:]
+            if len(mutations) > 1024:
+                oldest = sorted(
+                    mutations,
+                    key=lambda key: (str(mutations[key].get("occurred_at", "")), key),
+                )[: len(mutations) - 1024]
+                for key in oldest:
+                    mutations.pop(key, None)
+            return {
+                "actor": copy.deepcopy(actor),
+                "released": released,
+                "renewed": renewed,
+                "config": copy.deepcopy(validated),
+                "record": copy.deepcopy(history),
+                "idempotent_replay": False,
+                "event_created": True,
+                "recipients": service.admitted_agent_ids(document),
+            }
+
+        changed = service.mutate(board_id, set_config)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        event = None
+        if changed["event_created"]:
+            event = await append_and_publish(
+                board_id,
+                changed["actor"],
+                BUTLER_CONFIG_CHANGED,
+                butler_config_uri(board_id),
+                changed["recipients"],
+                ctx,
+                config_revision=changed["record"]["current_revision"],
+                request_digest_sha256=mutation_digest,
+                audit_id=changed["record"]["audit_id"],
+                reason_code="config_cas_committed",
+            )
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "config": changed["config"],
+            "idempotent_replay": changed["idempotent_replay"],
+            "event_created": changed["event_created"],
+            "rollback_evidence": {
+                key: copy.deepcopy(changed["record"].get(key))
+                for key in (
+                    "mutation_id", "prior_revision", "current_revision",
+                    "prior_digest_sha256", "current_digest_sha256",
+                    "changed_paths", "audit_id",
+                )
+            },
+            "event": event,
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+        }
+
+    @tool()
+    async def butler_command_submit(
+        board_id: str,
+        agent_name: str,
+        request_id: str,
+        project_id: str,
+        sender_channel: str,
+        intent: str,
+        parameters: dict[str, Any],
+        expected_config_revision: int,
+        expires_at: str,
+        priority: str,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Durably submit one typed, bounded and idempotent Butler command."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        request_id = require_butler_identifier("request_id", request_id)
+        project_id = require_butler_identifier("project_id", project_id)
+        normalized_parameters = validate_command_parameters(intent, parameters)
+        if priority not in COMMAND_PRIORITIES:
+            raise ValueError("priority must be low, normal, high, or emergency")
+        if (
+            isinstance(expected_config_revision, bool)
+            or not isinstance(expected_config_revision, int)
+            or expected_config_revision < 0
+        ):
+            raise ValueError("expected_config_revision must be non-negative")
+        expiry = parse_butler_time("expires_at", expires_at)
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        now = time.time()
+
+        def submit(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = butler_call_actor(
+                document, principal, agent_name, now
+            )
+            sender = butler_sender(document, principal, actor, sender_channel)
+            if sender_channel == "a2a" and priority == "emergency":
+                raise PermissionError("emergency priority is reserved for human-admin commands")
+            if intent == "resume" and sender_channel != "human":
+                raise PermissionError("resume requires human-admin authority")
+            if sender_channel == "a2a" and intent not in {
+                "reconcile_now", "veto_action", "kill"
+            }:
+                require_butler_actor(document, principal, agent_name)
+            immutable = {
+                "request_id": request_id,
+                "board_id": board_id,
+                "project_id": project_id,
+                "sender": sender,
+                "intent": intent,
+                "parameters": normalized_parameters,
+                "expected_config_revision": expected_config_revision,
+                "expires_at": expiry.isoformat(),
+                "priority": priority,
+            }
+            request_digest = canonical_digest(immutable)
+            commands = document.setdefault("butler_commands", {})
+            existing = commands.get(request_id)
+            if existing is not None:
+                if not hmac.compare_digest(existing["request_digest_sha256"], request_digest):
+                    raise ValueError("request_id was reused with different canonical bytes")
+                return {
+                    "actor": copy.deepcopy(actor),
+                    "released": released,
+                    "renewed": renewed,
+                    "command": copy.deepcopy(existing),
+                    "idempotent_replay": True,
+                    "event_created": False,
+                }
+            now_dt = datetime.now(timezone.utc)
+            if expiry <= now_dt or (expiry - now_dt).total_seconds() > 604_800:
+                raise ValueError(
+                    "expires_at must be in the future and no more than 7 days away"
+                )
+            current_config = document.get("butler_config")
+            current_config_revision = (
+                int(current_config.get("revision", 0))
+                if isinstance(current_config, Mapping)
+                else 0
+            )
+            if current_config_revision != expected_config_revision:
+                raise ValueError(
+                    "Butler command config precondition failed: "
+                    f"expected {expected_config_revision}, current {current_config_revision}"
+                )
+            if current_config is None and intent not in {"kill", "veto_action"}:
+                raise ValueError("Butler config is absent; only kill or veto_action is accepted")
+            if len(commands) >= 10_000:
+                raise ValueError("Butler command store reached its bounded limit")
+            audit = append_butler_audit(
+                document,
+                actor=actor,
+                category="command",
+                action="command_submit",
+                outcome="started",
+                reason_code="command_accepted",
+                now=now,
+                command_id=request_id,
+                prior_revision=0,
+                current_revision=1,
+            )
+            transition = {
+                "prior_revision": 0,
+                "current_revision": 1,
+                "actor_id": actor["agent_id"],
+                "reason_code": "command_accepted",
+                "audit_id": audit["audit_id"],
+                "occurred_at": iso_at(now),
+            }
+            command = {
+                "schema": COMMAND_SCHEMA,
+                "schema_version": 2,
+                "command_id": request_id,
+                **immutable,
+                "request_digest_sha256": request_digest,
+                "status": "accepted",
+                "revision": 1,
+                "transition": transition,
+                "transition_history": [copy.deepcopy(transition)],
+                "result": None,
+                "created_at": iso_at(now),
+                "updated_at": iso_at(now),
+            }
+            commands[request_id] = command
+            return {
+                "actor": copy.deepcopy(actor),
+                "released": released,
+                "renewed": renewed,
+                "command": copy.deepcopy(command),
+                "idempotent_replay": False,
+                "event_created": True,
+                "recipients": service.admitted_agent_ids(document),
+            }
+
+        changed = service.mutate(board_id, submit)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        event = None
+        if changed["event_created"]:
+            command = changed["command"]
+            event = await append_and_publish(
+                board_id,
+                changed["actor"],
+                BUTLER_COMMAND_CREATED,
+                butler_command_uri(board_id, request_id),
+                changed["recipients"],
+                ctx,
+                command_id=request_id,
+                command_status=command["status"],
+                command_revision=command["revision"],
+                config_revision=command["expected_config_revision"],
+                request_digest_sha256=command["request_digest_sha256"],
+                audit_id=command["transition"]["audit_id"],
+                reason_code="command_accepted",
+            )
+            notify_butler_command_waiters(board_id, request_id)
+        return {
+            "ok": True,
+            "command": changed["command"],
+            "idempotent_replay": changed["idempotent_replay"],
+            "event_created": changed["event_created"],
+            "event": event,
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+        }
+
+    @tool()
+    async def butler_command_inspect(
+        board_id: str,
+        agent_name: str,
+        command_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Inspect one visible command or the priority-ordered pending queue."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        if command_id is not None:
+            command_id = require_butler_identifier("command_id", command_id)
+        if status is not None and status not in COMMAND_STATES:
+            raise ValueError("status is invalid")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        principal = current_principal()
+        require_scope(principal, "board:read")
+        document = service.load(board_id)
+        actor = service.member(document, principal, agent_name)
+        if command_id is not None:
+            _actor, command = visible_butler_command(
+                document, principal, agent_name, command_id
+            )
+            return {"ok": True, "command": command, "commands": [command]}
+        membership = service.resolve_board_context(document, principal.principal_id)
+        commands = []
+        now_dt = datetime.now(timezone.utc)
+        for value in document.setdefault("butler_commands", {}).values():
+            sender = value.get("sender")
+            own = isinstance(sender, Mapping) and sender.get("principal_id") == principal.principal_id
+            if membership.get("role") != "admin" and not own:
+                continue
+            if status is not None and value.get("status") != status:
+                continue
+            item = copy.deepcopy(value)
+            item["expired"] = (
+                item.get("status") not in TERMINAL_COMMAND_STATES
+                and parse_butler_time("expires_at", item["expires_at"]) <= now_dt
+            )
+            commands.append(item)
+        commands.sort(key=command_sort_key)
+        return {
+            "ok": True,
+            "commands": commands[:limit],
+            "returned_count": min(len(commands), limit),
+            "total_count": len(commands),
+            "truncated": len(commands) > limit,
+        }
+
+    @tool()
+    async def butler_command_wait(
+        board_id: str,
+        agent_name: str,
+        command_id: str,
+        after_revision: int,
+        timeout_s: float = 50.0,
+    ) -> dict[str, Any]:
+        """Wait for a visible command to advance beyond one known revision."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        command_id = require_butler_identifier("command_id", command_id)
+        if (
+            isinstance(after_revision, bool)
+            or not isinstance(after_revision, int)
+            or after_revision < 0
+        ):
+            raise ValueError("after_revision must be a non-negative integer")
+        if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not 0 < timeout_s <= 50:
+            raise ValueError("timeout_s must be greater than 0 and at most 50")
+        principal = current_principal()
+        require_scope(principal, "board:read")
+
+        def read() -> dict[str, Any]:
+            document = service.load(board_id)
+            _actor, command = visible_butler_command(
+                document, principal, agent_name, command_id
+            )
+            return command
+
+        command = read()
+        if command["revision"] > after_revision or command["status"] in TERMINAL_COMMAND_STATES:
+            return {"ok": True, "command": command, "timed_out": False}
+        key = (board_id, command_id)
+        waiter = butler_command_waiters.setdefault(key, asyncio.Event())
+        command = read()
+        if command["revision"] > after_revision or command["status"] in TERMINAL_COMMAND_STATES:
+            if butler_command_waiters.get(key) is waiter:
+                butler_command_waiters.pop(key, None)
+            return {"ok": True, "command": command, "timed_out": False}
+        try:
+            await asyncio.wait_for(waiter.wait(), timeout=float(timeout_s))
+        except asyncio.TimeoutError:
+            timed_out = True
+        else:
+            timed_out = False
+        finally:
+            if butler_command_waiters.get(key) is waiter:
+                butler_command_waiters.pop(key, None)
+        return {"ok": True, "command": read(), "timed_out": timed_out}
+
+    @tool()
+    async def butler_command_acknowledge(
+        board_id: str,
+        agent_name: str,
+        command_id: str,
+        expected_revision: int,
+        target_status: str,
+        reason_code: str,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Advance one command through validating, pending, or applying."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        command_id = require_butler_identifier("command_id", command_id)
+        reason_code = require_butler_reason("reason_code", reason_code)
+        if target_status not in {"validating", "pending", "applying"}:
+            raise ValueError("acknowledge target_status must be validating, pending, or applying")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
+            raise ValueError("expected_revision must be a positive integer")
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        now = time.time()
+
+        def acknowledge(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = butler_call_actor(document, principal, agent_name, now)
+            require_butler_actor(document, principal, agent_name)
+            command = document.setdefault("butler_commands", {}).get(command_id)
+            if command is None:
+                raise ValueError("Butler command not found")
+            if command["revision"] != expected_revision:
+                raise ValueError("Butler command CAS conflict")
+            if parse_butler_time("expires_at", command["expires_at"]) <= datetime.now(timezone.utc):
+                raise ValueError("Butler command has expired")
+            updated, audit = transition_command(
+                document, command, actor=actor, target_status=target_status,
+                reason_code=reason_code, now=now,
+            )
+            return {
+                "actor": copy.deepcopy(actor), "released": released,
+                "renewed": renewed, "command": updated, "audit": audit,
+                "recipients": service.admitted_agent_ids(document),
+            }
+
+        changed = service.mutate(board_id, acknowledge)
+        release_events = await publish_releases(board_id, changed["released"], principal, ctx)
+        event = await append_and_publish(
+            board_id, changed["actor"], BUTLER_COMMAND_TRANSITIONED,
+            butler_command_uri(board_id, command_id), changed["recipients"], ctx,
+            command_id=command_id, command_status=changed["command"]["status"],
+            command_revision=changed["command"]["revision"],
+            config_revision=changed["command"]["expected_config_revision"],
+            audit_id=changed["audit"]["audit_id"], reason_code=reason_code,
+        )
+        notify_butler_command_waiters(board_id, command_id)
+        return {
+            "ok": True, "command": changed["command"], "audit": changed["audit"],
+            "event": event, "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+        }
+
+    @tool()
+    async def butler_command_cancel(
+        board_id: str,
+        agent_name: str,
+        command_id: str,
+        expected_revision: int,
+        sender_channel: str,
+        reason_code: str,
+        ctx: Context,
+        commit_state: str = "not_started",
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancel one visible command without allowing A2A to override a human."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        command_id = require_butler_identifier("command_id", command_id)
+        reason_code = require_butler_reason("reason_code", reason_code)
+        if commit_state not in {"not_started", "not_reached", "reached", "unknown"}:
+            raise ValueError("commit_state is invalid")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
+            raise ValueError("expected_revision must be a positive integer")
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        now = time.time()
+
+        def cancel(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = butler_call_actor(document, principal, agent_name, now)
+            sender = butler_sender(document, principal, actor, sender_channel)
+            command = document.setdefault("butler_commands", {}).get(command_id)
+            if command is None:
+                raise ValueError("Butler command not found")
+            if command["revision"] != expected_revision:
+                raise ValueError("Butler command CAS conflict")
+            original_sender = command.get("sender", {})
+            own = original_sender.get("principal_id") == principal.principal_id
+            if sender_channel == "a2a":
+                if original_sender.get("channel") == "human":
+                    raise PermissionError("A2A authority cannot cancel a human command")
+                if not own:
+                    require_butler_actor(document, principal, agent_name)
+            if command["status"] == "applying" and commit_state == "not_started":
+                raise ValueError("applying cancellation requires an explicit commit_state")
+            if command["status"] in TERMINAL_COMMAND_STATES:
+                raise ValueError("terminal command cannot be cancelled")
+            result = {
+                "outcome": "cancelled",
+                "reason_code": reason_code,
+                "commit_state": commit_state,
+            }
+            updated, audit = transition_command(
+                document, command, actor=actor, target_status="cancelled",
+                reason_code=reason_code, now=now, result=result,
+            )
+            return {
+                "actor": copy.deepcopy(actor), "released": released,
+                "renewed": renewed, "command": updated, "audit": audit,
+                "recipients": service.admitted_agent_ids(document), "sender": sender,
+            }
+
+        changed = service.mutate(board_id, cancel)
+        release_events = await publish_releases(board_id, changed["released"], principal, ctx)
+        event = await append_and_publish(
+            board_id, changed["actor"], BUTLER_COMMAND_TRANSITIONED,
+            butler_command_uri(board_id, command_id), changed["recipients"], ctx,
+            command_id=command_id, command_status="cancelled",
+            command_revision=changed["command"]["revision"],
+            config_revision=changed["command"]["expected_config_revision"],
+            audit_id=changed["audit"]["audit_id"], reason_code=reason_code,
+        )
+        notify_butler_command_waiters(board_id, command_id)
+        return {
+            "ok": True, "command": changed["command"], "audit": changed["audit"],
+            "event": event, "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+        }
+
+    @tool()
+    async def butler_command_result(
+        board_id: str,
+        agent_name: str,
+        command_id: str,
+        expected_revision: int,
+        result: dict[str, Any],
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Commit one typed terminal result from the board-owned Butler."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        command_id = require_butler_identifier("command_id", command_id)
+        normalized_result = validate_command_result(result)
+        if normalized_result["outcome"] == "succeeded" and "effect_observation_ref" not in normalized_result:
+            raise ValueError("succeeded result requires product-produced effect_observation_ref")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 1:
+            raise ValueError("expected_revision must be a positive integer")
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        now = time.time()
+
+        def commit_result(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = butler_call_actor(document, principal, agent_name, now)
+            require_butler_actor(document, principal, agent_name)
+            command = document.setdefault("butler_commands", {}).get(command_id)
+            if command is None:
+                raise ValueError("Butler command not found")
+            if command["revision"] != expected_revision:
+                raise ValueError("Butler command CAS conflict")
+            if normalized_result.get("config_revision") is not None:
+                config = document.get("butler_config")
+                current_config_revision = int(config.get("revision", 0)) if isinstance(config, Mapping) else 0
+                if normalized_result["config_revision"] != current_config_revision:
+                    raise ValueError("result config_revision does not match current config")
+            target = normalized_result["outcome"]
+            reason = normalized_result["reason_code"]
+            updated, audit = transition_command(
+                document, command, actor=actor, target_status=target,
+                reason_code=reason, now=now, result=normalized_result,
+            )
+            return {
+                "actor": copy.deepcopy(actor), "released": released,
+                "renewed": renewed, "command": updated, "audit": audit,
+                "recipients": service.admitted_agent_ids(document),
+            }
+
+        changed = service.mutate(board_id, commit_result)
+        release_events = await publish_releases(board_id, changed["released"], principal, ctx)
+        event = await append_and_publish(
+            board_id, changed["actor"], BUTLER_COMMAND_TRANSITIONED,
+            butler_command_uri(board_id, command_id), changed["recipients"], ctx,
+            command_id=command_id, command_status=changed["command"]["status"],
+            command_revision=changed["command"]["revision"],
+            config_revision=changed["command"]["expected_config_revision"],
+            audit_id=changed["audit"]["audit_id"],
+            reason_code=normalized_result["reason_code"],
+        )
+        notify_butler_command_waiters(board_id, command_id)
+        return {
+            "ok": True, "command": changed["command"], "audit": changed["audit"],
+            "event": event, "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
         }
 
     @tool()

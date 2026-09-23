@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pursers.invalid/schemas/autonomous-butler-command-v2.schema.json",
+  "title": "Autonomous Butler durable command v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "command_id", "request_id", "board_id", "project_id", "sender", "intent", "parameters", "expected_config_revision", "expires_at", "priority", "request_digest_sha256", "status", "revision", "transition", "transition_history", "result", "created_at", "updated_at"],
+  "properties": {
+    "schema": {"const": "autonomous_butler_command_v2"},
+    "schema_version": {"const": 2},
+    "command_id": {"$ref": "#/$defs/id"},
+    "request_id": {"$ref": "#/$defs/id"},
+    "board_id": {"$ref": "#/$defs/id"},
+    "project_id": {"$ref": "#/$defs/id"},
+    "sender": {"$ref": "#/$defs/sender"},
+    "intent": {"enum": ["set_desired_state", "reconcile_now", "drain_seat", "retire_seat", "enable_connector", "disable_connector", "veto_action", "kill", "resume"]},
+    "parameters": {"$ref": "#/$defs/parameters"},
+    "expected_config_revision": {"type": "integer", "minimum": 0},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "priority": {"enum": ["low", "normal", "high", "emergency"]},
+    "request_digest_sha256": {"$ref": "#/$defs/sha256"},
+    "status": {"enum": ["accepted", "validating", "pending", "applying", "succeeded", "rejected", "failed", "cancelled"]},
+    "revision": {"type": "integer", "minimum": 1},
+    "transition": {"$ref": "#/$defs/transition"},
+    "transition_history": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/transition"}},
+    "result": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/result"}]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {"if": {"properties": {"intent": {"const": "reconcile_now"}}}, "then": {"properties": {"parameters": {"maxProperties": 0}}}},
+    {"if": {"properties": {"intent": {"enum": ["drain_seat", "retire_seat"]}}}, "then": {"properties": {"parameters": {"required": ["seat_id", "seat_generation"], "minProperties": 2, "maxProperties": 2}}}},
+    {"if": {"properties": {"intent": {"enum": ["enable_connector", "disable_connector"]}}}, "then": {"properties": {"parameters": {"required": ["connector_id"], "minProperties": 1, "maxProperties": 1}}}},
+    {"if": {"properties": {"intent": {"const": "veto_action"}}}, "then": {"properties": {"parameters": {"required": ["action_id", "reason_code"], "minProperties": 2, "maxProperties": 2}}}},
+    {"if": {"properties": {"intent": {"enum": ["kill", "resume"]}}}, "then": {"properties": {"parameters": {"required": ["reason_code"], "minProperties": 1, "maxProperties": 1}}}},
+    {"if": {"properties": {"intent": {"const": "set_desired_state"}}}, "then": {"properties": {"parameters": {"required": ["desired_revision", "desired_digest_sha256"], "minProperties": 2, "maxProperties": 2}}}}
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reason": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+    "sender": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principal_id", "agent_id", "agent_name", "channel", "membership_role", "seat_role"],
+      "properties": {
+        "principal_id": {"$ref": "#/$defs/id"},
+        "agent_id": {"$ref": "#/$defs/id"},
+        "agent_name": {"$ref": "#/$defs/id"},
+        "channel": {"enum": ["human", "a2a"]},
+        "membership_role": {"enum": ["member", "admin", "reviewer"]},
+        "seat_role": {"enum": ["worker", "reviewer", "orchestrator", "coordinator"]}
+      }
+    },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "desired_revision": {"type": "integer", "minimum": 1},
+        "desired_digest_sha256": {"$ref": "#/$defs/sha256"},
+        "seat_id": {"$ref": "#/$defs/id"},
+        "seat_generation": {"type": "integer", "minimum": 1},
+        "connector_id": {"$ref": "#/$defs/id"},
+        "action_id": {"$ref": "#/$defs/id"},
+        "reason_code": {"$ref": "#/$defs/reason"}
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prior_revision", "current_revision", "actor_id", "reason_code", "audit_id", "occurred_at"],
+      "properties": {
+        "prior_revision": {"type": "integer", "minimum": 0},
+        "current_revision": {"type": "integer", "minimum": 1},
+        "actor_id": {"$ref": "#/$defs/id"},
+        "reason_code": {"$ref": "#/$defs/reason"},
+        "audit_id": {"$ref": "#/$defs/id"},
+        "occurred_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "reason_code", "commit_state"],
+      "properties": {
+        "outcome": {"enum": ["succeeded", "rejected", "failed", "cancelled"]},
+        "reason_code": {"$ref": "#/$defs/reason"},
+        "commit_state": {"enum": ["not_started", "not_reached", "reached", "unknown"]},
+        "effect_observation_ref": {"$ref": "#/$defs/id"},
+        "config_revision": {"type": "integer", "minimum": 1},
+        "result_digest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

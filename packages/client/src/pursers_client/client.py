@@ -22,6 +22,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.client.subscriptions import SubscriptionLost
 
 from .events import (
+    BUTLER_EVENT_KINDS,
     CLAIM_GATE_EVENT_KINDS,
     DISPATCH_KINDS,
     HELD_TICKET_KINDS,
@@ -49,7 +50,7 @@ DEFAULT_EVENT_KINDS = frozenset(
         "ticket_status_changed",
         "ticket_assigned",
     }
-) | REVIEW_LEASE_KINDS | DISPATCH_KINDS | CLAIM_GATE_EVENT_KINDS | PARK_EVENT_KINDS
+) | REVIEW_LEASE_KINDS | DISPATCH_KINDS | CLAIM_GATE_EVENT_KINDS | PARK_EVENT_KINDS | BUTLER_EVENT_KINDS
 GENERATION_META_KEY = "io.onboard/expected-generation"
 # Cleanup is best-effort after this bound so a broken transport cannot wedge a
 # host shutdown or mask the original __aenter__ failure indefinitely.
@@ -666,6 +667,165 @@ class BoardClient:
 
     async def board_list(self) -> dict[str, Any]:
         return await self._call_unscoped("board_list", {})
+
+    async def butler_config_get(
+        self, *, revision: int | None = None
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {}
+        if revision is not None:
+            arguments["revision"] = revision
+        return await self._call("butler_config_get", arguments)
+
+    async def butler_config_set(
+        self,
+        mutation_id: str,
+        sender_channel: str,
+        config: dict[str, Any],
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        return await self._call(
+            "butler_config_set",
+            {
+                "agent_name": self.agent_name,
+                "mutation_id": mutation_id,
+                "sender_channel": sender_channel,
+                "config": config,
+                "expected_revision": expected_revision,
+            },
+        )
+
+    async def butler_command_submit(
+        self,
+        request_id: str,
+        project_id: str,
+        sender_channel: str,
+        intent: str,
+        parameters: dict[str, Any],
+        expected_config_revision: int,
+        expires_at: str,
+        *,
+        priority: str = "normal",
+    ) -> dict[str, Any]:
+        self.watch_resource(
+            f"board://{self.board_id}/butler-command/{request_id}"
+        )
+        result = await self._call(
+            "butler_command_submit",
+            {
+                "agent_name": self.agent_name,
+                "request_id": request_id,
+                "project_id": project_id,
+                "sender_channel": sender_channel,
+                "intent": intent,
+                "parameters": parameters,
+                "expected_config_revision": expected_config_revision,
+                "expires_at": expires_at,
+                "priority": priority,
+            },
+        )
+        self._remember_event(result)
+        return result
+
+    async def butler_command_inspect(
+        self,
+        *,
+        command_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "limit": limit,
+        }
+        if command_id is not None:
+            arguments["command_id"] = command_id
+            self.watch_resource(
+                f"board://{self.board_id}/butler-command/{command_id}"
+            )
+        if status is not None:
+            arguments["status"] = status
+        return await self._call("butler_command_inspect", arguments)
+
+    async def butler_command_wait(
+        self,
+        command_id: str,
+        after_revision: int,
+        *,
+        timeout_s: float = 50.0,
+    ) -> dict[str, Any]:
+        self.watch_resource(
+            f"board://{self.board_id}/butler-command/{command_id}"
+        )
+        return await self._call(
+            "butler_command_wait",
+            {
+                "agent_name": self.agent_name,
+                "command_id": command_id,
+                "after_revision": after_revision,
+                "timeout_s": timeout_s,
+            },
+        )
+
+    async def butler_command_acknowledge(
+        self,
+        command_id: str,
+        expected_revision: int,
+        target_status: str,
+        reason_code: str,
+    ) -> dict[str, Any]:
+        result = await self._call(
+            "butler_command_acknowledge",
+            {
+                "agent_name": self.agent_name,
+                "command_id": command_id,
+                "expected_revision": expected_revision,
+                "target_status": target_status,
+                "reason_code": reason_code,
+            },
+        )
+        self._remember_event(result)
+        return result
+
+    async def butler_command_cancel(
+        self,
+        command_id: str,
+        expected_revision: int,
+        sender_channel: str,
+        reason_code: str,
+        *,
+        commit_state: str = "not_started",
+    ) -> dict[str, Any]:
+        result = await self._call(
+            "butler_command_cancel",
+            {
+                "agent_name": self.agent_name,
+                "command_id": command_id,
+                "expected_revision": expected_revision,
+                "sender_channel": sender_channel,
+                "reason_code": reason_code,
+                "commit_state": commit_state,
+            },
+        )
+        self._remember_event(result)
+        return result
+
+    async def butler_command_result(
+        self,
+        command_id: str,
+        expected_revision: int,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        response = await self._call(
+            "butler_command_result",
+            {
+                "agent_name": self.agent_name,
+                "command_id": command_id,
+                "expected_revision": expected_revision,
+                "result": result,
+            },
+        )
+        self._remember_event(response)
+        return response
 
     async def ticket_get(
         self,

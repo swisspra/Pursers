@@ -113,7 +113,7 @@ def _installed_quickstart(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     console = scripts / ("pursers-central.exe" if os.name == "nt" else "pursers-central")
     wheels = {
         name: next(wheel_dir.glob(f"{name}-*.whl"))
-        for name in ("pursers_central", "pursers")
+        for name in ("pursers_client", "pursers_central", "pursers")
     }
     _run(
         [
@@ -124,6 +124,7 @@ def _installed_quickstart(tmp_path: Path) -> tuple[Path, dict[str, str]]:
             "--disable-pip-version-check",
             "--find-links",
             str(wheel_dir),
+            str(wheels["pursers_client"]),
             str(wheels["pursers_central"]),
         ],
         cwd=tmp_path,
