@@ -395,6 +395,43 @@ def test_timeout_is_typed_and_fail_closed() -> None:
     }
 
 
+def test_runner_caps_backend_timeout() -> None:
+    schemas, digest = registry()
+
+    class TimeoutRecordingBackend(FakeBackend):
+        timeout_s: float | None = None
+
+        async def run(
+            self, request: Mapping[str, Any], *, timeout_s: float
+        ) -> Any:
+            self.timeout_s = timeout_s
+            return await super().run(request, timeout_s=timeout_s)
+
+    backend = TimeoutRecordingBackend()
+    instance = runner(backend, schemas)
+    request = model_request(
+        digest, deadline=(NOW + timedelta(days=365)).isoformat()
+    )
+
+    result = asyncio.run(instance.run(request))
+
+    assert result["outcome"] == "succeeded"
+    assert backend.timeout_s == butler.MAX_MODEL_RUN_SECONDS
+
+
+def test_runner_checks_cancellation_before_backend_dispatch() -> None:
+    schemas, digest = registry()
+    cancelled_backend = FakeBackend()
+    cancelled = runner(cancelled_backend, schemas)
+    cancelled.cancel("cancel:one")
+
+    cancelled_result = asyncio.run(cancelled.run(model_request(digest)))
+
+    assert cancelled_result["outcome"] == "cancelled"
+    assert cancelled_result["reason_code"] == "cancelled_before_dispatch"
+    assert cancelled_backend.calls == 0
+
+
 def test_policy_digest_drift_discards_provider_output() -> None:
     schemas, digest = registry()
     current = {"digest": POLICY_DIGEST}

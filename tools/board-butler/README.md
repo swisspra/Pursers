@@ -319,7 +319,8 @@ and a `ModelResultStore`. Direct API and ACP therefore receive the same bounded
 request and return the same normalized result. The runner validates the task
 input digest, current policy digest, deadline, exact task-schema digest,
 proposal byte cap, citations, measured token/cost arithmetic, and reservations
-before it releases a proposal to deterministic Butler policy.
+before it releases a proposal to deterministic Butler policy. A caller's
+deadline can shorten a run but cannot raise the adapter's 600-second hard cap.
 
 `DirectAPIModelBackend` requires the reviewed explicit
 `openai_chat_completions_v1` `ProviderRuntime`. It reuses the same proxy-free,

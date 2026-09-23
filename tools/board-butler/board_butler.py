@@ -78,6 +78,7 @@ MAX_PROVIDER_RESPONSE_BYTES = 1_000_000
 MAX_PROVIDER_DRAFT_CHARS = 2_000
 MAX_PROVIDER_PROMPT_CHARS = 12_000
 PROVIDER_TIMEOUT_S = 30.0
+MAX_MODEL_RUN_SECONDS = 600.0
 PROVIDER_DRAFT_PROTOCOLS = frozenset(
     {"pursers_json_v1", "openai_chat_completions_v1"}
 )
@@ -2709,12 +2710,15 @@ class AutonomousModelRunner:
                 )
                 return self._persist_result(validated, request_digest, result)
             deadline = _parse_utc_deadline(validated["deadline"])
-            remaining = (deadline - self.now().astimezone(timezone.utc)).total_seconds()
-            if remaining <= 0:
+            deadline_remaining = (
+                deadline - self.now().astimezone(timezone.utc)
+            ).total_seconds()
+            if deadline_remaining <= 0:
                 result = self._failure_result(
                     validated, ModelRunnerFailure("timeout", "deadline_expired")
                 )
                 return self._persist_result(validated, request_digest, result)
+            remaining = min(deadline_remaining, MAX_MODEL_RUN_SECONDS)
 
             task = asyncio.create_task(self.backend.run(validated, timeout_s=remaining))
             cancelled = asyncio.create_task(event.wait())
