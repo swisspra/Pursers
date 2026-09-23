@@ -303,6 +303,7 @@ def sandboxed_agent_command(
     *,
     readable_roots: Sequence[Path] = (),
     protected_files: Sequence[Path] = (),
+    scratch_root: Path | None = None,
 ) -> tuple[str, ...]:
     """Apply the macOS process boundary used by the production ACP seat."""
     if not _sandbox_available():
@@ -329,7 +330,11 @@ def sandboxed_agent_command(
         if candidate.exists():
             readable.add(Path(os.path.abspath(candidate)))
             readable.add(candidate.resolve())
-    scratch = Path(tempfile.gettempdir()).resolve()
+    scratch = (
+        Path(tempfile.gettempdir()) if scratch_root is None else scratch_root
+    ).resolve()
+    if not scratch.is_dir():
+        raise RuntimeError("ACP sandbox scratch root must be an existing directory")
     if (work_dir / ".git").exists():
         _require_git_metadata_within(work_dir, (work_dir, scratch))
     readable.add(scratch)

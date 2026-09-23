@@ -2429,6 +2429,7 @@ class DirectAPIModelBackend:
 
 
 _ACP_CLIENT_MODULE: Any = None
+_ACP_SEAT_MODULE: Any = None
 
 
 def _load_acp_client_module() -> Any:
@@ -2446,6 +2447,30 @@ def _load_acp_client_module() -> Any:
     return module
 
 
+def _load_acp_seat_module() -> Any:
+    """Load the production ACP seat boundary without copying its sandbox policy."""
+    global _ACP_SEAT_MODULE
+    if _ACP_SEAT_MODULE is not None:
+        return _ACP_SEAT_MODULE
+    root = Path(__file__).resolve().parents[1] / "acp-seat"
+    path = root / "pursers_acp_seat.py"
+    spec = importlib.util.spec_from_file_location("pursers_butler_acp_seat", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("ACP seat sandbox module is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    sys.path.insert(0, str(root))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        try:
+            sys.path.remove(str(root))
+        except ValueError:
+            pass
+    _ACP_SEAT_MODULE = module
+    return module
+
+
 class ACPModelBackend:
     """ACP v1 backend with no MCP servers and deny-by-default permissions."""
 
@@ -2456,12 +2481,20 @@ class ACPModelBackend:
         session_root: str | Path,
         model: str,
         process_env: Mapping[str, str] | None = None,
+        readable_roots: Sequence[str | os.PathLike[str]] = (),
+        protected_files: Sequence[str | os.PathLike[str]] = (),
     ) -> None:
         if not command or not model:
             raise ValueError("ACP command and model are required")
-        root = Path(session_root)
+        root = Path(session_root).expanduser()
         if not root.is_absolute():
             raise ValueError("ACP session root must be absolute")
+        try:
+            root = root.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError("ACP session root must exist") from exc
+        if not root.is_dir():
+            raise ValueError("ACP session root must be a directory")
         self.command = tuple(os.fspath(part) for part in command)
         self.session_root = root
         self.model = model
@@ -2472,6 +2505,14 @@ class ACPModelBackend:
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "LANG": os.environ.get("LANG", "C.UTF-8"),
             }
+        )
+        for name in ("TMPDIR", "TMP", "TEMP"):
+            self.process_env[name] = str(root)
+        self.readable_roots = tuple(
+            Path(path).expanduser().resolve() for path in readable_roots
+        )
+        self.protected_files = tuple(
+            Path(path).expanduser().resolve() for path in protected_files
         )
 
     async def run(
@@ -2500,6 +2541,19 @@ class ACPModelBackend:
     async def _run_acp(
         self, acp: Any, request: Mapping[str, Any], *, timeout_s: float
     ) -> ModelBackendResponse:
+        try:
+            seat = _load_acp_seat_module()
+            command = seat.sandboxed_agent_command(
+                self.command,
+                self.session_root,
+                readable_roots=self.readable_roots,
+                protected_files=self.protected_files,
+                scratch_root=self.session_root,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ModelRunnerFailure(
+                "policy", "acp_os_sandbox_unavailable", retryable=False
+            ) from exc
         prompt = _canonical_json_bytes(
             {
                 "protocol": "autonomous_butler_model_v1",
@@ -2536,7 +2590,7 @@ class ACPModelBackend:
         provider_request_ref: str | None = None
 
         async with acp.ACPClient(
-            self.command,
+            command,
             process_cwd=self.session_root,
             env=self.process_env,
             permission_policy=None,

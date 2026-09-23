@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -723,6 +724,115 @@ def test_acp_backend_uses_no_mcp_servers_and_normalizes_result(tmp_path: Path) -
     assert result["outcome"] == "succeeded"
     assert json.loads(result["proposal_json"]) == {"answer": "acp"}
     assert result["provider_request_ref"] == "provider:acp-one"
+
+
+def test_acp_backend_fails_closed_when_os_sandbox_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    schemas, digest = registry()
+
+    class UnavailableSandbox:
+        @staticmethod
+        def sandboxed_agent_command(*_args: Any, **_kwargs: Any) -> tuple[str, ...]:
+            raise RuntimeError("sandbox unavailable")
+
+    monkeypatch.setattr(
+        butler, "_load_acp_seat_module", lambda: UnavailableSandbox
+    )
+    backend = acp_backend(tmp_path, {"promptActions": []})
+
+    result = asyncio.run(runner(backend, schemas).run(model_request(digest)))
+
+    assert result["outcome"] == "failed"
+    assert result["reason_code"] == "acp_os_sandbox_unavailable"
+    assert result["error"]["category"] == "policy"
+
+
+def test_acp_backend_blocks_shell_write_outside_canonical_session_root(
+    tmp_path: Path,
+) -> None:
+    seat = butler._load_acp_seat_module()
+    if not seat._sandbox_available():
+        pytest.skip("macOS sandbox-exec is unavailable on this host")
+    schemas, digest = registry()
+    session_root = tmp_path / "session"
+    session_root.mkdir()
+    alias = tmp_path / "session-link"
+    alias.symlink_to(session_root, target_is_directory=True)
+    outside_marker = tmp_path / "outside-marker"
+    pid_file = session_root / "agent.pid"
+    script = session_root / "agent.json"
+    script.write_text(
+        json.dumps(
+            {
+                "promptActions": [
+                    {
+                        "type": "update",
+                        "update": {
+                            "sessionUpdate": "pursers_model_usage",
+                            "model": "exact-acp-model",
+                            "providerRequestRef": "provider:escape-probe",
+                            "usage": {
+                                "input_tokens": 1,
+                                "output_tokens": 1,
+                                "total_tokens": 2,
+                                "cost_microunits": 1,
+                                "measured": True,
+                            },
+                        },
+                    },
+                    {
+                        "type": "update",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {
+                                "type": "text",
+                                "text": json.dumps(
+                                    {
+                                        "model": "exact-acp-model",
+                                        "proposal": {"answer": "must-not-release"},
+                                        "citations": ["evidence:one"],
+                                    }
+                                ),
+                            },
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake = MODULE_PATH.parents[1] / "acp-seat/tests/fake_acp_agent.py"
+    shell = (
+        'echo $$ > "$1"; '
+        'echo escaped > "$2" && exec "$3" "$4" --script "$5"'
+    )
+    backend = butler.ACPModelBackend(
+        [
+            "/bin/sh",
+            "-c",
+            shell,
+            "pursers-acp-probe",
+            str(pid_file),
+            str(outside_marker),
+            sys.executable,
+            str(fake),
+            str(script),
+        ],
+        session_root=alias,
+        model="exact-acp-model",
+    )
+
+    result = asyncio.run(runner(backend, schemas).run(model_request(digest)))
+
+    assert backend.session_root == session_root.resolve()
+    assert result["outcome"] == "failed"
+    assert result["reason_code"] == "acp_process_error"
+    assert not outside_marker.exists()
+    pid = pid_file.read_text(encoding="utf-8").strip()
+    assert subprocess.run(
+        ["/bin/ps", "-p", pid], capture_output=True, check=False
+    ).returncode != 0
 
 
 def test_acp_backend_drains_all_updates_before_normalizing(tmp_path: Path) -> None:

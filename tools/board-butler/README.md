@@ -328,8 +328,12 @@ same-origin, bounded provider transport as shadow drafting, sends the exact
 configured model, and never places the credential or cancellation token in the
 prompt. `ACPModelBackend` uses the existing ACP v1 client with an absolute
 pre-approved session root, an empty MCP-server list, a minimal environment, and
-deny-by-default permission handling. An ACP tool or permission request cannot
-grant filesystem or MCP authority through this adapter.
+deny-by-default permission handling. Before launch it canonicalizes that root
+and applies the production ACP seat's macOS process sandbox. Writes and process
+scratch are confined to the session root; optional read roots and protected
+files must be supplied explicitly. If the OS sandbox cannot be established,
+the run fails closed. An ACP tool or permission request cannot grant filesystem
+or MCP authority through this adapter.
 
 Both backends normalize to `model`, `proposal`, `citations`, measured `usage`,
 and `provider_request_ref`. Direct API usage and request identity come from the
