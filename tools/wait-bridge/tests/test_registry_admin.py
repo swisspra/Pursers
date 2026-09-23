@@ -6,8 +6,11 @@ import hashlib
 import io
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
@@ -72,6 +75,14 @@ class FakeClient:
         return json.loads(self.value)
 
 
+class ContextClient(FakeClient):
+    async def __aenter__(self) -> ContextClient:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
 def parse(*arguments: str) -> argparse.Namespace:
     return registry_admin.build_parser().parse_args(list(arguments))
 
@@ -84,6 +95,60 @@ def invoke(client: FakeClient, *arguments: str) -> str:
 
 
 class RegistryAdminTests(unittest.TestCase):
+    def test_home_board_defaults_to_env_then_pursers(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(parse("show").home_board, "pursers")
+        with patch.dict(os.environ, {"ONBOARD_BOARD_ID": "env-home"}, clear=True):
+            self.assertEqual(parse("show").home_board, "env-home")
+        with patch.dict(os.environ, {"ONBOARD_BOARD_ID": "env-home"}, clear=True):
+            self.assertEqual(
+                parse("--home-board", "explicit-home", "show").home_board,
+                "explicit-home",
+            )
+
+    def test_help_documents_home_board_override(self) -> None:
+        help_text = registry_admin.build_parser().format_help()
+
+        self.assertIn("--home-board", help_text)
+        self.assertIn("ONBOARD_BOARD_ID", help_text)
+
+    def test_run_binds_all_registry_io_to_selected_home_board(self) -> None:
+        calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        client = ContextClient()
+
+        def factory(*args: Any, **kwargs: Any) -> ContextClient:
+            calls.append((args, kwargs))
+            return client
+
+        args = parse("--home-board", "alternate-home", "show")
+        asyncio.run(registry_admin.run(args, client_factory=factory))
+
+        self.assertEqual(calls[0][0][2], "alternate-home")
+        self.assertEqual(client.get_calls, 1)
+        self.assertEqual(client.writes, [])
+
+    def test_invalid_home_board_fails_before_client_open(self) -> None:
+        opened = False
+
+        def factory(*args: Any, **kwargs: Any) -> ContextClient:
+            nonlocal opened
+            opened = True
+            return ContextClient()
+
+        for invalid in ("", "bad/board", " spaced ", "x" * 81):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    registry_admin.RegistryError,
+                    "home board id must match",
+                ):
+                    asyncio.run(
+                        registry_admin.run(
+                            parse("--home-board", invalid, "show"),
+                            client_factory=factory,
+                        )
+                    )
+                self.assertFalse(opened)
+
     def test_show_validates_and_prints_without_writing(self) -> None:
         client = FakeClient()
 
@@ -339,6 +404,99 @@ class RegistryAdminTests(unittest.TestCase):
             ),
             "request [REDACTED] failed",
         )
+
+    def test_packaged_cli_uses_non_default_home_board(self) -> None:
+        uv = shutil.which("uv")
+        self.assertIsNotNone(uv)
+        assert uv is not None
+        with tempfile.TemporaryDirectory() as raw_temp:
+            temp = Path(raw_temp)
+            dist = temp / "dist"
+            environment = temp / "venv"
+            subprocess.run(
+                [uv, "build", "--wheel", "--out-dir", str(dist), str(ROOT)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    uv,
+                    "build",
+                    "--wheel",
+                    "--out-dir",
+                    str(dist),
+                    str(ROOT.parents[1] / "packages" / "client"),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            wheel = next(dist.glob("pursers_wait_bridge-*.whl"))
+            subprocess.run(
+                [uv, "venv", "--python", "3.12", str(environment)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            python = environment / "bin" / "python"
+            subprocess.run(
+                [
+                    uv,
+                    "pip",
+                    "install",
+                    "--python",
+                    str(python),
+                    "--find-links",
+                    str(dist),
+                    str(wheel),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            script = textwrap.dedent(
+                """
+                import json
+                import registry_admin
+
+                expected_board = "packaged-home"
+
+                class FakeClient:
+                    def __init__(self, central_url, token, board_id, **kwargs):
+                        if board_id != expected_board:
+                            raise AssertionError(f"wrong board: {board_id}")
+
+                    async def __aenter__(self):
+                        return self
+
+                    async def __aexit__(self, *args):
+                        return None
+
+                    async def board_state_get(self, key=None):
+                        return {"state": {"key": key, "value": json.dumps({
+                            "schema_version": 1,
+                            "projects": {},
+                        })}}
+
+                registry_admin.BoardClient = FakeClient
+                raise SystemExit(registry_admin.main([
+                    "--home-board", expected_board, "show"
+                ]))
+                """
+            )
+            completed = subprocess.run(
+                [str(python), "-I", "-c", script],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=temp,
+                env={**os.environ, "ONBOARD_CENTRAL_TOKEN": "TOKEN_PLACEHOLDER"},
+            )
+            self.assertEqual(
+                json.loads(completed.stdout),
+                {"schema_version": 1, "projects": {}},
+            )
 
 
 class RegistryAdminRealCentralTests(unittest.IsolatedAsyncioTestCase):

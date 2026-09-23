@@ -374,7 +374,7 @@ default.
 
 Use `registry_admin.py` to validate, inspect, and edit the registry without
 calling raw board-state tools. It reads the current document, validates the
-complete schema before any mutation, writes to the home `pursers` board, then
+complete schema before any mutation, writes to the configured home board, then
 reads back and compares the stored document. A mismatch exits non-zero and
 prints a diff. Each write includes the SHA-256 of the document that was read,
 so a concurrent registry change aborts instead of being overwritten. The
@@ -395,13 +395,27 @@ python tools/wait-bridge/registry_admin.py activate project-a
 python tools/wait-bridge/registry_admin.py remove project-a
 ```
 
+The home board defaults to `ONBOARD_BOARD_ID`, then to `pursers` when the
+environment variable is unset. Use the global `--home-board` option to override
+it explicitly; global options precede the subcommand:
+
+```sh
+python tools/wait-bridge/registry_admin.py \
+  --home-board alternate-home show
+```
+
+The selected home board must be a safe Central identifier. An invalid value
+exits before opening a client, so the command never falls back to, creates, or
+joins another board.
+
 `add` refuses an existing name unless `--force` is supplied. All mutations
 refuse malformed current state, unknown names, relative work directories, and
 empty board IDs before writing. Repository URLs must be credential-free HTTPS
 URLs, and one board cannot register the same active URL twice. Use
 `set-repository-url` to add URL routing without replacing the rest of an entry.
-`remove` prints the removed entry so it can be restored by hand. Override the default Central URL with
-`ONBOARD_CENTRAL_URL` or the global `--central-url` option.
+`remove` prints the removed entry so it can be restored by hand. Override the
+default Central URL with `ONBOARD_CENTRAL_URL` or the global `--central-url`
+option.
 
 ### Seat administration CLI
 
