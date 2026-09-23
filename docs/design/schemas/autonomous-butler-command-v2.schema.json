@@ -48,8 +48,8 @@
         "agent_id": {"$ref": "#/$defs/id"},
         "agent_name": {"$ref": "#/$defs/id"},
         "channel": {"enum": ["human", "a2a"]},
-        "membership_role": {"enum": ["member", "admin"]},
-        "seat_role": {"enum": ["worker", "reviewer", "coordinator"]}
+        "membership_role": {"enum": ["member", "admin", "reviewer"]},
+        "seat_role": {"enum": ["worker", "reviewer", "orchestrator", "coordinator"]}
       }
     },
     "parameters": {

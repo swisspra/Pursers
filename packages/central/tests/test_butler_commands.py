@@ -456,6 +456,84 @@ class ButlerCommandTests(unittest.IsolatedAsyncioTestCase):
                 priority="normal",
             )
 
+    async def test_authorized_sender_roles_match_committed_command_schema(self) -> None:
+        reviewer_coordinator = central.Principal(
+            "PR-reviewer-coordinator",
+            "reviewer-coordinator",
+            frozenset({"board:read", "board:write", "board:coordinate"}),
+        )
+        member_orchestrator = central.Principal(
+            "PR-member-orchestrator",
+            "member-orchestrator",
+            frozenset({"board:read", "board:write", "board:coordinate"}),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_member_add",
+            agent_name="human-admin",
+            principal_id=reviewer_coordinator.principal_id,
+            role="reviewer",
+        )
+        await self.call(
+            "board_member_add",
+            agent_name="human-admin",
+            principal_id=member_orchestrator.principal_id,
+            role="member",
+        )
+
+        cases = (
+            (
+                reviewer_coordinator,
+                "reviewer-coordinator-1",
+                "coordinator",
+                "reviewer",
+                "reviewer-coordinator-command",
+            ),
+            (
+                member_orchestrator,
+                "member-orchestrator-1",
+                "orchestrator",
+                "member",
+                "member-orchestrator-command",
+            ),
+        )
+        for principal, agent_name, seat_role, membership_role, request_id in cases:
+            self.principal = principal
+            joined = await self.call(
+                "board_join",
+                agent_name=agent_name,
+                role=seat_role,
+                capabilities={"can_work": False, "can_review": False},
+            )
+            self.assertFalse(joined.is_error)
+            created = await self.call(
+                "butler_command_submit",
+                agent_name=agent_name,
+                request_id=request_id,
+                project_id="pursers",
+                sender_channel="a2a",
+                intent="reconcile_now",
+                parameters={},
+                expected_config_revision=1,
+                expires_at=self.expiry(),
+                priority="normal",
+            )
+            self.assertFalse(created.is_error)
+            command = created.structured_content["command"]
+            self.assertEqual(command["sender"]["membership_role"], membership_role)
+            self.assertEqual(command["sender"]["seat_role"], seat_role)
+            validate_schema("autonomous-butler-command-v2.schema.json", command)
+
+        document = self.service.load("pursers")
+        accepted = [
+            command
+            for command in document["butler_commands"].values()
+            if command["status"] == "accepted"
+        ]
+        self.assertEqual(len(accepted), 2)
+        for command in accepted:
+            validate_schema("autonomous-butler-command-v2.schema.json", command)
+
     async def test_wait_wakes_on_revision_and_config_rejects_unknown_fields(self) -> None:
         self.principal = self.worker
         created = await self.call(
