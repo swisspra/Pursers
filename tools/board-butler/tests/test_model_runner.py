@@ -324,6 +324,27 @@ def test_replay_rejects_changed_request_id_payload() -> None:
     assert backend.calls == 1
 
 
+def test_replay_rejects_tampered_normalized_result() -> None:
+    schemas, digest = registry()
+    request = model_request(digest)
+    store = butler.MemoryModelResultStore()
+    first = asyncio.run(
+        runner(FakeBackend(), schemas, result_store=store).run(request)
+    )
+    first["board_id"] = "other-board"
+    store.put(request["request_id"], butler._sha256_json(request), first)
+    backend = FakeBackend()
+
+    result = asyncio.run(
+        runner(backend, schemas, result_store=store).run(request)
+    )
+
+    assert result["outcome"] == "failed"
+    assert result["reason_code"] == "invalid_replay_result"
+    assert backend.calls == 0
+    validate_contract(result)
+
+
 class SlowBackend:
     def __init__(self) -> None:
         self.started = asyncio.Event()

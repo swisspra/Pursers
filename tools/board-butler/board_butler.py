@@ -2695,7 +2695,11 @@ class AutonomousModelRunner:
                         validated,
                         ModelRunnerFailure("policy", "replay_digest_mismatch"),
                     )
-                return replay[1]
+                try:
+                    return self._validate_replay_result(validated, replay[1])
+                except ModelRunnerFailure as exc:
+                    result = self._failure_result(validated, exc)
+                    return self._persist_result(validated, request_digest, result)
 
             event = self.cancellations.event(validated["cancellation_token"])
             if event.is_set():
@@ -2837,6 +2841,59 @@ class AutonomousModelRunner:
             "provider_request_ref": response.provider_request_ref,
             "error": None,
         }
+
+    def _validate_replay_result(
+        self, request: Mapping[str, Any], result: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            import jsonschema
+
+            schema_path = (
+                Path(__file__).resolve().parents[2]
+                / "docs/design/schemas/autonomous-butler-model-v1.schema.json"
+            )
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            jsonschema.Draft202012Validator(
+                schema, format_checker=jsonschema.FormatChecker()
+            ).validate(result)
+            if (
+                result["message_type"] != "result"
+                or result["request_id"] != request["request_id"]
+                or result["board_id"] != request["board_id"]
+                or result["policy_digest_sha256"]
+                != request["policy_digest_sha256"]
+            ):
+                raise ValueError("replay correlation mismatch")
+
+            if result["outcome"] == "succeeded":
+                reference = result.get("provider_request_ref")
+                if not isinstance(reference, str):
+                    raise ValueError("successful replay lacks provider reference")
+                expected = self._success_result(
+                    request,
+                    ModelBackendResponse(
+                        proposal_json=result["proposal_json"],
+                        citations=tuple(result["citations"]),
+                        usage=result["usage"],
+                        provider_request_ref=reference,
+                    ),
+                )
+            else:
+                error = result["error"]
+                expected = self._failure_result(
+                    request,
+                    ModelRunnerFailure(
+                        error["category"],
+                        error["code"],
+                        retryable=error["retryable"],
+                    ),
+                )
+            expected["completed_at"] = result["completed_at"]
+            if dict(result) != expected:
+                raise ValueError("replay result is not normalized")
+        except Exception as exc:
+            raise ModelRunnerFailure("malformed", "invalid_replay_result") from exc
+        return copy.deepcopy(dict(result))
 
     @staticmethod
     def _validate_usage(
