@@ -518,6 +518,57 @@ def test_direct_api_backend_rejects_credential_echo_without_persisting_it() -> N
     assert secret not in json.dumps(result)
 
 
+def test_direct_api_backend_rejects_credential_echo_in_request_reference() -> None:
+    schemas, digest = registry()
+    secret = "provider-secret-value"
+    DirectHandler.response_payload = {
+        "id": f"request:{secret}",
+        "model": "exact-model",
+        "usage": {
+            "prompt_tokens": 9,
+            "completion_tokens": 3,
+            "total_tokens": 12,
+            "cost_microunits": 4,
+            "measured": True,
+        },
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "proposal": {"answer": "bounded"},
+                            "citations": ["evidence:one"],
+                        }
+                    )
+                }
+            }
+        ],
+    }
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        runtime = butler.ProviderRuntime(
+            endpoint=f"http://127.0.0.1:{server.server_port}",
+            model="exact-model",
+            credential=secret,
+            draft_path="v1/chat/completions",
+            draft_protocol="openai_chat_completions_v1",
+        )
+        result = asyncio.run(
+            runner(butler.DirectAPIModelBackend(runtime), schemas).run(
+                model_request(digest)
+            )
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert result["reason_code"] == "provider_credential_echo"
+    assert secret not in json.dumps(result)
+
+
 def test_direct_api_backend_normalizes_non_object_content_as_malformed() -> None:
     schemas, digest = registry()
     DirectHandler.response_payload = {

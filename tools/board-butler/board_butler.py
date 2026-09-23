@@ -2410,6 +2410,8 @@ class DirectAPIModelBackend:
             or not isinstance(raw_usage, Mapping)
         ):
             raise ModelRunnerFailure("malformed", "invalid_backend_payload")
+        if self.runtime.credential and self.runtime.credential in provider_ref:
+            raise ModelRunnerFailure("policy", "provider_credential_echo")
         usage = {
             "input_tokens": raw_usage.get("prompt_tokens"),
             "output_tokens": raw_usage.get("completion_tokens"),
