@@ -2600,9 +2600,16 @@ class ACPModelBackend:
                 outcome = await client.prompt(
                     session_id, prompt, timeout=timeout_s
                 )
-                await asyncio.sleep(0)
-                if collector.done():
+                drained = asyncio.create_task(client.wait_for_updates())
+                done, _pending = await asyncio.wait(
+                    {collector, drained}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if collector in done:
+                    drained.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await drained
                     collector.result()
+                await drained
             finally:
                 collector.cancel()
                 with suppress(asyncio.CancelledError):
@@ -2660,18 +2667,26 @@ class AutonomousModelRunner:
         self.cancellations.cancel(cancellation_token)
 
     async def run(self, request: Mapping[str, Any]) -> dict[str, Any]:
-        request_id = str(request.get("request_id", "invalid-request"))
+        request_view = request if isinstance(request, Mapping) else {}
+        request_id = str(request_view.get("request_id", "invalid-request"))
         lock = self._locks.setdefault(request_id, asyncio.Lock())
         async with lock:
             try:
                 validated = self._validate_request(request)
             except ModelRunnerFailure as exc:
-                return self._failure_result(request, exc)
+                return self._failure_result(request_view, exc)
             request_digest = _sha256_json(validated)
             try:
                 replay = self.result_store.get(validated["request_id"])
             except ModelRunnerFailure as exc:
                 return self._failure_result(validated, exc)
+            except Exception:
+                return self._failure_result(
+                    validated,
+                    ModelRunnerFailure(
+                        "provider", "result_store_error", retryable=True
+                    ),
+                )
             if replay is not None:
                 if replay[0] != request_digest:
                     return self._failure_result(
@@ -2686,16 +2701,14 @@ class AutonomousModelRunner:
                     validated,
                     ModelRunnerFailure("cancelled", "cancelled_before_dispatch"),
                 )
-                self.result_store.put(validated["request_id"], request_digest, result)
-                return result
+                return self._persist_result(validated, request_digest, result)
             deadline = _parse_utc_deadline(validated["deadline"])
             remaining = (deadline - self.now().astimezone(timezone.utc)).total_seconds()
             if remaining <= 0:
                 result = self._failure_result(
                     validated, ModelRunnerFailure("timeout", "deadline_expired")
                 )
-                self.result_store.put(validated["request_id"], request_digest, result)
-                return result
+                return self._persist_result(validated, request_digest, result)
 
             task = asyncio.create_task(self.backend.run(validated, timeout_s=remaining))
             cancelled = asyncio.create_task(event.wait())
@@ -2743,8 +2756,24 @@ class AutonomousModelRunner:
                 cancelled.cancel()
                 with suppress(asyncio.CancelledError):
                     await cancelled
-            self.result_store.put(validated["request_id"], request_digest, result)
-            return result
+            return self._persist_result(validated, request_digest, result)
+
+    def _persist_result(
+        self,
+        request: Mapping[str, Any],
+        request_digest: str,
+        result: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            self.result_store.put(request["request_id"], request_digest, result)
+        except ModelRunnerFailure as exc:
+            return self._failure_result(request, exc)
+        except Exception:
+            return self._failure_result(
+                request,
+                ModelRunnerFailure("provider", "result_store_error", retryable=True),
+            )
+        return dict(result)
 
     def _validate_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
         try:

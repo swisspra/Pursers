@@ -140,6 +140,59 @@ def test_common_runner_validates_and_normalizes_success() -> None:
     validate_contract(result)
 
 
+@pytest.mark.parametrize("request_value", [None, [], "not-an-object"])
+def test_common_runner_normalizes_non_object_requests(request_value: Any) -> None:
+    schemas, _digest = registry()
+
+    result = asyncio.run(runner(FakeBackend(), schemas).run(request_value))
+
+    assert result["outcome"] == "failed"
+    assert result["reason_code"] == "invalid_model_request"
+    assert result["request_id"] == "invalid-request"
+    validate_contract(result)
+
+
+class FailingResultStore:
+    def __init__(self, failure_point: str) -> None:
+        self.failure_point = failure_point
+
+    def get(self, _request_id: str) -> None:
+        if self.failure_point == "get":
+            raise OSError("private storage detail")
+        return None
+
+    def put(
+        self, _request_id: str, _request_digest: str, _result: Mapping[str, Any]
+    ) -> None:
+        if self.failure_point == "put":
+            raise OSError("private storage detail")
+
+
+@pytest.mark.parametrize("failure_point", ["get", "put"])
+def test_common_runner_normalizes_result_store_errors(failure_point: str) -> None:
+    schemas, digest = registry()
+    backend = FakeBackend()
+
+    result = asyncio.run(
+        runner(
+            backend,
+            schemas,
+            result_store=FailingResultStore(failure_point),
+        ).run(model_request(digest))
+    )
+
+    assert result["outcome"] == "failed"
+    assert result["reason_code"] == "result_store_error"
+    assert result["error"] == {
+        "category": "provider",
+        "code": "result_store_error",
+        "retryable": True,
+    }
+    assert "private storage detail" not in json.dumps(result)
+    assert backend.calls == (0 if failure_point == "get" else 1)
+    validate_contract(result)
+
+
 def test_common_runner_fails_closed_for_digest_schema_citation_and_usage() -> None:
     schemas, digest = registry()
     bad_digest = model_request(digest, task_input_digest_sha256="0" * 64)
@@ -561,6 +614,51 @@ def test_acp_backend_uses_no_mcp_servers_and_normalizes_result(tmp_path: Path) -
     assert result["outcome"] == "succeeded"
     assert json.loads(result["proposal_json"]) == {"answer": "acp"}
     assert result["provider_request_ref"] == "provider:acp-one"
+
+
+def test_acp_backend_drains_all_updates_before_normalizing(tmp_path: Path) -> None:
+    schemas, digest = registry()
+    encoded = json.dumps(
+        {
+            "model": "exact-acp-model",
+            "proposal": {"answer": "burst"},
+            "citations": ["evidence:one"],
+        }
+    )
+    actions = [
+        {
+            "type": "update",
+            "update": {
+                "sessionUpdate": "pursers_model_usage",
+                "model": "exact-acp-model",
+                "providerRequestRef": "provider:acp-burst",
+                "usage": {
+                    "input_tokens": 8,
+                    "output_tokens": 4,
+                    "total_tokens": 12,
+                    "cost_microunits": 2,
+                    "measured": True,
+                },
+            },
+        },
+        *[
+            {
+                "type": "update",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": character},
+                },
+            }
+            for character in encoded
+        ],
+    ]
+    backend = acp_backend(tmp_path, {"promptActions": actions})
+
+    result = asyncio.run(runner(backend, schemas).run(model_request(digest)))
+
+    assert result["outcome"] == "succeeded"
+    assert json.loads(result["proposal_json"]) == {"answer": "burst"}
+    assert result["provider_request_ref"] == "provider:acp-burst"
 
 
 def test_acp_permission_request_is_denied_and_normalized(tmp_path: Path) -> None:
