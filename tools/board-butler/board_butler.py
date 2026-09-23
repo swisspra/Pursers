@@ -1207,14 +1207,29 @@ def _pinned_http_transport(
             extensions = dict(request.extensions)
             if origin[0] == "https":
                 extensions["sni_hostname"] = origin[1]
+            headers = request.headers.copy()
+            headers["accept-encoding"] = "identity"
             pinned_request = httpx2.Request(
                 request.method,
                 request.url.copy_with(host=pinned_address),
-                headers=request.headers,
+                headers=headers,
                 stream=request.stream,
                 extensions=extensions,
             )
             response = await self._transport.handle_async_request(pinned_request)
+            content_encoding = response.headers.get("content-encoding", "")
+            encodings = tuple(
+                encoding.strip().casefold()
+                for encoding in content_encoding.split(",")
+                if encoding.strip()
+            )
+            if content_encoding and (
+                not encodings or any(encoding != "identity" for encoding in encodings)
+            ):
+                await response.aclose()
+                raise ConnectorResultError(
+                    "connector HTTP content encoding is not allowed"
+                )
             event_stream = response.headers.get("content-type", "").casefold().startswith(
                 "text/event-stream"
             )
@@ -1497,7 +1512,7 @@ class ConnectorRuntime:
                     raise ConnectorProtocolError(
                         "MCP v2 HTTP transport is unavailable"
                     ) from exc
-                headers = {}
+                headers = {"Accept-Encoding": "identity"}
                 if declaration.secret_ref:
                     headers[endpoint.secret_header] = (
                         f"{endpoint.secret_prefix} {secret}".strip()

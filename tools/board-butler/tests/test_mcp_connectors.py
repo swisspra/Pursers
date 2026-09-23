@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gzip
 import importlib.util
 import json
 import socket
@@ -821,6 +822,96 @@ def test_http_transport_pins_address_and_bounds_frames_before_parsing(
         assert str(inner.request.url).startswith("https://93.184.216.34/")
         assert inner.request.headers["host"] == "connector.example"
         assert inner.request.extensions["sni_hostname"] == "connector.example"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("content_type", "decoded_body"),
+    [
+        ("application/json", b'{"result":"' + (b"x" * 10_000) + b'"}'),
+        (
+            "text/event-stream",
+            b"event: message\ndata: " + (b"x" * 10_000) + b"\n\n",
+        ),
+    ],
+)
+def test_http_transport_rejects_gzip_before_parsing(
+    content_type: str,
+    decoded_body: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx2
+    import mcp.client.streamable_http as sdk_http
+
+    parser_calls = 0
+    original_parser = sdk_http.jsonrpc_message_adapter.validate_json
+
+    def counted_parser(*args, **kwargs):
+        nonlocal parser_calls
+        parser_calls += 1
+        return original_parser(*args, **kwargs)
+
+    monkeypatch.setattr(
+        sdk_http.jsonrpc_message_adapter,
+        "validate_json",
+        counted_parser,
+    )
+
+    class Stream(httpx2.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield gzip.compress(decoded_body)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    class InnerTransport:
+        request = None
+        response_stream = Stream()
+
+        async def handle_async_request(self, request):
+            self.request = request
+            return httpx2.Response(
+                200,
+                headers={
+                    "content-type": content_type,
+                    "content-encoding": "gzip",
+                },
+                stream=self.response_stream,
+            )
+
+        async def aclose(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        transport = butler._pinned_http_transport(
+            "https://connector.example/mcp",
+            "93.184.216.34",
+            128,
+        )
+        inner = InnerTransport()
+        transport._transport = inner
+        request = httpx2.Request(
+            "POST",
+            "https://connector.example/mcp",
+            headers={
+                "host": "connector.example",
+                "authorization": "Bearer private",
+                "accept-encoding": "gzip, deflate, br",
+            },
+            stream=Stream(),
+        )
+        with pytest.raises(
+            butler.ConnectorResultError,
+            match="content encoding is not allowed",
+        ):
+            await transport.handle_async_request(request)
+        assert parser_calls == 0
+        assert inner.request.headers["accept-encoding"] == "identity"
+        assert inner.response_stream.closed is True
+        await transport.aclose()
 
     asyncio.run(scenario())
 

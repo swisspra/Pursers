@@ -101,8 +101,10 @@ loopback), pinned for the runtime, and connected by IP while preserving the
 original TLS hostname and `Host` header. A changed resolution, private/special
 destination, loopback escape, or cross-origin request fails closed. Both stdio
 newline frames and HTTP JSON/SSE frames are byte-bounded before the MCP parser
-or model construction runs. Unsupported transports and protocol revisions fail
-validation before connection.
+or model construction runs. HTTP requests require identity encoding, and any
+response that declares another content encoding is rejected before its body is
+consumed. Unsupported transports and protocol revisions fail validation before
+connection.
 
 Discovery is filtered against the exact declared tool and resource allowlists
 before it is returned to a planner. Tool calls are validated against the
