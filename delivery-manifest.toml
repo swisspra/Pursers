@@ -580,6 +580,15 @@ evidence = ["docs/release/next-train-ship-plan.md"]
 evidence_contains = ["tools/release_versions.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/seat-kit/fleet_executor.py"
+kind = "operator-tool"
+source = "tools/seat-kit/fleet_executor.py"
+state = "delivered"
+channel = "mandatory CI seat-kit suite"
+evidence = [".github/workflows/ci.yml", "tools/ci_manifest.py", "tools/seat-kit/tests/test_fleet_executor.py"]
+evidence_contains = ["tools/ci_manifest.py run", "tools/seat-kit/tests", "fleet_executor.py"]
+
+[[artifacts]]
 id = "operator-tool:tools/seat-kit/seat_new.py"
 kind = "operator-tool"
 source = "tools/seat-kit/seat_new.py"
