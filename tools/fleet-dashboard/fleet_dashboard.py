@@ -2499,6 +2499,7 @@ def parse_project_registry(
         board_id = project.get("board_id")
         if (
             project.get("status") == "active"
+            and project.get("fleet", True)
             and isinstance(board_id, str)
             and board_id
             and board_id not in seen
@@ -2508,6 +2509,53 @@ def parse_project_registry(
         if len(boards) >= MAX_BOARDS:
             break
     return boards
+
+
+def parse_seat_registry(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return strict durable seat scope declarations keyed by seat name."""
+    state = result.get("state")
+    if not isinstance(state, dict) or not isinstance(state.get("value"), str):
+        raise TypeError("seat registry state is missing")
+    try:
+        document = json.loads(state["value"])
+    except json.JSONDecodeError as exc:
+        raise ValueError("seat registry is not valid JSON") from exc
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schema_version", "seats"}
+        or document.get("schema_version") != 1
+        or not isinstance(document.get("seats"), dict)
+    ):
+        raise ValueError("seat registry schema is unsupported")
+    selected: dict[str, dict[str, Any]] = {}
+    for name, definition in document["seats"].items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(definition, dict)
+            or set(definition) != {"principal_id", "role", "board_mode"}
+        ):
+            raise ValueError("seat registry contains an invalid definition")
+        principal_id = definition.get("principal_id")
+        role = definition.get("role")
+        board_mode = definition.get("board_mode")
+        if not isinstance(principal_id, str) or not principal_id or role not in {
+            "worker", "reviewer"
+        }:
+            raise ValueError("seat registry contains an invalid identity")
+        if board_mode != "registry" and not (
+            isinstance(board_mode, list)
+            and board_mode
+            and all(isinstance(board, str) and board for board in board_mode)
+            and len(set(board_mode)) == len(board_mode)
+        ):
+            raise ValueError("seat registry contains an invalid board_mode")
+        selected[name] = {
+            "principal_id": principal_id,
+            "role": role,
+            "board_mode": copy.deepcopy(board_mode),
+        }
+    return selected
 
 
 def parse_project_work_dirs(
@@ -3718,6 +3766,8 @@ def aggregate_fleet(
     *,
     stale_seconds: int,
     now: datetime | None = None,
+    seat_definitions: dict[str, dict[str, Any]] | None = None,
+    active_registry_boards: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the bounded API projection from already-bounded board reads."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -4058,6 +4108,11 @@ def aggregate_fleet(
     for key, group in groups.items():
         names_to_groups.setdefault(group["agent_name"], set()).add(key)
     agent_rows: list[dict[str, Any]] = []
+    scope_available = (
+        active_registry_boards is not None or seat_definitions is not None
+    )
+    registry_boards = sorted(set(active_registry_boards or []))
+    definitions = seat_definitions or {}
     for group in groups.values():
         last_seen = group["last_seen"]
         agent_ids = sorted(
@@ -4073,12 +4128,60 @@ def aggregate_fleet(
             status = "available"
         else:
             status = "stale"
+        definition = definitions.get(group["agent_name"])
+        if (
+            not isinstance(definition, dict)
+            or definition.get("principal_id") != group["principal_id"]
+        ):
+            definition = None
+        joined_boards = sorted(group["boards"])
+        observed_roles = sorted(
+            {
+                str(seat.get("role"))
+                for seat in group["seats"].values()
+                if seat.get("role")
+            }
+        )
+        if definition is None:
+            board_scope = {
+                "mode": "unconfigured",
+                "status": "misconfigured",
+                "active_boards": registry_boards,
+                "joined_boards": joined_boards,
+                "missing_boards": [],
+                "extra_boards": [],
+            }
+        else:
+            mode = definition["board_mode"]
+            expected = registry_boards if mode == "registry" else sorted(set(mode))
+            missing = sorted(set(expected) - set(joined_boards))
+            extra = sorted(set(joined_boards) - set(expected))
+            role_mismatch = any(role != definition["role"] for role in observed_roles)
+            if mode == "registry":
+                if missing:
+                    scope_status = "partial"
+                elif extra or role_mismatch:
+                    scope_status = "misconfigured"
+                else:
+                    scope_status = "full"
+            else:
+                scope_status = (
+                    "misconfigured" if missing or extra or role_mismatch else "explicit"
+                )
+            board_scope = {
+                "mode": "registry" if mode == "registry" else "explicit",
+                "status": scope_status,
+                "active_boards": expected,
+                "joined_boards": joined_boards,
+                "missing_boards": missing,
+                "extra_boards": extra,
+            }
         agent_rows.append(
             {
                 "agent_id": agent_ids[0] if len(agent_ids) == 1 else None,
                 "principal_id": group["principal_id"],
                 "agent_name": group["agent_name"],
-                "boards": sorted(group["boards"]),
+                "boards": joined_boards,
                 "seats": sorted(
                     group["seats"].values(),
                     key=lambda item: (item["project"], item["board_id"]),
@@ -4091,6 +4194,7 @@ def aggregate_fleet(
                 ),
                 "last_seen": last_seen.isoformat() if last_seen else None,
                 "pool_status": status,
+                **({"board_scope": board_scope} if scope_available else {}),
             }
         )
     rank = {"busy": 0, "available": 1, "stale": 2}
@@ -4381,6 +4485,8 @@ class FleetFetcher:
         self._readable_boards: list[tuple[str, str]] = []
         self._excluded_readable_boards: list[dict[str, str]] = []
         self._configured_but_unreadable: list[str] = []
+        self._active_registry_boards: list[str] = [config.home_board]
+        self._seat_definitions: dict[str, dict[str, Any]] = {}
         self._client_pool = _FleetClientPool(config, client_factory)
 
     def enable_client_reuse(self) -> None:
@@ -4399,6 +4505,11 @@ class FleetFetcher:
         async with self._client(self.config.home_board) as client:
             registry = await client.board_state_get(key="project_registry")
             try:
+                seat_registry = await client.board_state_get(key="seat_registry")
+                self._seat_definitions = parse_seat_registry(seat_registry)
+            except Exception:  # noqa: BLE001 - older/read-only Centrals may omit it.
+                self._seat_definitions = {}
+            try:
                 listed = await _client_call(client, "board_list", {})
             except (AttributeError, BoardClientError):
                 listed = {"boards": []}
@@ -4406,6 +4517,9 @@ class FleetFetcher:
             registry, self.config.home_board
         )
         registry_boards = parse_project_registry(registry, self.config.home_board)
+        self._active_registry_boards = sorted(
+            {board_id for _label, board_id in registry_boards}
+        )
         labels = {board_id: label for label, board_id in registry_boards}
         readable = listed.get("boards") if isinstance(listed, dict) else None
         readable_ids: list[str] = []
@@ -4811,6 +4925,8 @@ class FleetFetcher:
             rows,
             stale_seconds=self.config.stale_seconds,
             now=self.now_factory(),
+            seat_definitions=self._seat_definitions,
+            active_registry_boards=self._active_registry_boards,
         )
         covered = {
             row.get("board_id")
@@ -8141,7 +8257,7 @@ function workerByName(central,name){return (hubWorkers[central]?.workers||[]).fi
 function agentIdentity(a){if(a.agent_id)return String(a.agent_id);const name=a.agent_name||a.name;if(a.principal_id&&name)return`${a.principal_id}:${name}`;return String(a.principal_id||name||'unknown')}
 function agentIdentityLabel(a){const value=agentIdentity(a);return value.length>12?'…'+value.slice(-12):value}
 function workerForAgent(central,a){const workers=hubWorkers[central]?.workers||[],identity=agentIdentity(a),exact=workers.find(w=>agentIdentity(w)===identity);if(exact)return exact;const matches=workers.filter(w=>w.name===a.agent_name),liveMatches=(fleetData[central]?.agents||[]).filter(live=>live.agent_name===a.agent_name);return matches.length===1&&liveMatches.length===1?matches[0]:null}
-function renderRoleChips(seats,fallback){const roles=[];for(const s of seats||[]){if(!s.role||!s.board_id)continue;roles.push({board_id:s.board_id,role:s.role})}if(!roles.length)return esc(fallback||'worker');const unique=new Set(roles.map(r=>r.role));if(unique.size===1){const role=roles[0].role,boards=roles.map(r=>esc(r.board_id)).join(', ');return '<span class="role-chip" title="'+esc(role)+' on '+boards+'">'+esc(role)+' (all boards)</span>'}return roles.map(r=>'<span class="role-chip" title="'+esc(r.board_id)+': '+esc(r.role)+'"><span class="chip-board">'+esc(r.board_id)+'</span>: <span class="chip-role">'+esc(r.role)+'</span></span>').join('')}
+function renderRoleChips(seats,fallback,scope){const roles=[];for(const s of seats||[]){if(!s.role||!s.board_id)continue;roles.push({board_id:s.board_id,role:s.role})}const unique=new Set(roles.map(r=>r.role)),active=[...new Set(scope?.active_boards||[])],joined=[...new Set(roles.map(r=>r.board_id))],fullRegistry=scope?.mode==='registry'&&scope?.status==='full'&&active.length>1&&active.every(board=>joined.includes(board))&&joined.every(board=>active.includes(board));let chips;if(!roles.length)chips=esc(fallback||'worker');else if(unique.size===1&&fullRegistry){const role=roles[0].role,boards=roles.map(r=>esc(r.board_id)).join(', ');chips='<span class="role-chip" title="'+esc(role)+' on '+boards+'">'+esc(role)+' (all boards)</span>'}else chips=roles.map(r=>'<span class="role-chip" title="'+esc(r.board_id)+': '+esc(r.role)+'"><span class="chip-board">'+esc(r.board_id)+'</span>: <span class="chip-role">'+esc(r.role)+'</span></span>').join('');if(scope?.status==='partial'){const missing=(scope.missing_boards||[]).join(', ')||'unknown';chips+='<span class="warning scope-state">partial registry · missing '+esc(missing)+'</span>'}else if(scope?.status==='misconfigured'){chips+='<span class="warning scope-state">scope misconfigured</span>'}return chips}
 function agentRoles(a,managed){return[...new Set([...(a.seats||[]).map(s=>s.role),managed?.role].filter(Boolean))]}
 function canonicalAgentClient(value){const client=String(value||'').trim();if(!client)return'';const lower=client.toLocaleLowerCase();if(lower.startsWith('codex'))return'codex';if(lower.includes('goose'))return'goose';if(lower.includes('aion'))return'AionUi';return client}
 function agentClients(a,managed){return[...new Set([...(a.seats||[]).flatMap(s=>[s.client,s.capabilities?.host]),managed?.host].map(canonicalAgentClient).filter(Boolean))]}
@@ -8155,12 +8271,12 @@ function agentFilterOptions(records,key,label,values){const selected=agentFilter
 function agentCountStrip(records){const states=[['working','◉','Working / กำลังทำงาน'],['available','○','Available / พร้อม'],['stale','△','Stale / ไม่เคลื่อนไหว'],['offline','×','Offline / unreachable']];return`<section class="agent-count-strip" aria-label="Seat status counts" data-pursers-panel="agents" data-pursers-state="ready">${states.map(([state,glyph,label])=>{const count=records.filter(record=>agentDisplayState(record.agent,workerForAgent(record.central,record.agent))===state).length;return`<button type="button" data-agent-status-filter="${state}" data-pursers-status="${state}" aria-pressed="${agentFilters.status===state}"><span class="state-glyph" aria-hidden="true">${glyph}</span><span>${label}</span><b>${count}</b></button>`}).join('')}</section>`}
 function agentFilterBar(records){const roles=records.flatMap(record=>agentRoles(record.agent,workerForAgent(record.central,record.agent))),boards=records.flatMap(record=>agentBoards(record.agent)),clients=records.flatMap(record=>agentClients(record.agent,workerForAgent(record.central,record.agent)));return`<div class="agent-filters" aria-label="Filter seats">${agentFilterOptions(records,'role','Role',roles)}${agentFilterOptions(records,'status','Status',['working','available','stale','offline'])}${agentFilterOptions(records,'board','Board',boards)}${agentFilterOptions(records,'client','Client / platform',clients)}<button type="button" data-agent-filter-reset>Reset filters</button></div>`}
 // merge retained rc6 identity-safe live card below; the combined override follows the main timing renderer.
-function liveAgentCardTimingV1IdentityV1(central,a){const managed=workerForAgent(central,a),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[],work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))],identity=agentIdentityLabel(a),duplicate=a.duplicate_name?`<span class="warning">Duplicate name · identity ${esc(identity)}</span>`:`<span class="meta">Identity ${esc(identity)}</span>`;return `<article class="agent-card" data-agent-identity="${esc(agentIdentity(a))}"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||'worker')}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', '))}</span>${duplicate}</div><div class="agent-card-state"><span class="status">${esc(a.pool_status)}</span><span class="meta">${esc(relativeAge(a.last_seen))}</span></div></div>${work.length?work.map(s=>`<div class="work-row"><span class="severity"></span><div>${agentTicketLink(central,s)}<span class="meta">${esc(s.project||`${s.role||managed?.role||'worker'} · ${s.board_id}`)}</span></div></div>`).join(''):'<p class="empty">ว่าง/idle</p>'}${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`}
+function liveAgentCardTimingV1IdentityV1(central,a){const managed=workerForAgent(central,a),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[],work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))],identity=agentIdentityLabel(a),duplicate=a.duplicate_name?`<span class="warning">Duplicate name · identity ${esc(identity)}</span>`:`<span class="meta">Identity ${esc(identity)}</span>`;return `<article class="agent-card" data-agent-identity="${esc(agentIdentity(a))}"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||'worker',a.board_scope)}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', '))}</span>${duplicate}</div><div class="agent-card-state"><span class="status">${esc(a.pool_status)}</span><span class="meta">${esc(relativeAge(a.last_seen))}</span></div></div>${work.length?work.map(s=>`<div class="work-row"><span class="severity"></span><div>${agentTicketLink(central,s)}<span class="meta">${esc(s.project||`${s.role||managed?.role||'worker'} · ${s.board_id}`)}</span></div></div>`).join(''):'<p class="empty">ว่าง/idle</p>'}${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`}
 // merge retained main roster-timing live card below.
-function liveAgentCardTimingV1(central,a){const managed=workerByName(central,a.agent_name),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[],work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))];return `<article class="agent-card"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||'worker')}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', ')||'None recorded')}</span></div><div class="agent-card-state"><span class="status">${esc(a.pool_status||'Not observed')}</span><span class="meta">Last seen ${esc(relativeAge(a.last_seen))}</span></div></div>${work.length?work.map(s=>`<div class="work-row"><span class="severity${a.pool_status==='stale'?' critical':''}"></span><div>${agentTicketLink(central,s)}<span class="meta">Status ${esc(s.current_ticket_status||s.status||a.pool_status||'Not observed')}</span><span class="meta">${esc(s.project||`${s.role||managed?.role||'worker'} · ${s.board_id}`)}</span></div><span class="meta work-timing">${esc(agentRosterTiming(a,s))}</span></div>`).join(''):`<div class="work-row empty-work"><span class="severity${a.pool_status==='stale'?' critical':''}"></span><div><b>Current ticket</b><span class="meta">None recorded</span></div><span class="meta work-timing">${esc(agentRosterTiming(a,{}))}</span></div>`}${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`}
+function liveAgentCardTimingV1(central,a){const managed=workerByName(central,a.agent_name),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[],work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))];return `<article class="agent-card"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||'worker',a.board_scope)}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', ')||'None recorded')}</span></div><div class="agent-card-state"><span class="status">${esc(a.pool_status||'Not observed')}</span><span class="meta">Last seen ${esc(relativeAge(a.last_seen))}</span></div></div>${work.length?work.map(s=>`<div class="work-row"><span class="severity${a.pool_status==='stale'?' critical':''}"></span><div>${agentTicketLink(central,s)}<span class="meta">Status ${esc(s.current_ticket_status||s.status||a.pool_status||'Not observed')}</span><span class="meta">${esc(s.project||`${s.role||managed?.role||'worker'} · ${s.board_id}`)}</span></div><span class="meta work-timing">${esc(agentRosterTiming(a,s))}</span></div>`).join(''):`<div class="work-row empty-work"><span class="severity${a.pool_status==='stale'?' critical':''}"></span><div><b>Current ticket</b><span class="meta">None recorded</span></div><span class="meta work-timing">${esc(agentRosterTiming(a,{}))}</span></div>`}${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`}
 // end retained live card renderers.
 function agentCapabilitySummary(a){const seats=(a.seats||[]).length?a.seats:[{board_id:null,capabilities:a.capabilities||{}}],seen=new Set(),rows=[];for(const seat of seats){const c=seat.capabilities||{},tier=c.tier_max??'unknown',client=c.host||'unknown',model=c.model||'unknown',provider=c.provider||'unknown',key=JSON.stringify([tier,client,model,provider]);if(seen.has(key))continue;seen.add(key);rows.push(`<span class="agent-capability">${seat.board_id?`<span class="meta">${esc(seat.board_id)}</span>`:''}<span>tier ${esc(tier)} · client ${esc(client)} · model ${esc(model)} · provider ${esc(provider)}</span></span>`)}return `<div class="agent-capabilities" aria-label="Model attribution">${rows.join('')}</div>`}
-function liveAgentCard(central,a){const managed=workerForAgent(central,a),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[],work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))],identity=agentIdentity(a),identityLabel=agentIdentityLabel(a),state=agentDisplayState(a,managed),roles=agentRoles(a,managed),boards=agentBoards(a),clients=agentClients(a,managed),tier=agentTier(a,managed),labels={working:'◉ Working / กำลังทำงาน',available:'○ Available / พร้อม',stale:'△ Stale / ไม่เคลื่อนไหว',offline:'× Offline / unreachable'},duplicate=a.duplicate_name?`<span class="warning">Duplicate name · identity ${esc(identityLabel)}</span>`:`<span class="meta">Identity ${esc(identityLabel)}</span>`,boardTags=boards.map(board=>`<span class="agent-board" data-pursers-board="${esc(board)}" data-pursers-status="${esc(state)}">${esc(board)}</span>`).join(''),clientTags=clients.map(client=>`<span class="pill">${esc(client)}</span>`).join('');return`<article class="agent-card agent-state-${state}" data-agent-identity="${esc(identity)}" data-pursers-agent="${esc(identity)}" data-pursers-seat="${esc(identity)}" data-pursers-status="${esc(state)}" data-pursers-state="ready"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||roles[0]||'worker')}</span><h3>${esc(a.agent_name)}</h3></div><span class="agent-state status"><span aria-hidden="true">${labels[state].slice(0,1)}</span> ${esc(labels[state].slice(2))}</span></div><div class="agent-card-meta"><span>Tier ${esc(tier)}</span>${clientTags||'<span>Client not reported</span>'}</div><div class="agent-board-list">${boardTags||'<span class="meta">Board not reported</span>'}</div>${agentCapabilitySummary(a)}<p class="agent-age">last activity ${esc(detailedAge(a.last_seen))}</p>${duplicate}${work.length?work.map(s=>`<div class="agent-ticket-row">${agentTicketLink(central,s)}<span class="meta">${esc(s.current_ticket_status||s.status||state)} · ${esc(s.project||s.board_id||'board not reported')}</span><strong class="lease-countdown">${esc(leaseCountdown(s.lease_expires_at||s.current_ticket_lease_expires_at))}</strong></div>`).join(''):`<div class="agent-ticket-row empty-work"><b>ว่าง / Available</b><span class="meta">No held ticket</span></div>`}<details class="agent-ops"><summary>Seat controls</summary>${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</details></article>`}
+function liveAgentCard(central,a){const managed=workerForAgent(central,a),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[],work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))],identity=agentIdentity(a),identityLabel=agentIdentityLabel(a),state=agentDisplayState(a,managed),roles=agentRoles(a,managed),boards=agentBoards(a),clients=agentClients(a,managed),tier=agentTier(a,managed),labels={working:'◉ Working / กำลังทำงาน',available:'○ Available / พร้อม',stale:'△ Stale / ไม่เคลื่อนไหว',offline:'× Offline / unreachable'},duplicate=a.duplicate_name?`<span class="warning">Duplicate name · identity ${esc(identityLabel)}</span>`:`<span class="meta">Identity ${esc(identityLabel)}</span>`,boardTags=boards.map(board=>`<span class="agent-board" data-pursers-board="${esc(board)}" data-pursers-status="${esc(state)}">${esc(board)}</span>`).join(''),clientTags=clients.map(client=>`<span class="pill">${esc(client)}</span>`).join('');return`<article class="agent-card agent-state-${state}" data-agent-identity="${esc(identity)}" data-pursers-agent="${esc(identity)}" data-pursers-seat="${esc(identity)}" data-pursers-status="${esc(state)}" data-pursers-state="ready"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||roles[0]||'worker',a.board_scope)}</span><h3>${esc(a.agent_name)}</h3></div><span class="agent-state status"><span aria-hidden="true">${labels[state].slice(0,1)}</span> ${esc(labels[state].slice(2))}</span></div><div class="agent-card-meta"><span>Tier ${esc(tier)}</span>${clientTags||'<span>Client not reported</span>'}</div><div class="agent-board-list">${boardTags||'<span class="meta">Board not reported</span>'}</div>${agentCapabilitySummary(a)}<p class="agent-age">last activity ${esc(detailedAge(a.last_seen))}</p>${duplicate}${work.length?work.map(s=>`<div class="agent-ticket-row">${agentTicketLink(central,s)}<span class="meta">${esc(s.current_ticket_status||s.status||state)} · ${esc(s.project||s.board_id||'board not reported')}</span><strong class="lease-countdown">${esc(leaseCountdown(s.lease_expires_at||s.current_ticket_lease_expires_at))}</strong></div>`).join(''):`<div class="agent-ticket-row empty-work"><b>ว่าง / Available</b><span class="meta">No held ticket</span></div>`}<details class="agent-ops"><summary>Seat controls</summary>${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</details></article>`}
 function managedControls(central,w,includeWork=true){const p=w.pressure,work=w.current_work||[],logs=w.log_tail||[];return `<div class="pressure-line">${p?pressureBadge(p):'<span class="status">pressure unavailable</span>'}<span class="meta">${p?`${esc(p.latest_estimated_tokens)} tokens / poll`:'No local sample'}</span></div>${includeWork?work.map(x=>`<div class="work-row"><span class="severity"></span><div><b>${esc(x.ticket_title||x.ticket_id)}</b><span class="meta">${esc(x.role||w.role)} · ${esc(x.board_id)}</span></div><span class="id">${esc(x.ticket_id)}</span></div>`).join(''):''}<div class="agent-actions"><button data-hub-agent-action="test" data-central="${esc(central)}" data-name="${esc(w.name)}">Test</button><button data-hub-agent-action="start" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'disabled':''}>Start</button><button data-hub-agent-action="stop" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'':'disabled'}>Stop</button><button data-hub-agent-action="restart" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'':'disabled'}>Restart</button>${w.seat_exists?'':`<button data-hub-copy="${esc(w.seat_admin_command)}">Copy seat command</button>`}</div><details><summary>Log tail · last 20 lines</summary><pre class="log-tail">${esc(logs.join('\n')||'No log output yet.')}</pre></details>`}
 function renderGuide(){if(!hubGuide)return'';return `<section class="card pool"><div class="section-title"><h3>Finish ${esc(hubGuide.name)}</h3><span class="status">2 steps</span></div><div class="guide"><div class="guide-step"><b>1 · Provision seat</b><p class="muted">Run once, copy it, then Refresh to auto-detect.</p><code>${esc(hubGuide.seat_admin_command||'Seat already detected.')}</code>${hubGuide.seat_exists?'':'<button type="button" class="button" data-hub-copy="'+esc(hubGuide.seat_admin_command)+'">Copy command</button>'}</div><div class="guide-step"><b>2 · Start agent</b><p class="muted">Start unlocks after the seat and token are detected.</p><button type="button" class="primary-action" data-hub-agent-action="start" data-central="${esc(hubGuide.central)}" data-name="${esc(hubGuide.name)}" ${hubGuide.seat_exists?'':'disabled'}>Start</button></div></div></section>`}
 function inactiveAgentDrawer(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const a of d.inactive_agents||[])rows.push({central,agent:a});if(!rows.length)return'';return `<details id="inactive-agent-drawer" class="card pool"><summary>Retired / inactive agents · ${rows.length}</summary><div class="table-scroll"><table><thead><tr><th>Name</th><th>Lifecycle</th><th>Board</th><th>Stable identity</th><th>Last seen</th></tr></thead><tbody>${rows.sort((x,y)=>x.agent.agent_name.localeCompare(y.agent.agent_name)||agentIdentity(x.agent).localeCompare(agentIdentity(y.agent))).map(x=>`<tr><td><b>${esc(x.agent.agent_name)}</b><div class="meta">${esc(x.central)}</div></td><td><span class="status">${esc(x.agent.lifecycle_status||'inactive')}</span></td><td>${esc(x.agent.board_id||'—')}</td><td class="id">${esc(agentIdentityLabel(x.agent))}</td><td>${esc(relativeAge(x.agent.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`}

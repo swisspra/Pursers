@@ -1362,6 +1362,33 @@ def test_blank_board_serves_registry_and_named_board_is_dedicated(tmp_path: Path
         seat_new.generate(bad)
 
 
+def test_registry_mode_requires_event_board_for_routed_commands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = seat_new.generate(args(tmp_path / "seat", client="goose"))
+    generated = load_generated(dest / "bin" / "board.py", "board_registry_route")
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", "http://central.invalid/mcp")
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "test-token")
+    monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+    monkeypatch.setenv("ONBOARD_AGENT_NAME", "worker-agent")
+    monkeypatch.setenv("PURSERS_BOARDS", "registry")
+    monkeypatch.setattr(
+        generated,
+        "_load_client",
+        lambda: pytest.fail("routing guard must run before board access"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"claim requires --board <event-board-id> in registry mode",
+    ):
+        asyncio.run(
+            generated._execute(
+                generated._parser().parse_args(["claim", "TK-exact-board"])
+            )
+        )
+
+
 def test_nonempty_destination_is_refused(tmp_path: Path) -> None:
     dest = tmp_path / "worker"
     dest.mkdir()
@@ -1973,7 +2000,7 @@ def test_live_registry_wait_restarts_stable_seat_and_delivers_offer(
 ) -> None:
     async def exercise() -> None:
         from mcp import Client
-        from pursers_client import BoardClient, wait_for_boards
+        from pursers_client import BoardClient, active_registry_boards, wait_for_boards
         import pursers_client.client as client_module
         import pursers_client.project_registry as registry_module
 
@@ -2002,20 +2029,32 @@ def test_live_registry_wait_restarts_stable_seat_and_delivers_offer(
             "host": "test",
             "max_parallel": 1,
         }
+        reviewer_capabilities = {
+            **capabilities,
+            "can_work": False,
+            "can_review": True,
+        }
         try:
             active["principal"] = principals["admin"]
             await call_other("board_join", agent_name="admin-agent")
-            await call_other(
-                "board_member_add",
-                agent_name="admin-agent",
-                principal_id=principals["worker"].principal_id,
-                role="member",
-            )
+            for key, role in (("worker", "member"), ("reviewer", "reviewer")):
+                await call_other(
+                    "board_member_add",
+                    agent_name="admin-agent",
+                    principal_id=principals[key].principal_id,
+                    role=role,
+                )
             active["principal"] = principals["worker"]
-            await call_other(
+            worker_other = await call_other(
                 "board_join",
                 agent_name="worker-agent",
                 capabilities=capabilities,
+            )
+            active["principal"] = principals["reviewer"]
+            await call_other(
+                "board_join",
+                agent_name="reviewer-agent",
+                capabilities=reviewer_capabilities,
             )
             cursors = {
                 board_id: int(service.journal.read_after(board_id, 0)["latest_cursor"])
@@ -2096,15 +2135,15 @@ def test_live_registry_wait_restarts_stable_seat_and_delivers_offer(
                 ))
                 await asyncio.wait_for(ready.wait(), timeout=1)
                 active["principal"] = principals["admin"]
-                created = await call(
+                created = await call_other(
                     "ticket_create",
                     agent_name="admin-agent",
                     title="registry restart offer probe",
                     description="prove restarted stable-seat registry delivery",
-                    target_url="home/item",
+                    target_url="other/item",
                     scope="interactive-no-send",
                     required_fields=["test_output"],
-                    assigned_to=agent_ids["worker"],
+                    assigned_to=worker_other.structured_content["agent_id"],
                 )
                 ticket_id = created.structured_content["ticket"]["ticket_id"]
                 active["principal"] = principals["worker"]
@@ -2114,6 +2153,135 @@ def test_live_registry_wait_restarts_stable_seat_and_delivers_offer(
             assert result["skipped_boards"] == {}
             assert result["events"][0]["ticket_id"] == ticket_id
             assert result["events"][0]["kind"] == "ticket_offered"
+            assert result["events"][0]["board_id"] == other_board
+
+            active["principal"] = principals["worker"]
+            claimed = await call_other(
+                "ticket_claim", agent_name="worker-agent", ticket_id=ticket_id
+            )
+            assert claimed.structured_content["ticket"]["status"] == "claimed"
+
+            reviewer_ready = asyncio.Event()
+
+            class ReviewerSignalingClient(SignalingClient):
+                async def call_tool(self, *arguments, **kwargs):
+                    token = active.set(principals["reviewer"])
+                    try:
+                        return await self.inner.call_tool(*arguments, **kwargs)
+                    finally:
+                        active.reset(token)
+
+                @asynccontextmanager
+                async def listen(self, **kwargs):
+                    async with self.inner.listen(**kwargs) as subscription:
+                        async def signaled_subscription():
+                            reviewer_ready.set()
+                            async for cue in subscription:
+                                yield cue
+
+                        yield signaled_subscription()
+
+            monkeypatch.setattr(registry_module, "Client", ReviewerSignalingClient)
+            reviewer_cursors = {
+                board_id: int(service.journal.read_after(board_id, 0)["latest_cursor"])
+                for board_id in ("pursers", other_board)
+            }
+            active["principal"] = principals["reviewer"]
+            async with LocalBoardClient(
+                "http://central.invalid/mcp",
+                "test-token",
+                "pursers",
+                agent_name="reviewer-agent",
+                role="reviewer",
+                capabilities=reviewer_capabilities,
+                allow_takeover=True,
+            ) as reviewer_client:
+                review_wait = asyncio.create_task(wait_for_boards(
+                    reviewer_client,
+                    ["pursers", other_board],
+                    reviewer_cursors,
+                    3,
+                    kinds=REVIEWER_WAIT_KINDS,
+                    submitted=True,
+                    capabilities=reviewer_capabilities,
+                    allow_takeover=True,
+                ))
+                await asyncio.wait_for(reviewer_ready.wait(), timeout=1)
+                active["principal"] = principals["worker"]
+                submitted = await call_other(
+                    "ticket_submit",
+                    agent_name="worker-agent",
+                    ticket_id=ticket_id,
+                    summary="real multi-board proof",
+                    notes="test_output: real Central multi-board pass",
+                    files_changed=["tools/seat-kit/seat_new.py"],
+                )
+                assert submitted.structured_content["ticket"]["status"] == "submitted"
+                active["principal"] = principals["reviewer"]
+                review_event = await asyncio.wait_for(review_wait, timeout=2)
+
+            assert review_event["events"][0]["board_id"] == other_board
+            active["principal"] = principals["reviewer"]
+            review_claim = await call_other(
+                "ticket_review_claim",
+                agent_name="reviewer-agent",
+                ticket_id=ticket_id,
+            )
+            assert review_claim.structured_content["ok"] is True
+            approved = await call_other(
+                "ticket_review",
+                agent_name="reviewer-agent",
+                ticket_id=ticket_id,
+                verdict="approve",
+                review_notes="independent real Central multi-board proof",
+            )
+            assert approved.structured_content["ticket"]["status"] == "closed"
+
+            # A later active registry project is selected and joined on the
+            # next re-arm without changing the generated prompt or seat files.
+            new_board = "newly-active"
+
+            async def call_new(name: str, **arguments: Any) -> Any:
+                return await mcp.call_tool(name, {"board_id": new_board, **arguments})
+
+            active["principal"] = principals["admin"]
+            await call_new("board_join", agent_name="admin-agent")
+            await call_new(
+                "board_member_add",
+                agent_name="admin-agent",
+                principal_id=principals["worker"].principal_id,
+                role="member",
+            )
+            registry = {
+                "schema_version": 1,
+                "projects": {
+                    "home": {"board_id": "pursers", "work_dir": "/repo/home", "status": "active"},
+                    "other": {"board_id": other_board, "work_dir": "/repo/other", "status": "active"},
+                    "new": {"board_id": new_board, "work_dir": "/repo/new", "status": "active"},
+                },
+            }
+            active["principal"] = principals["worker"]
+            async with LocalBoardClient(
+                "http://central.invalid/mcp",
+                "test-token",
+                "pursers",
+                agent_name="worker-agent",
+                role="worker",
+                capabilities=capabilities,
+                allow_takeover=True,
+            ) as board_client:
+                refreshed = await wait_for_boards(
+                    board_client,
+                    active_registry_boards(registry, "pursers"),
+                    {"pursers": 0, other_board: 0, new_board: 0},
+                    1,
+                    kinds=WORKER_WAIT_KINDS,
+                    submitted=False,
+                    capabilities=capabilities,
+                    allow_takeover=True,
+                    poll_fallback=True,
+                )
+            assert new_board in refreshed["boards"]
             if os.environ.get("PURSERS_LIVE_PROBE_OUTPUT") == "1":
                 print(json.dumps({
                     "boards": result["boards"],
