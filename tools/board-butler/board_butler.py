@@ -2539,7 +2539,13 @@ class ACPModelBackend:
             permission_policy=None,
             request_timeout=timeout_s,
         ) as client:
-            await client.initialize(timeout=timeout_s)
+            await client.initialize(
+                client_capabilities={
+                    "fs": {"readTextFile": False, "writeTextFile": False},
+                    "terminal": False,
+                },
+                timeout=timeout_s,
+            )
             session_id = await client.new_session(
                 self.session_root, mcp_servers=(), timeout=timeout_s
             )
