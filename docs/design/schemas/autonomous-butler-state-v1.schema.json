@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pursers.invalid/schemas/autonomous-butler-state-v1.schema.json",
+  "title": "Autonomous Butler desired-versus-actual state v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "board_id", "config_revision", "effective_state", "observed_at", "stale_after", "capacity", "host_processes", "executor", "connectors", "kill_latched"],
+  "properties": {
+    "schema": {"const": "autonomous_butler_state_v1"},
+    "schema_version": {"const": 1},
+    "board_id": {"$ref": "#/$defs/id"},
+    "config_revision": {"type": "integer", "minimum": 1},
+    "effective_state": {"enum": ["shadow", "pending", "applying", "autonomous", "degraded", "auto_demoted", "killed"]},
+    "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "stale_after": {"type": "string", "format": "date-time"},
+    "kill_latched": {"type": "boolean"},
+    "capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker", "reviewer", "acp_worker"],
+      "properties": {
+        "worker": {"$ref": "#/$defs/roleState"},
+        "reviewer": {"$ref": "#/$defs/roleState"},
+        "acp_worker": {"$ref": "#/$defs/roleState"}
+      }
+    },
+    "host_processes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role_agents", "control_plane", "agent_process_ceiling", "total_process_ceiling", "observed_at"],
+      "properties": {
+        "role_agents": {"$ref": "#/$defs/count"},
+        "control_plane": {"$ref": "#/$defs/count"},
+        "agent_process_ceiling": {"type": "integer", "minimum": 1, "maximum": 256},
+        "total_process_ceiling": {"type": "integer", "minimum": 1, "maximum": 320},
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "executor": {"$ref": "#/$defs/health"},
+    "connectors": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/connectorHealth"}},
+    "current_command_id": {"$ref": "#/$defs/id"},
+    "current_operation_id": {"$ref": "#/$defs/id"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+    "count": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "roleState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["desired", "ready", "busy", "starting", "draining", "unhealthy", "stopped", "seat_ids", "template_ids"],
+      "properties": {
+        "desired": {"$ref": "#/$defs/count"},
+        "ready": {"$ref": "#/$defs/count"},
+        "busy": {"$ref": "#/$defs/count"},
+        "starting": {"$ref": "#/$defs/count"},
+        "draining": {"$ref": "#/$defs/count"},
+        "unhealthy": {"$ref": "#/$defs/count"},
+        "stopped": {"$ref": "#/$defs/count"},
+        "seat_ids": {"type": "array", "maxItems": 1000, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "template_ids": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "observed_at"],
+      "properties": {
+        "status": {"enum": ["healthy", "degraded", "unavailable", "unknown"]},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"}
+      }
+    },
+    "connectorHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connector_id", "status", "observed_at"],
+      "properties": {
+        "connector_id": {"$ref": "#/$defs/id"},
+        "status": {"enum": ["healthy", "degraded", "unavailable", "unknown"]},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+        "last_success_at": {"type": "string", "format": "date-time"},
+        "last_failure_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pursers.invalid/schemas/autonomous-butler-audit-v1.schema.json",
+  "title": "Autonomous Butler redacted audit record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "audit_id", "board_id", "sequence", "occurred_at", "actor_id", "category", "action", "outcome", "policy_digest_sha256", "detail_redacted"],
+  "properties": {
+    "schema": {"const": "autonomous_butler_audit_v1"},
+    "schema_version": {"const": 1},
+    "audit_id": {"$ref": "#/$defs/id"},
+    "board_id": {"$ref": "#/$defs/id"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "actor_id": {"$ref": "#/$defs/id"},
+    "category": {"enum": ["policy", "command", "model", "connector", "executor", "reconcile", "cas", "demotion", "kill"]},
+    "action": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+    "outcome": {"enum": ["allowed", "denied", "started", "succeeded", "failed", "cancelled", "conflict", "unknown"]},
+    "policy_digest_sha256": {"$ref": "#/$defs/sha256"},
+    "envelope_fingerprint_sha256": {"$ref": "#/$defs/sha256"},
+    "command_id": {"$ref": "#/$defs/id"},
+    "operation_id": {"$ref": "#/$defs/id"},
+    "target_ref": {"$ref": "#/$defs/id"},
+    "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+    "detail": {"type": "string", "maxLength": 1000},
+    "detail_redacted": {"type": "boolean"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

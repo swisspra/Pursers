@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pursers.invalid/schemas/autonomous-butler-command-v1.schema.json",
+  "title": "Autonomous Butler durable command v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "command_id", "board_id", "kind", "actor_id", "created_at", "expected_config_revision", "payload", "state", "revision"],
+  "properties": {
+    "schema": {"const": "autonomous_butler_command_v1"},
+    "schema_version": {"const": 1},
+    "command_id": {"$ref": "#/$defs/id"},
+    "board_id": {"$ref": "#/$defs/id"},
+    "kind": {"enum": ["set_desired_state", "reconcile_now", "drain_seat", "retire_seat", "enable_connector", "disable_connector", "veto_action", "kill", "resume"]},
+    "actor_id": {"$ref": "#/$defs/id"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "expected_config_revision": {"type": "integer", "minimum": 1},
+    "payload": {
+      "type": "object",
+      "maxProperties": 8,
+      "additionalProperties": false,
+      "properties": {
+        "desired_revision": {"type": "integer", "minimum": 1},
+        "desired_digest_sha256": {"$ref": "#/$defs/sha256"},
+        "seat_id": {"$ref": "#/$defs/id"},
+        "connector_id": {"$ref": "#/$defs/id"},
+        "action_id": {"$ref": "#/$defs/id"},
+        "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"}
+      }
+    },
+    "state": {"enum": ["accepted", "validating", "pending", "applying", "succeeded", "rejected", "failed", "cancelled"]},
+    "revision": {"type": "integer", "minimum": 1},
+    "seat_generation": {"type": "integer", "minimum": 1},
+    "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+    "result_ref": {"$ref": "#/$defs/id"},
+    "audit_id": {"$ref": "#/$defs/id"},
+    "updated_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

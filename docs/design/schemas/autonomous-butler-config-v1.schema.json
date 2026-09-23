@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pursers.invalid/schemas/autonomous-butler-config-v1.schema.json",
+  "title": "Autonomous Butler board configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "board_id", "revision", "host_runtime", "desired", "envelope"],
+  "properties": {
+    "schema": {"const": "autonomous_butler_config_v1"},
+    "schema_version": {"const": 1},
+    "board_id": {"$ref": "#/$defs/id"},
+    "revision": {"type": "integer", "minimum": 1},
+    "host_runtime": {"$ref": "#/$defs/hostRuntime"},
+    "desired": {"$ref": "#/$defs/desired"},
+    "envelope": {"$ref": "#/$defs/envelope"},
+    "authorization": {"$ref": "#/$defs/authorization"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "roleCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "target", "max"],
+      "properties": {
+        "min": {"type": "integer", "minimum": 0, "maximum": 100},
+        "target": {"type": "integer", "minimum": 0, "maximum": 100},
+        "max": {"type": "integer", "minimum": 0, "maximum": 100}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["period", "max_tokens", "max_cost_microunits", "max_external_calls"],
+      "properties": {
+        "period": {"enum": ["hour", "day", "month"]},
+        "max_tokens": {"type": "integer", "minimum": 0, "maximum": 1000000000},
+        "max_cost_microunits": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "max_external_calls": {"type": "integer", "minimum": 0, "maximum": 1000000}
+      }
+    },
+    "hostRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host_ref", "revision", "agent_process_ceiling", "control_plane_processes", "total_process_ceiling", "configured_by", "configured_at"],
+      "properties": {
+        "host_ref": {"$ref": "#/$defs/id"},
+        "revision": {"type": "integer", "minimum": 1},
+        "agent_process_ceiling": {"type": "integer", "minimum": 1, "maximum": 256},
+        "control_plane_processes": {"type": "integer", "minimum": 0, "maximum": 64},
+        "total_process_ceiling": {"type": "integer", "minimum": 1, "maximum": 320},
+        "configured_by": {"$ref": "#/$defs/id"},
+        "configured_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "connector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connector_id", "enabled", "transport", "protocol_revision", "endpoint_ref", "secret_ref", "tools", "resources", "limits"],
+      "properties": {
+        "connector_id": {"$ref": "#/$defs/id"},
+        "enabled": {"type": "boolean"},
+        "transport": {"enum": ["stdio", "streamable_http"]},
+        "protocol_revision": {"type": "string", "pattern": "^20[0-9]{2}-[0-9]{2}-[0-9]{2}$"},
+        "endpoint_ref": {"$ref": "#/$defs/id"},
+        "secret_ref": {"oneOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+        "tools": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "resources": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 300}},
+        "risky_tools": {"type": "array", "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["timeout_ms", "max_input_bytes", "max_output_bytes", "max_concurrency", "calls_per_minute"],
+          "properties": {
+            "timeout_ms": {"type": "integer", "minimum": 100, "maximum": 600000},
+            "max_input_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
+            "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 4194304},
+            "max_concurrency": {"type": "integer", "minimum": 1, "maximum": 32},
+            "calls_per_minute": {"type": "integer", "minimum": 1, "maximum": 1000}
+          }
+        }
+      }
+    },
+    "desired": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "runner", "capacity", "host_concurrency", "board_concurrency", "cooldowns", "budget", "connectors"],
+      "properties": {
+        "mode": {"enum": ["shadow", "autonomous"]},
+        "runner": {"enum": ["direct_api", "acp"]},
+        "capacity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["worker", "reviewer", "acp_worker"],
+          "properties": {
+            "worker": {"$ref": "#/$defs/roleCount"},
+            "reviewer": {"$ref": "#/$defs/roleCount"},
+            "acp_worker": {"$ref": "#/$defs/roleCount"}
+          }
+        },
+        "host_concurrency": {"type": "integer", "minimum": 1, "maximum": 256},
+        "board_concurrency": {"type": "integer", "minimum": 1, "maximum": 256},
+        "cooldowns": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scale_up_s", "scale_down_s", "failure_backoff_s"],
+          "properties": {
+            "scale_up_s": {"type": "integer", "minimum": 0, "maximum": 604800},
+            "scale_down_s": {"type": "integer", "minimum": 0, "maximum": 604800},
+            "failure_backoff_s": {"type": "integer", "minimum": 1, "maximum": 86400}
+          }
+        },
+        "budget": {"$ref": "#/$defs/budget"},
+        "connectors": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/connector"}}
+      }
+    },
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fingerprint_sha256", "approved_template_ids", "approved_connector_ids", "max_capacity", "max_host_concurrency", "max_board_concurrency", "max_budget", "created_by", "created_at"],
+      "properties": {
+        "fingerprint_sha256": {"$ref": "#/$defs/sha256"},
+        "approved_template_ids": {"type": "array", "minItems": 1, "maxItems": 100, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "approved_connector_ids": {"type": "array", "maxItems": 32, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "max_capacity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["worker", "reviewer", "acp_worker"],
+          "properties": {
+            "worker": {"type": "integer", "minimum": 0, "maximum": 100},
+            "reviewer": {"type": "integer", "minimum": 0, "maximum": 100},
+            "acp_worker": {"type": "integer", "minimum": 0, "maximum": 100}
+          }
+        },
+        "max_host_concurrency": {"type": "integer", "minimum": 1, "maximum": 256},
+        "max_board_concurrency": {"type": "integer", "minimum": 1, "maximum": 256},
+        "max_budget": {"$ref": "#/$defs/budget"},
+        "created_by": {"$ref": "#/$defs/id"},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authorization_id", "config_revision", "envelope_fingerprint_sha256", "expires_at"],
+      "properties": {
+        "authorization_id": {"$ref": "#/$defs/id"},
+        "config_revision": {"type": "integer", "minimum": 1},
+        "envelope_fingerprint_sha256": {"$ref": "#/$defs/sha256"},
+        "expires_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}
