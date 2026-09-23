@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pursers.invalid/schemas/autonomous-butler-control-audit-v2.schema.json",
+  "title": "Autonomous Butler command and config audit v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "audit_id", "board_id", "sequence", "occurred_at", "actor_id", "actor_principal_id", "category", "action", "outcome", "reason_code", "policy_digest_sha256", "detail_redacted"],
+  "properties": {
+    "schema": {"const": "autonomous_butler_control_audit_v2"},
+    "schema_version": {"const": 2},
+    "audit_id": {"$ref": "#/$defs/id"},
+    "board_id": {"$ref": "#/$defs/id"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "actor_id": {"$ref": "#/$defs/id"},
+    "actor_principal_id": {"$ref": "#/$defs/id"},
+    "category": {"enum": ["command", "config", "cas"]},
+    "action": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+    "outcome": {"enum": ["allowed", "denied", "started", "succeeded", "failed", "cancelled", "conflict", "unknown"]},
+    "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$"},
+    "policy_digest_sha256": {"$ref": "#/$defs/sha256"},
+    "detail_redacted": {"const": true},
+    "command_id": {"$ref": "#/$defs/id"},
+    "config_revision": {"type": "integer", "minimum": 1},
+    "prior_revision": {"type": "integer", "minimum": 0},
+    "current_revision": {"type": "integer", "minimum": 1}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

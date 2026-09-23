@@ -46,6 +46,14 @@ DEFAULT_TOOLS = frozenset(
         "board_question_inbox",
         "board_snapshot",
         "board_status",
+        "butler_command_acknowledge",
+        "butler_command_cancel",
+        "butler_command_inspect",
+        "butler_command_result",
+        "butler_command_submit",
+        "butler_command_wait",
+        "butler_config_get",
+        "butler_config_set",
         "dispatch_my_offers",
         "memory_links",
         "memory_read",
@@ -92,7 +100,9 @@ TOOL_PROFILES: dict[str, frozenset[str] | None] = {
     "all": None,
 }
 ROLE_TOOL_PROFILES = frozenset({"worker", "reviewer"})
-WAIT_TOOL_NAMES = frozenset({"a2a_wait", "ticket_question_wait"})
+WAIT_TOOL_NAMES = frozenset(
+    {"a2a_wait", "ticket_question_wait", "butler_command_wait"}
+)
 VERIFIED_SUBMIT_TOOL = "ticket_submit"
 MAX_WAIT_SECONDS = 50
 PROMPT_BEHAVIOR_INSTRUCTIONS = (

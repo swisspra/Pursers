@@ -35,6 +35,13 @@ TICKET_PARKED = "ticket_parked"
 TICKET_UNPARKED = "ticket_unparked"
 TICKET_ARCHIVED = "ticket_archived"
 SEAT_NAME_COLLISION = "seat_name_collision"
+BUTLER_COMMAND_CREATED = "butler_command_created"
+BUTLER_COMMAND_TRANSITIONED = "butler_command_transitioned"
+BUTLER_CONFIG_CHANGED = "butler_config_changed"
+
+BUTLER_EVENT_KINDS = frozenset(
+    {BUTLER_COMMAND_CREATED, BUTLER_COMMAND_TRANSITIONED, BUTLER_CONFIG_CHANGED}
+)
 
 DISPATCH_KINDS = frozenset(
     {TICKET_OFFERED, OFFER_EXPIRED, OFFER_REVOKED, REVIEW_OFFERED}
@@ -114,6 +121,7 @@ CENTRAL_EVENT_KINDS = (
     | CLAIM_GATE_EVENT_KINDS
     | PARK_EVENT_KINDS
     | ARCHIVE_EVENT_KINDS
+    | BUTLER_EVENT_KINDS
 )
 
 # Legacy client aliases remain accepted even though current Central emits the

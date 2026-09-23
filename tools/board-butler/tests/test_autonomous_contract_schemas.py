@@ -218,7 +218,16 @@ def command() -> dict:
 
 def test_all_contract_schemas_are_strict_draft_2020_12() -> None:
     paths = sorted(SCHEMA_DIR.glob("autonomous-butler-*.schema.json"))
-    assert len(paths) == 6
+    assert {
+        "autonomous-butler-config-v1.schema.json",
+        "autonomous-butler-command-v1.schema.json",
+        "autonomous-butler-command-v2.schema.json",
+        "autonomous-butler-state-v1.schema.json",
+        "autonomous-butler-executor-v1.schema.json",
+        "autonomous-butler-audit-v1.schema.json",
+        "autonomous-butler-control-audit-v2.schema.json",
+        "autonomous-butler-model-v1.schema.json",
+    } <= {path.name for path in paths}
     for path in paths:
         schema = json.loads(path.read_text(encoding="utf-8"))
         jsonschema.Draft202012Validator.check_schema(schema)

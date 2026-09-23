@@ -60,6 +60,13 @@ SEMANTIC_FIELDS = frozenset(
         "compacted_through",
         "removed_rows",
         "retained_rows",
+        "command_id",
+        "command_status",
+        "command_revision",
+        "config_revision",
+        "request_digest_sha256",
+        "audit_id",
+        "reason_code",
     }
 )
 

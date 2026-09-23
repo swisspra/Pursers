@@ -21,6 +21,10 @@ REMOVED_TOOLS = {"agent_nudge", "board_get_briefing", "ticket_terminate"}
 
 
 class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
+    def active_tool_count(self) -> int:
+        registered = len(self.mcp._tool_manager.list_tools())
+        return registered - len(central.DEPRECATED_TOOLS)
+
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(dir=PACKAGE_ROOT)
         self.root = Path(self.temp_dir.name)
@@ -92,7 +96,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             # Three retired tools are gone; the one deprecated tool stays hidden.
-            self.assertEqual(len(tool_names), 53)
+            self.assertEqual(len(tool_names), self.active_tool_count())
             self.assertIn("ticket_annotate", tool_names)
             self.assertIn("board_claim_ttl_set", tool_names)
 
@@ -141,13 +145,16 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             res_modern = await c_modern.list_tools()
 
             # legacy-seat sees the active tools plus ticket_assign.
-            self.assertEqual(len(res_legacy.tools), 54)
+            self.assertEqual(
+                len(res_legacy.tools),
+                self.active_tool_count() + len(central.DEPRECATED_TOOLS),
+            )
             legacy_names = {t.name for t in res_legacy.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertIn(dep, legacy_names)
 
             # modern-seat under same principal remains on the active surface.
-            self.assertEqual(len(res_modern.tools), 53)
+            self.assertEqual(len(res_modern.tools), self.active_tool_count())
             modern_names = {t.name for t in res_modern.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertNotIn(dep, modern_names)
@@ -172,9 +179,9 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertFalse(rejoin.is_error)
 
-            # Now legacy-seat immediately drops to the 47-tool surface.
+            # Now legacy-seat immediately drops to the active surface.
             res_rejoin = await c_legacy.list_tools()
-            self.assertEqual(len(res_rejoin.tools), 53)
+            self.assertEqual(len(res_rejoin.tools), self.active_tool_count())
             rejoin_names = {t.name for t in res_rejoin.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertNotIn(dep, rejoin_names)
@@ -185,7 +192,10 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
                 res = await client.list_tools()
                 tool_names = {t.name for t in res.tools}
-                self.assertEqual(len(tool_names), 54)
+                self.assertEqual(
+                    len(tool_names),
+                    self.active_tool_count() + len(central.DEPRECATED_TOOLS),
+                )
                 for dep in central.DEPRECATED_TOOLS:
                     self.assertIn(dep, tool_names)
                 self.assertTrue(REMOVED_TOOLS.isdisjoint(tool_names))
@@ -227,7 +237,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        self.assertEqual(len(result.tools), 53)
+        self.assertEqual(len(result.tools), self.active_tool_count())
         self.assertTrue(
             central.DEPRECATED_TOOLS.isdisjoint(
                 {tool.name for tool in result.tools}

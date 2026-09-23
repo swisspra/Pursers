@@ -82,9 +82,11 @@ Normative JSON Schemas are committed beside this document:
 
 - [`schemas/autonomous-butler-config-v1.schema.json`](schemas/autonomous-butler-config-v1.schema.json)
 - [`schemas/autonomous-butler-command-v1.schema.json`](schemas/autonomous-butler-command-v1.schema.json)
+- [`schemas/autonomous-butler-command-v2.schema.json`](schemas/autonomous-butler-command-v2.schema.json)
 - [`schemas/autonomous-butler-state-v1.schema.json`](schemas/autonomous-butler-state-v1.schema.json)
 - [`schemas/autonomous-butler-executor-v1.schema.json`](schemas/autonomous-butler-executor-v1.schema.json)
 - [`schemas/autonomous-butler-audit-v1.schema.json`](schemas/autonomous-butler-audit-v1.schema.json)
+- [`schemas/autonomous-butler-control-audit-v2.schema.json`](schemas/autonomous-butler-control-audit-v2.schema.json)
 - [`schemas/autonomous-butler-model-v1.schema.json`](schemas/autonomous-butler-model-v1.schema.json)
 
 All schemas reject unknown fields. Identifiers are opaque bounded strings;
@@ -177,6 +179,15 @@ Human and A2A commands use `autonomous_butler_command_v1`. Allowed kinds are
 `enable_connector`, `disable_connector`, `veto_action`, `kill`, and `resume`.
 Commands cannot carry credentials, arbitrary shell, raw MCP arguments, a new
 template, or raised ceilings.
+
+Central's durable submission surface writes `autonomous_butler_command_v2`.
+Version 2 preserves the v1 intents and transition evidence while adding the
+stable request ID, authenticated sender/authority, project target, bounded
+expiry and priority, canonical request digest, complete transition history,
+and typed terminal result required for replay-safe Human/A2A operation. The v1
+schema remains immutable and readable. Command/config mutations use the
+redacted `autonomous_butler_control_audit_v2`; the original general audit v1
+schema remains unchanged.
 
 Lifecycle is monotonic:
 
