@@ -372,27 +372,28 @@ default.
 
 ### Registry administration CLI
 
-Use `registry_admin.py` to validate, inspect, and edit the registry without
-calling raw board-state tools. It reads the current document, validates the
-complete schema before any mutation, writes to the configured home board, then
-reads back and compares the stored document. A mismatch exits non-zero and
+Use the packaged `pursers-registry` command to validate, inspect, and edit the
+registry without calling raw board-state tools. It reads the current document,
+validates the complete schema before any mutation, writes to the configured
+home board, then reads back and compares the stored document. A mismatch exits
+non-zero and
 prints a diff. Each write includes the SHA-256 of the document that was read,
 so a concurrent registry change aborts instead of being overwritten. The
 bearer token is read only from `ONBOARD_CENTRAL_TOKEN` and
 is never printed.
 
 ```sh
-python tools/wait-bridge/registry_admin.py show
-python tools/wait-bridge/registry_admin.py add project-a \
+pursers-registry show
+pursers-registry add project-a \
   --board-id project-a-board --work-dir /ABSOLUTE/PATH/TO/PROJECT-A \
   --work-dir-owner operator \
   --fleet-clone-dir /ABSOLUTE/PATH/TO/PURSERS-FLEET/clones/project-a \
   --repository-url https://example.test/org/project-a
-python tools/wait-bridge/registry_admin.py set-repository-url project-a \
+pursers-registry set-repository-url project-a \
   https://example.test/org/project-a
-python tools/wait-bridge/registry_admin.py pause project-a
-python tools/wait-bridge/registry_admin.py activate project-a
-python tools/wait-bridge/registry_admin.py remove project-a
+pursers-registry pause project-a
+pursers-registry activate project-a
+pursers-registry remove project-a
 ```
 
 The home board defaults to `ONBOARD_BOARD_ID`, then to `pursers` when the
@@ -400,14 +401,16 @@ environment variable is unset. Use the global `--home-board` option to override
 it explicitly; global options precede the subcommand:
 
 ```sh
-python tools/wait-bridge/registry_admin.py \
-  --home-board alternate-home show
+pursers-registry --home-board alternate-home show
 ```
 
 The selected home board must be a safe Central identifier. An invalid value
 exits before opening a client, so the command never falls back to, creates, or
 joins another board.
 
+On a fresh board, `add` creates the registry only if the key is still absent;
+a concurrent creator wins and the command exits without overwriting it. The
+same installed command therefore handles both bootstrap and later edits.
 `add` refuses an existing name unless `--force` is supplied. All mutations
 refuse malformed current state, unknown names, relative work directories, and
 empty board IDs before writing. Repository URLs must be credential-free HTTPS
@@ -535,17 +538,20 @@ health/routing, and never fails because its `fleet_clone_dir` is absent. The
 admin CLI can create this shape with `registry_admin.py add ... --operator-only`.
 
 After Central is deployed with board-state support for the board's scrub
-profile, seed and verify the initial registry with the bridge environment:
+profile, bootstrap and verify the initial registry with the bridge environment:
 
 ```sh
-ONBOARD_CENTRAL_TOKEN=TOKEN_PLACEHOLDER \
-  tools/wait-bridge/.venv/bin/python \
-  tools/wait-bridge/seed_project_registry.py
+ONBOARD_CENTRAL_TOKEN=TOKEN_PLACEHOLDER pursers-registry add project-a \
+  --board-id project-a-board \
+  --work-dir /ABSOLUTE/PATH/TO/PROJECT-A \
+  --repository-url https://example.test/org/project-a
 ```
 
-The script writes the operator-supplied initial project entries from the
-registry JSON file, reads the state back, fails if it differs, and prints the
-verified parsed JSON. Never commit or print the real bearer token.
+The command atomically creates a schema-v1 registry when the key is absent,
+reads the state back, fails if it differs, and prints the verified parsed JSON.
+Never commit or print the real bearer token. The source-only
+`seed_project_registry.py` helper remains available for compatibility, but it
+does not provide create-only concurrency protection.
 
 Pass the sentinel `boards="registry"` to read the registry once at the start
 of that `a2a_wait` invocation. The bridge selects all active project board IDs,

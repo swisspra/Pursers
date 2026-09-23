@@ -1093,6 +1093,43 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ToolError, "reads only"):
             await self.call("board_state_get")
 
+    async def test_board_state_create_only_precondition(self) -> None:
+        self.principal = self.admin
+        created = await self.call(
+            "board_state_update",
+            agent_name="admin-agent",
+            key="project_registry",
+            value='{"schema_version":1,"projects":{}}',
+            expected_absent=True,
+        )
+        self.assertFalse(created.is_error)
+
+        with self.assertRaisesRegex(ToolError, "state precondition failed"):
+            await self.call(
+                "board_state_update",
+                agent_name="admin-agent",
+                key="project_registry",
+                value='{"schema_version":1,"projects":{"lost":{}}}',
+                expected_absent=True,
+            )
+        stored = await self.call("board_state_get", key="project_registry")
+        self.assertEqual(
+            stored.structured_content["state"]["value"],
+            '{"schema_version":1,"projects":{}}',
+        )
+
+    async def test_board_state_preconditions_are_mutually_exclusive(self) -> None:
+        self.principal = self.admin
+        with self.assertRaisesRegex(ToolError, "mutually exclusive"):
+            await self.call(
+                "board_state_update",
+                agent_name="admin-agent",
+                key="project_registry",
+                value='{"schema_version":1,"projects":{}}',
+                expected_sha256="a" * 64,
+                expected_absent=True,
+            )
+
     async def test_intake_scope_server_rate_limit(self) -> None:
         self.service.mutate(
             "pursers",

@@ -144,6 +144,16 @@ evidence = ["tools/wait-bridge/pyproject.toml", ".github/workflows/publish-pypi.
 evidence_contains = ["pursers-door", "tools/wait-bridge"]
 
 [[artifacts]]
+id = "python-console-script:pursers-wait-bridge:pursers-registry"
+kind = "python-console-script"
+source = "tools/wait-bridge/registry_admin.py"
+entry_point = "registry_admin:main"
+state = "delivered"
+channel = "pursers-registry console command installed by the pursers-wait-bridge PyPI wheel"
+evidence = ["tools/wait-bridge/pyproject.toml", ".github/workflows/publish-pypi.yml"]
+evidence_contains = ["pursers-registry", "tools/wait-bridge"]
+
+[[artifacts]]
 id = "node-application:pursers-dashboard-ui"
 kind = "node-application"
 source = "tools/dashboard-ui/package.json"

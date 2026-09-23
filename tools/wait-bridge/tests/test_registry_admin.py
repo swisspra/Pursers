@@ -43,6 +43,7 @@ INITIAL = {
         }
     },
 }
+MISSING = object()
 
 
 class FakeClient:
@@ -51,14 +52,19 @@ class FakeClient:
         document: Any = INITIAL,
         *,
         mismatch_after_write: bool = False,
+        concurrent_document: Any = None,
     ) -> None:
-        self.value = json.dumps(document)
+        self.agent_name = "registry-test"
+        self.value = None if document is MISSING else json.dumps(document)
         self.mismatch_after_write = mismatch_after_write
+        self.concurrent_document = concurrent_document
         self.get_calls = 0
-        self.writes: list[tuple[str, str, str | None]] = []
+        self.writes: list[tuple[str, str, str | None, bool]] = []
 
     async def board_state_get(self, key: str | None = None) -> dict[str, Any]:
         self.get_calls += 1
+        if self.value is None:
+            raise registry_admin.BoardClientError("state key not found")
         value = self.value
         if self.mismatch_after_write and self.writes:
             value = json.dumps(INITIAL)
@@ -67,11 +73,38 @@ class FakeClient:
     async def board_state_update(
         self, key: str, value: str, *, expected_sha256: str | None = None
     ) -> dict[str, Any]:
-        self.writes.append((key, value, expected_sha256))
+        return await self._update(key, value, expected_sha256, False)
+
+    async def _call(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        if name != "board_state_update":
+            raise AssertionError(f"unexpected tool call {name}")
+        return await self._update(
+            arguments["key"],
+            arguments["value"],
+            arguments.get("expected_sha256"),
+            arguments.get("expected_absent", False),
+        )
+
+    async def _update(
+        self,
+        key: str,
+        value: str,
+        expected_sha256: str | None,
+        expected_absent: bool,
+    ) -> dict[str, Any]:
+        if self.concurrent_document is not None:
+            self.value = json.dumps(self.concurrent_document)
+            self.concurrent_document = None
+        if expected_absent and self.value is not None:
+            raise registry_admin.BoardClientError("state precondition failed")
+        self.writes.append((key, value, expected_sha256, expected_absent))
         self.value = value
         return {"ok": True}
 
     def document(self) -> dict[str, Any]:
+        assert self.value is not None
         return json.loads(self.value)
 
 
@@ -188,6 +221,53 @@ class RegistryAdminTests(unittest.TestCase):
             client.writes[0][2],
             hashlib.sha256(json.dumps(INITIAL).encode()).hexdigest(),
         )
+        self.assertFalse(client.writes[0][3])
+
+    def test_missing_state_first_add_uses_create_only_precondition(self) -> None:
+        client = FakeClient(MISSING)
+
+        output = invoke(
+            client,
+            "add",
+            "alpha",
+            "--board-id",
+            "alpha-board",
+            "--work-dir",
+            "/synthetic/alpha",
+        )
+
+        self.assertEqual(json.loads(output), INITIAL)
+        self.assertEqual(client.writes[0][2], None)
+        self.assertTrue(client.writes[0][3])
+
+    def test_missing_state_concurrent_creation_fails_without_overwrite(self) -> None:
+        concurrent = {
+            "schema_version": 1,
+            "projects": {
+                "winner": {
+                    "board_id": "winner-board",
+                    "work_dir": "/synthetic/winner",
+                    "status": "active",
+                }
+            },
+        }
+        client = FakeClient(MISSING, concurrent_document=concurrent)
+
+        with self.assertRaisesRegex(
+            registry_admin.BoardClientError, "state precondition failed"
+        ):
+            invoke(
+                client,
+                "add",
+                "alpha",
+                "--board-id",
+                "alpha-board",
+                "--work-dir",
+                "/synthetic/alpha",
+            )
+
+        self.assertEqual(client.document(), concurrent)
+        self.assertEqual(client.writes, [])
 
     def test_add_accepts_fleet_clone_routing_fields(self) -> None:
         client = FakeClient()

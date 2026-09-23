@@ -14451,6 +14451,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ctx: Context,
         expected_generation: str | None = None,
         expected_sha256: str | None = None,
+        expected_absent: bool = False,
     ) -> dict[str, Any]:
         """Atomically set one project-scoped board state value."""
         board_id = require_id("board_id", board_id)
@@ -14482,6 +14483,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             r"[0-9a-f]{64}", expected_sha256
         ):
             raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
+        if type(expected_absent) is not bool:
+            raise ValueError("expected_absent must be boolean")
+        if expected_absent and expected_sha256 is not None:
+            raise ValueError(
+                "expected_absent and expected_sha256 are mutually exclusive"
+            )
         now = time.time()
 
         def update(document: dict[str, Any]) -> dict[str, Any]:
@@ -14492,8 +14499,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 scrub_profile=board_scrub_profile(document),
             )
             assert safe_value is not None
-            if expected_sha256 is not None:
-                current = document.setdefault("state", {}).get(key)
+            state = document.setdefault("state", {})
+            if expected_absent:
+                if key in state:
+                    raise ValueError("state precondition failed")
+            elif expected_sha256 is not None:
+                current = state.get(key)
                 current_value = (
                     current.get("value") if isinstance(current, dict) else None
                 )
@@ -14524,7 +14535,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "updated_by_agent_id": actor["agent_id"],
                 "updated_by_principal_id": principal.principal_id,
             }
-            document.setdefault("state", {})[key] = entry
+            state[key] = entry
             return {
                 "actor": actor,
                 "entry": copy.deepcopy(entry),
