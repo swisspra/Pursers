@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -25,14 +26,25 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import time
 import urllib.parse
 import urllib.request
-from contextlib import aclosing
+from collections import deque
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import (
+    Any,
+    AsyncContextManager,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Mapping,
+    Protocol,
+    Sequence,
+)
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -66,6 +78,9 @@ PROVIDER_TIMEOUT_S = 30.0
 PROVIDER_DRAFT_PROTOCOLS = frozenset(
     {"pursers_json_v1", "openai_chat_completions_v1"}
 )
+SUPPORTED_MCP_PROTOCOL_REVISIONS = frozenset({"2026-07-28"})
+SUPPORTED_MCP_TRANSPORTS = frozenset({"stdio", "streamable_http"})
+MAX_CONNECTOR_AUDIT_DETAIL_CHARS = 1_000
 QUESTION_EVENT = "coordinator_question_asked"
 OBSERVATION_TICKET_LIMIT = 100
 OBSERVATION_HISTORY_DAYS = 7
@@ -319,6 +334,26 @@ class IdentityConflict(RuntimeError):
 
 class ButlerConfigError(ValueError):
     """Raised when coordinator_config cannot be interpreted safely."""
+
+
+class ConnectorError(RuntimeError):
+    """Base class for bounded, secret-free connector failures."""
+
+
+class ConnectorConfigError(ConnectorError, ValueError):
+    """A connector declaration or resolved endpoint is invalid."""
+
+
+class ConnectorDenied(ConnectorError):
+    """The exact allowlist or deterministic policy gate denied an operation."""
+
+
+class ConnectorProtocolError(ConnectorError):
+    """The remote server did not satisfy the pinned MCP v2 contract."""
+
+
+class ConnectorResultError(ConnectorError):
+    """A connector result was malformed, unsafe, or larger than its bound."""
 
 
 @dataclass(frozen=True)
@@ -668,6 +703,1065 @@ async def draft_with_provider(
         return text
 
     return await asyncio.to_thread(request)
+
+
+_CONNECTOR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+_SENSITIVE_FIELD_RE = re.compile(
+    r"authorization|cookie|token|secret|credential|environment|env|private[_-]?path",
+    re.I,
+)
+_PRIVATE_PATH_RE = re.compile(
+    r"(?:/(?:Users|home|private|var/folders)/[^\s\"']+|[A-Za-z]:\\[^\s\"']+)"
+)
+
+
+def _connector_id(value: Any, path: str) -> str:
+    if not isinstance(value, str) or _CONNECTOR_ID_RE.fullmatch(value) is None:
+        raise ConnectorConfigError(f"{path} must be an opaque identifier")
+    return value
+
+
+def _connector_int(value: Any, path: str, minimum: int, maximum: int) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not minimum <= value <= maximum
+    ):
+        raise ConnectorConfigError(
+            f"{path} must be an integer from {minimum} to {maximum}"
+        )
+    return value
+
+
+def _connector_keys(value: Mapping[str, Any], allowed: set[str], path: str) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ConnectorConfigError(f"{path} has unknown keys: {', '.join(unknown)}")
+
+
+@dataclass(frozen=True)
+class ConnectorToolDeclaration:
+    name: str
+    effect: str
+    replay: str
+    stable_call_id_field: str | None
+
+    @classmethod
+    def from_mapping(
+        cls, value: Mapping[str, Any], path: str
+    ) -> "ConnectorToolDeclaration":
+        _connector_keys(
+            value,
+            {"name", "effect", "replay", "stable_call_id_field"},
+            path,
+        )
+        if set(value) != {"name", "effect", "replay", "stable_call_id_field"}:
+            raise ConnectorConfigError(f"{path} is missing required fields")
+        name = _connector_id(value["name"], f"{path}.name")
+        effect = value["effect"]
+        replay = value["replay"]
+        stable_field = value["stable_call_id_field"]
+        if effect not in {"read_only", "mutating"}:
+            raise ConnectorConfigError(f"{path}.effect is invalid")
+        if replay not in {"safe_with_stable_call_id", "never"}:
+            raise ConnectorConfigError(f"{path}.replay is invalid")
+        if replay == "safe_with_stable_call_id":
+            stable_field = _connector_id(
+                stable_field, f"{path}.stable_call_id_field"
+            )
+        elif stable_field is not None:
+            raise ConnectorConfigError(
+                f"{path}.stable_call_id_field must be null when replay is never"
+            )
+        if effect == "read_only" and replay != "safe_with_stable_call_id":
+            raise ConnectorConfigError(f"{path} read-only tools must be safely replayable")
+        return cls(name, effect, replay, stable_field)
+
+
+@dataclass(frozen=True)
+class ConnectorLimits:
+    timeout_ms: int
+    max_input_bytes: int
+    max_output_bytes: int
+    max_concurrency: int
+    calls_per_minute: int
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any], path: str) -> "ConnectorLimits":
+        required = {
+            "timeout_ms",
+            "max_input_bytes",
+            "max_output_bytes",
+            "max_concurrency",
+            "calls_per_minute",
+        }
+        _connector_keys(value, required, path)
+        if set(value) != required:
+            raise ConnectorConfigError(f"{path} is missing required fields")
+        return cls(
+            _connector_int(value["timeout_ms"], f"{path}.timeout_ms", 100, 600_000),
+            _connector_int(
+                value["max_input_bytes"], f"{path}.max_input_bytes", 1, 1_048_576
+            ),
+            _connector_int(
+                value["max_output_bytes"],
+                f"{path}.max_output_bytes",
+                1,
+                4_194_304,
+            ),
+            _connector_int(
+                value["max_concurrency"], f"{path}.max_concurrency", 1, 32
+            ),
+            _connector_int(
+                value["calls_per_minute"], f"{path}.calls_per_minute", 1, 1_000
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class ConnectorDeclaration:
+    connector_id: str
+    enabled: bool
+    transport: str
+    protocol_revision: str
+    endpoint_ref: str
+    secret_ref: str | None
+    tools: tuple[ConnectorToolDeclaration, ...]
+    resources: tuple[str, ...]
+    risky_tools: frozenset[str]
+    limits: ConnectorLimits
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ConnectorDeclaration":
+        required = {
+            "connector_id",
+            "enabled",
+            "transport",
+            "protocol_revision",
+            "endpoint_ref",
+            "secret_ref",
+            "tools",
+            "resources",
+            "limits",
+        }
+        _connector_keys(value, required | {"risky_tools"}, "connector")
+        if not required.issubset(value):
+            raise ConnectorConfigError("connector is missing required fields")
+        connector_id = _connector_id(value["connector_id"], "connector.connector_id")
+        if not isinstance(value["enabled"], bool):
+            raise ConnectorConfigError("connector.enabled must be boolean")
+        transport = value["transport"]
+        if transport not in SUPPORTED_MCP_TRANSPORTS:
+            raise ConnectorConfigError("connector.transport is unsupported")
+        revision = value["protocol_revision"]
+        if revision not in SUPPORTED_MCP_PROTOCOL_REVISIONS:
+            raise ConnectorConfigError("connector.protocol_revision is unsupported")
+        endpoint_ref = _connector_id(value["endpoint_ref"], "connector.endpoint_ref")
+        secret_ref = value["secret_ref"]
+        if secret_ref is not None:
+            secret_ref = _connector_id(secret_ref, "connector.secret_ref")
+        raw_tools = value["tools"]
+        raw_resources = value["resources"]
+        raw_risky = value.get("risky_tools", [])
+        if not isinstance(raw_tools, list) or len(raw_tools) > 100:
+            raise ConnectorConfigError("connector.tools must be a bounded array")
+        if not isinstance(raw_resources, list) or len(raw_resources) > 100:
+            raise ConnectorConfigError("connector.resources must be a bounded array")
+        if not isinstance(raw_risky, list) or len(raw_risky) > 100:
+            raise ConnectorConfigError("connector.risky_tools must be a bounded array")
+        tools = tuple(
+            ConnectorToolDeclaration.from_mapping(item, f"connector.tools[{index}]")
+            if isinstance(item, Mapping)
+            else (_ for _ in ()).throw(
+                ConnectorConfigError(f"connector.tools[{index}] must be an object")
+            )
+            for index, item in enumerate(raw_tools)
+        )
+        tool_names = [item.name for item in tools]
+        if len(set(tool_names)) != len(tool_names):
+            raise ConnectorConfigError("connector tool names must be unique")
+        resources: list[str] = []
+        for index, item in enumerate(raw_resources):
+            if not isinstance(item, str) or not 1 <= len(item) <= 300:
+                raise ConnectorConfigError(
+                    f"connector.resources[{index}] must be a bounded URI"
+                )
+            resources.append(item)
+        if len(set(resources)) != len(resources):
+            raise ConnectorConfigError("connector resources must be unique")
+        risky = frozenset(
+            _connector_id(item, f"connector.risky_tools[{index}]")
+            for index, item in enumerate(raw_risky)
+        )
+        if len(risky) != len(raw_risky) or not risky.issubset(tool_names):
+            raise ConnectorConfigError("connector.risky_tools must name declared tools")
+        if any(tool.effect != "mutating" for tool in tools if tool.name in risky):
+            raise ConnectorConfigError("connector.risky_tools must be mutating tools")
+        raw_limits = value["limits"]
+        if not isinstance(raw_limits, Mapping):
+            raise ConnectorConfigError("connector.limits must be an object")
+        return cls(
+            connector_id,
+            value["enabled"],
+            transport,
+            revision,
+            endpoint_ref,
+            secret_ref,
+            tools,
+            tuple(resources),
+            risky,
+            ConnectorLimits.from_mapping(raw_limits, "connector.limits"),
+        )
+
+
+@dataclass(frozen=True)
+class StdioConnectorEndpoint:
+    executable: str = field(repr=False)
+    args: tuple[str, ...] = field(default=(), repr=False)
+    cwd: str | None = field(default=None, repr=False)
+    secret_env_name: str = "PURSERS_CONNECTOR_SECRET"
+
+    def __post_init__(self) -> None:
+        if not self.executable or "\x00" in self.executable:
+            raise ConnectorConfigError("resolved stdio executable is invalid")
+        if any(not isinstance(item, str) or "\x00" in item for item in self.args):
+            raise ConnectorConfigError("resolved stdio arguments are invalid")
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", self.secret_env_name):
+            raise ConnectorConfigError("resolved stdio secret environment name is invalid")
+
+
+@dataclass(frozen=True)
+class HttpConnectorEndpoint:
+    url: str = field(repr=False)
+    secret_header: str = "Authorization"
+    secret_prefix: str = "Bearer"
+
+    def __post_init__(self) -> None:
+        parsed = urllib.parse.urlsplit(self.url)
+        if (
+            parsed.scheme not in {"https", "http"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ConnectorConfigError("resolved HTTP endpoint is invalid")
+        if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname):
+            raise ConnectorConfigError("resolved HTTP endpoint requires TLS")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,79}", self.secret_header):
+            raise ConnectorConfigError("resolved HTTP secret header is invalid")
+
+
+ConnectorEndpoint = StdioConnectorEndpoint | HttpConnectorEndpoint
+
+
+@dataclass(frozen=True)
+class ConnectorPolicyRequest:
+    board_id: str
+    project_id: str
+    connector_id: str
+    operation_id: str
+    tool_name: str
+    effect: str
+    arguments_sha256: str
+
+
+@dataclass(frozen=True)
+class ConnectorPolicyDecision:
+    allowed: bool
+    decision_id: str
+    reason_code: str
+
+    def __post_init__(self) -> None:
+        _connector_id(self.decision_id, "policy decision id")
+        if re.fullmatch(r"[a-z][a-z0-9_]{0,79}", self.reason_code) is None:
+            raise ConnectorConfigError("policy reason code is invalid")
+
+
+class ConnectorPersistence(Protocol):
+    async def reserve_call(self, call_id: str, payload_sha256: str) -> None: ...
+    async def next_audit_sequence(self, board_id: str) -> int: ...
+    async def append_audit(self, record: Mapping[str, Any]) -> None: ...
+
+
+class InMemoryConnectorPersistence:
+    """Test/local persistence; production integrations must supply durable storage."""
+
+    def __init__(self) -> None:
+        self.reservations: dict[str, str] = {}
+        self.audit_records: list[dict[str, Any]] = []
+        self.audit_sequences: dict[str, int] = {}
+
+    async def reserve_call(self, call_id: str, payload_sha256: str) -> None:
+        previous = self.reservations.setdefault(call_id, payload_sha256)
+        if previous != payload_sha256:
+            raise ConnectorDenied("stable connector call payload changed")
+
+    async def next_audit_sequence(self, board_id: str) -> int:
+        sequence = self.audit_sequences.get(board_id, 0) + 1
+        self.audit_sequences[board_id] = sequence
+        return sequence
+
+    async def append_audit(self, record: Mapping[str, Any]) -> None:
+        self.audit_records.append(dict(record))
+
+
+@dataclass(frozen=True)
+class ConnectorDiscovery:
+    connector_id: str
+    protocol_revision: str
+    tools: tuple[dict[str, Any], ...]
+    resources: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class ConnectorResult:
+    connector_id: str
+    operation_id: str
+    call_id: str
+    payload_sha256: str
+    payload: Any
+
+
+@dataclass(frozen=True)
+class ConnectorHealth:
+    connector_id: str
+    status: str
+    observed_at: str
+    reason_code: str | None = None
+    last_success_at: str | None = None
+    last_failure_at: str | None = None
+
+
+SecretResolver = Callable[[str], str]
+EndpointResolver = Callable[[str], ConnectorEndpoint]
+PolicyGate = Callable[[ConnectorPolicyRequest], Awaitable[ConnectorPolicyDecision]]
+ConnectorClientFactory = Callable[
+    [ConnectorDeclaration, ConnectorEndpoint, str], AsyncContextManager[Any]
+]
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _canonical_json(value: Any) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ConnectorResultError("connector data is not canonical JSON") from exc
+
+
+def _redact_untrusted(value: Any, secret: str, depth: int = 0) -> Any:
+    if depth > 20:
+        raise ConnectorResultError("connector result nesting exceeded the safe bound")
+    if isinstance(value, Mapping):
+        redacted: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            if key == "_meta":
+                continue
+            if (secret and secret in key) or _PRIVATE_PATH_RE.search(key):
+                key = "[REDACTED_KEY]"
+            if _SENSITIVE_FIELD_RE.search(key):
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = _redact_untrusted(item, secret, depth + 1)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_untrusted(item, secret, depth + 1) for item in value]
+    if isinstance(value, str):
+        text = value.replace(secret, "[REDACTED]") if secret else value
+        return _PRIVATE_PATH_RE.sub("[REDACTED_PATH]", text)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    raise ConnectorResultError("connector result contains unsupported data")
+
+
+def _model_payload(value: Any, limit: int, secret: str) -> tuple[Any, str]:
+    try:
+        dumped = value.model_dump(mode="json", by_alias=True, exclude_none=True)
+    except Exception as exc:
+        raise ConnectorResultError("connector result is malformed") from exc
+    raw = _canonical_json(dumped)
+    if len(raw) > limit:
+        raise ConnectorResultError("connector result exceeded the output byte limit")
+    clean = _redact_untrusted(dumped, secret)
+    clean_raw = _canonical_json(clean)
+    if len(clean_raw) > limit:
+        raise ConnectorResultError("connector result exceeded the output byte limit")
+    return clean, hashlib.sha256(clean_raw).hexdigest()
+
+
+class ConnectorRuntime:
+    """Board-scoped, fail-closed MCP v2 client boundary.
+
+    Endpoint and secret references are resolved only inside a connection attempt.
+    The runtime never places resolved values in results, health, policy requests, or
+    audit records. A durable ``ConnectorPersistence`` implementation is required by
+    production callers so stable call reservations precede dispatch.
+    """
+
+    def __init__(
+        self,
+        *,
+        board_id: str,
+        project_id: str,
+        actor_id: str,
+        policy_digest_sha256: str,
+        declaration: ConnectorDeclaration,
+        approved_connector_ids: Sequence[str],
+        endpoint_resolver: EndpointResolver,
+        secret_resolver: SecretResolver,
+        persistence: ConnectorPersistence,
+        policy_gate: PolicyGate | None = None,
+        client_factory: ConnectorClientFactory | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.board_id = _connector_id(board_id, "board_id")
+        self.project_id = _connector_id(project_id, "project_id")
+        self.actor_id = _connector_id(actor_id, "actor_id")
+        if re.fullmatch(r"[0-9a-f]{64}", policy_digest_sha256) is None:
+            raise ConnectorConfigError("policy digest is invalid")
+        self.policy_digest_sha256 = policy_digest_sha256
+        self.declaration = declaration
+        if isinstance(approved_connector_ids, (str, bytes)) or len(
+            approved_connector_ids
+        ) > 32:
+            raise ConnectorConfigError("approved connector ids are invalid")
+        approved = {
+            _connector_id(item, "approved_connector_ids")
+            for item in approved_connector_ids
+        }
+        if declaration.connector_id not in approved:
+            raise ConnectorDenied("connector is outside the immutable envelope")
+        self.endpoint_resolver = endpoint_resolver
+        self.secret_resolver = secret_resolver
+        self.persistence = persistence
+        self.policy_gate = policy_gate
+        self.client_factory = client_factory or self._default_client
+        self.clock = clock
+        self._slots = asyncio.Semaphore(declaration.limits.max_concurrency)
+        self._rate_lock = asyncio.Lock()
+        self._rate_events: deque[float] = deque()
+        now = utc_now().isoformat()
+        self._health = ConnectorHealth(declaration.connector_id, "unknown", now)
+
+    @property
+    def health(self) -> ConnectorHealth:
+        return self._health
+
+    def _resolve_private(self) -> tuple[ConnectorEndpoint, str]:
+        endpoint = self.endpoint_resolver(self.declaration.endpoint_ref)
+        if self.declaration.transport == "stdio" and not isinstance(
+            endpoint, StdioConnectorEndpoint
+        ):
+            raise ConnectorConfigError("resolved endpoint transport mismatch")
+        if self.declaration.transport == "streamable_http" and not isinstance(
+            endpoint, HttpConnectorEndpoint
+        ):
+            raise ConnectorConfigError("resolved endpoint transport mismatch")
+        secret = ""
+        if self.declaration.secret_ref is not None:
+            try:
+                secret = self.secret_resolver(self.declaration.secret_ref)
+            except Exception:
+                raise ConnectorConfigError(
+                    "connector secret reference is unavailable"
+                ) from None
+            if (
+                not isinstance(secret, str)
+                or not secret
+                or len(secret.encode("utf-8")) > 8_192
+                or secret != secret.strip()
+                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in secret)
+            ):
+                raise ConnectorConfigError("connector secret reference is invalid")
+        return endpoint, secret
+
+    @asynccontextmanager
+    async def _default_client(
+        self,
+        declaration: ConnectorDeclaration,
+        endpoint: ConnectorEndpoint,
+        secret: str,
+    ) -> AsyncIterator[Any]:
+        try:
+            from mcp import Client, StdioServerParameters
+        except ImportError as exc:
+            raise ConnectorProtocolError("MCP v2 client SDK is unavailable") from exc
+        timeout_s = declaration.limits.timeout_ms / 1_000
+        async with AsyncExitStack() as stack:
+            if isinstance(endpoint, StdioConnectorEndpoint):
+                from mcp.client.stdio import stdio_client
+
+                environment = (
+                    {endpoint.secret_env_name: secret} if declaration.secret_ref else None
+                )
+                server = StdioServerParameters(
+                    command=endpoint.executable,
+                    args=list(endpoint.args),
+                    env=environment,
+                    cwd=endpoint.cwd,
+                )
+                error_sink = open(os.devnull, "w", encoding="utf-8")
+                stack.callback(error_sink.close)
+                transport = stdio_client(server, errlog=error_sink)
+                client = Client(
+                    transport,
+                    mode=declaration.protocol_revision,
+                    cache=None,
+                    read_timeout_seconds=timeout_s,
+                )
+            else:
+                try:
+                    import httpx2
+                    from mcp.client.streamable_http import streamable_http_client
+                except ImportError as exc:
+                    raise ConnectorProtocolError(
+                        "MCP v2 HTTP transport is unavailable"
+                    ) from exc
+                headers = {}
+                if declaration.secret_ref:
+                    headers[endpoint.secret_header] = (
+                        f"{endpoint.secret_prefix} {secret}".strip()
+                    )
+                http_client = await stack.enter_async_context(
+                    httpx2.AsyncClient(
+                        headers=headers,
+                        follow_redirects=False,
+                        trust_env=False,
+                        timeout=httpx2.Timeout(timeout_s),
+                    )
+                )
+                transport = streamable_http_client(
+                    endpoint.url, http_client=http_client
+                )
+                client = Client(
+                    transport,
+                    mode=declaration.protocol_revision,
+                    cache=None,
+                    read_timeout_seconds=timeout_s,
+                )
+            connected = await stack.enter_async_context(client)
+            if connected.protocol_version != declaration.protocol_revision:
+                raise ConnectorProtocolError("connector protocol revision mismatch")
+            yield connected
+
+    async def _rate_limit(self) -> None:
+        async with self._rate_lock:
+            now = self.clock()
+            while self._rate_events and now - self._rate_events[0] >= 60:
+                self._rate_events.popleft()
+            if len(self._rate_events) >= self.declaration.limits.calls_per_minute:
+                raise ConnectorDenied("connector rate limit exceeded")
+            self._rate_events.append(now)
+
+    async def _audit(
+        self,
+        action: str,
+        outcome: str,
+        operation_id: str,
+        *,
+        reason_code: str | None = None,
+        call_id: str | None = None,
+    ) -> None:
+        detail = {
+            "connector_id": self.declaration.connector_id,
+            "operation_id": operation_id,
+            "reason_code": reason_code,
+            "call_id": call_id,
+        }
+        detail_json = _canonical_json(detail).decode("utf-8")
+        if len(detail_json) > MAX_CONNECTOR_AUDIT_DETAIL_CHARS:
+            detail_json = '{"reason_code":"detail_dropped"}'
+        sequence = await self.persistence.next_audit_sequence(self.board_id)
+        occurred_at = utc_now().isoformat()
+        audit_material = (
+            f"{self.board_id}\x00{sequence}\x00{action}\x00{operation_id}\x00{occurred_at}"
+        ).encode("utf-8")
+        record: dict[str, Any] = {
+            "schema": "autonomous_butler_audit_v1",
+            "schema_version": 1,
+            "audit_id": f"audit:{hashlib.sha256(audit_material).hexdigest()}",
+            "board_id": self.board_id,
+            "sequence": sequence,
+            "occurred_at": occurred_at,
+            "actor_id": self.actor_id,
+            "category": "connector",
+            "action": action,
+            "outcome": outcome,
+            "policy_digest_sha256": self.policy_digest_sha256,
+            "operation_id": operation_id,
+            "target_ref": self.declaration.connector_id,
+            "detail": detail_json,
+            "detail_redacted": True,
+        }
+        if reason_code is not None:
+            record["reason_code"] = reason_code
+        await self.persistence.append_audit(
+            record
+        )
+
+    async def _deny(
+        self,
+        action: str,
+        operation_id: str,
+        message: str,
+        reason_code: str,
+        *,
+        call_id: str | None = None,
+    ) -> None:
+        await self._audit(
+            action,
+            "denied",
+            operation_id,
+            reason_code=reason_code,
+            call_id=call_id,
+        )
+        raise ConnectorDenied(message)
+
+    def _mark_success(self) -> None:
+        now = utc_now().isoformat()
+        self._health = ConnectorHealth(
+            self.declaration.connector_id,
+            "healthy",
+            now,
+            last_success_at=now,
+            last_failure_at=self._health.last_failure_at,
+        )
+
+    def _mark_failure(self, reason_code: str) -> None:
+        now = utc_now().isoformat()
+        self._health = ConnectorHealth(
+            self.declaration.connector_id,
+            "degraded",
+            now,
+            reason_code=reason_code,
+            last_success_at=self._health.last_success_at,
+            last_failure_at=now,
+        )
+
+    async def _all_listed(self, client: Any, method: str) -> list[Any]:
+        values: list[Any] = []
+        cursor: str | None = None
+        for _page in range(10):
+            result = await getattr(client, method)(cursor=cursor, cache_mode="bypass")
+            _model_payload(result, self.declaration.limits.max_output_bytes, "")
+            field = "tools" if method == "list_tools" else "resources"
+            page_values = getattr(result, field, None)
+            if not isinstance(page_values, list):
+                raise ConnectorProtocolError("connector discovery result is malformed")
+            values.extend(page_values)
+            if len(values) > 200:
+                raise ConnectorResultError("connector discovery exceeded the item limit")
+            cursor = getattr(result, "next_cursor", None)
+            if not cursor:
+                return values
+        raise ConnectorResultError("connector discovery exceeded the page limit")
+
+    async def _discover_on_client(
+        self, client: Any, secret: str
+    ) -> tuple[ConnectorDiscovery, dict[str, Any]]:
+        listed_tools = await self._all_listed(client, "list_tools")
+        listed_resources = await self._all_listed(client, "list_resources")
+        allowed_tools = {item.name for item in self.declaration.tools}
+        tools: list[dict[str, Any]] = []
+        schemas: dict[str, Any] = {}
+        for item in listed_tools:
+            name = getattr(item, "name", None)
+            if name not in allowed_tools:
+                continue
+            schema = getattr(item, "input_schema", None)
+            if not isinstance(schema, Mapping):
+                raise ConnectorProtocolError("connector tool schema is malformed")
+            schemas[name] = dict(schema)
+            tools.append(
+                {
+                    "name": name,
+                    "description": _redact_untrusted(
+                        getattr(item, "description", None), secret
+                    ),
+                    "input_schema": _redact_untrusted(dict(schema), secret),
+                }
+            )
+        allowed_resources = set(self.declaration.resources)
+        resources: list[dict[str, Any]] = []
+        for item in listed_resources:
+            uri = str(getattr(item, "uri", ""))
+            if uri in allowed_resources:
+                resources.append(
+                    {
+                        "uri": uri,
+                        "name": _redact_untrusted(getattr(item, "name", ""), secret),
+                        "mime_type": getattr(item, "mime_type", None),
+                    }
+                )
+        discovery = ConnectorDiscovery(
+            self.declaration.connector_id,
+            self.declaration.protocol_revision,
+            tuple(tools),
+            tuple(resources),
+        )
+        raw = _canonical_json(
+            {"tools": discovery.tools, "resources": discovery.resources}
+        )
+        if len(raw) > self.declaration.limits.max_output_bytes:
+            raise ConnectorResultError("filtered discovery exceeded the output byte limit")
+        return discovery, schemas
+
+    async def discover(self, operation_id: str) -> ConnectorDiscovery:
+        operation_id = _connector_id(operation_id, "operation_id")
+        if not self.declaration.enabled:
+            await self._deny(
+                "discover", operation_id, "connector is disabled", "disabled"
+            )
+        await self._rate_limit()
+        timeout_s = self.declaration.limits.timeout_ms / 1_000
+        async with self._slots:
+            for attempt in range(2):
+                try:
+                    endpoint, secret = self._resolve_private()
+                    async with asyncio.timeout(timeout_s):
+                        async with self.client_factory(
+                            self.declaration, endpoint, secret
+                        ) as client:
+                            discovery, _schemas = await self._discover_on_client(
+                                client, secret
+                            )
+                    self._mark_success()
+                    await self._audit("discover", "succeeded", operation_id)
+                    return discovery
+                except asyncio.CancelledError:
+                    self._mark_failure("cancelled")
+                    await self._audit(
+                        "discover", "cancelled", operation_id, reason_code="cancelled"
+                    )
+                    raise
+                except ConnectorDenied:
+                    raise
+                except (ConnectorConfigError, ConnectorResultError):
+                    self._mark_failure("invalid_result")
+                    await self._audit(
+                        "discover",
+                        "failed",
+                        operation_id,
+                        reason_code="invalid_result",
+                    )
+                    raise
+                except Exception as exc:
+                    if attempt == 0:
+                        await asyncio.sleep(0)
+                        continue
+                    self._mark_failure("connection_failed")
+                    await self._audit(
+                        "discover",
+                        "failed",
+                        operation_id,
+                        reason_code="connection_failed",
+                    )
+                    raise ConnectorProtocolError("connector discovery failed") from None
+        raise AssertionError("unreachable")
+
+    async def call_tool(
+        self, operation_id: str, tool_name: str, arguments: Mapping[str, Any]
+    ) -> ConnectorResult:
+        operation_id = _connector_id(operation_id, "operation_id")
+        tool = next(
+            (item for item in self.declaration.tools if item.name == tool_name), None
+        )
+        if tool is None or not self.declaration.enabled:
+            await self._deny(
+                "call_tool",
+                operation_id,
+                "connector tool is not enabled and allowlisted",
+                "not_allowlisted",
+            )
+        original = dict(arguments)
+        original_bytes = _canonical_json(original)
+        if len(original_bytes) > self.declaration.limits.max_input_bytes:
+            await self._deny(
+                "call_tool",
+                operation_id,
+                "connector input exceeded the byte limit",
+                "input_too_large",
+            )
+        call_material = b"\x00".join(
+            (
+                self.board_id.encode(),
+                self.declaration.connector_id.encode(),
+                operation_id.encode(),
+                tool.name.encode(),
+                original_bytes,
+            )
+        )
+        call_id = hashlib.sha256(call_material).hexdigest()
+        dispatched = dict(original)
+        if tool.stable_call_id_field is not None:
+            existing = dispatched.get(tool.stable_call_id_field)
+            if existing not in {None, call_id}:
+                await self._deny(
+                    "call_tool",
+                    operation_id,
+                    "caller supplied a conflicting stable call id",
+                    "call_id_conflict",
+                    call_id=call_id,
+                )
+            dispatched[tool.stable_call_id_field] = call_id
+        payload_bytes = _canonical_json(dispatched)
+        if len(payload_bytes) > self.declaration.limits.max_input_bytes:
+            await self._deny(
+                "call_tool",
+                operation_id,
+                "connector input exceeded the byte limit",
+                "input_too_large",
+                call_id=call_id,
+            )
+        payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+        await self.persistence.reserve_call(call_id, payload_sha256)
+        if tool.name in self.declaration.risky_tools:
+            if self.policy_gate is None:
+                await self._deny(
+                    "call_tool",
+                    operation_id,
+                    "risky connector tool has no policy gate",
+                    "policy_gate_missing",
+                    call_id=call_id,
+                )
+            decision = await self.policy_gate(
+                ConnectorPolicyRequest(
+                    self.board_id,
+                    self.project_id,
+                    self.declaration.connector_id,
+                    operation_id,
+                    tool.name,
+                    tool.effect,
+                    hashlib.sha256(original_bytes).hexdigest(),
+                )
+            )
+            if not isinstance(decision, ConnectorPolicyDecision) or not decision.allowed:
+                await self._deny(
+                    "call_tool",
+                    operation_id,
+                    "risky connector tool was denied by policy",
+                    "policy_denied",
+                    call_id=call_id,
+                )
+        await self._rate_limit()
+        attempts = 2 if tool.replay == "safe_with_stable_call_id" else 1
+        timeout_s = self.declaration.limits.timeout_ms / 1_000
+        async with self._slots:
+            for attempt in range(attempts):
+                try:
+                    endpoint, secret = self._resolve_private()
+                    async with asyncio.timeout(timeout_s):
+                        async with self.client_factory(
+                            self.declaration, endpoint, secret
+                        ) as client:
+                            _discovery, schemas = await self._discover_on_client(
+                                client, secret
+                            )
+                            schema = schemas.get(tool.name)
+                            if schema is None:
+                                await self._deny(
+                                    "call_tool",
+                                    operation_id,
+                                    "connector tool is absent from filtered discovery",
+                                    "discovery_denied",
+                                    call_id=call_id,
+                                )
+                            try:
+                                from jsonschema import Draft202012Validator
+
+                                Draft202012Validator(schema).validate(dispatched)
+                            except ConnectorError:
+                                raise
+                            except Exception:
+                                await self._deny(
+                                    "call_tool",
+                                    operation_id,
+                                    "connector arguments failed the discovered schema",
+                                    "schema_denied",
+                                    call_id=call_id,
+                                )
+                            result = await client.call_tool(
+                                tool.name,
+                                dispatched,
+                                read_timeout_seconds=timeout_s,
+                            )
+                            clean, result_sha256 = _model_payload(
+                                result,
+                                self.declaration.limits.max_output_bytes,
+                                secret,
+                            )
+                            if bool(getattr(result, "is_error", False)):
+                                raise ConnectorResultError("connector tool returned an error")
+                    self._mark_success()
+                    await self._audit(
+                        "call_tool", "succeeded", operation_id, call_id=call_id
+                    )
+                    return ConnectorResult(
+                        self.declaration.connector_id,
+                        operation_id,
+                        call_id,
+                        result_sha256,
+                        clean,
+                    )
+                except asyncio.CancelledError:
+                    self._mark_failure("cancelled")
+                    await self._audit(
+                        "call_tool",
+                        "cancelled",
+                        operation_id,
+                        reason_code="cancelled",
+                        call_id=call_id,
+                    )
+                    raise
+                except ConnectorDenied:
+                    raise
+                except (ConnectorConfigError, ConnectorResultError):
+                    self._mark_failure("invalid_result")
+                    await self._audit(
+                        "call_tool",
+                        "failed",
+                        operation_id,
+                        reason_code="invalid_result",
+                        call_id=call_id,
+                    )
+                    raise
+                except Exception as exc:
+                    if attempt + 1 < attempts:
+                        await asyncio.sleep(0)
+                        continue
+                    self._mark_failure("connection_failed")
+                    await self._audit(
+                        "call_tool",
+                        "failed",
+                        operation_id,
+                        reason_code="connection_failed",
+                        call_id=call_id,
+                    )
+                    raise ConnectorProtocolError("connector tool call failed") from None
+        raise AssertionError("unreachable")
+
+    async def read_resource(
+        self, operation_id: str, uri: str
+    ) -> ConnectorResult:
+        operation_id = _connector_id(operation_id, "operation_id")
+        if not self.declaration.enabled or uri not in self.declaration.resources:
+            await self._deny(
+                "read_resource",
+                operation_id,
+                "connector resource is not enabled and allowlisted",
+                "not_allowlisted",
+            )
+        request_bytes = _canonical_json({"uri": uri})
+        if len(request_bytes) > self.declaration.limits.max_input_bytes:
+            await self._deny(
+                "read_resource",
+                operation_id,
+                "connector input exceeded the byte limit",
+                "input_too_large",
+            )
+        call_id = hashlib.sha256(
+            b"\x00".join(
+                (
+                    self.board_id.encode(),
+                    self.declaration.connector_id.encode(),
+                    operation_id.encode(),
+                    b"resources/read",
+                    request_bytes,
+                )
+            )
+        ).hexdigest()
+        payload_sha256 = hashlib.sha256(request_bytes).hexdigest()
+        await self.persistence.reserve_call(call_id, payload_sha256)
+        await self._rate_limit()
+        timeout_s = self.declaration.limits.timeout_ms / 1_000
+        async with self._slots:
+            for attempt in range(2):
+                try:
+                    endpoint, secret = self._resolve_private()
+                    async with asyncio.timeout(timeout_s):
+                        async with self.client_factory(
+                            self.declaration, endpoint, secret
+                        ) as client:
+                            discovery, _schemas = await self._discover_on_client(
+                                client, secret
+                            )
+                            if uri not in {item["uri"] for item in discovery.resources}:
+                                await self._deny(
+                                    "read_resource",
+                                    operation_id,
+                                    "connector resource is absent from filtered discovery",
+                                    "discovery_denied",
+                                    call_id=call_id,
+                                )
+                            result = await client.read_resource(uri, cache_mode="bypass")
+                            clean, result_sha256 = _model_payload(
+                                result,
+                                self.declaration.limits.max_output_bytes,
+                                secret,
+                            )
+                    self._mark_success()
+                    await self._audit(
+                        "read_resource", "succeeded", operation_id, call_id=call_id
+                    )
+                    return ConnectorResult(
+                        self.declaration.connector_id,
+                        operation_id,
+                        call_id,
+                        result_sha256,
+                        clean,
+                    )
+                except asyncio.CancelledError:
+                    self._mark_failure("cancelled")
+                    await self._audit(
+                        "read_resource",
+                        "cancelled",
+                        operation_id,
+                        reason_code="cancelled",
+                        call_id=call_id,
+                    )
+                    raise
+                except ConnectorDenied:
+                    raise
+                except (ConnectorConfigError, ConnectorResultError):
+                    self._mark_failure("invalid_result")
+                    await self._audit(
+                        "read_resource",
+                        "failed",
+                        operation_id,
+                        reason_code="invalid_result",
+                        call_id=call_id,
+                    )
+                    raise
+                except Exception as exc:
+                    if attempt == 0:
+                        await asyncio.sleep(0)
+                        continue
+                    self._mark_failure("connection_failed")
+                    await self._audit(
+                        "read_resource",
+                        "failed",
+                        operation_id,
+                        reason_code="connection_failed",
+                        call_id=call_id,
+                    )
+                    raise ConnectorProtocolError("connector resource read failed") from None
+        raise AssertionError("unreachable")
 
 
 class SingletonLock:

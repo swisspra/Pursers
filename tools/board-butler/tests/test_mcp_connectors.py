@@ -1,0 +1,592 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import importlib.util
+import json
+import socket
+import subprocess
+import sys
+import textwrap
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, AsyncIterator, Mapping
+
+import pytest
+
+
+MODULE_PATH = Path(__file__).resolve().parents[1] / "board_butler.py"
+REPOSITORY_ROOT = MODULE_PATH.parents[2]
+SPEC = importlib.util.spec_from_file_location("board_butler_connectors", MODULE_PATH)
+assert SPEC and SPEC.loader
+butler = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = butler
+SPEC.loader.exec_module(butler)
+
+SHA = "a" * 64
+SECRET = "fixture-connector-secret"
+
+
+class Model:
+    def __init__(self, **values: Any) -> None:
+        self.__dict__.update(values)
+
+    def model_dump(self, **_kwargs: Any) -> dict[str, Any]:
+        def dump(value: Any) -> Any:
+            if isinstance(value, Model):
+                return {key: dump(item) for key, item in value.__dict__.items()}
+            if isinstance(value, SimpleNamespace):
+                return {key: dump(item) for key, item in vars(value).items()}
+            if isinstance(value, list):
+                return [dump(item) for item in value]
+            if isinstance(value, dict):
+                return {key: dump(item) for key, item in value.items()}
+            return value
+
+        return dump(self)
+
+
+class FakeClient:
+    protocol_version = "2026-07-28"
+
+    def __init__(
+        self,
+        *,
+        call_results: list[Any] | None = None,
+        delay: asyncio.Event | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.call_results = call_results or [
+            Model(
+                content=[{"type": "text", "text": "ok"}],
+                structured_content={"ok": True},
+                is_error=False,
+                _meta={"authority": "admin"},
+            )
+        ]
+        self.delay = delay
+
+    async def list_tools(self, **_kwargs: Any) -> Model:
+        return Model(
+            tools=[
+                SimpleNamespace(
+                    name="lookup",
+                    description="Allowed lookup",
+                    input_schema={
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["query", "call_id"],
+                        "properties": {
+                            "query": {"type": "string"},
+                            "call_id": {"type": "string"},
+                        },
+                    },
+                ),
+                SimpleNamespace(
+                    name="dangerous",
+                    description="Not declared",
+                    input_schema={"type": "object"},
+                ),
+                SimpleNamespace(
+                    name="mutate",
+                    description="Allowed mutation",
+                    input_schema={
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["value"],
+                        "properties": {"value": {"type": "string"}},
+                    },
+                ),
+            ],
+            next_cursor=None,
+        )
+
+    async def list_resources(self, **_kwargs: Any) -> Model:
+        return Model(
+            resources=[
+                SimpleNamespace(uri="cfg://allowed", name="Allowed", mime_type="application/json"),
+                SimpleNamespace(uri="cfg://hidden", name="Hidden", mime_type="text/plain"),
+            ],
+            next_cursor=None,
+        )
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], **_kwargs: Any
+    ) -> Any:
+        self.calls.append((name, dict(arguments)))
+        if self.delay is not None:
+            await self.delay.wait()
+        result = self.call_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    async def read_resource(self, uri: str, **_kwargs: Any) -> Model:
+        return Model(
+            contents=[
+                {
+                    "uri": uri,
+                    "text": f"secret={SECRET} path=/Users/private/project",
+                    "_meta": {"authority": "operator"},
+                }
+            ]
+        )
+
+
+def declaration(
+    *,
+    transport: str = "stdio",
+    output_bytes: int = 32_000,
+    calls_per_minute: int = 60,
+) -> butler.ConnectorDeclaration:
+    return butler.ConnectorDeclaration.from_mapping(
+        {
+            "connector_id": "connector:test",
+            "enabled": True,
+            "transport": transport,
+            "protocol_revision": "2026-07-28",
+            "endpoint_ref": "endpoint:test",
+            "secret_ref": "secret:test",
+            "tools": [
+                {
+                    "name": "lookup",
+                    "effect": "read_only",
+                    "replay": "safe_with_stable_call_id",
+                    "stable_call_id_field": "call_id",
+                },
+                {
+                    "name": "mutate",
+                    "effect": "mutating",
+                    "replay": "never",
+                    "stable_call_id_field": None,
+                },
+            ],
+            "resources": ["cfg://allowed"],
+            "risky_tools": ["mutate"],
+            "limits": {
+                "timeout_ms": 30_000,
+                "max_input_bytes": 4_096,
+                "max_output_bytes": output_bytes,
+                "max_concurrency": 2,
+                "calls_per_minute": calls_per_minute,
+            },
+        }
+    )
+
+
+def factory_for(clients: list[Any]):
+    calls = {"count": 0}
+
+    @contextlib.asynccontextmanager
+    async def factory(
+        _declaration: butler.ConnectorDeclaration,
+        _endpoint: butler.ConnectorEndpoint,
+        _secret: str,
+    ) -> AsyncIterator[Any]:
+        calls["count"] += 1
+        current = clients.pop(0)
+        if isinstance(current, BaseException):
+            raise current
+        yield current
+
+    return factory, calls
+
+
+def runtime(
+    clients: list[Any],
+    *,
+    declared: butler.ConnectorDeclaration | None = None,
+    policy_gate=None,
+    board_id: str = "board-one",
+) -> tuple[butler.ConnectorRuntime, butler.InMemoryConnectorPersistence, dict[str, int]]:
+    factory, calls = factory_for(clients)
+    persistence = butler.InMemoryConnectorPersistence()
+    connector = butler.ConnectorRuntime(
+        board_id=board_id,
+        project_id="project-one",
+        actor_id="butler-one",
+        policy_digest_sha256=SHA,
+        declaration=declared or declaration(),
+        approved_connector_ids=["connector:test"],
+        endpoint_resolver=lambda _ref: butler.StdioConnectorEndpoint("fake-server"),
+        secret_resolver=lambda _ref: SECRET,
+        persistence=persistence,
+        policy_gate=policy_gate,
+        client_factory=factory,
+    )
+    return connector, persistence, calls
+
+
+def test_declaration_rejects_unknown_transport_protocol_and_replay_shape() -> None:
+    value = {
+        "connector_id": "connector:test",
+        "enabled": True,
+        "transport": "websocket",
+        "protocol_revision": "2025-11-25",
+        "endpoint_ref": "endpoint:test",
+        "secret_ref": None,
+        "tools": [],
+        "resources": [],
+        "limits": {
+            "timeout_ms": 100,
+            "max_input_bytes": 1,
+            "max_output_bytes": 1,
+            "max_concurrency": 1,
+            "calls_per_minute": 1,
+        },
+    }
+    with pytest.raises(butler.ConnectorConfigError, match="transport"):
+        butler.ConnectorDeclaration.from_mapping(value)
+    value["transport"] = "stdio"
+    with pytest.raises(butler.ConnectorConfigError, match="protocol_revision"):
+        butler.ConnectorDeclaration.from_mapping(value)
+
+
+def test_http_endpoint_rejects_cleartext_non_loopback_and_embedded_credentials() -> None:
+    with pytest.raises(butler.ConnectorConfigError, match="requires TLS"):
+        butler.HttpConnectorEndpoint("http://example.invalid/mcp")
+    with pytest.raises(butler.ConnectorConfigError, match="invalid"):
+        butler.HttpConnectorEndpoint("https://user:pass@example.invalid/mcp")
+    butler.HttpConnectorEndpoint("http://127.0.0.1:8123/mcp")
+
+
+def test_runtime_rejects_connector_outside_immutable_envelope() -> None:
+    with pytest.raises(butler.ConnectorDenied, match="immutable envelope"):
+        butler.ConnectorRuntime(
+            board_id="board-one",
+            project_id="project-one",
+            actor_id="butler-one",
+            policy_digest_sha256=SHA,
+            declaration=declaration(),
+            approved_connector_ids=[],
+            endpoint_resolver=lambda _ref: butler.StdioConnectorEndpoint("server"),
+            secret_resolver=lambda _ref: SECRET,
+            persistence=butler.InMemoryConnectorPersistence(),
+        )
+
+
+def test_discovery_filters_before_exposure_and_reconnects() -> None:
+    async def scenario() -> None:
+        connector, persistence, calls = runtime([OSError("offline"), FakeClient()])
+        found = await connector.discover("operation-discover")
+        assert [tool["name"] for tool in found.tools] == ["lookup", "mutate"]
+        assert [resource["uri"] for resource in found.resources] == ["cfg://allowed"]
+        assert calls["count"] == 2
+        assert connector.health.status == "healthy"
+        assert persistence.audit_records[-1]["outcome"] == "succeeded"
+
+    asyncio.run(scenario())
+
+
+def test_allowed_call_validates_schema_reserves_stable_id_and_redacts_result() -> None:
+    async def scenario() -> None:
+        result = Model(
+            content=[
+                {
+                    "type": "text",
+                    "text": f"{SECRET} /Users/private/project",
+                }
+            ],
+            structured_content={
+                "token": SECRET,
+                "value": "safe",
+                "_meta": {"authority": "admin"},
+            },
+            is_error=False,
+        )
+        client = FakeClient(call_results=[result])
+        connector, persistence, _calls = runtime([client])
+        called = await connector.call_tool(
+            "operation-call", "lookup", {"query": "status"}
+        )
+        sent = client.calls[0][1]
+        assert sent["call_id"] == called.call_id
+        assert persistence.reservations == {called.call_id: next(iter(persistence.reservations.values()))}
+        encoded = json.dumps(called.payload)
+        assert SECRET not in encoded
+        assert "/Users/private/project" not in encoded
+        assert "authority" not in encoded
+        from jsonschema import Draft202012Validator
+
+        schema = json.loads(
+            (
+                REPOSITORY_ROOT
+                / "docs/design/schemas/autonomous-butler-audit-v1.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        Draft202012Validator(schema).validate(persistence.audit_records[-1])
+
+    asyncio.run(scenario())
+
+
+def test_denied_name_and_invalid_arguments_never_dispatch() -> None:
+    async def scenario() -> None:
+        client = FakeClient()
+        connector, _persistence, calls = runtime([client])
+        with pytest.raises(butler.ConnectorDenied, match="allowlisted"):
+            await connector.call_tool("operation-one", "dangerous", {})
+        assert calls["count"] == 0
+
+        connector, _persistence, _calls = runtime([client])
+        with pytest.raises(butler.ConnectorDenied, match="discovered schema"):
+            await connector.call_tool("operation-two", "lookup", {"query": 3})
+        assert client.calls == []
+
+    asyncio.run(scenario())
+
+
+def test_risky_call_requires_typed_policy_gate_and_never_retries() -> None:
+    async def scenario() -> None:
+        connector, _persistence, calls = runtime([FakeClient()])
+        with pytest.raises(butler.ConnectorDenied, match="no policy gate"):
+            await connector.call_tool("operation-risky", "mutate", {"value": "x"})
+        assert calls["count"] == 0
+
+        requests: list[butler.ConnectorPolicyRequest] = []
+
+        async def allow(request: butler.ConnectorPolicyRequest):
+            requests.append(request)
+            return butler.ConnectorPolicyDecision(True, "decision-one", "approved")
+
+        connector, _persistence, calls = runtime(
+            [FakeClient(call_results=[OSError("ambiguous")])], policy_gate=allow
+        )
+        with pytest.raises(butler.ConnectorProtocolError):
+            await connector.call_tool("operation-risky", "mutate", {"value": "x"})
+        assert calls["count"] == 1
+        assert requests[0].arguments_sha256 == butler.hashlib.sha256(
+            butler._canonical_json({"value": "x"})
+        ).hexdigest()
+
+    asyncio.run(scenario())
+
+
+def test_safe_replay_reuses_stable_call_id_after_ambiguous_disconnect() -> None:
+    async def scenario() -> None:
+        first = FakeClient(call_results=[OSError("disconnect")])
+        second = FakeClient()
+        connector, persistence, calls = runtime([first, second])
+        result = await connector.call_tool(
+            "operation-replay", "lookup", {"query": "same"}
+        )
+        assert calls["count"] == 2
+        assert first.calls[0][1]["call_id"] == second.calls[0][1]["call_id"]
+        assert first.calls[0][1]["call_id"] == result.call_id
+        assert len(persistence.reservations) == 1
+
+    asyncio.run(scenario())
+
+
+def test_oversize_malformed_and_rate_limited_results_fail_closed() -> None:
+    async def scenario() -> None:
+        oversized = Model(content=[{"text": "x" * 2_000}], is_error=False)
+        connector, _persistence, _calls = runtime(
+            [FakeClient(call_results=[oversized])],
+            declared=declaration(output_bytes=500),
+        )
+        with pytest.raises(butler.ConnectorResultError, match="output byte"):
+            await connector.call_tool("operation-large", "lookup", {"query": "x"})
+
+        connector, _persistence, _calls = runtime(
+            [FakeClient()], declared=declaration(calls_per_minute=1)
+        )
+        await connector.discover("operation-rate-one")
+        with pytest.raises(butler.ConnectorDenied, match="rate limit"):
+            await connector.discover("operation-rate-two")
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_is_local_and_audited() -> None:
+    async def scenario() -> None:
+        delay = asyncio.Event()
+        connector, persistence, _calls = runtime([FakeClient(delay=delay)])
+        task = asyncio.create_task(
+            connector.call_tool("operation-cancel", "lookup", {"query": "x"})
+        )
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert connector.health.reason_code == "cancelled"
+        assert persistence.audit_records[-1]["outcome"] == "cancelled"
+
+    asyncio.run(scenario())
+
+
+def test_resource_redaction_and_concurrent_board_isolation() -> None:
+    async def scenario() -> None:
+        one, store_one, _ = runtime([FakeClient()], board_id="board-one")
+        two, store_two, _ = runtime([FakeClient()], board_id="board-two")
+        first, second = await asyncio.gather(
+            one.read_resource("operation-one", "cfg://allowed"),
+            two.read_resource("operation-two", "cfg://allowed"),
+        )
+        assert SECRET not in json.dumps(first.payload)
+        assert "/Users/private/project" not in json.dumps(second.payload)
+        assert first.call_id != second.call_id
+        assert store_one.audit_records[-1]["board_id"] == "board-one"
+        assert store_two.audit_records[-1]["board_id"] == "board-two"
+
+    asyncio.run(scenario())
+
+
+def test_secret_resolution_failure_does_not_disclose_value_or_path() -> None:
+    async def scenario() -> None:
+        persistence = butler.InMemoryConnectorPersistence()
+
+        def fail(_ref: str) -> str:
+            raise RuntimeError(f"{SECRET} /Users/private/credential")
+
+        connector = butler.ConnectorRuntime(
+            board_id="board-secret",
+            project_id="project-one",
+            actor_id="butler-one",
+            policy_digest_sha256=SHA,
+            declaration=declaration(),
+            approved_connector_ids=["connector:test"],
+            endpoint_resolver=lambda _ref: butler.StdioConnectorEndpoint(
+                "/Users/private/server", (SECRET,)
+            ),
+            secret_resolver=fail,
+            persistence=persistence,
+        )
+        with pytest.raises(butler.ConnectorConfigError) as caught:
+            await connector.discover("operation-secret")
+        assert SECRET not in str(caught.value)
+        assert "/Users/private" not in str(caught.value)
+        assert SECRET not in repr(connector.endpoint_resolver("endpoint:test"))
+        assert "/Users/private" not in repr(connector.endpoint_resolver("endpoint:test"))
+        assert SECRET not in json.dumps(persistence.audit_records)
+        assert "/Users/private" not in json.dumps(persistence.audit_records)
+
+    asyncio.run(scenario())
+
+
+def _server_script(path: Path, *, transport: str, port: int | None = None) -> None:
+    run = "mcp.run()"
+    if transport == "streamable_http":
+        run = (
+            "mcp.run(transport='streamable-http', host='127.0.0.1', "
+            f"port={port}, json_response=True, stateless_http=True)"
+        )
+    path.write_text(
+        textwrap.dedent(
+            f"""
+            from mcp.server import MCPServer
+
+            mcp = MCPServer("fake-connector")
+
+            @mcp.tool()
+            def lookup(query: str, call_id: str) -> dict[str, str]:
+                return {{"query": query, "call_id": call_id}}
+
+            @mcp.resource("cfg://allowed")
+            def allowed() -> dict[str, bool]:
+                return {{"ready": True}}
+
+            if __name__ == "__main__":
+                {run}
+            """
+        ),
+        encoding="utf-8",
+    )
+
+
+def _transport_declaration(transport: str) -> butler.ConnectorDeclaration:
+    value = declaration(transport=transport)
+    return butler.ConnectorDeclaration(
+        value.connector_id,
+        value.enabled,
+        value.transport,
+        value.protocol_revision,
+        value.endpoint_ref,
+        None,
+        (value.tools[0],),
+        value.resources,
+        frozenset(),
+        value.limits,
+    )
+
+
+def test_real_sdk_stdio_transport(tmp_path: Path) -> None:
+    script = tmp_path / "stdio_server.py"
+    _server_script(script, transport="stdio")
+
+    async def scenario() -> None:
+        declared = _transport_declaration("stdio")
+        connector = butler.ConnectorRuntime(
+            board_id="board-stdio",
+            project_id="project-one",
+            actor_id="butler-one",
+            policy_digest_sha256=SHA,
+            declaration=declared,
+            approved_connector_ids=["connector:test"],
+            endpoint_resolver=lambda _ref: butler.StdioConnectorEndpoint(
+                sys.executable, (str(script),)
+            ),
+            secret_resolver=lambda _ref: "",
+            persistence=butler.InMemoryConnectorPersistence(),
+        )
+        found = await connector.discover("stdio-discover")
+        assert [item["name"] for item in found.tools] == ["lookup"]
+        result = await connector.call_tool(
+            "stdio-call", "lookup", {"query": "stdio"}
+        )
+        assert result.payload["structuredContent"]["query"] == "stdio"
+
+    asyncio.run(scenario())
+
+
+def test_real_sdk_streamable_http_transport(tmp_path: Path) -> None:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    script = tmp_path / "http_server.py"
+    _server_script(script, transport="streamable_http", port=port)
+    process = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            with socket.socket() as probe:
+                if probe.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.05)
+        else:
+            pytest.fail("fake streamable HTTP server did not start")
+
+        async def scenario() -> None:
+            declared = _transport_declaration("streamable_http")
+            connector = butler.ConnectorRuntime(
+                board_id="board-http",
+                project_id="project-one",
+                actor_id="butler-one",
+                policy_digest_sha256=SHA,
+                declaration=declared,
+                approved_connector_ids=["connector:test"],
+                endpoint_resolver=lambda _ref: butler.HttpConnectorEndpoint(
+                    f"http://127.0.0.1:{port}/mcp"
+                ),
+                secret_resolver=lambda _ref: "",
+                persistence=butler.InMemoryConnectorPersistence(),
+            )
+            found = await connector.discover("http-discover")
+            assert [item["name"] for item in found.tools] == ["lookup"]
+            result = await connector.call_tool(
+                "http-call", "lookup", {"query": "http"}
+            )
+            assert result.payload["structuredContent"]["query"] == "http"
+
+        asyncio.run(scenario())
+    finally:
+        process.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=5)
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)

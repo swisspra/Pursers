@@ -80,6 +80,44 @@ adds only the two existing, separately authorized mechanical actions. No
 observer deletes files or board data, answers a question, merges work, changes
 membership, assigns a seat, dispatches cleanup, or performs an operator action.
 
+## MCP v2 connector boundary
+
+`ConnectorDeclaration` and `ConnectorRuntime` implement the provider-neutral
+client boundary for the canonical `autonomous_butler_config_v1` connector
+shape. A declaration is scoped by the runtime's exact board and project IDs and
+pins one of two transports (`stdio` or `streamable_http`) plus protocol revision
+`2026-07-28`. Endpoint and credential values do not appear in the declaration:
+trusted host code resolves the opaque `endpoint_ref` and `secret_ref` only while
+opening a connection. Construction also requires the human-owned immutable
+envelope's approved connector IDs; an unapproved declaration is rejected.
+
+The runtime uses the Python MCP v2 `Client` for both transports. Stdio receives
+an executable and argument vector, never a shell command, and suppresses the
+untrusted child stderr stream. Streamable HTTP requires TLS except on explicit
+loopback, rejects URL credentials, query strings, and fragments, ignores ambient
+proxy settings, and disables redirect following so credentials cannot move to
+another origin. Unsupported transports and protocol revisions fail validation
+before connection.
+
+Discovery is filtered against the exact declared tool and resource allowlists
+before it is returned to a planner. Tool calls are validated against the
+discovered JSON Schema and the declaration's byte, timeout, concurrency, and
+rate limits. Stable call IDs and the final payload digest are reserved through
+the `ConnectorPersistence` seam before dispatch. A mutating tool declared with
+`replay=never` is attempted once; a safely replayable tool may reconnect once
+with the same reserved ID and bytes. Every risky tool requires an affirmative
+`ConnectorPolicyDecision`; an absent or malformed gate fails closed.
+
+Connector output is bounded, strips `_meta`, redacts credential-like fields,
+resolved secret values, and private paths, and is returned only as untrusted
+data with a digest. Health is an observation, not authority. Success, denial,
+failure, and cancellation emit schema-valid redacted connector audit records
+through the persistence seam. Failure or cancellation closes only that
+connector call, so another board's stewardship continues.
+`InMemoryConnectorPersistence` exists for tests and local probes only; a
+production integration must provide durable call reservations and audit
+storage.
+
 Questions that propose proceeding despite a blocked, skipped, failed, or
 never-reached suite use the coverage map declared by `tools/ci_manifest.py`.
 The butler compares the submitted cumulative file list with the quoted suite
