@@ -81,7 +81,7 @@ CLIENT_REQUIRED_ARGUMENTS = {
         "isSecret": False,
     },
     "--tools": {
-        "choices": ["default", "all"],
+        "choices": ["default", "worker", "reviewer", "all"],
         "default": "default",
         "isRequired": False,
     },

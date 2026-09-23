@@ -215,6 +215,8 @@
           "description": "Tool surface exposed by the relay",
           "choices": [
             "default",
+            "worker",
+            "reviewer",
             "all"
           ],
           "default": "default",

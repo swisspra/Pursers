@@ -60,6 +60,38 @@ DEFAULT_TOOLS = frozenset(
         "ticket_request_human",
     }
 )
+WORKER_TOOLS = frozenset(
+    {
+        "lease_renew",
+        "ticket_annotate",
+        "ticket_claim",
+        "ticket_get",
+        "ticket_question_ask",
+        "ticket_request_human",
+        "ticket_submit",
+        "ticket_unclaim",
+    }
+)
+REVIEWER_TOOLS = frozenset(
+    {
+        "dispatch_my_offers",
+        "lease_renew",
+        "ticket_annotate",
+        "ticket_get",
+        "ticket_question_ask",
+        "ticket_request_human",
+        "ticket_review",
+        "ticket_review_claim",
+        "ticket_review_release",
+    }
+)
+TOOL_PROFILES: dict[str, frozenset[str] | None] = {
+    "default": DEFAULT_TOOLS,
+    "worker": WORKER_TOOLS,
+    "reviewer": REVIEWER_TOOLS,
+    "all": None,
+}
+ROLE_TOOL_PROFILES = frozenset({"worker", "reviewer"})
 WAIT_TOOL_NAMES = frozenset({"a2a_wait", "ticket_question_wait"})
 VERIFIED_SUBMIT_TOOL = "ticket_submit"
 MAX_WAIT_SECONDS = 50
@@ -196,6 +228,9 @@ class CentralRelay:
         uvx_path: str | None = None,
         repository_roots: list[Path] | tuple[Path, ...] | None = None,
     ) -> None:
+        if tools_mode not in TOOL_PROFILES:
+            choices = ", ".join(TOOL_PROFILES)
+            raise RelayFailure(f"--tools must be one of: {choices}")
         self.central_url = central_mcp_url(central_url)
         self.board = board
         self.setup_root = (setup_root or DEFAULT_INSTANCE_DIR).expanduser()
@@ -225,6 +260,7 @@ class CentralRelay:
         self._identity_selection_tools: set[str] = set()
         self._resolved_agent_name: str | None = None
         self._principal_agent_names: tuple[str, ...] = ()
+        self._principal_agent_roles: dict[str, str] = {}
         self._authenticated_principal_id: str | None = None
         self._identity_discovery_succeeded = False
         self._reported_error: str | None = None
@@ -358,6 +394,7 @@ class CentralRelay:
     async def _discover_existing_identity(self) -> None:
         self._resolved_agent_name = None
         self._principal_agent_names = ()
+        self._principal_agent_roles = {}
         self._authenticated_principal_id = None
         self._identity_discovery_succeeded = False
         try:
@@ -426,8 +463,35 @@ class CentralRelay:
                 and agent["agent_name"]
             )
         )
+        self._principal_agent_roles = {
+            agent["agent_name"]: agent["role"]
+            for agent in matching_agents
+            if agent.get("principal_id") == self._authenticated_principal_id
+            and agent.get("lifecycle_status", "active") == "active"
+            and isinstance(agent.get("agent_name"), str)
+            and agent["agent_name"]
+            and isinstance(agent.get("role"), str)
+        }
         if len(self._principal_agent_names) == 1:
             self._resolved_agent_name = self._principal_agent_names[0]
+
+    def _restrict_identity_to_tool_profile(self) -> None:
+        if self.tools_mode not in ROLE_TOOL_PROFILES:
+            return
+        matching_names = tuple(
+            name
+            for name in self._principal_agent_names
+            if self._principal_agent_roles.get(name) == self.tools_mode
+        )
+        if not matching_names:
+            raise RelayFailure(
+                f"--tools {self.tools_mode} requires an active {self.tools_mode} "
+                f"seat for this credential on board {self.board}"
+            )
+        self._principal_agent_names = matching_names
+        self._resolved_agent_name = (
+            matching_names[0] if len(matching_names) == 1 else None
+        )
 
     def _identity_selection_failure(self, supplied: str | None = None) -> RelayFailure:
         principal = self._authenticated_principal_id or "an unreported principal"
@@ -454,8 +518,6 @@ class CentralRelay:
     async def _upstream_tools(self) -> list[types.Tool]:
         result = await self._retrying(lambda client: client.list_tools())
         tools = result.tools
-        if self.tools_mode == "default":
-            tools = [tool for tool in tools if tool.name in DEFAULT_TOOLS]
         self._local_identity_tools = set()
         self._identity_selection_tools = set()
         if self._token_file_was_overridden:
@@ -463,8 +525,13 @@ class CentralRelay:
         else:
             self._resolved_agent_name = SETUP_AGENT_NAME
             self._principal_agent_names = (SETUP_AGENT_NAME,)
+            self._principal_agent_roles = {SETUP_AGENT_NAME: "worker"}
             self._authenticated_principal_id = None
             self._identity_discovery_succeeded = True
+        self._restrict_identity_to_tool_profile()
+        selected_tools = TOOL_PROFILES[self.tools_mode]
+        if selected_tools is not None:
+            tools = [tool for tool in tools if tool.name in selected_tools]
         exposed_tools: list[types.Tool] = []
         for tool in tools:
             schema = tool.input_schema
@@ -1164,7 +1231,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--token-file", type=Path)
     command.add_argument("--ca-file", type=Path)
     command.add_argument("--setup-root", type=Path)
-    command.add_argument("--tools", choices=("default", "all"), default="default")
+    command.add_argument("--tools", choices=tuple(TOOL_PROFILES), default="default")
     command.add_argument(
         "--repository-root",
         action="append",

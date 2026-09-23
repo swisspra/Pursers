@@ -10,8 +10,16 @@ launched with:
 ```
 uvx --from pursers-client==<VERSION> pursers-mcp \
   --central-url <URL> --board <BOARD_ID> --token-file <PATH> \
-  [--ca-file <PATH>] [--tools default|all]
+  [--ca-file <PATH>] [--tools default|worker|reviewer|all]
 ```
+
+Use `--tools worker` or `--tools reviewer` for external execution hosts. The
+worker profile exposes eight role-specific tools; the reviewer profile exposes
+nine, including `dispatch_my_offers` for exact offer discovery. Both reject
+credentials without a matching active seat and still rely on Central's bearer-
+token authorization for every operation. `default` remains the curated
+interactive board profile; `all` is an explicit administrative escape hatch for
+principals that need their entire authorized surface.
 
 The pinned
 [`2025-12-11` schema](https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json)
