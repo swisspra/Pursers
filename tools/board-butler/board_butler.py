@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import fcntl
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -31,7 +33,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections import deque
-from contextlib import AsyncExitStack, aclosing, asynccontextmanager
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -659,7 +661,44 @@ async def draft_with_provider(
     """Create one bounded shadow draft without exposing provider credentials."""
     request_body = _provider_request_body(runtime, question, finding)
 
-    def request() -> str:
+    document = await _post_provider_json(
+        runtime,
+        request_body,
+        timeout_s=PROVIDER_TIMEOUT_S,
+        max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES,
+    )
+    text = (
+        _provider_draft_text(document)
+        if runtime.draft_protocol == "pursers_json_v1"
+        else _openai_chat_draft_text(document)
+    )
+    if text is None:
+        raise ValueError("provider response had no draft text")
+    text = text.strip()
+    if (
+        not text
+        or len(text) > MAX_PROVIDER_DRAFT_CHARS
+        or any(ord(character) < 0x20 and character not in "\n\t" for character in text)
+        or (runtime.credential and runtime.credential in text)
+    ):
+        raise ValueError("provider draft was unsafe")
+    return text
+
+
+async def _post_provider_json(
+    runtime: ProviderRuntime,
+    request_body: bytes,
+    *,
+    timeout_s: float,
+    max_response_bytes: int,
+) -> Any:
+    """Use the reviewed provider transport for every direct model request."""
+    if timeout_s <= 0:
+        raise ValueError("provider timeout must be positive")
+    if max_response_bytes <= 0 or max_response_bytes > MAX_PROVIDER_RESPONSE_BYTES:
+        raise ValueError("provider response limit is invalid")
+
+    def request() -> Any:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
@@ -677,31 +716,15 @@ async def draft_with_provider(
             urllib.request.ProxyHandler({}),
             _ProviderRedirectHandler(raw.full_url),
         )
-        with opener.open(raw, timeout=PROVIDER_TIMEOUT_S) as response:
+        with opener.open(raw, timeout=timeout_s) as response:
             geturl = getattr(response, "geturl", None)
             final_url = geturl() if callable(geturl) else raw.full_url
             if _provider_origin(final_url) != _provider_origin(raw.full_url):
                 raise ValueError("provider response changed origin")
-            payload = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
-        if len(payload) > MAX_PROVIDER_RESPONSE_BYTES:
+            payload = response.read(max_response_bytes + 1)
+        if len(payload) > max_response_bytes:
             raise ValueError("provider response exceeded the safe bound")
-        document = json.loads(payload)
-        text = (
-            _provider_draft_text(document)
-            if runtime.draft_protocol == "pursers_json_v1"
-            else _openai_chat_draft_text(document)
-        )
-        if text is None:
-            raise ValueError("provider response had no draft text")
-        text = text.strip()
-        if (
-            not text
-            or len(text) > MAX_PROVIDER_DRAFT_CHARS
-            or any(ord(character) < 0x20 and character not in "\n\t" for character in text)
-            or (runtime.credential and runtime.credential in text)
-        ):
-            raise ValueError("provider draft was unsafe")
-        return text
+        return json.loads(payload)
 
     return await asyncio.to_thread(request)
 
@@ -2055,8 +2078,792 @@ class ConnectorRuntime:
                     )
                     raise ConnectorProtocolError("connector resource read failed") from None
         raise AssertionError("unreachable")
+def _canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
 
 
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(_canonical_json_bytes(value)).hexdigest()
+
+
+def _bounded_model_id(value: Any, fallback: str) -> str:
+    candidate = value if isinstance(value, str) else ""
+    return (
+        candidate
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", candidate)
+        else fallback
+    )
+
+
+def _bounded_sha256(value: Any) -> str:
+    if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value):
+        return value
+    return "0" * 64
+
+
+def _parse_utc_deadline(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("model deadline must be a date-time string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("model deadline is invalid") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("model deadline must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+class ModelRunnerFailure(Exception):
+    """A bounded typed failure that is safe to persist and return."""
+
+    def __init__(self, category: str, code: str, *, retryable: bool = False) -> None:
+        super().__init__(code)
+        self.category = category
+        self.code = code
+        self.retryable = retryable
+
+
+@dataclass(frozen=True)
+class ModelBackendResponse:
+    proposal_json: str
+    citations: tuple[str, ...]
+    usage: Mapping[str, Any]
+    provider_request_ref: str
+
+
+class ModelBackend(Protocol):
+    async def run(
+        self, request: Mapping[str, Any], *, timeout_s: float
+    ) -> ModelBackendResponse: ...
+
+
+class ModelResultStore(Protocol):
+    def get(self, request_id: str) -> tuple[str, dict[str, Any]] | None: ...
+
+    def put(
+        self, request_id: str, request_digest: str, result: Mapping[str, Any]
+    ) -> None: ...
+
+
+class MemoryModelResultStore:
+    """Cycle-local replay store used by tests and ephemeral runners."""
+
+    def __init__(self) -> None:
+        self._rows: dict[str, tuple[str, dict[str, Any]]] = {}
+
+    def get(self, request_id: str) -> tuple[str, dict[str, Any]] | None:
+        row = self._rows.get(request_id)
+        return None if row is None else (row[0], copy.deepcopy(row[1]))
+
+    def put(
+        self, request_id: str, request_digest: str, result: Mapping[str, Any]
+    ) -> None:
+        self._rows[request_id] = (request_digest, copy.deepcopy(dict(result)))
+
+
+class FileModelResultStore:
+    """Private atomic result-before-reply store for crash-safe replay."""
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root)
+        try:
+            info = self.root.lstat()
+        except FileNotFoundError:
+            self.root.mkdir(parents=True, mode=0o700)
+            info = self.root.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_uid != os.getuid()
+        ):
+            raise ModelRunnerFailure("policy", "unsafe_replay_directory")
+
+    def _path(self, request_id: str) -> Path:
+        name = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        return self.root / f"{name}.json"
+
+    def get(self, request_id: str) -> tuple[str, dict[str, Any]] | None:
+        path = self._path(request_id)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return None
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.getuid()
+            or info.st_size > MAX_PROVIDER_RESPONSE_BYTES + 65_536
+        ):
+            raise ModelRunnerFailure("policy", "unsafe_replay_record")
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ModelRunnerFailure("malformed", "invalid_replay_record") from exc
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"request_id", "request_digest_sha256", "result"}
+            or row.get("request_id") != request_id
+            or not isinstance(row.get("request_digest_sha256"), str)
+            or not isinstance(row.get("result"), dict)
+        ):
+            raise ModelRunnerFailure("malformed", "invalid_replay_record")
+        return row["request_digest_sha256"], copy.deepcopy(row["result"])
+
+    def put(
+        self, request_id: str, request_digest: str, result: Mapping[str, Any]
+    ) -> None:
+        path = self._path(request_id)
+        row = {
+            "request_id": request_id,
+            "request_digest_sha256": request_digest,
+            "result": dict(result),
+        }
+        encoded = _canonical_json_bytes(row) + b"\n"
+        if len(encoded) > MAX_PROVIDER_RESPONSE_BYTES + 65_536:
+            raise ModelRunnerFailure("malformed", "replay_record_too_large")
+        descriptor, temporary = tempfile.mkstemp(prefix=".model-result-", dir=self.root)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            directory = os.open(self.root, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(temporary)
+
+
+class TaskSchemaRegistry:
+    """Binds schema identifiers to exact canonical bytes and validators."""
+
+    def __init__(self) -> None:
+        self._schemas: dict[tuple[str, str], Mapping[str, Any]] = {}
+
+    def register(self, schema_id: str, schema: Mapping[str, Any]) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", schema_id):
+            raise ValueError("task schema id is invalid")
+        document = copy.deepcopy(dict(schema))
+        digest = _sha256_json(document)
+        try:
+            import jsonschema
+
+            jsonschema.Draft202012Validator.check_schema(document)
+        except ImportError as exc:
+            raise RuntimeError("jsonschema is required for model task validation") from exc
+        self._schemas[(schema_id, digest)] = document
+        return digest
+
+    def validate(self, binding: Mapping[str, Any], value: Any) -> None:
+        if not isinstance(binding, Mapping):
+            raise ModelRunnerFailure("malformed", "invalid_task_schema_binding")
+        key = (binding.get("schema_id"), binding.get("schema_sha256"))
+        schema = self._schemas.get(key)
+        if schema is None:
+            raise ModelRunnerFailure("policy", "unknown_task_schema")
+        import jsonschema
+
+        try:
+            jsonschema.Draft202012Validator(schema).validate(value)
+        except jsonschema.ValidationError as exc:
+            raise ModelRunnerFailure("malformed", "task_schema_rejected") from exc
+
+
+class ModelCancellationRegistry:
+    """Opaque-token cancellation shared by all model backends."""
+
+    def __init__(self) -> None:
+        self._events: dict[str, asyncio.Event] = {}
+
+    def event(self, token: str) -> asyncio.Event:
+        return self._events.setdefault(token, asyncio.Event())
+
+    def cancel(self, token: str) -> None:
+        self.event(token).set()
+
+
+def _backend_payload(value: Any, expected_model: str) -> ModelBackendResponse:
+    if not isinstance(value, Mapping) or set(value) != {
+        "model",
+        "proposal",
+        "citations",
+        "usage",
+        "provider_request_ref",
+    }:
+        raise ModelRunnerFailure("malformed", "invalid_backend_payload")
+    if value.get("model") != expected_model:
+        raise ModelRunnerFailure("policy", "model_mismatch")
+    citations = value.get("citations")
+    usage = value.get("usage")
+    provider_ref = value.get("provider_request_ref")
+    if (
+        not isinstance(citations, list)
+        or not all(isinstance(item, str) for item in citations)
+        or not isinstance(usage, Mapping)
+        or not isinstance(provider_ref, str)
+    ):
+        raise ModelRunnerFailure("malformed", "invalid_backend_payload")
+    return ModelBackendResponse(
+        proposal_json=_canonical_json_bytes(value["proposal"]).decode("utf-8"),
+        citations=tuple(citations),
+        usage=dict(usage),
+        provider_request_ref=provider_ref,
+    )
+
+
+class DirectAPIModelBackend:
+    """OpenAI-compatible backend using the reviewed Board Butler transport."""
+
+    def __init__(self, runtime: ProviderRuntime) -> None:
+        if runtime.draft_protocol != "openai_chat_completions_v1":
+            raise ValueError("direct model backend requires openai_chat_completions_v1")
+        self.runtime = runtime
+
+    async def run(
+        self, request: Mapping[str, Any], *, timeout_s: float
+    ) -> ModelBackendResponse:
+        safe_envelope = {
+            key: request[key]
+            for key in (
+                "request_id",
+                "board_id",
+                "subject_id",
+                "task_kind",
+                "policy_digest_sha256",
+                "task_input",
+                "task_input_digest_sha256",
+                "task_schema",
+                "evidence_refs",
+                "max_output_bytes",
+                "usage_limit",
+                "deadline",
+            )
+        }
+        prompt = _canonical_json_bytes(safe_envelope).decode("utf-8")
+        if len(prompt.encode("utf-8")) > MAX_PROVIDER_PROMPT_CHARS:
+            raise ModelRunnerFailure("budget", "provider_prompt_too_large")
+        body = _canonical_json_bytes(
+            {
+                "model": self.runtime.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Return exactly one JSON object with keys proposal and "
+                            "citations. Do not call tools."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": request["usage_limit"]["max_output_tokens"],
+                "response_format": {"type": "json_object"},
+            }
+        )
+        try:
+            document = await _post_provider_json(
+                self.runtime,
+                body,
+                timeout_s=timeout_s,
+                max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES,
+            )
+            content = _openai_chat_draft_text(document)
+            if content is None:
+                raise ModelRunnerFailure("malformed", "missing_provider_content")
+            if self.runtime.credential and self.runtime.credential in content:
+                raise ModelRunnerFailure("policy", "provider_credential_echo")
+            payload = json.loads(content)
+        except ModelRunnerFailure:
+            raise
+        except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
+            raise ModelRunnerFailure("malformed", "malformed_provider_response") from exc
+        except (OSError, urllib.error.URLError) as exc:
+            raise ModelRunnerFailure(
+                "provider", "direct_provider_error", retryable=True
+            ) from exc
+        if not isinstance(document, Mapping) or set(payload) != {
+            "proposal",
+            "citations",
+        }:
+            raise ModelRunnerFailure("malformed", "invalid_backend_payload")
+        if document.get("model") != self.runtime.model:
+            raise ModelRunnerFailure("policy", "model_mismatch")
+        provider_ref = document.get("id")
+        citations = payload.get("citations")
+        raw_usage = document.get("usage")
+        if (
+            not isinstance(provider_ref, str)
+            or not isinstance(citations, list)
+            or not all(isinstance(item, str) for item in citations)
+            or not isinstance(raw_usage, Mapping)
+        ):
+            raise ModelRunnerFailure("malformed", "invalid_backend_payload")
+        usage = {
+            "input_tokens": raw_usage.get("prompt_tokens"),
+            "output_tokens": raw_usage.get("completion_tokens"),
+            "total_tokens": raw_usage.get("total_tokens"),
+            "cost_microunits": raw_usage.get("cost_microunits"),
+            "measured": raw_usage.get("measured"),
+        }
+        return ModelBackendResponse(
+            proposal_json=_canonical_json_bytes(payload["proposal"]).decode("utf-8"),
+            citations=tuple(citations),
+            usage=usage,
+            provider_request_ref=provider_ref,
+        )
+
+
+_ACP_CLIENT_MODULE: Any = None
+
+
+def _load_acp_client_module() -> Any:
+    global _ACP_CLIENT_MODULE
+    if _ACP_CLIENT_MODULE is not None:
+        return _ACP_CLIENT_MODULE
+    path = Path(__file__).resolve().parents[1] / "acp-seat" / "acp_client.py"
+    spec = importlib.util.spec_from_file_location("pursers_butler_acp_client", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("ACP client module is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _ACP_CLIENT_MODULE = module
+    return module
+
+
+class ACPModelBackend:
+    """ACP v1 backend with no MCP servers and deny-by-default permissions."""
+
+    def __init__(
+        self,
+        command: Sequence[str | os.PathLike[str]],
+        *,
+        session_root: str | Path,
+        model: str,
+        process_env: Mapping[str, str] | None = None,
+    ) -> None:
+        if not command or not model:
+            raise ValueError("ACP command and model are required")
+        root = Path(session_root)
+        if not root.is_absolute():
+            raise ValueError("ACP session root must be absolute")
+        self.command = tuple(os.fspath(part) for part in command)
+        self.session_root = root
+        self.model = model
+        self.process_env = dict(
+            process_env
+            if process_env is not None
+            else {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "LANG": os.environ.get("LANG", "C.UTF-8"),
+            }
+        )
+
+    async def run(
+        self, request: Mapping[str, Any], *, timeout_s: float
+    ) -> ModelBackendResponse:
+        acp = _load_acp_client_module()
+        try:
+            return await self._run_acp(acp, request, timeout_s=timeout_s)
+        except ModelRunnerFailure:
+            raise
+        except acp.ACPTimeoutError as exc:
+            raise ModelRunnerFailure(
+                "timeout", "acp_timeout", retryable=True
+            ) from exc
+        except acp.ACPProcessError as exc:
+            raise ModelRunnerFailure(
+                "provider", "acp_process_error", retryable=True
+            ) from exc
+        except acp.ACPRemoteError as exc:
+            raise ModelRunnerFailure(
+                "provider", "acp_remote_error", retryable=False
+            ) from exc
+        except acp.ACPProtocolError as exc:
+            raise ModelRunnerFailure("malformed", "acp_protocol_error") from exc
+
+    async def _run_acp(
+        self, acp: Any, request: Mapping[str, Any], *, timeout_s: float
+    ) -> ModelBackendResponse:
+        prompt = _canonical_json_bytes(
+            {
+                "protocol": "autonomous_butler_model_v1",
+                "model": self.model,
+                "instruction": (
+                    "Return exactly one JSON object with keys model, proposal, "
+                    "and citations. Request no tools or filesystem access."
+                ),
+                "request": {
+                    key: request[key]
+                    for key in (
+                        "request_id",
+                        "board_id",
+                        "subject_id",
+                        "task_kind",
+                        "policy_digest_sha256",
+                        "task_input",
+                        "task_input_digest_sha256",
+                        "task_schema",
+                        "evidence_refs",
+                        "max_output_bytes",
+                        "usage_limit",
+                        "deadline",
+                    )
+                },
+            }
+        ).decode("utf-8")
+        if len(prompt.encode("utf-8")) > MAX_PROVIDER_PROMPT_CHARS:
+            raise ModelRunnerFailure("budget", "provider_prompt_too_large")
+        chunks: list[str] = []
+        size = 0
+        tool_seen = False
+        measured_usage: Mapping[str, Any] | None = None
+        provider_request_ref: str | None = None
+
+        async with acp.ACPClient(
+            self.command,
+            process_cwd=self.session_root,
+            env=self.process_env,
+            permission_policy=None,
+            request_timeout=timeout_s,
+        ) as client:
+            await client.initialize(timeout=timeout_s)
+            session_id = await client.new_session(
+                self.session_root, mcp_servers=(), timeout=timeout_s
+            )
+
+            async def collect() -> None:
+                nonlocal size, tool_seen, measured_usage, provider_request_ref
+                while True:
+                    row = await client.next_update()
+                    try:
+                        if row.get("sessionId") != session_id:
+                            continue
+                        update = row.get("update")
+                        if not isinstance(update, Mapping):
+                            continue
+                        kind = update.get("sessionUpdate")
+                        if kind in {"tool_call", "tool_call_update"}:
+                            tool_seen = True
+                        if kind == "pursers_model_usage":
+                            if measured_usage is not None:
+                                raise ModelRunnerFailure(
+                                    "malformed", "duplicate_acp_usage"
+                                )
+                            usage = update.get("usage")
+                            reference = update.get("providerRequestRef")
+                            if (
+                                not isinstance(usage, Mapping)
+                                or not isinstance(reference, str)
+                                or update.get("model") != self.model
+                            ):
+                                raise ModelRunnerFailure(
+                                    "malformed", "invalid_acp_usage"
+                                )
+                            measured_usage = dict(usage)
+                            provider_request_ref = reference
+                        if kind != "agent_message_chunk":
+                            continue
+                        content = update.get("content")
+                        text = content.get("text") if isinstance(content, Mapping) else None
+                        if not isinstance(text, str):
+                            continue
+                        size += len(text.encode("utf-8"))
+                        if size > int(request["max_output_bytes"]) + 65_536:
+                            raise ModelRunnerFailure(
+                                "budget", "acp_response_too_large"
+                            )
+                        chunks.append(text)
+                    finally:
+                        client.acknowledge_update()
+
+            collector = asyncio.create_task(collect())
+            try:
+                outcome = await client.prompt(
+                    session_id, prompt, timeout=timeout_s
+                )
+                await asyncio.sleep(0)
+                if collector.done():
+                    collector.result()
+            finally:
+                collector.cancel()
+                with suppress(asyncio.CancelledError):
+                    await collector
+        if outcome.get("stopReason") == "cancelled":
+            raise ModelRunnerFailure("cancelled", "acp_cancelled")
+        if outcome.get("stopReason") != "end_turn":
+            raise ModelRunnerFailure("provider", "acp_incomplete", retryable=True)
+        if tool_seen:
+            raise ModelRunnerFailure("policy", "acp_tool_request_refused")
+        try:
+            payload = json.loads("".join(chunks))
+        except json.JSONDecodeError as exc:
+            raise ModelRunnerFailure("malformed", "malformed_acp_response") from exc
+        if not isinstance(payload, Mapping) or set(payload) != {
+            "model",
+            "proposal",
+            "citations",
+        }:
+            raise ModelRunnerFailure("malformed", "invalid_backend_payload")
+        if measured_usage is None or provider_request_ref is None:
+            raise ModelRunnerFailure("budget", "missing_acp_usage")
+        return _backend_payload(
+            {
+                **payload,
+                "usage": measured_usage,
+                "provider_request_ref": provider_request_ref,
+            },
+            self.model,
+        )
+
+
+class AutonomousModelRunner:
+    """Provider-neutral policy boundary for autonomous model execution."""
+
+    def __init__(
+        self,
+        backend: ModelBackend,
+        *,
+        task_schemas: TaskSchemaRegistry,
+        policy_digest: Callable[[str], str],
+        result_store: ModelResultStore | None = None,
+        cancellations: ModelCancellationRegistry | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.backend = backend
+        self.task_schemas = task_schemas
+        self.policy_digest = policy_digest
+        self.result_store = result_store or MemoryModelResultStore()
+        self.cancellations = cancellations or ModelCancellationRegistry()
+        self.now = now or (lambda: datetime.now(timezone.utc))
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def cancel(self, cancellation_token: str) -> None:
+        self.cancellations.cancel(cancellation_token)
+
+    async def run(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        request_id = str(request.get("request_id", "invalid-request"))
+        lock = self._locks.setdefault(request_id, asyncio.Lock())
+        async with lock:
+            try:
+                validated = self._validate_request(request)
+            except ModelRunnerFailure as exc:
+                return self._failure_result(request, exc)
+            request_digest = _sha256_json(validated)
+            try:
+                replay = self.result_store.get(validated["request_id"])
+            except ModelRunnerFailure as exc:
+                return self._failure_result(validated, exc)
+            if replay is not None:
+                if replay[0] != request_digest:
+                    return self._failure_result(
+                        validated,
+                        ModelRunnerFailure("policy", "replay_digest_mismatch"),
+                    )
+                return replay[1]
+
+            event = self.cancellations.event(validated["cancellation_token"])
+            if event.is_set():
+                result = self._failure_result(
+                    validated,
+                    ModelRunnerFailure("cancelled", "cancelled_before_dispatch"),
+                )
+                self.result_store.put(validated["request_id"], request_digest, result)
+                return result
+            deadline = _parse_utc_deadline(validated["deadline"])
+            remaining = (deadline - self.now().astimezone(timezone.utc)).total_seconds()
+            if remaining <= 0:
+                result = self._failure_result(
+                    validated, ModelRunnerFailure("timeout", "deadline_expired")
+                )
+                self.result_store.put(validated["request_id"], request_digest, result)
+                return result
+
+            task = asyncio.create_task(self.backend.run(validated, timeout_s=remaining))
+            cancelled = asyncio.create_task(event.wait())
+            try:
+                done, _pending = await asyncio.wait(
+                    {task, cancelled},
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if cancelled in done and cancelled.result():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await task
+                    raise ModelRunnerFailure(
+                        "cancelled", "cancelled_during_dispatch"
+                    )
+                if task not in done:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await task
+                    raise ModelRunnerFailure(
+                        "timeout", "provider_timeout", retryable=True
+                    )
+                response = task.result()
+                if event.is_set():
+                    raise ModelRunnerFailure(
+                        "cancelled", "cancelled_before_result"
+                    )
+                if self.policy_digest(validated["board_id"]) != validated[
+                    "policy_digest_sha256"
+                ]:
+                    raise ModelRunnerFailure("policy", "policy_digest_drift")
+                result = self._success_result(validated, response)
+            except ModelRunnerFailure as exc:
+                result = self._failure_result(validated, exc)
+            except asyncio.CancelledError:
+                task.cancel()
+                raise
+            except Exception:
+                result = self._failure_result(
+                    validated,
+                    ModelRunnerFailure("provider", "provider_crash", retryable=True),
+                )
+            finally:
+                cancelled.cancel()
+                with suppress(asyncio.CancelledError):
+                    await cancelled
+            self.result_store.put(validated["request_id"], request_digest, result)
+            return result
+
+    def _validate_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        try:
+            import jsonschema
+
+            schema_path = (
+                Path(__file__).resolve().parents[2]
+                / "docs/design/schemas/autonomous-butler-model-v1.schema.json"
+            )
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            jsonschema.Draft202012Validator(
+                schema, format_checker=jsonschema.FormatChecker()
+            ).validate(request)
+        except Exception as exc:
+            if isinstance(exc, ModelRunnerFailure):
+                raise
+            raise ModelRunnerFailure("malformed", "invalid_model_request") from exc
+        value = copy.deepcopy(dict(request))
+        if _sha256_json(value["task_input"]) != value["task_input_digest_sha256"]:
+            raise ModelRunnerFailure("policy", "task_input_digest_mismatch")
+        if self.policy_digest(value["board_id"]) != value["policy_digest_sha256"]:
+            raise ModelRunnerFailure("policy", "policy_digest_mismatch")
+        _parse_utc_deadline(value["deadline"])
+        return value
+
+    def _success_result(
+        self, request: Mapping[str, Any], response: ModelBackendResponse
+    ) -> dict[str, Any]:
+        encoded = response.proposal_json.encode("utf-8")
+        if len(encoded) > request["max_output_bytes"]:
+            raise ModelRunnerFailure("budget", "output_bytes_exceeded")
+        try:
+            proposal = json.loads(response.proposal_json)
+        except json.JSONDecodeError as exc:
+            raise ModelRunnerFailure("malformed", "invalid_proposal_json") from exc
+        self.task_schemas.validate(request["task_schema"], proposal)
+        citations = list(response.citations)
+        if not citations or len(citations) != len(set(citations)):
+            raise ModelRunnerFailure("malformed", "invalid_citations")
+        if any(item not in request["evidence_refs"] for item in citations):
+            raise ModelRunnerFailure("policy", "unknown_citation")
+        usage = self._validate_usage(request["usage_limit"], response.usage)
+        if not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", response.provider_request_ref
+        ):
+            raise ModelRunnerFailure("malformed", "invalid_provider_reference")
+        return {
+            "schema": "autonomous_butler_model_v1",
+            "schema_version": 1,
+            "message_type": "result",
+            "request_id": request["request_id"],
+            "board_id": request["board_id"],
+            "policy_digest_sha256": request["policy_digest_sha256"],
+            "outcome": "succeeded",
+            "proposal_json": response.proposal_json,
+            "citations": citations,
+            "usage": usage,
+            "completed_at": self.now().astimezone(timezone.utc).isoformat(),
+            "provider_request_ref": response.provider_request_ref,
+            "error": None,
+        }
+
+    @staticmethod
+    def _validate_usage(
+        limit: Mapping[str, Any], usage: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        keys = {
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cost_microunits",
+            "measured",
+        }
+        if set(usage) != keys or usage.get("measured") is not True:
+            raise ModelRunnerFailure("budget", "unmeasured_usage")
+        values = {key: usage[key] for key in keys - {"measured"}}
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in values.values()):
+            raise ModelRunnerFailure("malformed", "invalid_usage")
+        if values["total_tokens"] != values["input_tokens"] + values["output_tokens"]:
+            raise ModelRunnerFailure("malformed", "usage_arithmetic_mismatch")
+        if (
+            values["input_tokens"] > limit["max_input_tokens"]
+            or values["output_tokens"] > limit["max_output_tokens"]
+            or values["cost_microunits"] > limit["max_cost_microunits"]
+        ):
+            raise ModelRunnerFailure("budget", "usage_limit_exceeded")
+        return {**values, "measured": True}
+
+    def _failure_result(
+        self, request: Mapping[str, Any], failure: ModelRunnerFailure
+    ) -> dict[str, Any]:
+        category = failure.category if failure.category in {
+            "cancelled",
+            "timeout",
+            "provider",
+            "malformed",
+            "policy",
+            "budget",
+        } else "provider"
+        return {
+            "schema": "autonomous_butler_model_v1",
+            "schema_version": 1,
+            "message_type": "result",
+            "request_id": _bounded_model_id(
+                request.get("request_id"), "invalid-request"
+            ),
+            "board_id": _bounded_model_id(request.get("board_id"), "invalid-board"),
+            "policy_digest_sha256": _bounded_sha256(
+                request.get("policy_digest_sha256")
+            ),
+            "outcome": "cancelled" if category == "cancelled" else "failed",
+            "proposal_json": None,
+            "citations": [],
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cost_microunits": 0,
+                "measured": True,
+            },
+            "completed_at": self.now().astimezone(timezone.utc).isoformat(),
+            "reason_code": failure.code,
+            "error": {
+                "category": category,
+                "code": failure.code,
+                "retryable": failure.retryable,
+            },
+        }
 class SingletonLock:
     def __init__(self, path: Path) -> None:
         self.path = path
