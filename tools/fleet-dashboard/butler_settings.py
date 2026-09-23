@@ -41,6 +41,7 @@ MAX_HEADER_VALUE_CHARS = 1_000
 DEFAULT_VALIDATION_PATH = "models"
 DEFAULT_DRAFT_PATH = "draft"
 DRAFT_PROTOCOL = "pursers_json_v1"
+DRAFT_PROTOCOLS = frozenset({DRAFT_PROTOCOL, "openai_chat_completions_v1"})
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 _SECRET_HEADER = re.compile(r"(?:authorization|api[-_]?key|token|secret|cookie)", re.I)
 _MANAGED_KEY_REFERENCE = re.compile(r"^file:([A-Za-z0-9._-]{1,160}\.key)$")
@@ -344,7 +345,7 @@ def validate_request(value: Any) -> dict[str, Any]:
         or parsed_draft_path.fragment
     ):
         raise ButlerSettingsError("draft_path must be a relative URL path")
-    if value["draft_protocol"] != DRAFT_PROTOCOL:
+    if value["draft_protocol"] not in DRAFT_PROTOCOLS:
         raise ButlerSettingsError("draft_protocol is invalid")
     api_key = value["api_key"]
     if not isinstance(api_key, str) or len(api_key.encode("utf-8")) > MAX_KEY_BYTES:
@@ -373,7 +374,7 @@ def validate_request(value: Any) -> dict[str, Any]:
         "key_prefix": key_prefix,
         "validation_path": validation_path,
         "draft_path": draft_path,
-        "draft_protocol": DRAFT_PROTOCOL,
+        "draft_protocol": value["draft_protocol"],
         "expected_sha256": expected_sha256,
     }
 
@@ -461,7 +462,10 @@ def validate_board_butler_document(value: Any) -> dict[str, Any]:
             _text(candidate["validation_path"], f"{path}.validation_path", 500)
         if "draft_path" in candidate:
             _text(candidate["draft_path"], f"{path}.draft_path", 500)
-        if "draft_protocol" in candidate and candidate["draft_protocol"] != DRAFT_PROTOCOL:
+        if (
+            "draft_protocol" in candidate
+            and candidate["draft_protocol"] not in DRAFT_PROTOCOLS
+        ):
             raise ButlerSettingsError(f"{path}.draft_protocol is invalid")
 
     def settings(candidate: Any, path: str) -> None:

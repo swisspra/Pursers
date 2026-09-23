@@ -252,6 +252,12 @@ existing key is preserved when the key field is left blank. **Stop butler now**
 is enabled only for a verified live process; it engages the private kill switch
 and reports the stopped state on the refreshed card.
 
+The draft protocol is explicit. Existing configurations keep **Pursers JSON
+v1** and their existing draft path. For a standard OpenAI-compatible or LiteLLM
+endpoint ending in `/v1`, select **OpenAI chat completions v1** and use
+`chat/completions` as the draft path. Fleet validates the selected protocol and
+relative path; it does not infer or silently rewrite either value.
+
 The linked **Coordinator config** page exposes the published thresholds and
 intake policy. **Save config** uses the displayed revision for concurrency and
 shows success or conflict beside the button; mode changes still require a

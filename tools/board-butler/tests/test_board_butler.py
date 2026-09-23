@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import threading
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -230,6 +231,213 @@ def provider_server(content: str) -> Any:
         server.shutdown()
         thread.join(timeout=5)
         server.server_close()
+
+
+@contextlib.contextmanager
+def openai_chat_server(
+    *, response: Any = None, status: int = 200, raw_response: bytes | None = None
+) -> Any:
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            requests.append(
+                {
+                    "path": self.path,
+                    "headers": dict(self.headers.items()),
+                    "body": json.loads(self.rfile.read(length)),
+                }
+            )
+            payload = (
+                raw_response
+                if raw_response is not None
+                else json.dumps(response).encode("utf-8")
+            )
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}/v1", requests
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+
+def openai_runtime(endpoint: str, secret: str = "adapter-secret-6471") -> Any:
+    return butler.ProviderRuntime(
+        endpoint=endpoint,
+        model="exact-model-6471",
+        credential=secret,
+        draft_path="chat/completions",
+        draft_protocol="openai_chat_completions_v1",
+    )
+
+
+def test_openai_chat_adapter_uses_exact_model_and_keeps_secret_out_of_prompt() -> None:
+    secret = "adapter-secret-6471"
+    response = {"choices": [{"message": {"content": "adapter draft"}}]}
+    with openai_chat_server(response=response) as (endpoint, requests):
+        draft = asyncio.run(
+            butler.draft_with_provider(
+                openai_runtime(endpoint, secret),
+                question("What should the coordinator answer?"),
+                {
+                    "verdict": "ESCALATE",
+                    "policy_rule": "no-confident-policy-match",
+                    "evidence": "No citable evidence was found.",
+                    "message": "fallback",
+                },
+            )
+        )
+
+    assert draft == "adapter draft"
+    assert len(requests) == 1
+    sent = requests[0]
+    assert sent["path"] == "/v1/chat/completions"
+    assert sent["headers"]["Authorization"] == f"Bearer {secret}"
+    assert sent["body"]["model"] == "exact-model-6471"
+    assert sent["body"]["messages"][0]["role"] == "system"
+    assert json.loads(sent["body"]["messages"][1]["content"])["question"] == (
+        "What should the coordinator answer?"
+    )
+    assert secret not in json.dumps(sent["body"])
+    assert secret not in draft
+
+
+@pytest.mark.parametrize(
+    ("status", "response", "raw_response", "error_type", "match"),
+    [
+        (401, {"error": {"message": "bad key"}}, None, urllib.error.HTTPError, None),
+        (200, {"choices": []}, None, ValueError, "no draft text"),
+        (
+            200,
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "adapter-error-secret-6471"
+                        }
+                    }
+                ]
+            },
+            None,
+            ValueError,
+            "provider draft was unsafe",
+        ),
+        (
+            200,
+            None,
+            b"x" * (butler.MAX_PROVIDER_RESPONSE_BYTES + 1),
+            ValueError,
+            "exceeded the safe bound",
+        ),
+    ],
+)
+def test_openai_chat_adapter_fails_closed_for_provider_errors(
+    status: int,
+    response: Any,
+    raw_response: bytes | None,
+    error_type: type[BaseException],
+    match: str | None,
+) -> None:
+    secret = "adapter-error-secret-6471"
+    with openai_chat_server(
+        response=response, status=status, raw_response=raw_response
+    ) as (endpoint, requests):
+        with pytest.raises(error_type, match=match) as caught:
+            asyncio.run(
+                butler.draft_with_provider(
+                    openai_runtime(endpoint, secret), question("Anything?"), {}
+                )
+            )
+
+    assert len(requests) == 1
+    assert secret not in json.dumps(requests[0]["body"])
+    assert secret not in str(caught.value)
+
+
+def test_openai_chat_adapter_rejects_oversize_prompt_before_request() -> None:
+    runtime = openai_runtime("http://127.0.0.1:9/v1")
+    with pytest.raises(ValueError, match="prompt exceeded the safe bound"):
+        asyncio.run(
+            butler.draft_with_provider(
+                runtime,
+                question("x" * butler.MAX_PROVIDER_PROMPT_CHARS),
+                {},
+            )
+        )
+
+
+def test_openai_chat_adapter_refuses_cross_origin_redirect() -> None:
+    secret = "redirect-secret-6471"
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def do_GET(self) -> None:
+            type(self).calls += 1
+            self.send_response(200)
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            type(self).calls += 1
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+    target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+    target_thread.start()
+    target_url = f"http://127.0.0.1:{target.server_port}/capture"
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        authorization: str | None = None
+
+        def do_POST(self) -> None:
+            type(self).authorization = self.headers.get("Authorization")
+            self.send_response(302)
+            self.send_header("Location", target_url)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    source = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    source_thread = threading.Thread(target=source.serve_forever, daemon=True)
+    source_thread.start()
+    endpoint = f"http://127.0.0.1:{source.server_port}/v1"
+    try:
+        with pytest.raises(urllib.error.URLError, match="redirect refused") as caught:
+            asyncio.run(
+                butler.draft_with_provider(
+                    openai_runtime(endpoint, secret), question("Anything?"), {}
+                )
+            )
+    finally:
+        source.shutdown()
+        target.shutdown()
+        source_thread.join(timeout=5)
+        target_thread.join(timeout=5)
+        source.server_close()
+        target.server_close()
+
+    assert RedirectHandler.authorization == f"Bearer {secret}"
+    assert TargetHandler.calls == 0
+    assert secret not in str(caught.value)
 
 
 @pytest.mark.parametrize(

@@ -24,6 +24,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import aclosing
@@ -60,7 +61,11 @@ MAX_FINDINGS = 50
 MAX_STATE_CHARS = 4_800
 MAX_PROVIDER_RESPONSE_BYTES = 1_000_000
 MAX_PROVIDER_DRAFT_CHARS = 2_000
+MAX_PROVIDER_PROMPT_CHARS = 12_000
 PROVIDER_TIMEOUT_S = 30.0
+PROVIDER_DRAFT_PROTOCOLS = frozenset(
+    {"pursers_json_v1", "openai_chat_completions_v1"}
+)
 QUESTION_EVENT = "coordinator_question_asked"
 OBSERVATION_TICKET_LIMIT = 100
 OBSERVATION_HISTORY_DAYS = 7
@@ -521,30 +526,102 @@ def _provider_draft_text(document: Any) -> str | None:
     return draft if isinstance(draft, str) else None
 
 
+def _openai_chat_draft_text(document: Any) -> str | None:
+    if not isinstance(document, Mapping):
+        return None
+    choices = document.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, Mapping):
+        return None
+    message = first.get("message")
+    if not isinstance(message, Mapping):
+        return None
+    content = message.get("content")
+    return content if isinstance(content, str) else None
+
+
+def _provider_origin(value: str) -> tuple[str, str, int]:
+    parsed = urllib.parse.urlsplit(value)
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ValueError("provider URL is invalid") from exc
+    return parsed.scheme.casefold(), (parsed.hostname or "").casefold(), port
+
+
+class _ProviderRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep provider credentials on their originally configured origin."""
+
+    def __init__(self, request_url: str) -> None:
+        super().__init__()
+        self._origin = _provider_origin(request_url)
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Mapping[str, str],
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if _provider_origin(newurl) != self._origin:
+            raise urllib.error.URLError("provider redirect refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _provider_request_body(
+    runtime: ProviderRuntime,
+    question: Mapping[str, Any],
+    finding: Mapping[str, Any],
+) -> bytes:
+    inputs = {
+        "question": str(question.get("message", "")),
+        "question_kind": str(question.get("kind", "information")),
+        "verdict": finding.get("verdict"),
+        "policy_rule": finding.get("policy_rule"),
+        "evidence": finding.get("evidence"),
+        "fallback_draft": finding.get("message"),
+    }
+    if runtime.draft_protocol == "pursers_json_v1":
+        document = {
+            "protocol": runtime.draft_protocol,
+            "model": runtime.model,
+            "input": inputs,
+            "max_output_chars": MAX_PROVIDER_DRAFT_CHARS,
+        }
+    elif runtime.draft_protocol == "openai_chat_completions_v1":
+        prompt = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
+        if len(prompt) > MAX_PROVIDER_PROMPT_CHARS:
+            raise ValueError("provider prompt exceeded the safe bound")
+        document = {
+            "model": runtime.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Draft one concise coordinator response from the supplied "
+                        "policy result. Return only the draft text."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": MAX_PROVIDER_DRAFT_CHARS,
+        }
+    else:
+        raise ValueError("provider draft protocol is unsupported")
+    return json.dumps(document, separators=(",", ":")).encode("utf-8")
+
+
 async def draft_with_provider(
     runtime: ProviderRuntime,
     question: Mapping[str, Any],
     finding: Mapping[str, Any],
 ) -> str:
     """Create one bounded shadow draft without exposing provider credentials."""
-    if runtime.draft_protocol != "pursers_json_v1":
-        raise ValueError("provider draft protocol is unsupported")
-    request_body = json.dumps(
-        {
-            "protocol": runtime.draft_protocol,
-            "model": runtime.model,
-            "input": {
-                "question": str(question.get("message", "")),
-                "question_kind": str(question.get("kind", "information")),
-                "verdict": finding.get("verdict"),
-                "policy_rule": finding.get("policy_rule"),
-                "evidence": finding.get("evidence"),
-                "fallback_draft": finding.get("message"),
-            },
-            "max_output_chars": MAX_PROVIDER_DRAFT_CHARS,
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
+    request_body = _provider_request_body(runtime, question, finding)
 
     def request() -> str:
         headers = {
@@ -560,12 +637,24 @@ async def draft_with_provider(
             headers=headers,
             method="POST",
         )
-        with urllib.request.urlopen(raw, timeout=PROVIDER_TIMEOUT_S) as response:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            _ProviderRedirectHandler(raw.full_url),
+        )
+        with opener.open(raw, timeout=PROVIDER_TIMEOUT_S) as response:
+            geturl = getattr(response, "geturl", None)
+            final_url = geturl() if callable(geturl) else raw.full_url
+            if _provider_origin(final_url) != _provider_origin(raw.full_url):
+                raise ValueError("provider response changed origin")
             payload = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
         if len(payload) > MAX_PROVIDER_RESPONSE_BYTES:
             raise ValueError("provider response exceeded the safe bound")
         document = json.loads(payload)
-        text = _provider_draft_text(document)
+        text = (
+            _provider_draft_text(document)
+            if runtime.draft_protocol == "pursers_json_v1"
+            else _openai_chat_draft_text(document)
+        )
         if text is None:
             raise ValueError("provider response had no draft text")
         text = text.strip()
@@ -944,7 +1033,7 @@ def _validate_settings(value: Any, path: str) -> dict[str, Any]:
                 raise ButlerConfigError(f"{path}.{task}.{field_name} is invalid")
             result[task][field_name] = relative_path
         if "draft_protocol" in selected:
-            if selected["draft_protocol"] != "pursers_json_v1":
+            if selected["draft_protocol"] not in PROVIDER_DRAFT_PROTOCOLS:
                 raise ButlerConfigError(f"{path}.{task}.draft_protocol is invalid")
             result[task]["draft_protocol"] = selected["draft_protocol"]
     return result

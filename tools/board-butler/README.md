@@ -243,18 +243,24 @@ are configuration; `key_ref` is an opaque `file:<id>.key` reference into the
 private 0600 provider secret directory, never a home path or credential value.
 Provider entries may also contain bounded
 non-secret `extra_headers`, `key_header`, `key_prefix`, and a relative
-`validation_path`. The relative `draft_path` and explicit
-`draft_protocol=pursers_json_v1` select the provider-neutral draft contract.
+`validation_path`. The relative `draft_path` and explicit `draft_protocol`
+select the draft contract. Existing and omitted settings remain
+`pursers_json_v1` with `draft_path=draft`. To use a standard OpenAI-compatible
+gateway such as LiteLLM, select `openai_chat_completions_v1` and set the path to
+`chat/completions` when the endpoint already ends in `/v1`.
 Fleet validates and saves these settings, then the resident
 re-resolves them and reads the referenced key at the start of every question
 cycle. No process restart or hand edit is required.
 
 When the drafting provider is configured, the resident sends one bounded
-`pursers_json_v1` request to the configured relative draft path for each question
-that clears the local rate limits. The request contains `protocol`, `model`, a
-bounded `input` object, and `max_output_chars`; the response is a JSON object with
-a string `draft`. The request uses the exact selected model, optional headers,
-and credential read from `key_ref`; none of those secret bytes enter the input.
+request to the configured relative draft path for each question that clears the
+local rate limits. `pursers_json_v1` sends `protocol`, `model`, an `input` object,
+and `max_output_chars`, and reads a string `draft`. The opt-in
+`openai_chat_completions_v1` contract sends the exact model, bounded system/user
+messages, and `max_tokens`, then reads `choices[0].message.content`. Both
+contracts use the optional headers and credential read from `key_ref`; secret
+bytes never enter the prompt. Responses and draft text remain bounded, and
+cross-origin redirects are refused before credentials can be forwarded.
 Deterministic policy and evidence still set the verdict, and the provider supplies
 only the shadow draft text. A provider failure or a response that contains the
 credential fails closed to a fixed, key-free escalation message.

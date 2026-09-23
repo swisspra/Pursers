@@ -395,6 +395,76 @@ def test_provider_validation_has_four_fixed_outcomes(opener: Any, outcome: str) 
     assert "not-returned" not in json.dumps(result.as_dict())
 
 
+def test_openai_chat_protocol_requires_explicit_selection_and_preserves_legacy_default(
+    tmp_path: Path,
+) -> None:
+    legacy = butler_settings.ButlerSettingsManager(tmp_path / "legacy").view(
+        configured_payload(), "sandbox"
+    )
+    assert legacy["draft_path"] == "draft"
+    assert legacy["draft_protocol"] == "pursers_json_v1"
+
+    clean = butler_settings.validate_request(
+        provider_request(
+            draft_path="chat/completions",
+            draft_protocol="openai_chat_completions_v1",
+        )
+    )
+    assert clean["draft_path"] == "chat/completions"
+    assert clean["draft_protocol"] == "openai_chat_completions_v1"
+
+    with pytest.raises(
+        butler_settings.ButlerSettingsError, match="draft_protocol is invalid"
+    ):
+        butler_settings.validate_request(
+            provider_request(draft_protocol="implicit-or-unknown")
+        )
+
+
+def test_save_persists_openai_chat_protocol_for_next_resident_cycle(
+    tmp_path: Path,
+) -> None:
+    saved: dict[str, Any] = {}
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "private-keys",
+        opener=lambda *_args, **_kwargs: Response(
+            {"data": [{"id": "Model/Exact-1"}]}
+        ),
+    )
+    result = manager.save(
+        {"config": coordinator_config(), "expected_sha256": "a" * 64},
+        provider_request(
+            draft_path="chat/completions",
+            draft_protocol="openai_chat_completions_v1",
+        ),
+        "sandbox",
+        lambda value, _expected: saved.update(config=value)
+        or {"config": value, "expected_sha256": "b" * 64},
+    )
+
+    provider = saved["config"]["board_butler"]["global"]["drafting"]
+    assert result["saved"] is True
+    assert result["draft_path"] == "chat/completions"
+    assert result["draft_protocol"] == "openai_chat_completions_v1"
+    assert provider["draft_path"] == "chat/completions"
+    assert provider["draft_protocol"] == "openai_chat_completions_v1"
+
+    effective = board_butler.resolve_config(
+        saved["config"],
+        SimpleNamespace(
+            drafts_per_hour=5,
+            drafts_per_ticket=2,
+            drafts_per_board=20,
+            home_board="sandbox",
+            project=None,
+        ),
+        {},
+        datetime(2026, 9, 17, tzinfo=timezone.utc),
+    )
+    assert effective.drafting_draft_path == "chat/completions"
+    assert effective.drafting_draft_protocol == "openai_chat_completions_v1"
+
+
 @pytest.mark.parametrize(
     "endpoint",
     [
@@ -1386,6 +1456,8 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
     assert 'data-pursers-action="save-butler"' in html
     assert 'data-pursers-field="draft-path"' in html
     assert 'data-pursers-field="draft-protocol"' in html
+    assert '<select name="draft_protocol"' in html
+    assert 'value="openai_chat_completions_v1"' in html
     assert "body.saved===false" in html
     assert "form.elements.api_key.value=''" in html
     assert "Saved changes apply on the butler's next question cycle." in html
