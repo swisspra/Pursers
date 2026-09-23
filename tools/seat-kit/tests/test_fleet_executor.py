@@ -767,18 +767,170 @@ def test_config_loader_accepts_only_explicit_local_policy(tmp_path: Path) -> Non
         executor.load_policy(path)
 
 
-@pytest.mark.skipif(
-    sys.platform != "linux" or not os.environ.get("XDG_RUNTIME_DIR"),
-    reason="real disposable systemd user manager is unavailable",
-)
-def test_real_disposable_systemd_user_service_when_available(tmp_path: Path) -> None:
-    probe = subprocess.run(
+def _systemd_user_manager_available(
+    *,
+    runner: Any = subprocess.run,
+    platform: str = sys.platform,
+    runtime_dir: str | None = os.environ.get("XDG_RUNTIME_DIR"),
+) -> bool:
+    if platform != "linux" or not runtime_dir:
+        return False
+    probe = runner(
         ["systemctl", "--user", "is-system-running"],
         check=False,
         text=True,
         capture_output=True,
     )
-    if probe.returncode not in {0, 1}:
+    return probe.returncode == 0 and probe.stdout.strip() == "running"
+
+
+def _cleanup_disposable_systemd_user_service(
+    adapter: Any,
+    seat_id: str,
+    template: executor.SeatTemplate,
+    unit_dir: Path,
+    *,
+    started: bool,
+    suppress_errors: bool,
+    runner: Any = subprocess.run,
+) -> None:
+    cleanup_error: Exception | None = None
+    if started:
+        try:
+            adapter.stop(seat_id, template)
+        except Exception as exc:  # pragma: no branch - preserves the primary failure
+            cleanup_error = exc
+    try:
+        (unit_dir / adapter._unit_name(seat_id)).unlink(missing_ok=True)
+    except Exception as exc:
+        cleanup_error = cleanup_error or exc
+    try:
+        reload_result = runner(
+            ["systemctl", "--user", "daemon-reload"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if reload_result.returncode != 0:
+            cleanup_error = cleanup_error or RuntimeError("systemd_daemon_reload_failed")
+    except Exception as exc:
+        cleanup_error = cleanup_error or exc
+    if cleanup_error is not None and not suppress_errors:
+        raise cleanup_error
+
+
+def _exercise_disposable_systemd_user_service(
+    adapter: Any,
+    seat_id: str,
+    template: executor.SeatTemplate,
+    unit_dir: Path,
+    *,
+    runner: Any = subprocess.run,
+) -> executor.ServiceObservation:
+    started = False
+    try:
+        adapter.instantiate(seat_id, template)
+        adapter.start(seat_id, template)
+        started = True
+        observation = adapter.inspect(seat_id, template)
+        assert observation.identity_verified
+    except BaseException:
+        _cleanup_disposable_systemd_user_service(
+            adapter,
+            seat_id,
+            template,
+            unit_dir,
+            started=started,
+            suppress_errors=True,
+            runner=runner,
+        )
+        raise
+    _cleanup_disposable_systemd_user_service(
+        adapter,
+        seat_id,
+        template,
+        unit_dir,
+        started=True,
+        suppress_errors=False,
+        runner=runner,
+    )
+    return observation
+
+
+def test_degraded_systemd_user_manager_is_unavailable_before_mutation() -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, "degraded\n", "")
+
+    assert not _systemd_user_manager_available(
+        runner=runner,
+        platform="linux",
+        runtime_dir="/run/user/1000",
+    )
+    assert calls == [["systemctl", "--user", "is-system-running"]]
+
+
+def test_start_failure_cleanup_preserves_primary_error(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    calls: list[str] = []
+    reloads: list[list[str]] = []
+
+    class FailingAdapter:
+        @staticmethod
+        def _unit_name(seat_id: str) -> str:
+            return f"{seat_id}.service"
+
+        def instantiate(self, seat_id: str, template: executor.SeatTemplate) -> None:
+            calls.append("instantiate")
+            (unit_dir / self._unit_name(seat_id)).write_text("unit", encoding="utf-8")
+
+        def start(self, seat_id: str, template: executor.SeatTemplate) -> None:
+            calls.append("start")
+            raise RuntimeError("systemd_start_failed")
+
+        def inspect(
+            self, seat_id: str, template: executor.SeatTemplate
+        ) -> executor.ServiceObservation:
+            raise AssertionError("inspect must not run after start failure")
+
+        def stop(self, seat_id: str, template: executor.SeatTemplate) -> None:
+            calls.append("stop")
+            raise RuntimeError("systemd_stop_failed")
+
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        reloads.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    repository = tmp_path / "repository"
+    seat = tmp_path / "seat"
+    repository.mkdir()
+    seat.mkdir()
+    template = executor.SeatTemplate.from_record(
+        "worker-standard", template_record(repository, seat)
+    )
+    with pytest.raises(RuntimeError, match="systemd_start_failed"):
+        _exercise_disposable_systemd_user_service(
+            FailingAdapter(),
+            "worker-a",
+            template,
+            unit_dir,
+            runner=runner,
+        )
+
+    assert calls == ["instantiate", "start"]
+    assert not (unit_dir / "worker-a.service").exists()
+    assert reloads == [["systemctl", "--user", "daemon-reload"]]
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or not os.environ.get("XDG_RUNTIME_DIR"),
+    reason="real disposable systemd user manager is unavailable",
+)
+def test_real_disposable_systemd_user_service_when_available(tmp_path: Path) -> None:
+    if not _systemd_user_manager_available():
         pytest.skip("real disposable systemd user manager is unavailable")
     repository = tmp_path / "repository"
     seat = tmp_path / "seat"
@@ -794,11 +946,4 @@ def test_real_disposable_systemd_user_service_when_available(tmp_path: Path) -> 
         {"credential.worker-a": tmp_path / "empty.env"},
     )
     seat_id = f"disposable-{os.getpid()}"
-    try:
-        adapter.instantiate(seat_id, template)
-        adapter.start(seat_id, template)
-        assert adapter.inspect(seat_id, template).identity_verified
-    finally:
-        adapter.stop(seat_id, template)
-        (unit_dir / adapter._unit_name(seat_id)).unlink(missing_ok=True)
-        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+    _exercise_disposable_systemd_user_service(adapter, seat_id, template, unit_dir)
