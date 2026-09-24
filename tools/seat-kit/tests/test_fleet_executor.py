@@ -784,6 +784,41 @@ def _systemd_user_manager_available(
     return probe.returncode == 0 and probe.stdout.strip() == "running"
 
 
+def _systemd_user_service_start_available(
+    *,
+    runner: Any = subprocess.run,
+    platform: str = sys.platform,
+    runtime_dir: str | None = os.environ.get("XDG_RUNTIME_DIR"),
+    pid: int = os.getpid(),
+) -> bool:
+    if not _systemd_user_manager_available(
+        runner=runner,
+        platform=platform,
+        runtime_dir=runtime_dir,
+    ):
+        return False
+    try:
+        probe = runner(
+            [
+                "systemd-run",
+                "--user",
+                "--quiet",
+                "--wait",
+                "--collect",
+                f"--unit=pursers-ci-probe-{pid}",
+                sys.executable,
+                "-c",
+                "raise SystemExit(0)",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except OSError:
+        return False
+    return probe.returncode == 0
+
+
 def _cleanup_disposable_systemd_user_service(
     adapter: Any,
     seat_id: str,
@@ -872,6 +907,50 @@ def test_degraded_systemd_user_manager_is_unavailable_before_mutation() -> None:
     assert calls == [["systemctl", "--user", "is-system-running"]]
 
 
+def test_running_systemd_user_manager_without_start_capability_is_unavailable() -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[0] == "systemctl":
+            return subprocess.CompletedProcess(command, 0, "running\n", "")
+        return subprocess.CompletedProcess(command, 1, "", "Failed to start transient service")
+
+    assert not _systemd_user_service_start_available(
+        runner=runner,
+        platform="linux",
+        runtime_dir="/run/user/1000",
+        pid=123,
+    )
+    assert calls == [
+        ["systemctl", "--user", "is-system-running"],
+        [
+            "systemd-run",
+            "--user",
+            "--quiet",
+            "--wait",
+            "--collect",
+            "--unit=pursers-ci-probe-123",
+            sys.executable,
+            "-c",
+            "raise SystemExit(0)",
+        ],
+    ]
+
+
+def test_running_systemd_user_manager_with_start_capability_is_available() -> None:
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        stdout = "running\n" if command[0] == "systemctl" else ""
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    assert _systemd_user_service_start_available(
+        runner=runner,
+        platform="linux",
+        runtime_dir="/run/user/1000",
+        pid=123,
+    )
+
+
 def test_start_failure_cleanup_preserves_primary_error(tmp_path: Path) -> None:
     unit_dir = tmp_path / "systemd"
     unit_dir.mkdir()
@@ -930,8 +1009,8 @@ def test_start_failure_cleanup_preserves_primary_error(tmp_path: Path) -> None:
     reason="real disposable systemd user manager is unavailable",
 )
 def test_real_disposable_systemd_user_service_when_available(tmp_path: Path) -> None:
-    if not _systemd_user_manager_available():
-        pytest.skip("real disposable systemd user manager is unavailable")
+    if not _systemd_user_service_start_available():
+        pytest.skip("real disposable systemd user service start is unavailable")
     repository = tmp_path / "repository"
     seat = tmp_path / "seat"
     repository.mkdir()
