@@ -2881,7 +2881,7 @@ def test_module_has_only_bounded_question_answer_ticket_mutation() -> None:
         "ticket_" + "assign",
     )
     assert all(name not in source for name in forbidden)
-    assert "self.client.ticket_question_answer(" in source
+    assert source.count("client.ticket_question_answer(") == 3
     assert "host_binding" not in source
     assert "ticket_update(action.ticket_id, parked=True)" in source
     assert source.count("ticket_annotate(") == 2
@@ -3194,3 +3194,180 @@ def test_registry_refresh_runs_real_derivation_for_two_active_boards_twice(
     ]
     assert first["refreshed_at"] != second["refreshed_at"]
     assert len(calls) == 2
+
+
+def test_full_ticket_hydration_is_board_scoped_and_tolerates_delete_race(
+    tmp_path: Path,
+) -> None:
+    from contextlib import asynccontextmanager
+
+    from pursers_client import BoardClientError
+
+    options = args(tmp_path, dry_run=False)
+    options.home_board = "home"
+    backend = butler.CentralBackend(options, "opaque")
+    calls: list[tuple[str, str]] = []
+
+    class Client:
+        def __init__(self, board_id: str, tickets: Mapping[str, Any]) -> None:
+            self.board_id = board_id
+            self.tickets = tickets
+
+        async def ticket_get(self, ticket_id: str, **_kwargs: Any) -> Mapping[str, Any]:
+            calls.append((self.board_id, ticket_id))
+            if ticket_id not in self.tickets:
+                raise BoardClientError("ticket not found")
+            return {"ticket": self.tickets[ticket_id]}
+
+    clients = {
+        "home": Client("home", {"TK-home": {"ticket_id": "TK-home"}}),
+        "away": Client("away", {"TK-away": {"ticket_id": "TK-away"}}),
+    }
+
+    @asynccontextmanager
+    async def client_for_board(board_id: str):
+        yield clients[board_id]
+
+    backend._client_for_board = client_for_board  # type: ignore[method-assign]
+
+    async def hydrate() -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        home = await backend._full_tickets_for_board("home", ["TK-home"])
+        away = await backend._full_tickets_for_board(
+            "away", ["TK-away", "TK-disappeared"]
+        )
+        return home, away
+
+    home, away = asyncio.run(hydrate())
+
+    assert list(home) == ["TK-home"]
+    assert list(away) == ["TK-away"]
+    assert calls == [
+        ("home", "TK-home"),
+        ("away", "TK-away"),
+        ("away", "TK-disappeared"),
+    ]
+    assert backend._registry_failures == {
+        "away": [
+            {"operation": "ticket_get", "reason_code": "ticket_disappeared"}
+        ]
+    }
+
+
+def test_registry_refresh_continues_after_list_get_delete_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import asynccontextmanager
+
+    from pursers_client import BoardClientError
+
+    options = args(tmp_path, dry_run=False)
+    options.home_board = "home"
+    options.runtime_mode = "active"
+    options.act_on_board = ["home", "away"]
+    options.active_action = []
+    options.no_live_candidates_cycles = 3
+    backend = butler.CentralBackend(options, "opaque")
+
+    class Reader:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "Reader":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    snapshots = {
+        "home": {"coordination_tickets": [{"ticket_id": "TK-home"}]},
+        "away": {
+            "coordination_tickets": [
+                {"ticket_id": "TK-away"},
+                {"ticket_id": "TK-removed"},
+            ]
+        },
+    }
+
+    async def read_cycle(_reader: Reader, _home: str) -> tuple[Any, Any, Any]:
+        projects = [SimpleNamespace(board_id="home"), SimpleNamespace(board_id="away")]
+        return projects, snapshots, {"home": {}, "away": {}}
+
+    async def coordinator_run(_parsed: argparse.Namespace) -> None:
+        return None
+
+    monkeypatch.setattr(
+        backend,
+        "_coordinator_api",
+        lambda: {
+            "RawReader": Reader,
+            "read_cycle": read_cycle,
+            "parse_args": lambda _argv: argparse.Namespace(),
+            "run": coordinator_run,
+        },
+    )
+
+    class Client:
+        def __init__(self, tickets: Mapping[str, Any]) -> None:
+            self.tickets = tickets
+
+        async def ticket_get(self, ticket_id: str, **_kwargs: Any) -> Mapping[str, Any]:
+            if ticket_id not in self.tickets:
+                raise BoardClientError("ticket not found")
+            return {"ticket": self.tickets[ticket_id]}
+
+    clients = {
+        "home": Client({"TK-home": {"ticket_id": "TK-home"}}),
+        "away": Client({"TK-away": {"ticket_id": "TK-away"}}),
+    }
+
+    @asynccontextmanager
+    async def client_for_board(board_id: str):
+        yield clients[board_id]
+
+    monkeypatch.setattr(backend, "_client_for_board", client_for_board)
+
+    async def observation_context(
+        board_id: str, _snapshot: Mapping[str, Any], now: Any
+    ) -> butler.ObservationContext:
+        return butler.ObservationContext(
+            board_id=board_id, tickets={}, questions=(), now=now
+        )
+
+    async def reconcile_holds(
+        _board_id: str, _action_ids: set[str], _now: Any
+    ) -> list[str]:
+        return []
+
+    async def write_observations(
+        _board_id: str, _findings: Any, _now: Any
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        backend, "_observation_context_for_board", observation_context
+    )
+    monkeypatch.setattr(backend, "_reconcile_mechanical_holds", reconcile_holds)
+    monkeypatch.setattr(backend, "_write_observation_findings", write_observations)
+
+    refreshed = asyncio.run(backend.refresh_registry_findings(NOW))
+
+    assert refreshed["active_boards"] == ["away", "home"]
+    assert refreshed["observations"] == {
+        "away": {
+            "findings": 0,
+            "open_questions": 0,
+            "reconciled_open_questions": 0,
+            "repeat_rediscovery_escalations": 0,
+        },
+        "home": {
+            "findings": 0,
+            "open_questions": 0,
+            "reconciled_open_questions": 0,
+            "repeat_rediscovery_escalations": 0,
+        },
+    }
+    assert refreshed["board_failures"] == {
+        "away": [
+            {"operation": "ticket_get", "reason_code": "ticket_disappeared"}
+        ]
+    }

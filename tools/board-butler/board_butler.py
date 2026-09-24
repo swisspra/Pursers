@@ -7564,6 +7564,7 @@ class CentralBackend:
         self.latest_seq = 0
         self.project_name: str | None = None
         self._coordinator: dict[str, Any] | None = None
+        self._registry_failures: dict[str, list[dict[str, str]]] = {}
 
     async def __aenter__(self) -> "CentralBackend":
         from pursers_client import BoardClient
@@ -7601,8 +7602,37 @@ class CentralBackend:
         if self._context is not None:
             await self._context.__aexit__(*args)
 
-    async def ticket_get(self, ticket_id: str) -> Mapping[str, Any]:
-        return await self.client.ticket_get(ticket_id)
+    @asynccontextmanager
+    async def _client_for_board(self, board_id: str) -> AsyncIterator[Any]:
+        """Yield a client whose immutable board context matches the operation."""
+        if board_id == self.args.home_board:
+            yield self.client
+            return
+        from pursers_client import BoardClient
+
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
+            allow_takeover=True,
+        ) as client:
+            yield client
+
+    def _record_registry_failure(
+        self, board_id: str, operation: str, reason_code: str
+    ) -> None:
+        rows = self._registry_failures.setdefault(board_id, [])
+        if len(rows) < OBSERVATION_TICKET_LIMIT:
+            rows.append({"operation": operation, "reason_code": reason_code})
+
+    async def ticket_get(
+        self, ticket_id: str, *, board_id: str | None = None
+    ) -> Mapping[str, Any]:
+        async with self._client_for_board(board_id or self.args.home_board) as client:
+            return await client.ticket_get(ticket_id)
 
     async def board_status(self) -> Mapping[str, Any]:
         status = await self.client.board_snapshot(limit=1_000, max_bytes=750_000)
@@ -7646,11 +7676,19 @@ class CentralBackend:
                 pending.append({**dict(row), "board_id": self.args.home_board})
         return pending
 
-    async def question(self, ticket_id: str, question_id: str) -> Mapping[str, Any] | None:
-        result = await self.client.board_question_inbox(ticket_id=ticket_id, limit=100)
+    async def question(
+        self,
+        ticket_id: str,
+        question_id: str,
+        *,
+        board_id: str | None = None,
+    ) -> Mapping[str, Any] | None:
+        selected_board = board_id or self.args.home_board
+        async with self._client_for_board(selected_board) as client:
+            result = await client.board_question_inbox(ticket_id=ticket_id, limit=100)
         return next(
             (
-                {**dict(row), "board_id": self.args.home_board}
+                {**dict(row), "board_id": selected_board}
                 for row in result.get("questions", [])
                 if isinstance(row, Mapping) and row.get("question_id") == question_id
             ),
@@ -7658,25 +7696,33 @@ class CentralBackend:
         )
 
     async def accept_question(
-        self, ticket_id: str, question_id: str
+        self, ticket_id: str, question_id: str, *, board_id: str | None = None
     ) -> Mapping[str, Any]:
-        return await self.client.ticket_question_answer(
-            ticket_id, question_id, action="accept"
-        )
+        async with self._client_for_board(board_id or self.args.home_board) as client:
+            return await client.ticket_question_answer(
+                ticket_id, question_id, action="accept"
+            )
 
     async def answer_question(
-        self, ticket_id: str, question_id: str, message: str
+        self,
+        ticket_id: str,
+        question_id: str,
+        message: str,
+        *,
+        board_id: str | None = None,
     ) -> Mapping[str, Any]:
-        return await self.client.ticket_question_answer(
-            ticket_id, question_id, action="answer", message=message
-        )
+        async with self._client_for_board(board_id or self.args.home_board) as client:
+            return await client.ticket_question_answer(
+                ticket_id, question_id, action="answer", message=message
+            )
 
     async def release_question(
-        self, ticket_id: str, question_id: str
+        self, ticket_id: str, question_id: str, *, board_id: str | None = None
     ) -> Mapping[str, Any]:
-        return await self.client.ticket_question_answer(
-            ticket_id, question_id, action="release"
-        )
+        async with self._client_for_board(board_id or self.args.home_board) as client:
+            return await client.ticket_question_answer(
+                ticket_id, question_id, action="release"
+            )
 
     async def coordinator_config(self) -> Mapping[str, Any]:
         try:
@@ -8004,22 +8050,22 @@ class CentralBackend:
     async def _full_tickets_for_board(
         self, board_id: str, ticket_ids: Sequence[str]
     ) -> dict[str, Mapping[str, Any]]:
-        from pursers_client import BoardClient
+        from pursers_client import BoardClientError
 
         result: dict[str, Mapping[str, Any]] = {}
-        async with BoardClient(
-            self.args.url,
-            self.token,
-            board_id,
-            agent_name=self.args.agent_name,
-            role="coordinator",
-            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
-            allow_takeover=True,
-        ) as client:
+        async with self._client_for_board(board_id) as client:
             for ticket_id in sorted(set(ticket_ids)):
-                payload = await client.ticket_get(
-                    ticket_id, view="full", include_dispatch_history=True
-                )
+                try:
+                    payload = await client.ticket_get(
+                        ticket_id, view="full", include_dispatch_history=True
+                    )
+                except BoardClientError as exc:
+                    if str(exc).strip().lower() != "ticket not found":
+                        raise
+                    self._record_registry_failure(
+                        board_id, "ticket_get", "ticket_disappeared"
+                    )
+                    continue
                 ticket = payload.get("ticket", {})
                 if isinstance(ticket, Mapping):
                     result[ticket_id] = ticket
@@ -8334,6 +8380,7 @@ class CentralBackend:
 
     async def refresh_registry_findings(self, now: datetime) -> dict[str, Any]:
         """Act only on opted-in boards, then run coordinator's real derivation."""
+        self._registry_failures = {}
         coordinator = self._coordinator_api()
         async with coordinator["RawReader"](self.args.url, self.token) as reader:
             projects, snapshots, previous = await coordinator["read_cycle"](
@@ -8441,6 +8488,10 @@ class CentralBackend:
                 for board_id in sorted(active_boards)
             },
             "fleet": dict(fleet),
+            "board_failures": {
+                board_id: list(rows)
+                for board_id, rows in sorted(self._registry_failures.items())
+            },
             "refreshed_at": now.isoformat(),
         }
 

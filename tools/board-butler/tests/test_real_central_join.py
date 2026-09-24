@@ -302,6 +302,148 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
                 pass
 
 
+async def _seed_multiboard(
+    data_root: Path, port: int, principal_id: str
+) -> tuple[str, str, str]:
+    mcp, service = central.build_server("127.0.0.1", port, data_root)
+    admin = central.Principal(
+        "PR-real-multiboard-admin",
+        "real-multiboard-admin",
+        frozenset({"board:read", "board:write", "board:coordinate"}),
+    )
+    butler_principal = central.Principal(
+        principal_id,
+        "board-butler-real-join",
+        frozenset({"board:read", "board:coordinate"}),
+    )
+    current = [admin]
+    original_current_principal = central.current_principal
+    central.current_principal = lambda: current[0]
+    boards = ("butler-home", "butler-away")
+    ticket_ids = ("TK-home-context", "TK-away-context")
+    question_id = "CQ-away-context"
+    try:
+        agent_ids: dict[str, str] = {}
+        for board_id, ticket_id in zip(boards, ticket_ids, strict=True):
+            current[0] = admin
+            joined = await mcp.call_tool(
+                "board_join",
+                {"board_id": board_id, "agent_name": "bootstrap-admin"},
+            )
+            assert not joined.is_error
+            admitted = await mcp.call_tool(
+                "board_member_add",
+                {
+                    "board_id": board_id,
+                    "agent_name": "bootstrap-admin",
+                    "principal_id": principal_id,
+                    "role": "admin",
+                },
+            )
+            assert not admitted.is_error
+            current[0] = butler_principal
+            butler_join = await mcp.call_tool(
+                "board_join",
+                {
+                    "board_id": board_id,
+                    "agent_name": "board-butler-real-join",
+                    "role": "coordinator",
+                    "capabilities": dict(butler.BOARD_BUTLER_CAPABILITIES),
+                },
+            )
+            assert not butler_join.is_error
+            agent_ids[board_id] = butler_join.structured_content["agent_id"]
+            current[0] = admin
+            created = await mcp.call_tool(
+                "ticket_create",
+                {
+                    "board_id": board_id,
+                    "ticket_id": ticket_id,
+                    "agent_name": "bootstrap-admin",
+                    "title": f"Exact context for {board_id}",
+                    "description": "Real Central multi-board routing fixture",
+                    "scope": "interactive-no-send",
+                    "required_fields": ["test_output"],
+                    "unassigned": True,
+                },
+            )
+            assert not created.is_error
+            coordinators = await mcp.call_tool(
+                "board_state_update",
+                {
+                    "board_id": board_id,
+                    "agent_name": "bootstrap-admin",
+                    "key": central.PROJECT_COORDINATORS_STATE_KEY,
+                    "value": json.dumps({board_id: [agent_ids[board_id]]}),
+                },
+            )
+            assert not coordinators.is_error
+
+        registry = {
+            "schema_version": 1,
+            "projects": {
+                board_id: {
+                    "board_id": board_id,
+                    "work_dir": f"/PATH/TO/{board_id}",
+                    "status": "active",
+                }
+                for board_id in boards
+            },
+        }
+        registered = await mcp.call_tool(
+            "board_state_update",
+            {
+                "board_id": boards[0],
+                "agent_name": "bootstrap-admin",
+                "key": "project_registry",
+                "value": json.dumps(registry),
+            },
+        )
+        assert not registered.is_error
+
+        asked_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+        def seed_question(document: dict[str, object]) -> dict[str, object]:
+            ticket = document["tickets"][ticket_ids[1]]  # type: ignore[index]
+            ticket["coordinator_questions"] = [  # type: ignore[index]
+                {
+                    "question_id": question_id,
+                    "project": boards[1],
+                    "asker_role": "worker",
+                    "message_id": None,
+                    "in_reply_to": None,
+                    "message": f"What is the status of {ticket_ids[1]}?",
+                    "kind": "information",
+                    "state": "open",
+                    "asked_by": {
+                        "agent_id": "AI-away-worker",
+                        "agent_name": "away-worker",
+                        "principal_id": "PR-away-worker",
+                    },
+                    "asked_at": asked_at.isoformat(),
+                    "accepted_by": None,
+                    "accepted_at": None,
+                    "binding": None,
+                    "rebound_at": None,
+                    "answer": None,
+                    "answered_at": None,
+                }
+            ]
+            return {}
+
+        service.mutate(boards[1], seed_question)
+        return ticket_ids[0], ticket_ids[1], question_id
+    finally:
+        central.current_principal = original_current_principal
+        task = getattr(service, "recurring_reaper_task", None)
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
 @contextmanager
 def _central_process(
     data_root: Path, port: int, environment: dict[str, str]
@@ -669,6 +811,135 @@ def test_butler_reaches_first_working_state_against_real_central(
             assert effective.future_active_state == "auto_demoted"
             assert effective.effective_answering_mode == "assist"
             assert "private injected delivery detail" not in json.dumps(finding_state)
+
+    with _central_process(data_root, port, environment) as url:
+        asyncio.run(connect(url))
+
+
+def test_real_central_multiboard_operations_keep_exact_board_context(
+    tmp_path: Path,
+) -> None:
+    port = _free_port()
+    issuer = f"http://127.0.0.1:{port}"
+    audience = f"{issuer}/mcp"
+    token, principal_id = _credential(tmp_path, issuer, audience)
+    token_path = tmp_path / "butler.token"
+    token_path.write_text(token, encoding="utf-8")
+    token_path.chmod(0o600)
+    data_root = tmp_path / "central-data"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "CENTRAL_AUTH_MODE": "jwt",
+            "CENTRAL_JWT_ISSUER": issuer,
+            "CENTRAL_JWT_AUDIENCE": audience,
+            "CENTRAL_JWKS_PATH": str(tmp_path / "jwks.json"),
+            "CENTRAL_ADMISSION": "invite",
+            "STORE_BACKEND": "sqlite",
+        }
+    )
+    previous = os.environ.copy()
+    os.environ.update(environment)
+    try:
+        home_ticket, away_ticket, away_question = asyncio.run(
+            _seed_multiboard(data_root, port, principal_id)
+        )
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
+
+    async def connect(url: str) -> None:
+        options = SimpleNamespace(
+            url=url,
+            token_path=token_path,
+            home_board="butler-home",
+            agent_name="board-butler-real-join",
+            dry_run=True,
+            kill_switch=False,
+            veto_question=None,
+            repo=REPOSITORY_ROOT,
+            runtime_mode="active",
+            act_on_board=["butler-home", "butler-away"],
+            active_action=[],
+            no_live_candidates_cycles=3,
+            action_hold_seconds=0,
+            fleet_observation_file=None,
+            fleet_state_file=None,
+            fleet_executor_socket=None,
+            fleet_executor_key_id=None,
+            fleet_executor_private_key=None,
+        )
+        async with butler.CentralBackend(options, token) as backend:
+            refreshed = await backend.refresh_registry_findings(butler.utc_now())
+            assert refreshed["active_boards"] == ["butler-away", "butler-home"]
+            assert refreshed["board_failures"] == {}
+
+            home = await backend._full_tickets_for_board(
+                "butler-home", [home_ticket]
+            )
+            away = await backend._full_tickets_for_board(
+                "butler-away", [away_ticket, "TK-removed-after-list"]
+            )
+            assert list(home) == [home_ticket]
+            assert list(away) == [away_ticket]
+            assert backend._registry_failures == {
+                "butler-away": [
+                    {
+                        "operation": "ticket_get",
+                        "reason_code": "ticket_disappeared",
+                    }
+                ]
+            }
+
+            question = await backend.question(
+                away_ticket, away_question, board_id="butler-away"
+            )
+            assert question is not None
+            assert question["board_id"] == "butler-away"
+            accepted = await backend.accept_question(
+                away_ticket, away_question, board_id="butler-away"
+            )
+            assert accepted["question"]["state"] == "accepted"
+            released = await backend.release_question(
+                away_ticket, away_question, board_id="butler-away"
+            )
+            assert released["question"]["state"] == "open"
+
+            options.dry_run = False
+            action = butler.MechanicalAction(
+                "park_no_live_candidates",
+                "butler-away",
+                away_ticket,
+                None,
+                None,
+                3,
+                "real Central exact-board fixture",
+                True,
+            )
+            assert (
+                await backend._mechanical_hold_status(action, butler.utc_now())
+                == "registered"
+            )
+            assert (
+                await backend._mechanical_hold_status(action, butler.utc_now())
+                == "ready"
+            )
+            await backend._execute_mechanical_action(action)
+            await backend._mark_mechanical_hold_executed(action, butler.utc_now())
+
+            away_after = await backend.ticket_get(
+                away_ticket, board_id="butler-away"
+            )
+            home_after = await backend.ticket_get(
+                home_ticket, board_id="butler-home"
+            )
+            assert away_after["ticket"]["parked"] is True
+            assert any(
+                butler.PARK_ANNOTATION_MARKER in row["text"]
+                for row in away_after["ticket"]["annotations"]
+            )
+            assert home_after["ticket"].get("parked") is not True
+            assert home_after["ticket"].get("annotations", []) == []
 
     with _central_process(data_root, port, environment) as url:
         asyncio.run(connect(url))
