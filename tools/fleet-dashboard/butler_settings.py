@@ -46,10 +46,563 @@ _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 _SECRET_HEADER = re.compile(r"(?:authorization|api[-_]?key|token|secret|cookie)", re.I)
 _MANAGED_KEY_REFERENCE = re.compile(r"^file:([A-Za-z0-9._-]{1,160}\.key)$")
 _AddressInfo = tuple[int, int, int, str, tuple[Any, ...]]
+AUTONOMOUS_STATES = frozenset(
+    {
+        "shadow",
+        "pending",
+        "applying",
+        "autonomous",
+        "degraded",
+        "auto_demoted",
+        "killed",
+    }
+)
+AUTONOMOUS_ROLES = ("worker", "reviewer", "acp_worker")
+AUTONOMOUS_RUNNERS = frozenset({"direct_api", "acp"})
+AUTONOMOUS_COMMANDS = frozenset(
+    {"reconcile_now", "enable_connector", "disable_connector", "kill", "resume"}
+)
 
 
 class ButlerSettingsError(ValueError):
     """One bounded, key-free settings error safe for the local page."""
+
+
+def _bounded_integer(value: Any, label: str, minimum: int, maximum: int) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not minimum <= value <= maximum
+    ):
+        raise ButlerSettingsError(
+            f"{label} must be an integer between {minimum} and {maximum}"
+        )
+    return value
+
+
+def _identifier(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", value
+    ):
+        raise ButlerSettingsError(f"{label} must be a bounded identifier")
+    return value
+
+
+def _timestamp(value: Any) -> str | None:
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return value if parsed.tzinfo is not None else None
+
+
+def _state_identifier(value: Any) -> str | None:
+    try:
+        return _identifier(value, "state identifier")
+    except ButlerSettingsError:
+        return None
+
+
+def _state_count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10_000:
+        return None
+    return value
+
+
+def _project_health(value: Any, *, connector: bool = False) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    status = value.get("status")
+    observed_at = _timestamp(value.get("observed_at"))
+    if status not in {"healthy", "degraded", "unavailable", "unknown"} or observed_at is None:
+        return None
+    result: dict[str, Any] = {"status": status, "observed_at": observed_at}
+    if connector:
+        connector_id = _state_identifier(value.get("connector_id"))
+        if connector_id is None:
+            return None
+        result["connector_id"] = connector_id
+    reason_code = value.get("reason_code")
+    if reason_code is not None:
+        if not isinstance(reason_code, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,79}", reason_code
+        ):
+            return None
+        result["reason_code"] = reason_code
+    if connector:
+        for name in ("last_success_at", "last_failure_at"):
+            if name in value:
+                timestamp = _timestamp(value[name])
+                if timestamp is None:
+                    return None
+                result[name] = timestamp
+    return result
+
+
+def _project_autonomous_state(value: Any, board_id: Any) -> dict[str, Any] | None:
+    """Allowlist one strict public state projection and discard unknown fields."""
+    if not isinstance(value, Mapping) or value.get("schema") != "autonomous_butler_state_v1":
+        return None
+    state_board = _state_identifier(value.get("board_id"))
+    revision = value.get("config_revision")
+    effective = value.get("effective_state")
+    observed_at = _timestamp(value.get("observed_at"))
+    stale_after = _timestamp(value.get("stale_after"))
+    if (
+        value.get("schema_version") != 1
+        or state_board is None
+        or state_board != board_id
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+        or effective not in AUTONOMOUS_STATES
+        or observed_at is None
+        or stale_after is None
+        or not isinstance(value.get("kill_latched"), bool)
+    ):
+        return None
+    capacity = value.get("capacity")
+    if not isinstance(capacity, Mapping):
+        return None
+    projected_capacity: dict[str, Any] = {}
+    for role in AUTONOMOUS_ROLES:
+        row = capacity.get(role)
+        if not isinstance(row, Mapping):
+            return None
+        counts = {
+            name: _state_count(row.get(name))
+            for name in (
+                "desired",
+                "ready",
+                "busy",
+                "starting",
+                "draining",
+                "unhealthy",
+                "stopped",
+            )
+        }
+        seat_ids = row.get("seat_ids")
+        template_ids = row.get("template_ids")
+        if (
+            any(item is None for item in counts.values())
+            or not isinstance(seat_ids, list)
+            or not isinstance(template_ids, list)
+            or len(seat_ids) > 1_000
+            or len(template_ids) > 1_000
+        ):
+            return None
+        clean_seats = [_state_identifier(item) for item in seat_ids]
+        clean_templates = [_state_identifier(item) for item in template_ids]
+        if any(item is None for item in clean_seats + clean_templates):
+            return None
+        projected_capacity[role] = {
+            **counts,
+            "seat_ids": clean_seats,
+            "template_ids": clean_templates,
+        }
+    host = value.get("host_processes")
+    if not isinstance(host, Mapping):
+        return None
+    host_counts = {
+        name: _state_count(host.get(name))
+        for name in (
+            "role_agents",
+            "control_plane",
+            "agent_process_ceiling",
+            "total_process_ceiling",
+        )
+    }
+    host_observed_at = _timestamp(host.get("observed_at"))
+    executor = _project_health(value.get("executor"))
+    connectors = value.get("connectors")
+    if (
+        any(item is None for item in host_counts.values())
+        or host_counts["agent_process_ceiling"] == 0
+        or host_counts["total_process_ceiling"] == 0
+        or host_observed_at is None
+        or executor is None
+        or not isinstance(connectors, list)
+        or len(connectors) > 32
+    ):
+        return None
+    projected_connectors = [
+        _project_health(item, connector=True) for item in connectors
+    ]
+    if any(item is None for item in projected_connectors):
+        return None
+    result: dict[str, Any] = {
+        "schema": "autonomous_butler_state_v1",
+        "schema_version": 1,
+        "board_id": state_board,
+        "config_revision": revision,
+        "effective_state": effective,
+        "observed_at": observed_at,
+        "stale_after": stale_after,
+        "capacity": projected_capacity,
+        "host_processes": {**host_counts, "observed_at": host_observed_at},
+        "executor": executor,
+        "connectors": projected_connectors,
+        "kill_latched": value["kill_latched"],
+    }
+    reason_code = value.get("reason_code")
+    if reason_code is not None:
+        if not isinstance(reason_code, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,79}", reason_code
+        ):
+            return None
+        result["reason_code"] = reason_code
+    for name in ("current_command_id", "current_operation_id"):
+        if name in value:
+            identifier = _state_identifier(value[name])
+            if identifier is None:
+                return None
+            result[name] = identifier
+    return result
+
+
+def autonomous_butler_view(
+    config_payload: Mapping[str, Any],
+    command_payload: Mapping[str, Any],
+    actual_state: Any = None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Project only public, typed Autonomous Butler control-plane fields."""
+    config = config_payload.get("config")
+    if config is not None and not isinstance(config, Mapping):
+        raise ButlerSettingsError("Autonomous Butler config is malformed")
+    clean_config = copy.deepcopy(dict(config)) if isinstance(config, Mapping) else None
+    if clean_config is not None:
+        for connector in clean_config.get("desired", {}).get("connectors", []):
+            if isinstance(connector, dict):
+                # Secret references are useful only to the transport adapter. Fleet
+                # exposes presence, never the reference identifier or secret value.
+                connector["secret_configured"] = connector.get("secret_ref") is not None
+                connector.pop("secret_ref", None)
+                connector.pop("endpoint_ref", None)
+    commands = command_payload.get("commands", [])
+    if not isinstance(commands, list):
+        raise ButlerSettingsError("Autonomous Butler command history is malformed")
+    projected_commands: list[dict[str, Any]] = []
+    for row in commands[:50]:
+        if not isinstance(row, Mapping):
+            continue
+        transition = row.get("transition")
+        projected_commands.append(
+            {
+                "command_id": row.get("command_id"),
+                "intent": row.get("intent"),
+                "status": row.get("status"),
+                "revision": row.get("revision"),
+                "created_at": row.get("created_at"),
+                "updated_at": row.get("updated_at"),
+                "reason_code": (
+                    transition.get("reason_code")
+                    if isinstance(transition, Mapping)
+                    else None
+                ),
+                "audit_id": (
+                    transition.get("audit_id")
+                    if isinstance(transition, Mapping)
+                    else None
+                ),
+                "expired": row.get("expired") is True,
+            }
+        )
+    state = _project_autonomous_state(actual_state, config_payload.get("board_id"))
+    state_stale = False
+    if state is not None:
+        stale_after = state.get("stale_after")
+        try:
+            stale_at = datetime.fromisoformat(str(stale_after).replace("Z", "+00:00"))
+            if stale_at.tzinfo is None:
+                raise ValueError("missing timezone")
+        except ValueError:
+            state = None
+        else:
+            current_time = now or datetime.now(timezone.utc)
+            if current_time.tzinfo is None:
+                current_time = current_time.replace(tzinfo=timezone.utc)
+            state_stale = stale_at.astimezone(timezone.utc) <= current_time.astimezone(
+                timezone.utc
+            )
+            if state_stale:
+                executor = state.get("executor")
+                if isinstance(executor, dict):
+                    executor["status"] = "unknown"
+                    executor["reason_code"] = "stale_observation"
+                for connector in state.get("connectors", []):
+                    if isinstance(connector, dict):
+                        connector["status"] = "unknown"
+                        connector["reason_code"] = "stale_observation"
+    config_revision = config_payload.get("revision", 0)
+    state_revision_mismatch = (
+        state is not None and state.get("config_revision") != config_revision
+    )
+    state_current = state is not None and not state_stale and not state_revision_mismatch
+    effective = config_payload.get("effective_mode", "shadow")
+    if state_current and state.get("effective_state") in AUTONOMOUS_STATES:
+        effective = state["effective_state"]
+    state_status = (
+        "unavailable"
+        if state is None
+        else "revision_mismatch"
+        if state_revision_mismatch
+        else "stale"
+        if state_stale
+        else "current"
+    )
+    return {
+        "schema_version": 1,
+        "board_id": config_payload.get("board_id"),
+        "revision": config_payload.get("revision", 0),
+        "config_digest_sha256": config_payload.get("config_digest_sha256"),
+        "effective_state": effective if effective in AUTONOMOUS_STATES else "shadow",
+        "config": clean_config,
+        "actual_state": state,
+        "actual_state_available": state_current,
+        "actual_state_stale": state_stale,
+        "actual_state_revision_mismatch": state_revision_mismatch,
+        "actual_state_status": state_status,
+        "commands": projected_commands,
+        "history_truncated": command_payload.get("truncated") is True,
+    }
+
+
+def prepare_autonomous_butler_config(
+    current_payload: Mapping[str, Any], request: Any
+) -> tuple[dict[str, Any], int, str]:
+    """Validate a bounded Fleet edit while preserving human-owned authority."""
+    required = {
+        "board_id",
+        "mutation_id",
+        "expected_revision",
+        "mode",
+        "runner",
+        "capacity",
+        "host_concurrency",
+        "board_concurrency",
+        "cooldowns",
+        "budget",
+        "connectors",
+    }
+    if not isinstance(request, Mapping) or set(request) != required:
+        raise ButlerSettingsError("Autonomous Butler config request fields are invalid")
+    board_id = _identifier(request["board_id"], "board_id")
+    mutation_id = _identifier(request["mutation_id"], "mutation_id")
+    expected = _bounded_integer(
+        request["expected_revision"], "expected_revision", 0, 2**63 - 1
+    )
+    current_revision = current_payload.get("revision", 0)
+    if expected != current_revision:
+        raise ButlerSettingsError("configuration changed; reload before saving")
+    current = current_payload.get("config")
+    if not isinstance(current, Mapping):
+        raise ButlerSettingsError(
+            "Autonomous Butler must be provisioned by an administrator first"
+        )
+    if current.get("board_id") != board_id:
+        raise ButlerSettingsError("board_id does not match the current configuration")
+    envelope = current.get("envelope")
+    if not isinstance(envelope, Mapping):
+        raise ButlerSettingsError("Autonomous Butler envelope is malformed")
+    mode = request["mode"]
+    if mode not in {"shadow", "autonomous"}:
+        raise ButlerSettingsError("mode is invalid")
+    if mode == "autonomous":
+        raise ButlerSettingsError(
+            "Fleet cannot activate autonomous mode; a separate active authorization is required"
+        )
+    runner = request["runner"]
+    if runner not in AUTONOMOUS_RUNNERS:
+        raise ButlerSettingsError("runner is invalid")
+    capacity = request["capacity"]
+    if not isinstance(capacity, Mapping) or set(capacity) != set(AUTONOMOUS_ROLES):
+        raise ButlerSettingsError("capacity fields are invalid")
+    clean_capacity: dict[str, dict[str, int]] = {}
+    for role in AUTONOMOUS_ROLES:
+        counts = capacity[role]
+        if not isinstance(counts, Mapping) or set(counts) != {"min", "target", "max"}:
+            raise ButlerSettingsError(f"capacity.{role} fields are invalid")
+        clean = {
+            name: _bounded_integer(counts[name], f"capacity.{role}.{name}", 0, 100)
+            for name in ("min", "target", "max")
+        }
+        if not clean["min"] <= clean["target"] <= clean["max"]:
+            raise ButlerSettingsError(
+                f"capacity.{role} must satisfy min <= target <= max"
+            )
+        envelope_capacity = envelope.get("max_capacity")
+        if (
+            not isinstance(envelope_capacity, Mapping)
+            or isinstance(envelope_capacity.get(role), bool)
+            or not isinstance(envelope_capacity.get(role), int)
+            or clean["max"] > envelope_capacity[role]
+        ):
+            raise ButlerSettingsError(f"capacity.{role} exceeds the immutable envelope")
+        clean_capacity[role] = clean
+    host_concurrency = _bounded_integer(
+        request["host_concurrency"], "host_concurrency", 1, 256
+    )
+    board_concurrency = _bounded_integer(
+        request["board_concurrency"], "board_concurrency", 1, 256
+    )
+    if host_concurrency > envelope.get("max_host_concurrency", 0):
+        raise ButlerSettingsError("host_concurrency exceeds the immutable envelope")
+    if board_concurrency > envelope.get("max_board_concurrency", 0):
+        raise ButlerSettingsError("board_concurrency exceeds the immutable envelope")
+    runtime = current.get("host_runtime")
+    if not isinstance(runtime, Mapping) or host_concurrency > runtime.get(
+        "agent_process_ceiling", 0
+    ):
+        raise ButlerSettingsError("host_concurrency exceeds the host runtime ceiling")
+    if sum(role["target"] for role in clean_capacity.values()) > board_concurrency:
+        raise ButlerSettingsError("capacity targets exceed board_concurrency")
+    if sum(role["target"] for role in clean_capacity.values()) > host_concurrency:
+        raise ButlerSettingsError("capacity targets exceed host_concurrency")
+    cooldowns = request["cooldowns"]
+    if not isinstance(cooldowns, Mapping) or set(cooldowns) != {
+        "scale_up_s",
+        "scale_down_s",
+        "failure_backoff_s",
+    }:
+        raise ButlerSettingsError("cooldown fields are invalid")
+    clean_cooldowns = {
+        "scale_up_s": _bounded_integer(
+            cooldowns["scale_up_s"], "cooldowns.scale_up_s", 0, 604_800
+        ),
+        "scale_down_s": _bounded_integer(
+            cooldowns["scale_down_s"], "cooldowns.scale_down_s", 0, 604_800
+        ),
+        "failure_backoff_s": _bounded_integer(
+            cooldowns["failure_backoff_s"], "cooldowns.failure_backoff_s", 1, 86_400
+        ),
+    }
+    budget = request["budget"]
+    if not isinstance(budget, Mapping) or set(budget) != {
+        "period",
+        "max_tokens",
+        "max_cost_microunits",
+        "max_external_calls",
+    }:
+        raise ButlerSettingsError("budget fields are invalid")
+    if budget["period"] not in {"hour", "day", "month"}:
+        raise ButlerSettingsError("budget.period is invalid")
+    clean_budget = {
+        "period": budget["period"],
+        "max_tokens": _bounded_integer(
+            budget["max_tokens"], "budget.max_tokens", 0, 1_000_000_000
+        ),
+        "max_cost_microunits": _bounded_integer(
+            budget["max_cost_microunits"],
+            "budget.max_cost_microunits",
+            0,
+            1_000_000_000_000,
+        ),
+        "max_external_calls": _bounded_integer(
+            budget["max_external_calls"], "budget.max_external_calls", 0, 1_000_000
+        ),
+    }
+    envelope_budget = envelope.get("max_budget")
+    if not isinstance(envelope_budget, Mapping) or any(
+        clean_budget[name] > envelope_budget.get(name, -1)
+        for name in ("max_tokens", "max_cost_microunits", "max_external_calls")
+    ):
+        raise ButlerSettingsError("budget exceeds the immutable envelope")
+    if clean_budget["period"] != envelope_budget.get("period"):
+        raise ButlerSettingsError("budget period must match the immutable envelope")
+    requested_connectors = request["connectors"]
+    stored_connectors = current.get("desired", {}).get("connectors", [])
+    if not isinstance(requested_connectors, list) or len(requested_connectors) > 32:
+        raise ButlerSettingsError("connectors are invalid")
+    enabled_by_id: dict[str, bool] = {}
+    for connector in requested_connectors:
+        if not isinstance(connector, Mapping) or set(connector) != {
+            "connector_id",
+            "enabled",
+        }:
+            raise ButlerSettingsError("connector fields are invalid")
+        connector_id = _identifier(connector["connector_id"], "connector_id")
+        if not isinstance(connector["enabled"], bool) or connector_id in enabled_by_id:
+            raise ButlerSettingsError("connector enablement is invalid")
+        enabled_by_id[connector_id] = connector["enabled"]
+    stored_ids = {
+        row.get("connector_id")
+        for row in stored_connectors
+        if isinstance(row, Mapping)
+    }
+    if set(enabled_by_id) != stored_ids:
+        raise ButlerSettingsError("connector set changed; reload before saving")
+    approved_ids = envelope.get("approved_connector_ids")
+    if not isinstance(approved_ids, list) or not stored_ids <= set(approved_ids):
+        raise ButlerSettingsError("connector set exceeds the immutable envelope")
+    updated = copy.deepcopy(dict(current))
+    updated["revision"] = expected + 1
+    updated["enabled"] = False
+    updated.pop("authorization", None)
+    desired = updated["desired"]
+    desired.update(
+        {
+            "mode": "shadow",
+            "runner": runner,
+            "capacity": clean_capacity,
+            "host_concurrency": host_concurrency,
+            "board_concurrency": board_concurrency,
+            "cooldowns": clean_cooldowns,
+            "budget": clean_budget,
+        }
+    )
+    for connector in desired["connectors"]:
+        connector["enabled"] = enabled_by_id[connector["connector_id"]]
+    return updated, expected, mutation_id
+
+
+def validate_autonomous_command_request(request: Any) -> dict[str, Any]:
+    required = {"board_id", "request_id", "intent", "expected_config_revision"}
+    optional = {"connector_id", "reason_code"}
+    if (
+        not isinstance(request, Mapping)
+        or not required <= set(request)
+        or not set(request) <= required | optional
+    ):
+        raise ButlerSettingsError("Autonomous Butler command request fields are invalid")
+    board_id = _identifier(request["board_id"], "board_id")
+    request_id = _identifier(request["request_id"], "request_id")
+    intent = request["intent"]
+    if intent not in AUTONOMOUS_COMMANDS:
+        raise ButlerSettingsError("command intent is not allowlisted")
+    revision = _bounded_integer(
+        request["expected_config_revision"], "expected_config_revision", 0, 2**63 - 1
+    )
+    parameters: dict[str, Any]
+    if intent in {"enable_connector", "disable_connector"}:
+        parameters = {
+            "connector_id": _identifier(request.get("connector_id"), "connector_id")
+        }
+        if "reason_code" in request:
+            raise ButlerSettingsError("connector commands do not accept reason_code")
+    elif intent in {"kill", "resume"}:
+        reason = request.get("reason_code")
+        if not isinstance(reason, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,79}", reason
+        ):
+            raise ButlerSettingsError("reason_code is invalid")
+        parameters = {"reason_code": reason}
+        if "connector_id" in request:
+            raise ButlerSettingsError("kill and resume do not accept connector_id")
+    else:
+        if set(request) & optional:
+            raise ButlerSettingsError("reconcile_now does not accept parameters")
+        parameters = {}
+    return {
+        "board_id": board_id,
+        "request_id": request_id,
+        "intent": intent,
+        "expected_config_revision": revision,
+        "parameters": parameters,
+    }
 
 
 @dataclass(frozen=True)

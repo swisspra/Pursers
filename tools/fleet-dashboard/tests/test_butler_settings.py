@@ -125,6 +125,176 @@ def configured_payload() -> dict[str, Any]:
     return {"config": config, "expected_sha256": "a" * 64}
 
 
+def autonomous_config(board_id: str = "pursers") -> dict[str, Any]:
+    return {
+        "schema": "autonomous_butler_config_v1",
+        "schema_version": 1,
+        "board_id": board_id,
+        "revision": 3,
+        "enabled": False,
+        "host_runtime": {
+            "host_ref": "host-a",
+            "revision": 1,
+            "agent_process_ceiling": 12,
+            "control_plane_processes": 2,
+            "total_process_ceiling": 14,
+            "configured_by": "human-admin",
+            "configured_at": "2026-09-24T00:00:00+00:00",
+        },
+        "desired": {
+            "mode": "shadow",
+            "runner": "direct_api",
+            "capacity": {
+                role: {"min": 0, "target": 1, "max": 2}
+                for role in ("worker", "reviewer", "acp_worker")
+            },
+            "host_concurrency": 4,
+            "board_concurrency": 3,
+            "cooldowns": {
+                "scale_up_s": 30,
+                "scale_down_s": 60,
+                "failure_backoff_s": 10,
+            },
+            "budget": {
+                "period": "day",
+                "max_tokens": 10_000,
+                "max_cost_microunits": 1_000_000,
+                "max_external_calls": 100,
+            },
+            "connectors": [
+                {
+                    "connector_id": "github",
+                    "enabled": True,
+                    "transport": "streamable_http",
+                    "protocol_revision": "2026-07-28",
+                    "endpoint_ref": "github-endpoint",
+                    "secret_ref": "github-secret",
+                    "tools": [
+                        {
+                            "name": "issue_get",
+                            "effect": "read_only",
+                            "replay": "safe_with_stable_call_id",
+                            "stable_call_id_field": "call_id",
+                        }
+                    ],
+                    "resources": ["repo:issues"],
+                    "limits": {
+                        "timeout_ms": 1_000,
+                        "max_input_bytes": 1_024,
+                        "max_output_bytes": 4_096,
+                        "max_concurrency": 2,
+                        "calls_per_minute": 10,
+                    },
+                }
+            ],
+        },
+        "envelope": {
+            "fingerprint_sha256": "f" * 64,
+            "approved_template_ids": ["worker-template"],
+            "approved_connector_ids": ["github"],
+            "max_capacity": {"worker": 4, "reviewer": 4, "acp_worker": 4},
+            "max_host_concurrency": 8,
+            "max_board_concurrency": 8,
+            "max_budget": {
+                "period": "day",
+                "max_tokens": 100_000,
+                "max_cost_microunits": 10_000_000,
+                "max_external_calls": 1_000,
+            },
+            "created_by": "human-admin",
+            "created_at": "2026-09-24T00:00:00+00:00",
+        },
+    }
+
+
+def autonomous_state(board_id: str = "pursers") -> dict[str, Any]:
+    return {
+        "schema": "autonomous_butler_state_v1",
+        "schema_version": 1,
+        "board_id": board_id,
+        "config_revision": 3,
+        "effective_state": "autonomous",
+        "reason_code": "desired_state_reconciled",
+        "observed_at": "2026-09-24T00:00:00+00:00",
+        "stale_after": "2026-09-25T00:00:00+00:00",
+        "capacity": {
+            role: {
+                "desired": 1,
+                "ready": 1,
+                "busy": 0,
+                "starting": 0,
+                "draining": 0,
+                "unhealthy": 0,
+                "stopped": 0,
+                "seat_ids": [f"{role}-1"],
+                "template_ids": [f"{role}-template"],
+            }
+            for role in ("worker", "reviewer", "acp_worker")
+        },
+        "host_processes": {
+            "role_agents": 3,
+            "control_plane": 2,
+            "agent_process_ceiling": 12,
+            "total_process_ceiling": 14,
+            "observed_at": "2026-09-24T00:00:00+00:00",
+        },
+        "executor": {
+            "status": "healthy",
+            "observed_at": "2026-09-24T00:00:00+00:00",
+        },
+        "connectors": [],
+        "kill_latched": False,
+    }
+
+
+def product_autonomous_state(board_id: str = "pursers") -> dict[str, Any]:
+    """Generate actual state through the landed production reconciler."""
+    observed_at = datetime.now(timezone.utc)
+    roles = {
+        role: board_butler.FleetRolePolicy(0, 1, 2, 1)
+        for role in board_butler.FLEET_ROLES
+    }
+    policy = board_butler.FleetBoardPolicy(
+        board_id=board_id,
+        roles=roles,
+        board_maximum=3,
+        provider_maximums={"direct": 3},
+        approved_template_ids=frozenset(
+            f"template:{role}:direct" for role in board_butler.FLEET_ROLES
+        ),
+        idle_grace_s=60,
+        scale_up_cooldown_s=30,
+        scale_down_cooldown_s=60,
+        failure_backoff_s=10,
+    )
+    demand = board_butler.FleetDemand(
+        board_id=board_id,
+        open_by_tier={1: 1},
+        review_backlog=1,
+        acp_backlog=1,
+        oldest_ticket_age_s=600,
+        expiring_offers=0,
+        provider_health={"direct": "healthy"},
+        provider_latency_ms={"direct": 10},
+    )
+    snapshot = board_butler.FleetSnapshot(
+        observed_at=observed_at,
+        demands={board_id: demand},
+        seats=(),
+        host_load_ratio=0.1,
+        host_capacity_available=True,
+        executor_healthy=True,
+    )
+    reconciler = board_butler.FleetReconciler(
+        board_butler.FleetHostPolicy(3, 2, 5),
+        {board_id: policy},
+        config_revision=3,
+        authorization_fingerprint_sha256="f" * 64,
+    )
+    plan = reconciler.plan(snapshot, {})
+    return reconciler.desired_state_document(board_id, snapshot, plan)
+
+
 def write_runtime(path: Path, *, mode: str, pid: int = 4321) -> None:
     path.write_text(
         json.dumps(
@@ -1467,6 +1637,14 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
     assert "Running · active" in html
     assert 'data-pursers-action="kill-butler"' in html
     assert "/api/butler/kill" in html
+    assert "/api/butler/autonomous" in html
+    assert "Desired versus actual" in html
+    assert "MCP v2 connector allowlists" in html
+    assert "Kill immediately" in html
+    assert "Autonomous · separate authorization required" in html
+    assert "--bad:#984d3d" in html
+    assert ".autonomous-card button{min-height:44px}" in html
+    assert ".connector-row label{display:flex;align-items:center;gap:8px;min-height:44px}" in html
 
     scripts = _inline_scripts(html)
     assert scripts
@@ -1478,6 +1656,446 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
             check=True,
             capture_output=True,
         )
+
+
+def test_autonomous_view_redacts_references_and_projects_truthful_state() -> None:
+    config = autonomous_config()
+    payload = {
+        "board_id": "pursers",
+        "revision": 3,
+        "effective_mode": "shadow",
+        "config_digest_sha256": "a" * 64,
+        "config": config,
+    }
+    commands = {
+        "commands": [
+            {
+                "command_id": "cmd-1",
+                "intent": "kill",
+                "status": "succeeded",
+                "revision": 2,
+                "created_at": "2026-09-24T00:00:00+00:00",
+                "updated_at": "2026-09-24T00:00:01+00:00",
+                "sender": {"principal_id": "private-principal"},
+                "transition": {
+                    "reason_code": "kill_completed",
+                    "audit_id": "audit-1",
+                },
+            }
+        ],
+        "truncated": True,
+    }
+    actual = autonomous_state()
+    actual["effective_state"] = "killed"
+    actual["reason_code"] = "human_kill_switch"
+    actual["private_path"] = "/private/secret/path"
+    actual["executor"]["secret_ref"] = "executor-secret"
+
+    view = butler_settings.autonomous_butler_view(payload, commands, actual)
+
+    connector = view["config"]["desired"]["connectors"][0]
+    assert connector["secret_configured"] is True
+    assert "secret_ref" not in connector
+    assert "endpoint_ref" not in connector
+    assert "github-secret" not in json.dumps(view)
+    assert "github-endpoint" not in json.dumps(view)
+    assert "private-principal" not in json.dumps(view)
+    assert "/private/secret/path" not in json.dumps(view)
+    assert "executor-secret" not in json.dumps(view)
+    assert view["effective_state"] == "killed"
+    assert view["actual_state_available"] is True
+    assert view["commands"][0]["audit_id"] == "audit-1"
+    assert view["history_truncated"] is True
+
+    malformed = autonomous_state()
+    malformed["executor"]["status"] = "secret-value"
+    rejected = butler_settings.autonomous_butler_view(payload, commands, malformed)
+    assert rejected["actual_state"] is None
+    assert rejected["actual_state_available"] is False
+    assert "secret-value" not in json.dumps(rejected)
+
+
+def test_autonomous_view_marks_stale_health_unknown() -> None:
+    state = autonomous_state()
+    state["effective_state"] = "degraded"
+    state["stale_after"] = "2026-09-24T00:00:00+00:00"
+    state["executor"] = {
+        "status": "healthy",
+        "observed_at": "2026-09-23T23:59:00+00:00",
+    }
+    state["connectors"] = [
+        {
+            "connector_id": "github",
+            "status": "healthy",
+            "observed_at": "2026-09-23T23:59:00+00:00",
+        }
+    ]
+
+    view = butler_settings.autonomous_butler_view(
+        {"board_id": "pursers", "revision": 3, "config": autonomous_config()},
+        {"commands": []},
+        state,
+        now=datetime(2026, 9, 24, 1, tzinfo=timezone.utc),
+    )
+
+    assert view["actual_state_stale"] is True
+    assert view["actual_state_available"] is False
+    assert view["actual_state_status"] == "stale"
+    assert view["effective_state"] == "shadow"
+    assert view["actual_state"]["executor"]["status"] == "unknown"
+    assert view["actual_state"]["connectors"][0]["status"] == "unknown"
+    assert state["executor"]["status"] == "healthy"
+
+
+def test_autonomous_view_quarantines_prior_revision_observation() -> None:
+    config = autonomous_config()
+    config["revision"] = 4
+    config["enabled"] = False
+    config["desired"]["mode"] = "shadow"
+    state = autonomous_state()
+    state["config_revision"] = 3
+    state["effective_state"] = "autonomous"
+
+    view = butler_settings.autonomous_butler_view(
+        {
+            "board_id": "pursers",
+            "revision": 4,
+            "effective_mode": "shadow",
+            "config": config,
+        },
+        {"commands": []},
+        state,
+        now=datetime(2026, 9, 24, 1, tzinfo=timezone.utc),
+    )
+
+    assert view["effective_state"] == "shadow"
+    assert view["actual_state_available"] is False
+    assert view["actual_state_stale"] is False
+    assert view["actual_state_revision_mismatch"] is True
+    assert view["actual_state_status"] == "revision_mismatch"
+    assert view["actual_state"]["config_revision"] == 3
+
+
+def test_prepare_autonomous_config_is_shadow_only_cas_and_preserves_envelope() -> None:
+    config = autonomous_config()
+    request = {
+        "board_id": "pursers",
+        "mutation_id": "mutation-1",
+        "expected_revision": 3,
+        "mode": "shadow",
+        "runner": "acp",
+        "capacity": {
+            "worker": {"min": 1, "target": 2, "max": 3},
+            "reviewer": {"min": 1, "target": 1, "max": 2},
+            "acp_worker": {"min": 0, "target": 1, "max": 2},
+        },
+        "host_concurrency": 6,
+        "board_concurrency": 5,
+        "cooldowns": {
+            "scale_up_s": 5,
+            "scale_down_s": 10,
+            "failure_backoff_s": 3,
+        },
+        "budget": {
+            "period": "day",
+            "max_tokens": 2_000,
+            "max_cost_microunits": 3_000,
+            "max_external_calls": 4,
+        },
+        "connectors": [{"connector_id": "github", "enabled": False}],
+    }
+
+    updated, expected, mutation_id = butler_settings.prepare_autonomous_butler_config(
+        {"board_id": "pursers", "revision": 3, "config": config}, request
+    )
+
+    assert expected == 3
+    assert mutation_id == "mutation-1"
+    assert updated["revision"] == 4
+    assert updated["enabled"] is False
+    assert updated["desired"]["mode"] == "shadow"
+    assert updated["desired"]["runner"] == "acp"
+    assert updated["desired"]["connectors"][0]["enabled"] is False
+    assert updated["desired"]["connectors"][0]["secret_ref"] == "github-secret"
+    assert updated["envelope"] == config["envelope"]
+    assert "authorization" not in updated
+
+    with pytest.raises(
+        butler_settings.ButlerSettingsError, match="separate active authorization"
+    ):
+        butler_settings.prepare_autonomous_butler_config(
+            {"board_id": "pursers", "revision": 3, "config": config},
+            {**request, "mode": "autonomous"},
+        )
+    with pytest.raises(
+        butler_settings.ButlerSettingsError, match="reload before saving"
+    ):
+        butler_settings.prepare_autonomous_butler_config(
+            {"board_id": "pursers", "revision": 4, "config": config}, request
+        )
+
+
+@pytest.mark.parametrize(
+    ("request_data", "parameters"),
+    [
+        (
+            {
+                "board_id": "pursers",
+                "request_id": "request-1",
+                "intent": "reconcile_now",
+                "expected_config_revision": 3,
+            },
+            {},
+        ),
+        (
+            {
+                "board_id": "pursers",
+                "request_id": "request-2",
+                "intent": "kill",
+                "expected_config_revision": 3,
+                "reason_code": "human_kill_switch",
+            },
+            {"reason_code": "human_kill_switch"},
+        ),
+        (
+            {
+                "board_id": "pursers",
+                "request_id": "request-3",
+                "intent": "disable_connector",
+                "expected_config_revision": 3,
+                "connector_id": "github",
+            },
+            {"connector_id": "github"},
+        ),
+    ],
+)
+def test_autonomous_commands_are_typed_and_bounded(
+    request_data: dict[str, Any], parameters: dict[str, Any]
+) -> None:
+    assert butler_settings.validate_autonomous_command_request(request_data)[
+        "parameters"
+    ] == parameters
+
+    with pytest.raises(butler_settings.ButlerSettingsError):
+        butler_settings.validate_autonomous_command_request(
+            {**request_data, "shell": "rm -rf /"}
+        )
+
+
+def test_autonomous_http_api_routes_typed_reads_writes_and_commands() -> None:
+    class Cache:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str]] = []
+
+        def resolve_central(self, value: str | None) -> str:
+            if value not in {None, "default"}:
+                raise KeyError(value)
+            return "default"
+
+        def get_autonomous_butler(
+            self, board_id: str, _central: str | None = None
+        ) -> dict[str, Any]:
+            self.calls.append(("get", board_id))
+            return {"board_id": board_id, "revision": 3, "config": None}
+
+        def save_autonomous_butler(
+            self, board_id: str, request: dict[str, Any], _central: str | None = None
+        ) -> dict[str, Any]:
+            self.calls.append(("save", board_id))
+            return {"board_id": board_id, "revision": request["expected_revision"] + 1}
+
+        def submit_autonomous_butler_command(
+            self, board_id: str, request: dict[str, Any], _central: str | None = None
+        ) -> dict[str, Any]:
+            self.calls.append((request["intent"], board_id))
+            return {"board_id": board_id, "submitted_command": {"status": "accepted"}}
+
+    cache = Cache()
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        fetched = json.loads(
+            urllib.request.urlopen(
+                base + "/api/butler/autonomous?central=default&board_id=pursers"
+            ).read()
+        )
+        save_body = {
+            "board_id": "pursers",
+            "mutation_id": "mutation-1",
+            "expected_revision": 3,
+        }
+        saved = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    base + "/api/butler/autonomous?central=default",
+                    data=json.dumps(save_body).encode(),
+                    method="POST",
+                    headers={"Content-Type": "application/json", "Origin": base},
+                )
+            ).read()
+        )
+        command_body = {
+            "board_id": "pursers",
+            "request_id": "request-1",
+            "intent": "kill",
+            "expected_config_revision": 4,
+            "reason_code": "human_kill_switch",
+        }
+        commanded = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    base + "/api/butler/autonomous/command?central=default",
+                    data=json.dumps(command_body).encode(),
+                    method="POST",
+                    headers={"Content-Type": "application/json", "Origin": base},
+                )
+            ).read()
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert fetched["revision"] == 3
+    assert saved["revision"] == 4
+    assert commanded["submitted_command"]["status"] == "accepted"
+    assert cache.calls == [
+        ("get", "pursers"),
+        ("save", "pursers"),
+        ("kill", "pursers"),
+    ]
+
+
+def test_fetcher_consumes_product_config_commands_and_actual_state() -> None:
+    calls: list[tuple[str, int | None]] = []
+
+    class Client:
+        async def __aenter__(self) -> "Client":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def butler_config_get(self) -> dict[str, Any]:
+            calls.append(("config", None))
+            return {
+                "board_id": "pursers",
+                "revision": 3,
+                "effective_mode": "shadow",
+                "config_digest_sha256": "a" * 64,
+                "config": autonomous_config(),
+            }
+
+        async def butler_command_inspect(self, *, limit: int) -> dict[str, Any]:
+            calls.append(("commands", limit))
+            return {"commands": [], "truncated": False}
+
+        async def board_state_get(self, *, key: str) -> dict[str, Any]:
+            calls.append((key, None))
+            return {"state": {"value": json.dumps(product_autonomous_state())}}
+
+    class Fetcher(dashboard.FleetFetcher):
+        async def _boards(self) -> list[tuple[str, str]]:
+            return [("Project", "pursers")]
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = Fetcher(config, client_factory=lambda *_args, **_kwargs: Client())
+    try:
+        view = asyncio.run(fetcher.fetch_autonomous_butler("pursers"))
+    finally:
+        fetcher.close()
+
+    assert calls == [
+        ("config", None),
+        ("commands", 50),
+        ("autonomous_butler_state", None),
+    ]
+    assert view["revision"] == 3
+    assert view["effective_state"] == "autonomous"
+    assert view["actual_state_available"] is True
+    assert view["actual_state"]["schema"] == "autonomous_butler_state_v1"
+    assert view["actual_state"]["config_revision"] == 3
+    assert view["config"]["desired"]["connectors"][0][
+        "secret_configured"
+    ] is True
+
+
+def test_fetcher_maps_product_cas_conflict_to_reloadable_conflict() -> None:
+    class Client:
+        async def __aenter__(self) -> "Client":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def butler_config_get(self) -> dict[str, Any]:
+            return {
+                "board_id": "pursers",
+                "revision": 3,
+                "effective_mode": "shadow",
+                "config_digest_sha256": "a" * 64,
+                "config": autonomous_config(),
+            }
+
+        async def butler_config_set(self, *_args: object) -> dict[str, Any]:
+            raise dashboard.BoardClientError(
+                "Butler config CAS conflict: expected 3, current 4"
+            )
+
+    class Fetcher(dashboard.FleetFetcher):
+        async def _boards(self) -> list[tuple[str, str]]:
+            return [("Project", "pursers")]
+
+    request = {
+        "board_id": "pursers",
+        "mutation_id": "mutation-conflict",
+        "expected_revision": 3,
+        "mode": "shadow",
+        "runner": "direct_api",
+        "capacity": {
+            role: {"min": 0, "target": 1, "max": 2}
+            for role in ("worker", "reviewer", "acp_worker")
+        },
+        "host_concurrency": 4,
+        "board_concurrency": 3,
+        "cooldowns": {
+            "scale_up_s": 30,
+            "scale_down_s": 60,
+            "failure_backoff_s": 10,
+        },
+        "budget": {
+            "period": "day",
+            "max_tokens": 10_000,
+            "max_cost_microunits": 1_000_000,
+            "max_external_calls": 100,
+        },
+        "connectors": [{"connector_id": "github", "enabled": True}],
+    }
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = Fetcher(config, client_factory=lambda *_args, **_kwargs: Client())
+    try:
+        with pytest.raises(dashboard.ConfigConflictError, match="reload before saving"):
+            asyncio.run(fetcher.save_autonomous_butler("pursers", request))
+    finally:
+        fetcher.close()
 
 
 class _InlineScripts(HTMLParser):
