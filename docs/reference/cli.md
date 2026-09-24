@@ -681,12 +681,13 @@ usage: board_butler.py [-h] [--url URL] --token-path TOKEN_PATH [--home-board HO
                        [--action-hold-seconds ACTION_HOLD_SECONDS] [--once] [--dry-run]
                        [--kill-switch | --veto-question VETO_QUESTION] [--control-reason CONTROL_REASON]
 
-Registry-wide coordinator findings refresher and shadow question drafter. The butler runs the real coordinator
+Registry-wide coordinator findings refresher and policy-gated question answerer. The butler runs the real coordinator
 derivation for every active registry board on a bounded cycle and listens for coordinator questions through the same
-journal/seat resource subscriptions used by the wait bridge. It never answers a question. Its Central writes are CAS-
-protected findings and identifier-only evaluation records; the only ticket mutations are two explicitly configured,
-mechanically checkable safety actions: parking repeated ``no_live_candidates`` loops and recording refusal of an
-escalation target that cannot work.
+journal/seat resource subscriptions used by the wait bridge. Question answers are disabled or assist-only unless a
+board explicitly selects ``autonomous``; even then only deterministic, fully evidenced information answers cross the
+existing coordinator binding. Its Central writes are CAS-protected findings and per-question audit records. The other
+ticket mutations remain the two explicitly configured, mechanically checkable safety actions: parking repeated
+``no_live_candidates`` loops and recording refusal of an escalation target that cannot work.
 
 options:
   -h, --help            show this help message and exit
