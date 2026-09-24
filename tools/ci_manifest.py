@@ -240,6 +240,19 @@ AUTHORITY_CA_FILE_ENV = "SSL_CERT_FILE"
 AUTHORITY_PYTHON_ENV = "PURSERS_CENTRAL_AUTHORITY_PYTHON"
 AUTHORITY_EXPECTED_AGENT_ENV = "PURSERS_EXPECTED_AGENT_ID"
 AUTHORITY_EXPECTED_PRINCIPAL_ENV = "PURSERS_EXPECTED_PRINCIPAL_ID"
+SUITE_ENVIRONMENT_DENYLIST = frozenset(
+    {
+        AUTHORITY_URL_ENV,
+        AUTHORITY_TOKEN_FILE_ENV,
+        AUTHORITY_BOARD_ENV,
+        AUTHORITY_AGENT_ENV,
+        AUTHORITY_ROLE_ENV,
+        AUTHORITY_CA_FILE_ENV,
+        AUTHORITY_PYTHON_ENV,
+        AUTHORITY_EXPECTED_AGENT_ENV,
+        AUTHORITY_EXPECTED_PRINCIPAL_ENV,
+    }
+)
 BRANCH_AND_COMMIT_RE = re.compile(
     r"(?im)^\s*branch_and_commit:\s*"
     r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+"
@@ -1184,6 +1197,8 @@ def run_full_gate(
 def suite_environment(root: Path, scratch: Path | None = None) -> dict[str, str]:
     """Prefer checkout package sources over operator installations."""
     environment = os.environ.copy()
+    for name in SUITE_ENVIRONMENT_DENYLIST:
+        environment.pop(name, None)
     sources = [str(path) for path in sorted((root / "packages").glob("*/src"))]
     inherited = environment.get("PYTHONPATH", "").strip()
     if inherited:

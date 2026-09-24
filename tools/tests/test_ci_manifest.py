@@ -900,6 +900,17 @@ def test_suite_environment_prepends_checkout_package_sources(
     ]
 
 
+def test_suite_environment_does_not_leak_live_authority_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ci_manifest.SUITE_ENVIRONMENT_DENYLIST:
+        monkeypatch.setenv(name, f"secret-{name}")
+
+    environment = suite_environment(tmp_path)
+
+    assert ci_manifest.SUITE_ENVIRONMENT_DENYLIST.isdisjoint(environment)
+
+
 def test_default_job_count_uses_idle_cpu_capacity_with_a_sensible_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

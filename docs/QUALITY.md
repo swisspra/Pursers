@@ -114,7 +114,9 @@ environment variables with `PURSERS_ROLE=coordinator`. Private CAs use
 Pursers runtime Python that provides the BoardClient dependencies. Credential
 contents never enter arguments or evidence. `PURSERS_EXPECTED_AGENT_ID` and
 `PURSERS_EXPECTED_PRINCIPAL_ID` pin the authenticated identity and reject a
-same-name or wrong-seat binding.
+same-name or wrong-seat binding. Authority connection, credential-path, role,
+identity-pin, and CA variables are removed from each pytest subprocess after
+admission so they cannot change suite behavior or expose connection context.
 
 The batch command rejects SHA or changed-file drift, stale main, missing or
 non-independent review identity, dirty trees, merge conflicts, and integration
