@@ -433,6 +433,14 @@ class ButlerConfigError(ValueError):
     """Raised when coordinator_config cannot be interpreted safely."""
 
 
+class FindingCapacityError(ValueError):
+    """The bounded coordinator findings document cannot admit a new row."""
+
+    def __init__(self, reason_code: str, message: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 class ConnectorError(RuntimeError):
     """Base class for bounded, secret-free connector failures."""
 
@@ -6924,6 +6932,66 @@ def rate_limit_reason(
     return None
 
 
+COMPACTABLE_STATE_FIELDS = (
+    "action_history",
+    "drop_history",
+    "drop_uncertainty",
+    "privacy_watermarks",
+    "config_sources",
+    "effective_config",
+    "drop_counters",
+)
+
+
+def _encoded_state_chars(state: Mapping[str, Any]) -> int:
+    return len(json.dumps(state, sort_keys=True, separators=(",", ":")))
+
+
+def _increment_truncation(
+    state: dict[str, Any], field: str, amount: int = 1
+) -> None:
+    truncation = dict(state.get("truncation", {}))
+    current = truncation.get(field, 0)
+    if not isinstance(current, int) or isinstance(current, bool) or current < 0:
+        current = 0
+    truncation[field] = current + amount
+    state["truncation"] = truncation
+
+
+def compact_non_finding_state(
+    state: Mapping[str, Any], max_chars: int = MAX_STATE_CHARS
+) -> dict[str, Any]:
+    """Bound coordinator metadata before considering finding eviction.
+
+    These fields are derived histories and summaries, not the durable per-question
+    evaluation audit. Removal is deterministic and every removed item increments
+    a field-specific cumulative counter. Critical findings and Board Butler
+    control state are never candidates.
+    """
+    result = copy.deepcopy(dict(state))
+    while _encoded_state_chars(result) > max_chars:
+        changed = False
+        for field in COMPACTABLE_STATE_FIELDS:
+            if field not in result:
+                continue
+            value = result[field]
+            if isinstance(value, list) and value:
+                value.pop(0)
+            elif isinstance(value, dict) and value:
+                del value[sorted(value, key=str)[0]]
+            elif value not in ([], {}):
+                del result[field]
+            else:
+                continue
+            _increment_truncation(result, field)
+            changed = True
+            if _encoded_state_chars(result) <= max_chars:
+                return result
+        if not changed:
+            break
+    return result
+
+
 def merge_finding(
     state: Mapping[str, Any], finding: Mapping[str, Any], now: datetime
 ) -> dict[str, Any]:
@@ -6938,6 +7006,7 @@ def merge_finding(
                 "would_answer",
                 "butler_queued",
                 "butler_config_invalid",
+                "butler_capacity_exhausted",
                 "butler_action",
             }
             and item.get("question_id") == finding.get("question_id")
@@ -6945,7 +7014,10 @@ def merge_finding(
     ]
     critical = [item for item in rows if item.get("level") == "critical"]
     if len(critical) >= MAX_FINDINGS:
-        raise ValueError("coordinator_findings has no bounded room after critical alerts")
+        raise FindingCapacityError(
+            "critical_capacity",
+            "coordinator_findings has no bounded room after critical alerts",
+        )
     ordinary = [item for item in rows if item.get("level") != "critical"]
     ordinary_capacity = MAX_FINDINGS - len(critical) - 1
     selected = critical + ordinary[-ordinary_capacity:] if ordinary_capacity else critical
@@ -6970,12 +7042,12 @@ def merge_finding(
         "updated_at": now.isoformat(),
     })
     result["board_butler"] = board_butler
+    result = compact_non_finding_state(result)
     # Match the coordinator's bounded state convention and keep the new draft.
     # Older non-critical findings are removed first; the truncation count makes
     # that loss explicit instead of relying on Central's 5,000-character cap.
     while (
-        len(json.dumps(result, sort_keys=True, separators=(",", ":")))
-        > MAX_STATE_CHARS
+        _encoded_state_chars(result) > MAX_STATE_CHARS
         and len(result["findings"]) > 1
     ):
         removable = next(
@@ -6987,14 +7059,75 @@ def merge_finding(
             None,
         )
         if removable is None:
-            raise ValueError(
-                "coordinator_findings has no bounded room after critical alerts"
+            raise FindingCapacityError(
+                "critical_capacity",
+                "coordinator_findings has no bounded room after critical alerts",
             )
         result["findings"].pop(removable)
         result["truncation"]["findings"] += 1
-    if len(json.dumps(result, sort_keys=True, separators=(",", ":"))) > MAX_STATE_CHARS:
-        raise ValueError("coordinator_findings has no bounded room for a butler draft")
+    if _encoded_state_chars(result) > MAX_STATE_CHARS:
+        raise FindingCapacityError(
+            "draft_too_large",
+            "coordinator_findings has no bounded room for a butler draft",
+        )
     return result
+
+
+def capacity_diagnostic_finding(
+    question: Mapping[str, Any], reason_code: str, now: datetime
+) -> dict[str, Any]:
+    """Return a bounded, non-answering diagnostic for a rejected draft."""
+    return {
+        "kind": "butler_capacity_exhausted",
+        "level": "critical",
+        "board_id": str(question.get("board_id", "unknown"))[:160],
+        "ticket_id": str(question.get("ticket_id", ""))[:160],
+        "question_id": str(question.get("question_id", ""))[:160],
+        "verdict": Outcome.ESCALATE.value,
+        "reason_code": reason_code,
+        "message": (
+            "Board Butler could not persist a bounded draft; the question "
+            "remains for the coordinator."
+        ),
+        "evidence": f"source=coordinator_findings; reason_code={reason_code}",
+        "next_action": "Coordinator answers manually; Board Butler continues running.",
+        "mode": "shadow",
+        "auto_eligible": False,
+        "observed_at": now.isoformat(),
+    }
+
+
+def prepare_bounded_question_state(
+    state: Mapping[str, Any],
+    evaluation_state: Mapping[str, Any],
+    question: Mapping[str, Any],
+    finding: Mapping[str, Any],
+    identity: Any,
+    now: datetime,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, bool]:
+    """Pair a draft with bounded state, or fail closed without raising."""
+    paired = record_draft_evaluation(
+        evaluation_state, question, finding, identity, now
+    )
+    try:
+        return dict(finding), paired, merge_finding(state, finding, now), False
+    except FindingCapacityError as exc:
+        diagnostic = capacity_diagnostic_finding(question, exc.reason_code, now)
+        declined = record_draft_evaluation(
+            evaluation_state, question, diagnostic, identity, now
+        )
+        evaluation = dict(declined["evaluation"])
+        evaluation.pop("answer_audit", None)
+        evaluation["capacity_failure"] = {
+            "reason_code": exc.reason_code,
+            "at": now.isoformat(),
+        }
+        declined["evaluation"] = evaluation
+        try:
+            bounded = merge_finding(state, diagnostic, now)
+        except FindingCapacityError:
+            bounded = None
+        return diagnostic, declined, bounded, True
 
 
 def merge_observation_findings(
@@ -8821,7 +8954,12 @@ async def process_question(
             for item in state.get("findings", [])
             if isinstance(item, Mapping)
             and item.get("kind")
-            in {"would_answer", "butler_queued", "butler_config_invalid"}
+            in {
+                "would_answer",
+                "butler_queued",
+                "butler_config_invalid",
+                "butler_capacity_exhausted",
+            }
             and str(item.get("question_id", "")) == question_id
         ),
         None,
@@ -8885,11 +9023,14 @@ async def process_question(
         precedents = find_precedents(question, answered)
         finding["precedents"] = precedents
         finding["precedent_status"] = "found" if precedents else "none"
-        paired = record_draft_evaluation(
-            evaluation_state, question, finding, backend.identity, now
+        finding, paired, merged, _capacity_failed = prepare_bounded_question_state(
+            state,
+            evaluation_state,
+            question,
+            finding,
+            backend.identity,
+            now,
         )
-        merged = merge_finding(state, finding, now)
-        encoded = json.dumps(merged, sort_keys=True, separators=(",", ":"))
         if args.dry_run:
             print(json.dumps(finding, indent=2, sort_keys=True))
         else:
@@ -8898,7 +9039,11 @@ async def process_question(
                 json.dumps(paired, sort_keys=True, separators=(",", ":")),
                 previous_evaluation_value,
             )
-            await backend.write_findings(encoded, previous_value)
+            if merged is not None:
+                await backend.write_findings(
+                    json.dumps(merged, sort_keys=True, separators=(",", ":")),
+                    previous_value,
+                )
         return finding
     reason = rate_limit_reason(
         state,
@@ -8933,12 +9078,15 @@ async def process_question(
     finding["precedents"] = precedents
     finding["precedent_status"] = "found" if precedents else "none"
     finding = decorate_finding(finding, config, now)
-    paired = record_draft_evaluation(
-        evaluation_state, question, finding, backend.identity, now
+    finding, paired, merged, capacity_failed = prepare_bounded_question_state(
+        state,
+        evaluation_state,
+        question,
+        finding,
+        backend.identity,
+        now,
     )
     paired_encoded = json.dumps(paired, sort_keys=True, separators=(",", ":"))
-    merged = merge_finding(state, finding, now)
-    encoded = json.dumps(merged, sort_keys=True, separators=(",", ":"))
     if args.dry_run:
         print(json.dumps(finding, indent=2, sort_keys=True))
     else:
@@ -8947,8 +9095,12 @@ async def process_question(
             paired_encoded,
             previous_evaluation_value,
         )
-        await backend.write_findings(encoded, previous_value)
-        if finding.get("auto_eligible") is True and callable(
+        if merged is not None:
+            await backend.write_findings(
+                json.dumps(merged, sort_keys=True, separators=(",", ":")),
+                previous_value,
+            )
+        if not capacity_failed and finding.get("auto_eligible") is True and callable(
             getattr(backend, "answer_question", None)
         ):
             return await advance_autonomous_answer(

@@ -2671,6 +2671,218 @@ def test_findings_merge_refuses_to_displace_a_full_critical_set() -> None:
         )
 
 
+def test_findings_merge_compacts_non_finding_metadata_before_rows() -> None:
+    old = {
+        "schema_version": 2,
+        "findings": [],
+        "drop_uncertainty": [
+            {"ticket_id": f"TK-{index}", "detail": "x" * 180}
+            for index in range(30)
+        ],
+        "config_sources": {
+            f"source-{index}": "config" for index in range(20)
+        },
+        "truncation": {"findings": 0, "drop_uncertainty": 2},
+    }
+    new = {
+        "kind": "would_answer",
+        "question_id": "CQ-new",
+        "ticket_id": "TK-new",
+        "verdict": "MECHANICAL",
+        "message": "new draft",
+    }
+
+    merged = butler.merge_finding(old, new, NOW)
+
+    assert merged["findings"] == [new]
+    assert merged["truncation"]["findings"] == 0
+    assert merged["truncation"]["drop_uncertainty"] > 2
+    assert len(json.dumps(merged, sort_keys=True, separators=(",", ":"))) <= (
+        butler.MAX_STATE_CHARS
+    )
+
+
+def test_process_question_all_critical_capacity_fails_closed(tmp_path: Path) -> None:
+    options = args(tmp_path)
+    initial = {
+        "schema_version": 2,
+        "findings": [
+            {
+                "kind": "privacy-leak-suspect",
+                "level": "critical",
+                "ticket_id": f"TK-critical-{index}",
+            }
+            for index in range(butler.MAX_FINDINGS)
+        ],
+        "truncation": {"findings": 0},
+    }
+
+    class Backend(Source):
+        findings_writes = 0
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {"state": {"value": json.dumps(initial)}}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            return {}
+
+        async def write_findings(self, *_args: Any) -> None:
+            self.findings_writes += 1
+
+    backend = Backend()
+    result = asyncio.run(
+        butler.process_question(backend, question("Anything?"), options, NOW)
+    )
+    replayed = asyncio.run(
+        butler.process_question(backend, question("Anything?"), options, NOW)
+    )
+
+    assert result["kind"] == "butler_capacity_exhausted"
+    assert replayed == result
+    assert result["reason_code"] == "critical_capacity"
+    assert result["auto_eligible"] is False
+    assert backend.findings_writes == 0
+    evaluation = json.loads(backend.evaluation_values["CQ-source"])["evaluation"]
+    assert evaluation["draft_status"] == "declined"
+    assert evaluation["decline_reason"] == "butler_capacity_exhausted"
+    assert evaluation["capacity_failure"]["reason_code"] == "critical_capacity"
+    assert "answer_audit" not in evaluation
+
+
+def test_process_question_oversized_draft_persists_bounded_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = args(tmp_path)
+
+    async def oversized(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        return {
+            "kind": "would_answer",
+            "level": "info",
+            "board_id": "pursers",
+            "ticket_id": "TK-source",
+            "question_id": "CQ-source",
+            "question_kind": "information",
+            "verdict": "MECHANICAL",
+            "policy_rule": "ticket-status",
+            "answer_class": "ticket_status",
+            "evidence_kind": "ticket_status",
+            "message": "x" * (butler.MAX_STATE_CHARS * 2),
+            "evidence": "source=test",
+            "next_action": "none",
+            "mode": "shadow",
+            "observed_at": NOW.isoformat(),
+        }
+
+    monkeypatch.setattr(butler, "make_finding", oversized)
+
+    class Backend(Source):
+        written: dict[str, Any] | None = None
+
+        async def findings(self) -> Mapping[str, Any]:
+            return (
+                {"state": {"value": json.dumps(self.written)}}
+                if self.written is not None
+                else {}
+            )
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            return {}
+
+        async def write_findings(self, value: str, _expected: str | None) -> None:
+            self.written = json.loads(value)
+
+    backend = Backend()
+    result = asyncio.run(
+        butler.process_question(backend, question("Anything?"), options, NOW)
+    )
+    replayed = asyncio.run(
+        butler.process_question(backend, question("Anything?"), options, NOW)
+    )
+
+    assert result["kind"] == "butler_capacity_exhausted"
+    assert replayed == result
+    assert result["reason_code"] == "draft_too_large"
+    assert backend.written is not None
+    assert backend.written["findings"][-1]["kind"] == "butler_capacity_exhausted"
+    assert len(backend.written["findings"]) == 1
+    assert len(json.dumps(backend.written, sort_keys=True, separators=(",", ":"))) <= (
+        butler.MAX_STATE_CHARS
+    )
+
+
+def test_resident_survives_capacity_replay_and_processes_later_question(
+    tmp_path: Path,
+) -> None:
+    options = args(tmp_path)
+    options.refresh_seconds = 60
+    initial = {
+        "schema_version": 2,
+        "findings": [],
+        "drop_uncertainty": [],
+        "truncation": {"findings": 0, "drop_uncertainty": 0},
+    }
+    while len(json.dumps(initial, separators=(",", ":"))) < 4_400:
+        initial["drop_uncertainty"].append(
+            {
+                "ticket_id": f"TK-{len(initial['drop_uncertainty'])}",
+                "detail": "x" * 120,
+            }
+        )
+    assert len(json.dumps(initial, separators=(",", ":"))) < 4_800
+
+    first = {**question("Anything?"), "question_id": "CQ-capacity-first"}
+    second = {
+        **question("What is the status of TK-123?"),
+        "question_id": "CQ-capacity-second",
+    }
+
+    class Backend(Source):
+        latest_seq = 10
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.findings_value = json.dumps(initial)
+
+        async def __aenter__(self) -> "Backend":
+            self.tickets["TK-123"] = {"status": "closed"}
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def refresh_registry_findings(self, _now: Any) -> Mapping[str, Any]:
+            return {"active_boards": ["pursers"]}
+
+        async def pending_questions(self) -> list[Mapping[str, Any]]:
+            return [first]
+
+        async def wait_for_question(
+            self, _cursor: int, _timeout: float
+        ) -> tuple[int, Mapping[str, Any]]:
+            return 11, second
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {"state": {"value": self.findings_value}}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            return {}
+
+        async def write_findings(self, value: str, _expected: str | None) -> None:
+            self.findings_value = value
+
+    backend = Backend()
+    asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
+
+    persisted = json.loads(backend.findings_value)
+    question_ids = {row.get("question_id") for row in persisted["findings"]}
+    assert "CQ-capacity-second" in question_ids
+    assert persisted["truncation"]["drop_uncertainty"] > 0
+    assert set(backend.evaluation_values) == {
+        "CQ-capacity-first",
+        "CQ-capacity-second",
+    }
+
+
 def board_observation_context() -> Any:
     decision_at = NOW - butler.timedelta(hours=2)
     offered_at = NOW - butler.timedelta(hours=1)
