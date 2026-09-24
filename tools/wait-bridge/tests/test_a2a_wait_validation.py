@@ -162,6 +162,39 @@ class A2AWaitValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("TOKEN_PLACEHOLDER", rendered)
         self.assertNotIn("/private/host/path", rendered)
 
+    async def test_deferred_join_failure_is_structured_but_argument_errors_are_not(
+        self,
+    ) -> None:
+        async def fail_setup(_context: object) -> object:
+            raise wait_server.BoardJoinFailure(
+                "configuration", "TOKEN_PLACEHOLDER /private/host/path"
+            )
+
+        context = SimpleNamespace(request_context=SimpleNamespace())
+        with (
+            patch.object(wait_server, "WAIT_MODE", "push"),
+            patch.object(wait_server, "_client_for_tool", fail_setup),
+        ):
+            result = await wait_server.a2a_wait(
+                context,
+                since_seq={"pursers": 38_519},
+                timeout_s=1,
+                boards=["pursers"],
+                agent_name="zed-seat",
+                wait_for="claimable",
+            )
+
+        self.assertEqual(result["new_seq"], {"pursers": 38_519})
+        self.assertEqual(result["error"]["cause_class"], "configuration")
+        self.assertFalse(result["error"]["retryable"])
+        self.assertEqual(
+            result["error"]["action"],
+            "repair_configuration_then_rearm_from_unchanged_cursor",
+        )
+        rendered = repr(result)
+        self.assertNotIn("TOKEN_PLACEHOLDER", rendered)
+        self.assertNotIn("/private/host/path", rendered)
+
     async def test_runtime_auth_failure_is_redacted_and_not_blindly_retryable(
         self,
     ) -> None:

@@ -5950,6 +5950,18 @@ def _wait_error_cursor(
 def _wait_failure_class(exc: BaseException) -> tuple[str, list[str]]:
     nested = _nested_exceptions(exc)
     classes = sorted({type(item).__name__ for item in nested})
+    join_failure = next(
+        (item for item in nested if isinstance(item, BoardJoinFailure)), None
+    )
+    if join_failure is not None:
+        cause_class = {
+            "auth": "authentication",
+            "denied": "authorization",
+            "configuration": "configuration",
+            "unreachable": "transport",
+            "board": "central",
+        }.get(join_failure.cause_class, "central")
+        return cause_class, classes
     detail = " ".join(str(item) for item in nested).casefold()
     if any(
         name in {
@@ -5996,7 +6008,11 @@ def _structured_wait_error(
     cursor = _wait_error_cursor(boards, since_seq)
     cause_class, exception_classes = _wait_failure_class(exc)
     push = WAIT_MODE == "push"
-    retryable = cause_class not in {"authentication", "authorization"}
+    retryable = cause_class not in {
+        "authentication",
+        "authorization",
+        "configuration",
+    }
     if cursor is None:
         action = "rearm_with_omitted_cursor"
     elif retryable:
@@ -6053,6 +6069,20 @@ async def a2a_wait(
     started = time.monotonic()
     try:
         client = await _client_for_tool(ctx)
+    except BoardJoinFailure as exc:
+        result = _structured_wait_error(
+            exc=exc,
+            since_seq=since_seq,
+            boards=boards,
+            started=started,
+        )
+        error = result["error"]
+        _log(
+            "WARNING: a2a_wait setup returned a structured failure "
+            f"code={error['code']} cause_class={error['cause_class']} "
+            f"exception_classes={','.join(error['exception_classes'])}"
+        )
+        return result
     except ToolError:
         raise
     except Exception as exc:

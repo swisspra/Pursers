@@ -82,6 +82,7 @@ def test_profiles_match_wait_bridge_and_keep_host_margins() -> None:
     } == {
         "codex": 560,
         "codex-cli": 560,
+        "zed": 560,
         "goose": 270,
         "claude-code": 21_540,
         "claude-desktop": 200,

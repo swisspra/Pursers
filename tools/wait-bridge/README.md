@@ -655,9 +655,9 @@ producing a normal cue or timeout, the stdio tool returns a bounded structured
 result with `reason=push_unavailable`, `mode=error`, an empty event list, and
 the caller's cursor unchanged in `new_seq`. The `error` object contains only a
 safe cause class and re-arm action; raw exception text, credentials, and host
-paths are not returned. Authentication and authorization failures are marked
-non-retryable until the named configuration is repaired. This is not a polling
-fallback or a cursor reset.
+paths are not returned. Authentication, authorization, and local configuration
+failures are marked non-retryable until the named configuration is repaired.
+This is not a polling fallback or a cursor reset.
 
 For a per-call identity, the entry snapshot exact-filters
 `claimed_by_agent_id`. This prevents substring matches such as `session-a` and
