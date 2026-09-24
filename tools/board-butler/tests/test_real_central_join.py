@@ -320,8 +320,8 @@ async def _seed_multiboard(
     original_current_principal = central.current_principal
     central.current_principal = lambda: current[0]
     boards = ("butler-home", "butler-away")
-    ticket_ids = ("TK-home-context", "TK-away-context")
-    question_id = "CQ-away-context"
+    ticket_ids = ("TK-context-collision", "TK-context-collision")
+    question_id = "CQ-context-collision"
     try:
         agent_ids: dict[str, str] = {}
         for board_id, ticket_id in zip(boards, ticket_ids, strict=True):
@@ -401,18 +401,62 @@ async def _seed_multiboard(
         )
         assert not registered.is_error
 
+        configured = await mcp.call_tool(
+            "board_state_update",
+            {
+                "board_id": boards[0],
+                "agent_name": "bootstrap-admin",
+                "key": butler.CONFIG_KEY,
+                "value": json.dumps(
+                    {
+                        "board_butler": {
+                            "schema_version": 1,
+                            "global": {
+                                "mode": "active",
+                                "answering_mode": "autonomous",
+                                "kill_switch": False,
+                                "answer_scope": {"ticket_status": "auto"},
+                                "required_evidence_kinds": ["ticket_status"],
+                                "hold_before_post_s": 60,
+                                "active_windows": [
+                                    {
+                                        "days": [
+                                            "mon",
+                                            "tue",
+                                            "wed",
+                                            "thu",
+                                            "fri",
+                                            "sat",
+                                            "sun",
+                                        ],
+                                        "start": "00:00",
+                                        "end": "23:59",
+                                        "timezone": "UTC",
+                                    }
+                                ],
+                            },
+                        }
+                    }
+                ),
+            },
+        )
+        assert not configured.is_error
+
         asked_at = datetime.now(timezone.utc) - timedelta(minutes=2)
 
-        def seed_question(document: dict[str, object]) -> dict[str, object]:
-            ticket = document["tickets"][ticket_ids[1]]  # type: ignore[index]
+        def seed_question(
+            document: dict[str, object], *, board_id: str, status: str
+        ) -> dict[str, object]:
+            ticket = document["tickets"][ticket_ids[0]]  # type: ignore[index]
+            ticket["status"] = status  # type: ignore[index]
             ticket["coordinator_questions"] = [  # type: ignore[index]
                 {
                     "question_id": question_id,
-                    "project": boards[1],
+                    "project": board_id,
                     "asker_role": "worker",
                     "message_id": None,
                     "in_reply_to": None,
-                    "message": f"What is the status of {ticket_ids[1]}?",
+                    "message": f"What is the status of {ticket_ids[0]}?",
                     "kind": "information",
                     "state": "open",
                     "asked_by": {
@@ -431,7 +475,18 @@ async def _seed_multiboard(
             ]
             return {}
 
-        service.mutate(boards[1], seed_question)
+        service.mutate(
+            boards[0],
+            lambda document: seed_question(
+                document, board_id=boards[0], status="closed"
+            ),
+        )
+        service.mutate(
+            boards[1],
+            lambda document: seed_question(
+                document, board_id=boards[1], status="open"
+            ),
+        )
         return ticket_ids[0], ticket_ids[1], question_id
     finally:
         central.current_principal = original_current_principal
@@ -764,7 +819,12 @@ def test_butler_reaches_first_working_state_against_real_central(
             answer_attempts = 0
 
             async def answer_question(
-                self, ticket_id: str, question_id: str, message: str
+                self,
+                ticket_id: str,
+                question_id: str,
+                message: str,
+                *,
+                board_id: str | None = None,
             ) -> dict[str, object]:
                 self.answer_attempts += 1
                 raise RuntimeError("private injected delivery detail")
@@ -906,6 +966,55 @@ def test_real_central_multiboard_operations_keep_exact_board_context(
             assert released["question"]["state"] == "open"
 
             options.dry_run = False
+            options.project = "butler-home"
+            options.integration_ref = "origin/main"
+            options.drafts_per_hour = 5
+            options.drafts_per_ticket = 10
+            options.drafts_per_board = 20
+            options.provider_secrets_dir = None
+            drafted_at = butler.utc_now()
+            away_row = await backend.question(
+                away_ticket, away_question, board_id="butler-away"
+            )
+            assert away_row is not None
+            drafted = await butler.process_question(
+                backend, away_row, options, drafted_at
+            )
+            assert drafted["auto_eligible"] is True, drafted
+            accepted = await backend.accept_question(
+                away_ticket, away_question, board_id="butler-away"
+            )
+            assert accepted["question"]["state"] == "accepted"
+
+            answered = await butler.process_question(
+                backend,
+                away_row,
+                options,
+                drafted_at + timedelta(seconds=61),
+            )
+            evaluation = await backend.evaluation(away_question)
+            answer_audit = json.loads(evaluation["state"]["value"])["evaluation"][
+                "answer_audit"
+            ]
+            assert answer_audit.get("reason_code") is None, answer_audit
+            assert answer_audit["status"] == "answered", answer_audit
+            assert answered.get("answer_status") == "answered", (
+                answered,
+                answer_audit,
+            )
+            away_answered = await backend.question(
+                away_ticket, away_question, board_id="butler-away"
+            )
+            home_untouched = await backend.question(
+                home_ticket, away_question, board_id="butler-home"
+            )
+            assert away_answered is not None
+            assert away_answered["state"] == "answered"
+            assert away_answered["answer"] == f"{away_ticket} is open."
+            assert home_untouched is not None
+            assert home_untouched["state"] == "open"
+            assert home_untouched["answer"] is None
+
             action = butler.MechanicalAction(
                 "park_no_live_candidates",
                 "butler-away",

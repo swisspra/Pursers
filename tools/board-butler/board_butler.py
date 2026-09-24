@@ -414,7 +414,9 @@ class Evidence:
 
 
 class EvidenceSource(Protocol):
-    async def ticket_get(self, ticket_id: str) -> Mapping[str, Any]: ...
+    async def ticket_get(
+        self, ticket_id: str, *, board_id: str | None = None
+    ) -> Mapping[str, Any]: ...
     async def board_status(self) -> Mapping[str, Any]: ...
     async def answered_questions(self) -> Sequence[Mapping[str, Any]]: ...
 
@@ -6109,6 +6111,16 @@ def _suite_statuses(output: str, suite_names: Sequence[str]) -> dict[str, str]:
     return result
 
 
+def _authoritative_question_board_id(question: Mapping[str, Any]) -> str:
+    board_id = question.get("board_id")
+    if (
+        not isinstance(board_id, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", board_id) is None
+    ):
+        raise ValueError("question has no valid authoritative board_id")
+    return board_id
+
+
 async def _coverage_blindness(
     question: Mapping[str, Any], source: EvidenceSource, repo: Path
 ) -> Evidence:
@@ -6118,7 +6130,9 @@ async def _coverage_blindness(
     )
     if not target:
         raise ValueError("coverage check needs a ticket identifier")
-    payload = await source.ticket_get(target)
+    payload = await source.ticket_get(
+        target, board_id=_authoritative_question_board_id(question)
+    )
     ticket = payload.get("ticket", payload)
     if not isinstance(ticket, Mapping):
         raise ValueError(f"ticket {target} is unreadable")
@@ -6167,6 +6181,7 @@ async def evaluate_mechanical(
 ) -> Evidence:
     message = str(question.get("message", ""))
     ticket_id = str(question.get("ticket_id", ""))
+    board_id = _authoritative_question_board_id(question)
     if classification.evaluator == "coverage_blindness":
         return await _coverage_blindness(question, source, repo)
     if classification.evaluator == "git_ancestry":
@@ -6178,7 +6193,7 @@ async def evaluate_mechanical(
         target = _identifier(r"\bTK-[0-9A-Za-z-]+\b", message)
         if target is None:
             raise ValueError("no ticket identifier was present")
-        payload = await source.ticket_get(target)
+        payload = await source.ticket_get(target, board_id=board_id)
         ticket = payload.get("ticket", payload)
         status = ticket.get("status") if isinstance(ticket, Mapping) else None
         if not isinstance(status, str):
@@ -6194,7 +6209,7 @@ async def evaluate_mechanical(
         target = _identifier(r"\bTK-[0-9A-Za-z-]+\b", message) or ticket_id
         if annotation_id is None or not target:
             raise ValueError("annotation coverage needs an annotation and ticket identifier")
-        payload = await source.ticket_get(target)
+        payload = await source.ticket_get(target, board_id=board_id)
         ticket = payload.get("ticket", payload)
         annotations = ticket.get("annotations", []) if isinstance(ticket, Mapping) else []
         annotation = next(
@@ -7695,6 +7710,11 @@ class CentralBackend:
             None,
         )
 
+    async def agent_id_for_board(self, board_id: str) -> str:
+        """Return this authenticated principal's board-scoped agent identity."""
+        async with self._client_for_board(board_id) as client:
+            return str(client.identity.agent_id)
+
     async def accept_question(
         self, ticket_id: str, question_id: str, *, board_id: str | None = None
     ) -> Mapping[str, Any]:
@@ -8593,6 +8613,7 @@ async def advance_autonomous_answer(
     """Accept and, after the durable hold, answer through Central's bound client."""
     question_id = str(question.get("question_id", ""))
     ticket_id = str(question.get("ticket_id", ""))
+    board_id = _authoritative_question_board_id(question)
     evaluation = evaluation_state.get("evaluation", {})
     audit = evaluation.get("answer_audit", {}) if isinstance(evaluation, Mapping) else {}
     if not isinstance(audit, Mapping) or audit.get("status") in {
@@ -8601,7 +8622,7 @@ async def advance_autonomous_answer(
         "failed",
     }:
         return dict(finding)
-    current = await backend.question(ticket_id, question_id)
+    current = await backend.question(ticket_id, question_id, board_id=board_id)
     if current is None:
         await _write_answer_audit(
             backend,
@@ -8612,6 +8633,8 @@ async def advance_autonomous_answer(
             reason_code="question_missing",
         )
         return dict(finding)
+    if _authoritative_question_board_id(current) != board_id:
+        raise RuntimeError("Central returned a question from a different board")
     if current.get("state") == "answered":
         await _write_answer_audit(
             backend,
@@ -8626,6 +8649,10 @@ async def advance_autonomous_answer(
 
     accepted_by = current.get("accepted_by") or {}
     own_agent_id = str(getattr(backend.identity, "agent_id", ""))
+    if accepted_by:
+        identity_reader = getattr(backend, "agent_id_for_board", None)
+        if callable(identity_reader):
+            own_agent_id = str(await identity_reader(board_id))
     if accepted_by and accepted_by.get("agent_id") != own_agent_id:
         await _write_answer_audit(
             backend,
@@ -8640,7 +8667,9 @@ async def advance_autonomous_answer(
         current.get("state") == "accepted"
         and accepted_by.get("agent_id") == own_agent_id
     ):
-        response = await backend.release_question(ticket_id, question_id)
+        response = await backend.release_question(
+            ticket_id, question_id, board_id=board_id
+        )
         released = response.get("question", {})
         if released.get("state") != "open" or released.get("accepted_by"):
             raise RuntimeError("Central did not release accepted question ownership")
@@ -8739,7 +8768,9 @@ async def advance_autonomous_answer(
         )
         return dict(finding)
     try:
-        response = await backend.answer_question(ticket_id, question_id, answer)
+        response = await backend.answer_question(
+            ticket_id, question_id, answer, board_id=board_id
+        )
     except Exception:
         await _record_answer_failure(backend, question_id, "central_answer_failed", now)
         await _write_answer_audit(

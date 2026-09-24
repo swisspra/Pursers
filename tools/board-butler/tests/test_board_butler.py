@@ -49,8 +49,12 @@ class Source:
         )
         self.evaluation_writes = 0
         self.evaluation_values: dict[str, str] = {}
+        self.ticket_get_boards: list[str | None] = []
 
-    async def ticket_get(self, ticket_id: str) -> Mapping[str, Any]:
+    async def ticket_get(
+        self, ticket_id: str, *, board_id: str | None = None
+    ) -> Mapping[str, Any]:
+        self.ticket_get_boards.append(board_id)
         return {"ticket": self.tickets[ticket_id]}
 
     async def board_status(self) -> Mapping[str, Any]:
@@ -81,6 +85,9 @@ class AutonomousBackend(Source):
         self.accept_calls = 0
         self.release_calls = 0
         self.answer_calls = 0
+        self.question_boards: list[str | None] = []
+        self.release_boards: list[str | None] = []
+        self.answer_boards: list[str | None] = []
         self.fail_answers = False
 
     async def findings(self) -> Mapping[str, Any]:
@@ -118,9 +125,17 @@ class AutonomousBackend(Source):
         }
 
     async def question(
-        self, _ticket_id: str, question_id: str
+        self,
+        _ticket_id: str,
+        question_id: str,
+        *,
+        board_id: str | None = None,
     ) -> Mapping[str, Any] | None:
+        self.question_boards.append(board_id)
         return self.questions.get(question_id)
+
+    async def agent_id_for_board(self, _board_id: str) -> str:
+        return str(self.identity.agent_id)
 
     async def accept_question(
         self, _ticket_id: str, question_id: str
@@ -141,9 +156,15 @@ class AutonomousBackend(Source):
         }
 
     async def answer_question(
-        self, _ticket_id: str, question_id: str, message: str
+        self,
+        _ticket_id: str,
+        question_id: str,
+        message: str,
+        *,
+        board_id: str | None = None,
     ) -> Mapping[str, Any]:
         self.answer_calls += 1
+        self.answer_boards.append(board_id)
         if self.fail_answers:
             raise RuntimeError("private failure detail")
         row = self.questions[question_id]
@@ -157,9 +178,14 @@ class AutonomousBackend(Source):
         }
 
     async def release_question(
-        self, _ticket_id: str, question_id: str
+        self,
+        _ticket_id: str,
+        question_id: str,
+        *,
+        board_id: str | None = None,
     ) -> Mapping[str, Any]:
         self.release_calls += 1
+        self.release_boards.append(board_id)
         row = self.questions[question_id]
         row["state"] = "open"
         row["released_from"] = row.get("accepted_by")
@@ -1552,6 +1578,10 @@ def test_autonomous_mode_answers_once_without_early_ownership(
     assert second["question_id"] == item["question_id"]
     assert backend.accept_calls == 0
     assert backend.answer_calls == 1
+    assert backend.question_boards == ["pursers"]
+    assert backend.answer_boards == ["pursers"]
+    assert backend.ticket_get_boards
+    assert set(backend.ticket_get_boards) == {"pursers"}
     assert backend.questions[item["question_id"]]["answer"] == "TK-123 is closed."
     evaluation = json.loads(backend.evaluation_values[item["question_id"]])[
         "evaluation"
@@ -1800,6 +1830,7 @@ def test_accepted_restart_releases_question_before_every_exit(
     assert current["state"] == "open"
     assert current["accepted_by"] is None
     assert backend.release_calls == 1
+    assert backend.release_boards == ["pursers"]
     audit = json.loads(backend.evaluation_values[item["question_id"]])["evaluation"][
         "answer_audit"
     ]
