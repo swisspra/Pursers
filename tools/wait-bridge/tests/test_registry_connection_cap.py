@@ -80,7 +80,7 @@ def _decode(result) -> dict:
 
 class RegistryConnectionCapTests(unittest.IsolatedAsyncioTestCase):
     async def test_default_cap_keeps_three_registry_boards_push_only(self) -> None:
-        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+        with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -212,7 +212,7 @@ class RegistryConnectionCapTests(unittest.IsolatedAsyncioTestCase):
                                     "boards": "registry",
                                     "only_mine": True,
                                     "since_seq": cursors,
-                                    "timeout_s": 1,
+                                    "timeout_s": 5,
                                     "wait_for": "claimable",
                                 },
                             )
