@@ -5,7 +5,9 @@ import base64
 import importlib.util
 import json
 import os
+import re
 import secrets
+import shlex
 import subprocess
 import stat
 import sys
@@ -858,6 +860,28 @@ class _SystemdUserEnvironmentUnavailable(RuntimeError):
     """The exact disposable unit proved a host-specific user-manager gap."""
 
 
+def _effective_execstart_matches(value: str, command: tuple[str, ...]) -> bool:
+    match = re.fullmatch(
+        r"\{ path=(.+?) ; argv\[\]=(.+?) ; ignore_errors=(?:yes|no) ;.*\}",
+        value,
+    )
+    if match is None:
+        return False
+    try:
+        path = shlex.split(match.group(1))
+        argv = shlex.split(match.group(2))
+        expected_executable = Path(command[0]).resolve(strict=True)
+        return (
+            len(path) == 1
+            and len(argv) == len(command)
+            and Path(path[0]).resolve(strict=True) == expected_executable
+            and Path(argv[0]).resolve(strict=True) == expected_executable
+            and tuple(argv[1:]) == command[1:]
+        )
+    except (OSError, TypeError, UnicodeError, ValueError):
+        return False
+
+
 def _systemd_unit_execution_paths_are_accessible(
     adapter: Any,
     template: executor.SeatTemplate,
@@ -868,7 +892,7 @@ def _systemd_unit_execution_paths_are_accessible(
     try:
         fragment = Path(properties["FragmentPath"])
         working_directory = Path(properties["WorkingDirectory"])
-        executable = Path(template.command[0])
+        executable = Path(template.command[0]).resolve(strict=True)
         credential = adapter.credential_paths[template.credential_ref]
         return (
             not fragment.is_symlink()
@@ -883,7 +907,7 @@ def _systemd_unit_execution_paths_are_accessible(
             and credential.is_file()
             and not credential.is_symlink()
             and os.access(credential, os.R_OK)
-            and adapter._execstart_matches(properties["ExecStart"], template.command)
+            and _effective_execstart_matches(properties["ExecStart"], template.command)
         )
     except (AttributeError, KeyError, OSError, RuntimeError, TypeError, UnicodeError):
         return False
@@ -1246,6 +1270,7 @@ def test_exact_accessible_generated_unit_proves_203_is_environmental(
         runner=lambda command, **_: subprocess.CompletedProcess(command, 0, "", ""),
     )
     adapter.instantiate("worker-a", template)
+    effective_executable = Path(sys.executable).resolve()
 
     def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         if "show" in command:
@@ -1254,7 +1279,8 @@ def test_exact_accessible_generated_unit_proves_203_is_environmental(
                 "Result=exit-code\nExecMainCode=1\nExecMainStatus=203\n"
                 f"FragmentPath={adapter._unit_path('worker-a')}\nDropInPaths=\n"
                 f"WorkingDirectory={repository}\n"
-                f"ExecStart={{ path={sys.executable} ; argv[]={sys.executable} -c "
+                f"ExecStart={{ path={effective_executable} ; "
+                f"argv[]={effective_executable} -c "
                 '"raise SystemExit(0)" ; ignore_errors=no ; start_time=[n/a] ; }\n'
             )
             return subprocess.CompletedProcess(command, 0, output, "")
