@@ -37,6 +37,82 @@ python3 tools/ci_manifest.py verify --input /PATH/TO/counts.json
 python3 tools/ci_manifest.py run
 ```
 
+## Affected-ticket and batch validation
+
+Ordinary tickets do not need to repeat the full manifest at every worker and
+reviewer stage. The worker records the exact base and candidate commit IDs,
+runs ticket-focused tests, and then runs the manifest-owned affected selection:
+
+```sh
+export PURSERS_TICKET_LEASE_ID=TK-EXAMPLE
+python3 tools/ci_manifest.py affected \
+  --base FULL_40_CHARACTER_BASE_SHA \
+  --candidate FULL_40_CHARACTER_CANDIDATE_SHA \
+  --output /PATH/OUTSIDE/THE/CHECKOUT/affected.json
+```
+
+The command obtains changed paths from Git, requires a clean checkout at the
+exact candidate, and has no option that can narrow its result. It writes
+bounded canonical JSON with the rename-aware diff, selected and skipped suites,
+escalation reasons, execution result, timing, and a SHA-256 integrity value. An
+operator may also supply `--signing-key-file /PATH/TO/PRIVATE/KEY` to add an
+HMAC-SHA-256 signature without placing secret material in the evidence.
+
+Selection fails closed to all 14 suites for any unmapped path, test or runner
+change, repository-wide configuration, shared schema/protocol or
+security/authority/authentication/policy path, release/generated artifact,
+cross-component diff, or explicit `--high-risk` ticket. Release-train work
+always uses the full gate. A focused result means only that a reviewed ownership
+rule proved narrower suite coverage; it does not waive independent HARD review.
+
+The independent reviewer still verifies the exact base, candidate, and Git
+diff; inspects the selection and security-sensitive logic; reproduces the
+ticket-critical behavior; and adds focused tests when judgment requires. The
+reviewer must be a different principal. Main CI and release candidates always
+run the literal full manifest.
+
+| Diff class | Worker | Independent reviewer | Frozen integration batch |
+| --- | --- | --- | --- |
+| Isolated mapped component | Focused tests plus computed affected suites | Exact-SHA/diff/selection verification plus critical reproduction | All 14 suites once |
+| Overlapping reviewed ownership | Every mapped suite | Verify every ownership edge plus critical reproduction | All 14 suites once |
+| Unknown, global, policy-sensitive, generated, cross-component, or high-risk | All 14 suites | HARD review and judgment-driven focused tests; full result remains mandatory | All 14 suites once |
+| Release train | All 14 suites | HARD review and exact-candidate full-gate verification | All 14 suites for the frozen release candidate |
+
+After independent approvals, the coordinator/operator prepares a schema-1 JSON
+file outside the checkout. It contains `frozen_base` and one row per ticket with
+`ticket_id`, `candidate_sha`, exact sorted `files_changed`, and an approved
+review binding the same candidate SHA to distinct `reviewer_principal_id` and
+`submitter_principal_id`. Then, from a clean checkout whose `HEAD` and
+`origin/main` both equal the frozen base:
+
+```sh
+python3 tools/ci_manifest.py approved-batch \
+  --base FULL_40_CHARACTER_FROZEN_MAIN_SHA \
+  --approvals /PATH/OUTSIDE/THE/CHECKOUT/approvals.json \
+  --output /PATH/OUTSIDE/THE/CHECKOUT/integration.json
+```
+
+The batch command rejects SHA or changed-file drift, stale main, missing or
+non-independent review identity, dirty trees, merge conflicts, and integration
+manifest drift before running the full 14-suite gate exactly once. Its output
+binds every ticket and review SHA to the deterministic aggregate candidate and
+records queue and execution timing. It creates only a local namespaced ref; it
+never pushes, tags, publishes, or waives a failure.
+
+Full gates use a host-wide file-lock admission queue under
+`~/.cache/pursers/full-gate` by default. `PURSERS_FULL_GATE_CONCURRENCY` sets the
+positive slot budget. Waiting requests are ordered `main/release`, critical
+reviewer, active reviewer, active worker, then background validation, with FIFO
+ordering inside a class. Worker and reviewer classes require a ticket lease;
+focused tests do not enter this queue. Evidence records both queue wait and
+execution time.
+
+Rollback is operationally simple: stop using `affected` and `approved-batch`
+and return every worker, reviewer, integration, main, and release stage to
+`python3 tools/ci_manifest.py run`. Do not remove the strict-review policy or
+the full main/release gate during rollback. Existing JSON evidence remains
+self-contained and tied to its exact commits.
+
 ## CI and CodeQL
 
 The checked-in [`ci.yml`](../.github/workflows/ci.yml) runs on pull requests and

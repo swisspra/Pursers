@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import re
 import stat
@@ -20,22 +21,62 @@ sys.path.insert(0, str(TOOLS))
 import ci_manifest  # noqa: E402
 from ci_manifest import (  # noqa: E402
     SUITES,
+    FullGateAdmissionTiming,
     Suite,
+    add_evidence_integrity,
     changed_paths_since,
     covering_suites,
     default_job_count,
     inspect_integration_files,
+    run_approved_batch,
     parse_collected_count,
     print_seat_digest_report,
     pytest_target,
     require_free_space,
     run_suites,
     run_seat_suites,
+    select_affected_suites,
     suite_environment,
     validate_integration_files,
     validate_manifest,
     verify_counts,
 )
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _commit(root: Path, message: str) -> str:
+    _git(root, "add", ".")
+    _git(
+        root,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-qm",
+        message,
+    )
+    return _git(root, "rev-parse", "HEAD")
+
+
+def _git_fixture(tmp_path: Path) -> tuple[Path, str]:
+    root = tmp_path / "repository"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.name", "Test")
+    _git(root, "config", "user.email", "test@example.invalid")
+    marker = root / "README.md"
+    marker.write_text("base\n", encoding="utf-8")
+    return root, _commit(root, "base")
 
 
 def test_manifest_covers_every_test_directory() -> None:
@@ -191,6 +232,355 @@ def test_manifest_declares_cross_package_acceptance_coverage() -> None:
         "aionui-extension",
     )
     assert coverage["docs/design-home/example.md"] == ()
+
+
+def test_affected_selection_uses_exact_git_diff_and_overlapping_coverage(
+    tmp_path: Path,
+) -> None:
+    root, base = _git_fixture(tmp_path)
+    changed = root / "packages/client/src/pursers_client/example.py"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("VALUE = 1\n", encoding="utf-8")
+    candidate = _commit(root, "client change")
+
+    selection = select_affected_suites(root, base, candidate)
+
+    assert selection.selected_suites == ("client", "aionui-extension")
+    assert selection.escalation_reasons == ()
+    assert selection.full_gate is False
+    assert "central" in selection.skipped_suite_reasons
+
+
+@pytest.mark.parametrize(
+    ("relative", "reason"),
+    [
+        ("unmapped/new.file", "unmapped:"),
+        ("packages/client/tests/test_new.py", "test-or-runner:"),
+        ("packages/client/src/pursers_client/auth_policy.py", "policy-sensitive:"),
+        ("packages/client/src/pursers_client/authentication.py", "policy-sensitive:"),
+        ("packages/client/generated.lock", "release-or-generated:"),
+        ("tools/ci_manifest.py", "global-or-generated:"),
+    ],
+)
+def test_affected_selection_escalates_uncertain_and_high_risk_paths(
+    tmp_path: Path, relative: str, reason: str
+) -> None:
+    root, base = _git_fixture(tmp_path)
+    changed = root / relative
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("changed\n", encoding="utf-8")
+    candidate = _commit(root, "risky change")
+
+    selection = select_affected_suites(root, base, candidate)
+
+    assert selection.selected_suites == tuple(suite.name for suite in SUITES)
+    assert any(item.startswith(reason) for item in selection.escalation_reasons)
+
+
+def test_affected_selection_escalates_cross_component_changes(tmp_path: Path) -> None:
+    root, base = _git_fixture(tmp_path)
+    for relative in (
+        "packages/client/src/pursers_client/example.py",
+        "tools/wait-bridge/src/pursers_wait_server/example.py",
+    ):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("changed\n", encoding="utf-8")
+    candidate = _commit(root, "cross component")
+
+    selection = select_affected_suites(root, base, candidate)
+
+    assert "cross-component:packages/client,tools/wait-bridge" in selection.escalation_reasons
+    assert len(selection.selected_suites) == len(SUITES)
+
+
+def test_affected_selection_explicit_high_risk_only_broadens(tmp_path: Path) -> None:
+    root, base = _git_fixture(tmp_path)
+    changed = root / "packages/import/src/pursers_import/example.py"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("changed\n", encoding="utf-8")
+    candidate = _commit(root, "high risk")
+
+    ordinary = select_affected_suites(root, base, candidate)
+    high_risk = select_affected_suites(root, base, candidate, high_risk=True)
+
+    assert ordinary.selected_suites == ("import",)
+    assert high_risk.selected_suites == tuple(suite.name for suite in SUITES)
+    assert high_risk.escalation_reasons == ("ticket-marked-high-risk",)
+
+
+def test_affected_selection_tracks_renamed_and_deleted_paths(tmp_path: Path) -> None:
+    root, base = _git_fixture(tmp_path)
+    old = root / "packages/client/src/pursers_client/old.py"
+    old.parent.mkdir(parents=True)
+    old.write_text("old\n", encoding="utf-8")
+    with_file = _commit(root, "add old")
+    new = old.with_name("new.py")
+    _git(root, "mv", old.relative_to(root).as_posix(), new.relative_to(root).as_posix())
+    candidate = _commit(root, "rename")
+
+    renamed = select_affected_suites(root, with_file, candidate)
+    assert renamed.changes[0].status.startswith("R")
+    assert renamed.changes[0].paths == (
+        "packages/client/src/pursers_client/old.py",
+        "packages/client/src/pursers_client/new.py",
+    )
+
+    new.unlink()
+    deleted_candidate = _commit(root, "delete")
+    deleted = select_affected_suites(root, candidate, deleted_candidate)
+    assert deleted.changes == (
+        ci_manifest.ChangeRecord(
+            status="D", paths=("packages/client/src/pursers_client/new.py",)
+        ),
+    )
+    assert base != deleted_candidate
+
+
+def test_affected_selection_rejects_abbreviated_shas(tmp_path: Path) -> None:
+    root, base = _git_fixture(tmp_path)
+    changed = root / "packages/client/src/pursers_client/example.py"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("changed\n", encoding="utf-8")
+    candidate = _commit(root, "change")
+
+    with pytest.raises(ValueError, match="exact 40-character"):
+        select_affected_suites(root, base[:12], candidate)
+
+
+def test_selection_evidence_is_deterministic_and_can_be_signed(tmp_path: Path) -> None:
+    root, base = _git_fixture(tmp_path)
+    changed = root / "packages/client/src/pursers_client/example.py"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("changed\n", encoding="utf-8")
+    candidate = _commit(root, "change")
+    selection = select_affected_suites(root, base, candidate)
+    payload = ci_manifest.selection_payload(selection)
+    key = tmp_path / "key"
+    key.write_bytes(b"fixture key")
+
+    first = add_evidence_integrity(payload, key)
+    second = add_evidence_integrity(payload, key)
+
+    assert first == second
+    assert first["signature"]["algorithm"] == "hmac-sha256"
+    assert len(first["evidence_sha256"]) == 64
+
+
+def test_full_gate_requires_lease_and_orders_priority(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="requires an active ticket lease"):
+        with ci_manifest.full_gate_admission(
+            "active-worker", None, state_dir=tmp_path
+        ):
+            pass
+
+    rows = [
+        {"admission_class": "active-worker", "requested_ns": 1, "request_id": "w"},
+        {"admission_class": "background-validation", "requested_ns": 0, "request_id": "b"},
+        {"admission_class": "critical-reviewer", "requested_ns": 2, "request_id": "c"},
+        {"admission_class": "active-reviewer", "requested_ns": 3, "request_id": "r"},
+    ]
+    assert [row["request_id"] for row in ci_manifest._queue_order(rows)] == [
+        "c",
+        "r",
+        "w",
+        "b",
+    ]
+
+
+def _approval(ticket_id: str, candidate: str, files: list[str]) -> dict[str, object]:
+    return {
+        "ticket_id": ticket_id,
+        "candidate_sha": candidate,
+        "files_changed": files,
+        "review": {
+            "status": "approved",
+            "candidate_sha": candidate,
+            "reviewer_principal_id": "PR-reviewer",
+            "submitter_principal_id": "PR-worker",
+        },
+    }
+
+
+def _branch_change(root: Path, base: str, branch: str, relative: str, text: str) -> str:
+    _git(root, "switch", "--detach", base)
+    _git(root, "switch", "-c", branch)
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return _commit(root, branch)
+
+
+def test_batch_rejects_review_sha_mismatch(tmp_path: Path) -> None:
+    root, base = _git_fixture(tmp_path)
+    candidate = _branch_change(
+        root, base, "candidate", "packages/client/src/example.py", "change\n"
+    )
+    row = _approval("TK-one", candidate, ["packages/client/src/example.py"])
+    row["review"]["candidate_sha"] = base  # type: ignore[index]
+
+    with pytest.raises(ValueError, match="review/SHA mismatch"):
+        ci_manifest.validate_batch_approvals(
+            root,
+            {"schema": 1, "frozen_base": base, "tickets": [row]},
+            base,
+        )
+
+
+def test_batch_rejects_stale_frozen_main_base(tmp_path: Path) -> None:
+    root, base = _git_fixture(tmp_path)
+    changed = root / "packages/client/src/example.py"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("change\n", encoding="utf-8")
+    candidate = _commit(root, "advance main")
+    _git(root, "switch", "--detach", base)
+
+    with pytest.raises(RuntimeError, match="stale base"):
+        ci_manifest._require_clean_exact_base(root, base, candidate)
+
+
+def test_approved_batch_constructs_candidate_and_runs_full_gate_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, base = _git_fixture(tmp_path)
+    first_path = "packages/client/src/first.py"
+    second_path = "tools/wait-bridge/src/second.py"
+    first = _branch_change(root, base, "first", first_path, "first\n")
+    second = _branch_change(root, base, "second", second_path, "second\n")
+    _git(root, "switch", "--detach", base)
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "frozen_base": base,
+                "tickets": [
+                    _approval("TK-first", first, [first_path]),
+                    _approval("TK-second", second, [second_path]),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "result.json"
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(ci_manifest, "validate_integration_files", lambda _root: None)
+    calls: list[Path] = []
+
+    def full_gate(worktree: Path, **_kwargs: object) -> FullGateAdmissionTiming:
+        calls.append(worktree)
+        return FullGateAdmissionTiming("release", 1, 0.1, 0.2)
+
+    monkeypatch.setattr(ci_manifest, "run_full_gate", full_gate)
+
+    result = run_approved_batch(
+        root,
+        base=base,
+        approvals_path=approvals,
+        output=output,
+        main_ref="HEAD",
+        jobs=1,
+        admission_class="release",
+        lease_id=None,
+        signing_key_file=None,
+    )
+
+    assert len(calls) == 1
+    assert result["full_gate"]["suite_invocations"] == len(SUITES)
+    assert result["aggregate_files_changed"] == [first_path, second_path]
+    assert output.is_file()
+    assert _git(root, "rev-parse", result["aggregate_ref"]) == result["aggregate_candidate"]
+
+
+def test_approved_batch_rejects_conflicting_branches_before_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, base = _git_fixture(tmp_path)
+    relative = "packages/client/src/conflict.py"
+    first = _branch_change(root, base, "first", relative, "first\n")
+    second = _branch_change(root, base, "second", relative, "second\n")
+    _git(root, "switch", "--detach", base)
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "frozen_base": base,
+                "tickets": [
+                    _approval("TK-first", first, [relative]),
+                    _approval("TK-second", second, [relative]),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(ci_manifest, "validate_integration_files", lambda _root: None)
+    monkeypatch.setattr(
+        ci_manifest,
+        "run_full_gate",
+        lambda *_args, **_kwargs: pytest.fail("full gate must not run after conflict"),
+    )
+
+    with pytest.raises(RuntimeError, match="git merge .* failed"):
+        run_approved_batch(
+            root,
+            base=base,
+            approvals_path=approvals,
+            output=tmp_path / "result.json",
+            main_ref="HEAD",
+            jobs=1,
+            admission_class="release",
+            lease_id=None,
+            signing_key_file=None,
+        )
+
+
+def test_approved_batch_rejects_generated_drift_before_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, base = _git_fixture(tmp_path)
+    relative = "packages/client/src/change.py"
+    candidate = _branch_change(root, base, "candidate", relative, "change\n")
+    _git(root, "switch", "--detach", base)
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "frozen_base": base,
+                "tickets": [_approval("TK-one", candidate, [relative])],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(
+        ci_manifest,
+        "validate_integration_files",
+        lambda _root: (_ for _ in ()).throw(ValueError("generated drift")),
+    )
+    monkeypatch.setattr(
+        ci_manifest,
+        "run_full_gate",
+        lambda *_args, **_kwargs: pytest.fail("full gate must not run after drift"),
+    )
+
+    with pytest.raises(ValueError, match="generated drift"):
+        run_approved_batch(
+            root,
+            base=base,
+            approvals_path=approvals,
+            output=tmp_path / "result.json",
+            main_ref="HEAD",
+            jobs=1,
+            admission_class="release",
+            lease_id=None,
+            signing_key_file=None,
+        )
 
 
 def test_manifest_rejects_an_unlisted_test_directory(tmp_path: Path) -> None:
