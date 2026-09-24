@@ -30,12 +30,19 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.error
 import time
 import urllib.parse
 import urllib.request
 from collections import deque
-from contextlib import AsyncExitStack, aclosing, asynccontextmanager, suppress
+from contextlib import (
+    AsyncExitStack,
+    aclosing,
+    asynccontextmanager,
+    contextmanager,
+    suppress,
+)
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -757,25 +764,130 @@ class FleetStateStore(Protocol):
         self, expected_revision: int, value: Mapping[str, Any]
     ) -> bool: ...
 
+    def execute_if_current(
+        self,
+        config_revisions: Mapping[str, int],
+        authorization_fingerprints: Mapping[str, str],
+        operation: FleetOperation,
+        attempted_at: datetime,
+        executor: FleetExecutorClient,
+    ) -> tuple[bool, Mapping[str, Any]]: ...
+
+
+def _execute_fleet_operation(
+    value: Mapping[str, Any],
+    config_revisions: Mapping[str, int],
+    authorization_fingerprints: Mapping[str, str],
+    operation: FleetOperation,
+    attempted_at: datetime,
+    executor: FleetExecutorClient,
+) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    """Execute and record one operation while the caller holds the CAS lock."""
+    operations = value.get("operations")
+    row = (
+        operations.get(operation.operation_id)
+        if isinstance(operations, Mapping)
+        else None
+    )
+    current_revisions = value.get("config_revisions")
+    current_fingerprints = value.get("authorization_fingerprints")
+    expected_row = {
+        "operation_id": operation.operation_id,
+        "board_id": operation.board_id,
+        "action": operation.action,
+        "seat_id": operation.seat_id,
+        "template_id": operation.template_id,
+        "template_digest_sha256": operation.template_digest_sha256,
+        "expected_seat_generation": operation.expected_seat_generation,
+        "authorization_fingerprint_sha256": operation.authorization_fingerprint_sha256,
+        "status": "pending",
+    }
+    if (
+        not isinstance(current_revisions, Mapping)
+        or dict(current_revisions) != dict(config_revisions)
+        or not isinstance(current_fingerprints, Mapping)
+        or dict(current_fingerprints) != dict(authorization_fingerprints)
+        or not isinstance(row, Mapping)
+        or any(row.get(key) != expected for key, expected in expected_row.items())
+    ):
+        return False, copy.deepcopy(dict(value)), {}
+    try:
+        receipt = dict(executor.execute(operation))
+        if (
+            receipt.get("operation_id") != operation.operation_id
+            or receipt.get("outcome")
+            not in {"succeeded", "rejected", "failed", "cancelled", "unknown"}
+            or not isinstance(receipt.get("committed"), bool)
+        ):
+            raise RuntimeError("executor receipt contract mismatch")
+    except Exception as exc:
+        receipt = {
+            "operation_id": operation.operation_id,
+            "outcome": "unknown",
+            "committed": False,
+            "reason_code": type(exc).__name__.casefold(),
+        }
+    updated = copy.deepcopy(dict(value))
+    operation_state = updated["operations"]
+    completed = dict(operation_state[operation.operation_id])
+    completed["attempts"] = int(completed.get("attempts", 0) or 0) + 1
+    completed["last_attempt_at"] = attempted_at.isoformat()
+    completed["status"] = (
+        "terminal"
+        if receipt["outcome"] in {"succeeded", "rejected", "failed", "cancelled"}
+        else "unknown"
+    )
+    completed["outcome"] = receipt["outcome"]
+    completed["committed"] = receipt.get("committed") is True
+    if isinstance(receipt.get("reason_code"), str):
+        completed["reason_code"] = receipt["reason_code"]
+    operation_state[operation.operation_id] = completed
+    return True, updated, receipt
+
 
 class MemoryFleetStateStore:
     """Deterministic CAS store used by simulations and embedders."""
 
     def __init__(self, value: Mapping[str, Any] | None = None) -> None:
+        self._lock = threading.RLock()
         self.revision = 0
         self.value: dict[str, Any] = copy.deepcopy(dict(value or {}))
 
     def load(self) -> tuple[int, Mapping[str, Any]]:
-        return self.revision, copy.deepcopy(self.value)
+        with self._lock:
+            return self.revision, copy.deepcopy(self.value)
 
     def compare_and_swap(
         self, expected_revision: int, value: Mapping[str, Any]
     ) -> bool:
-        if expected_revision != self.revision:
-            return False
-        self.value = copy.deepcopy(dict(value))
-        self.revision += 1
-        return True
+        with self._lock:
+            if expected_revision != self.revision:
+                return False
+            self.value = copy.deepcopy(dict(value))
+            self.revision += 1
+            return True
+
+    def execute_if_current(
+        self,
+        config_revisions: Mapping[str, int],
+        authorization_fingerprints: Mapping[str, str],
+        operation: FleetOperation,
+        attempted_at: datetime,
+        executor: FleetExecutorClient,
+    ) -> tuple[bool, Mapping[str, Any]]:
+        with self._lock:
+            executed, updated, receipt = _execute_fleet_operation(
+                self.value,
+                config_revisions,
+                authorization_fingerprints,
+                operation,
+                attempted_at,
+                executor,
+            )
+            if executed:
+                self.value = updated
+                self.revision += 1
+            return executed, receipt
 
 
 class FileFleetStateStore:
@@ -788,16 +900,31 @@ class FileFleetStateStore:
         self.lock_path = path.with_suffix(path.suffix + ".lock")
         self.max_bytes = max_bytes
 
+    _held_locks = threading.local()
+
+    @contextmanager
     def _locked(self) -> Any:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.path.parent, 0o700)
+        key = os.fspath(self.lock_path.resolve())
+        held = getattr(self._held_locks, "paths", set())
+        if key in held:
+            yield
+            return
         descriptor = os.open(
             self.lock_path,
             os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
             0o600,
         )
         os.chmod(self.lock_path, 0o600)
-        return os.fdopen(descriptor, "r+")
+        with os.fdopen(descriptor, "r+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            held.add(key)
+            self._held_locks.paths = held
+            try:
+                yield
+            finally:
+                held.remove(key)
 
     def _read_unlocked(self) -> tuple[int, dict[str, Any]]:
         if not self.path.exists():
@@ -826,16 +953,14 @@ class FileFleetStateStore:
         return document["revision"], document["value"]
 
     def load(self) -> tuple[int, Mapping[str, Any]]:
-        with self._locked() as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with self._locked():
             revision, value = self._read_unlocked()
             return revision, copy.deepcopy(value)
 
     def compare_and_swap(
         self, expected_revision: int, value: Mapping[str, Any]
     ) -> bool:
-        with self._locked() as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with self._locked():
             revision, _ = self._read_unlocked()
             if revision != expected_revision:
                 return False
@@ -868,6 +993,56 @@ class FileFleetStateStore:
             finally:
                 temporary.unlink(missing_ok=True)
             return True
+
+    def execute_if_current(
+        self,
+        config_revisions: Mapping[str, int],
+        authorization_fingerprints: Mapping[str, str],
+        operation: FleetOperation,
+        attempted_at: datetime,
+        executor: FleetExecutorClient,
+    ) -> tuple[bool, Mapping[str, Any]]:
+        with self._locked():
+            revision, value = self._read_unlocked()
+            executed, updated, receipt = _execute_fleet_operation(
+                value,
+                config_revisions,
+                authorization_fingerprints,
+                operation,
+                attempted_at,
+                executor,
+            )
+            if not executed:
+                return False, receipt
+            document = {
+                "schema": "pursers_fleet_state_store_v1",
+                "revision": revision + 1,
+                "value": updated,
+            }
+            encoded = json.dumps(
+                document,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(encoded) > self.max_bytes:
+                raise RuntimeError("fleet state exceeds the safe bound")
+            descriptor, raw = tempfile.mkstemp(
+                prefix=f".{self.path.name}.", dir=self.path.parent
+            )
+            temporary = Path(raw)
+            try:
+                os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(encoded)
+                    handle.write(b"\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                temporary.replace(self.path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return True, receipt
 
 
 class FileFleetObservationSource:
@@ -1975,6 +2150,12 @@ class FleetReconciler:
                     "board_id": operation.board_id,
                     "action": operation.action,
                     "seat_id": operation.seat_id,
+                    "template_id": operation.template_id,
+                    "template_digest_sha256": operation.template_digest_sha256,
+                    "expected_seat_generation": operation.expected_seat_generation,
+                    "authorization_fingerprint_sha256": (
+                        operation.authorization_fingerprint_sha256
+                    ),
                     "status": "pending",
                     "attempts": int(row.get("attempts", 0) or 0),
                 }
@@ -2047,39 +2228,43 @@ class FleetReconciler:
             raise RuntimeError("fleet state CAS retry exhausted")
         receipts: list[dict[str, Any]] = []
         for operation in plan.operations:
-            try:
-                receipt = dict(executor.execute(operation))
-                if (
-                    receipt.get("operation_id") != operation.operation_id
-                    or receipt.get("outcome")
-                    not in {"succeeded", "rejected", "failed", "cancelled", "unknown"}
-                    or not isinstance(receipt.get("committed"), bool)
-                ):
-                    raise RuntimeError("executor receipt contract mismatch")
-            except Exception as exc:
-                receipt = {
-                    "operation_id": operation.operation_id,
-                    "outcome": "unknown",
-                    "committed": False,
-                    "reason_code": type(exc).__name__.casefold(),
+            executed, receipt = store.execute_if_current(
+                self.config_revisions,
+                self.authorization_fingerprints,
+                operation,
+                snapshot.observed_at,
+                executor,
+            )
+            if not executed:
+                _current_revision, current = store.load()
+                stale = self._stale_config_revisions(current)
+                if stale:
+                    return self._stale_config_report(
+                        current, stale, snapshot.observed_at
+                    )
+                return {
+                    "status": "shadow",
+                    "effective_state": "shadow",
+                    "reason_code": "superseded_policy_generation",
+                    "desired": self._durable_desired(current),
+                    "operations": [],
+                    "receipts": [],
+                    "explanations": [
+                        {
+                            "scope": "policy",
+                            "reason": "superseded_policy_generation",
+                        }
+                    ],
+                    "audit_evidence": [],
+                    "state_documents": {},
                 }
-            receipts.append(receipt)
-        # A result-CAS failure is safe: operation ids are deterministic and the
-        # executor rejects changed payloads, so the next cycle replays safely.
-        result_revision, current = store.load()
-        updated = copy.deepcopy(dict(current))
-        operation_state = updated.setdefault("operations", {})
-        for operation, receipt in zip(plan.operations, receipts, strict=True):
-            row = dict(operation_state.get(operation.operation_id, {}))
-            row["attempts"] = int(row.get("attempts", 0) or 0) + 1
-            row["last_attempt_at"] = snapshot.observed_at.isoformat()
-            row["status"] = "terminal" if receipt.get("outcome") in {"succeeded", "rejected", "failed", "cancelled"} else "unknown"
-            row["outcome"] = str(receipt.get("outcome", "unknown"))
-            row["committed"] = receipt.get("committed") is True
-            if isinstance(receipt.get("reason_code"), str):
-                row["reason_code"] = receipt["reason_code"]
-            operation_state[operation.operation_id] = row
-        store.compare_and_swap(result_revision, updated)
+            receipts.append(dict(receipt))
+        if not plan.operations:
+            # Preserve the historical two-CAS cycle while refusing to touch a
+            # state that changed policy generation after planning.
+            result_revision, current = store.load()
+            if self._policy_matches(current):
+                store.compare_and_swap(result_revision, current)
         return {
             "desired": copy.deepcopy(dict(plan.desired)),
             "operations": [operation.operation_id for operation in plan.operations],

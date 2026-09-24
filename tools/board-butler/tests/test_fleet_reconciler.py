@@ -782,6 +782,76 @@ def test_stale_plan_losing_cas_cannot_overwrite_newer_policy() -> None:
     assert durable["boards"]["pursers"]["desired"]["worker"] == 1
 
 
+class DispatchRaceStore(butler.MemoryFleetStateStore):
+    def __init__(self, newer: Mapping[str, Any]) -> None:
+        super().__init__()
+        self.newer = copy.deepcopy(dict(newer))
+        self.injected = False
+
+    def execute_if_current(
+        self,
+        config_revisions: Mapping[str, int],
+        authorization_fingerprints: Mapping[str, str],
+        operation: Any,
+        attempted_at: datetime,
+        executor: Any,
+    ) -> tuple[bool, Mapping[str, Any]]:
+        if not self.injected:
+            self.injected = True
+            revision, _current = self.load()
+            assert self.compare_and_swap(revision, self.newer)
+        return super().execute_if_current(
+            config_revisions,
+            authorization_fingerprints,
+            operation,
+            attempted_at,
+            executor,
+        )
+
+
+def test_newer_policy_winning_after_plan_cas_fences_old_executor() -> None:
+    seed = butler.MemoryFleetStateStore()
+    reconciler(
+        {"pursers": board_policy(maximum=1, provider_maximums={"direct": 1})},
+        host_cap=1,
+        config_revision=8,
+        fingerprint="c" * 64,
+    ).reconcile(
+        snapshot(
+            {"pursers": demand(work=1)},
+            [seat("worker-a", "worker", lifecycle="ready")],
+        ),
+        seed,
+        RecordingExecutor(),
+    )
+    _seed_revision, newer = seed.load()
+    store = DispatchRaceStore(newer)
+    executor = RecordingExecutor()
+
+    report = reconciler(
+        {"pursers": board_policy(maximum=2, provider_maximums={"direct": 2})},
+        host_cap=2,
+        config_revision=7,
+    ).reconcile(
+        snapshot(
+            {"pursers": demand(work=2)},
+            [seat("worker-a", "worker"), seat("worker-b", "worker")],
+            now=NOW + timedelta(minutes=1),
+        ),
+        store,
+        executor,
+    )
+
+    assert store.injected is True
+    assert report["status"] == "shadow"
+    assert report["reason_code"] == "stale_config_revision"
+    assert report["operations"] == []
+    assert report["receipts"] == []
+    assert executor.calls == []
+    _revision, durable = store.load()
+    assert durable == newer
+
+
 def test_fingerprint_only_transition_discards_unknown_operation() -> None:
     store = butler.MemoryFleetStateStore()
     failed = RecordingExecutor(fail_seat="worker-a")
@@ -1287,3 +1357,106 @@ def test_production_fleet_cycle_reads_products_executes_and_publishes(
     ]
     assert stale_publications == []
     assert json.loads(options.fleet_state_file.read_text()) == durable
+
+
+def test_production_cycle_fences_real_executor_client_after_policy_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cycle_now = datetime.now(timezone.utc)
+    seed = butler.MemoryFleetStateStore()
+    reconciler(
+        {"pursers": board_policy(maximum=1, provider_maximums={"direct": 1})},
+        host_cap=1,
+        config_revision=4,
+        fingerprint="c" * 64,
+    ).reconcile(
+        snapshot(
+            {"pursers": demand(work=1)},
+            [seat("worker-a", "worker", lifecycle="ready")],
+            now=cycle_now - timedelta(seconds=1),
+        ),
+        seed,
+        RecordingExecutor(),
+    )
+    _seed_revision, newer = seed.load()
+    store = DispatchRaceStore(newer)
+    observation = {
+        "executor_seats": [
+            {
+                "seat_id": "worker-a",
+                "board_id": "pursers",
+                "role": "worker",
+                "provider": "direct",
+                "template_id": "template:worker:direct",
+                "template_digest_sha256": DIGEST,
+                "generation": 1,
+                "lifecycle": "stopped",
+                "transition_at": (cycle_now - timedelta(minutes=10)).isoformat(),
+                "managed": True,
+            }
+        ],
+        "provider_observations": {
+            "pursers": {"direct": {"status": "healthy", "latency_ms": 5}}
+        },
+        "provider_maximums": {"pursers": {"direct": 2}},
+        "host_observation": {
+            "load_ratio": 0.1,
+            "capacity_available": True,
+            "executor_status": "healthy",
+        },
+    }
+    options = SimpleNamespace(
+        url="https://central.invalid/mcp",
+        home_board="pursers",
+        agent_name="board-butler-test",
+        runtime_mode="active",
+        fleet_observation_file=(tmp_path / "observation.json").resolve(),
+        fleet_state_file=(tmp_path / "state.json").resolve(),
+        fleet_executor_socket=(tmp_path / "missing.sock").resolve(),
+        fleet_executor_key_id="butler-local",
+        fleet_executor_private_key=(tmp_path / "missing.key").resolve(),
+    )
+    backend = butler.CentralBackend(options, "opaque")
+    config = active_config()
+    config["authorization"]["expires_at"] = (
+        cycle_now + timedelta(hours=1)
+    ).isoformat()
+    publications: list[tuple[str, Mapping[str, Any]]] = []
+
+    async def configs(_board_ids: Any) -> dict[str, Mapping[str, Any]]:
+        return {"pursers": config}
+
+    async def publish(board_id: str, document: Mapping[str, Any]) -> None:
+        publications.append((board_id, dict(document)))
+
+    monkeypatch.setattr(backend, "_autonomous_fleet_configs", configs)
+    monkeypatch.setattr(backend, "_write_fleet_state", publish)
+    monkeypatch.setattr(
+        butler.FileFleetObservationSource, "load", lambda _self, _now: observation
+    )
+    monkeypatch.setattr(butler, "FileFleetStateStore", lambda _path: store)
+    board_snapshot = {
+        "truncated": False,
+        "tickets": [
+            {
+                "ticket_id": "TK-race",
+                "status": "open",
+                "tier": 1,
+                "tags": [],
+                "created_at": (cycle_now - timedelta(minutes=1)).isoformat(),
+            }
+        ],
+        "agents": [],
+    }
+
+    result = asyncio.run(
+        backend._reconcile_fleet(
+            ["pursers"], {"pursers": board_snapshot}, cycle_now
+        )
+    )
+
+    assert result["status"] == "shadow"
+    assert result["reason_code"] == "stale_config_revision"
+    assert publications == []
+    _revision, durable = store.load()
+    assert durable == newer
