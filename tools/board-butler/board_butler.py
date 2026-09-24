@@ -1364,6 +1364,85 @@ class FleetReconciler:
             and dict(fingerprints) == self.authorization_fingerprints
         )
 
+    def _stale_config_revisions(
+        self, prior: Mapping[str, Any]
+    ) -> dict[str, dict[str, int]]:
+        """Return boards whose authoritative input is older than durable state."""
+        revisions = prior.get("config_revisions")
+        if not isinstance(revisions, Mapping):
+            return {}
+        stale: dict[str, dict[str, int]] = {}
+        for board_id in sorted(set(revisions) & set(self.config_revisions)):
+            durable = revisions[board_id]
+            current = self.config_revisions[board_id]
+            if (
+                isinstance(durable, int)
+                and not isinstance(durable, bool)
+                and durable > current
+            ):
+                stale[board_id] = {
+                    "current_revision": current,
+                    "durable_revision": durable,
+                }
+        return stale
+
+    @staticmethod
+    def _durable_desired(prior: Mapping[str, Any]) -> dict[str, dict[str, int]]:
+        boards = prior.get("boards")
+        if not isinstance(boards, Mapping):
+            return {}
+        desired: dict[str, dict[str, int]] = {}
+        for board_id, raw in boards.items():
+            if not isinstance(board_id, str) or not isinstance(raw, Mapping):
+                continue
+            counts = raw.get("desired")
+            if not isinstance(counts, Mapping):
+                continue
+            desired[board_id] = {
+                role: int(counts.get(role, 0) or 0)
+                for role in FLEET_ROLES
+                if isinstance(counts.get(role, 0), int)
+                and not isinstance(counts.get(role, 0), bool)
+            }
+        return desired
+
+    def _stale_config_report(
+        self,
+        prior: Mapping[str, Any],
+        stale: Mapping[str, Mapping[str, int]],
+        now: datetime,
+    ) -> dict[str, Any]:
+        evidence = [
+            {
+                "board_id": board_id,
+                "action": "reconcile",
+                "outcome": "denied",
+                "reason_code": "stale_config_revision",
+                "current_revision": int(revisions["current_revision"]),
+                "durable_revision": int(revisions["durable_revision"]),
+                "observed_at": now.isoformat(),
+                "detail_redacted": True,
+            }
+            for board_id, revisions in sorted(stale.items())
+        ]
+        return {
+            "status": "shadow",
+            "effective_state": "shadow",
+            "reason_code": "stale_config_revision",
+            "desired": self._durable_desired(prior),
+            "operations": [],
+            "receipts": [],
+            "explanations": [
+                {
+                    "scope": "policy",
+                    "reason": "stale_config_revision",
+                    "boards": sorted(stale),
+                }
+            ],
+            "audit_evidence": evidence,
+            "state_documents": {},
+        }
+
     @staticmethod
     def _terminal_operation_history(prior: Mapping[str, Any]) -> dict[str, Any]:
         """Keep only validated, non-replayable audit rows across policy changes."""
@@ -1954,6 +2033,11 @@ class FleetReconciler:
             raise RuntimeError("fleet executor is unavailable")
         for _ in range(self.max_cas_retries):
             revision, prior = store.load()
+            stale = self._stale_config_revisions(prior)
+            if stale:
+                return self._stale_config_report(
+                    prior, stale, snapshot.observed_at
+                )
             prior = self.prior_for_current_policy(prior, snapshot.observed_at)
             plan = self.plan(snapshot, prior)
             persisted = self._persisted_plan(plan, snapshot, prior)
@@ -7314,6 +7398,16 @@ class CentralBackend:
                 self.args.fleet_executor_private_key,
             ),
         )
+        if report.get("status") == "shadow":
+            return {
+                "status": "shadow",
+                "effective_state": "shadow",
+                "boards": sorted(configs),
+                "reason_code": str(report.get("reason_code", "unknown")),
+                "audit_evidence": copy.deepcopy(
+                    list(report.get("audit_evidence", []))
+                ),
+            }
         for board_id in sorted(configs):
             await self._write_fleet_state(
                 board_id,

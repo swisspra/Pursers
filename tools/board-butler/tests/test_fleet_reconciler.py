@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import asyncio
 import json
@@ -661,6 +662,126 @@ def test_policy_transition_is_atomic_and_does_not_replay_stale_operations(
     assert sum(durable["boards"]["pursers"]["desired"].values()) == 1
 
 
+def test_stale_policy_revision_cannot_roll_back_durable_caps(
+    tmp_path: Path,
+) -> None:
+    path = (tmp_path / "state" / "fleet.json").resolve()
+    store = butler.FileFleetStateStore(path)
+    current = snapshot(
+        {"pursers": demand(work=1)},
+        [
+            seat("worker-a", "worker", lifecycle="ready"),
+            seat("worker-b", "worker"),
+        ],
+    )
+    current_policy = reconciler(
+        {"pursers": board_policy(maximum=1, provider_maximums={"direct": 1})},
+        host_cap=1,
+        config_revision=8,
+        fingerprint="c" * 64,
+    )
+    current_policy.reconcile(current, store, RecordingExecutor())
+    before = store.load()
+
+    stale_executor = RecordingExecutor()
+    report = reconciler(
+        {"pursers": board_policy(maximum=2, provider_maximums={"direct": 2})},
+        host_cap=2,
+        config_revision=7,
+    ).reconcile(
+        snapshot(
+            {"pursers": demand(work=2)},
+            [
+                seat("worker-a", "worker", lifecycle="ready"),
+                seat("worker-b", "worker"),
+            ],
+            now=NOW + timedelta(minutes=1),
+        ),
+        butler.FileFleetStateStore(path),
+        stale_executor,
+    )
+
+    assert report["status"] == "shadow"
+    assert report["effective_state"] == "shadow"
+    assert report["reason_code"] == "stale_config_revision"
+    assert report["desired"]["pursers"]["worker"] == 1
+    assert report["operations"] == []
+    assert report["receipts"] == []
+    assert report["audit_evidence"] == [
+        {
+            "board_id": "pursers",
+            "action": "reconcile",
+            "outcome": "denied",
+            "reason_code": "stale_config_revision",
+            "current_revision": 7,
+            "durable_revision": 8,
+            "observed_at": (NOW + timedelta(minutes=1)).isoformat(),
+            "detail_redacted": True,
+        }
+    ]
+    assert stale_executor.calls == []
+    assert butler.FileFleetStateStore(path).load() == before
+
+
+class PolicyRaceStore(butler.MemoryFleetStateStore):
+    def __init__(self, newer: Mapping[str, Any]) -> None:
+        super().__init__()
+        self.newer = copy.deepcopy(dict(newer))
+        self.cas_calls = 0
+
+    def compare_and_swap(
+        self, expected_revision: int, value: Mapping[str, Any]
+    ) -> bool:
+        self.cas_calls += 1
+        if self.cas_calls == 1:
+            assert super().compare_and_swap(expected_revision, self.newer)
+            return False
+        return super().compare_and_swap(expected_revision, value)
+
+
+def test_stale_plan_losing_cas_cannot_overwrite_newer_policy() -> None:
+    seed_store = butler.MemoryFleetStateStore()
+    reconciler(
+        {"pursers": board_policy(maximum=1, provider_maximums={"direct": 1})},
+        host_cap=1,
+        config_revision=8,
+        fingerprint="c" * 64,
+    ).reconcile(
+        snapshot(
+            {"pursers": demand(work=1)},
+            [seat("worker-a", "worker", lifecycle="ready")],
+        ),
+        seed_store,
+        RecordingExecutor(),
+    )
+    _revision, newer = seed_store.load()
+    store = PolicyRaceStore(newer)
+    executor = RecordingExecutor()
+
+    report = reconciler(
+        {"pursers": board_policy(maximum=2, provider_maximums={"direct": 2})},
+        host_cap=2,
+        config_revision=7,
+    ).reconcile(
+        snapshot(
+            {"pursers": demand(work=2)},
+            [seat("worker-a", "worker"), seat("worker-b", "worker")],
+            now=NOW + timedelta(minutes=1),
+        ),
+        store,
+        executor,
+    )
+
+    assert report["status"] == "shadow"
+    assert report["effective_state"] == "shadow"
+    assert report["reason_code"] == "stale_config_revision"
+    assert store.cas_calls == 1
+    assert executor.calls == []
+    _revision, durable = store.load()
+    assert durable["config_revisions"] == {"pursers": 8}
+    assert durable["boards"]["pursers"]["desired"]["worker"] == 1
+
+
 def test_fingerprint_only_transition_discards_unknown_operation() -> None:
     store = butler.MemoryFleetStateStore()
     failed = RecordingExecutor(fail_seat="worker-a")
@@ -1108,3 +1229,61 @@ def test_production_fleet_cycle_reads_products_executes_and_publishes(
     assert durable["value"]["policy_transition"][
         "discarded_nonterminal_operations"
     ] == 0
+
+    stale_now = second_now + timedelta(seconds=1)
+    config["revision"] = 3
+    config["authorization"]["config_revision"] = 3
+    config["authorization"]["envelope_fingerprint_sha256"] = FINGERPRINT
+    config["envelope"]["fingerprint_sha256"] = FINGERPRINT
+    config["host_runtime"]["agent_process_ceiling"] = 2
+    config["host_runtime"]["total_process_ceiling"] = 4
+    config["desired"]["host_concurrency"] = 2
+    config["desired"]["board_concurrency"] = 2
+    config["envelope"]["max_host_concurrency"] = 2
+    config["envelope"]["max_board_concurrency"] = 2
+    config["desired"]["capacity"]["worker"]["max"] = 2
+    config["envelope"]["max_capacity"]["worker"] = 2
+    observation = json.loads(observation_path.read_text(encoding="utf-8"))
+    observation["observed_at"] = (
+        stale_now - timedelta(milliseconds=100)
+    ).isoformat()
+    observation["stale_after"] = (
+        stale_now + timedelta(minutes=1)
+    ).isoformat()
+    observation["provider_maximums"]["pursers"]["direct"] = 2
+    observation_path.write_text(json.dumps(observation), encoding="utf-8")
+    observation_path.chmod(0o600)
+    stale_backend = butler.CentralBackend(options, "opaque")
+    stale_publications: list[tuple[str, Mapping[str, Any]]] = []
+
+    async def reject_publish(
+        board_id: str, document: Mapping[str, Any]
+    ) -> None:
+        stale_publications.append((board_id, dict(document)))
+
+    monkeypatch.setattr(stale_backend, "_autonomous_fleet_configs", configs)
+    monkeypatch.setattr(stale_backend, "_write_fleet_state", reject_publish)
+
+    stale = asyncio.run(
+        stale_backend._reconcile_fleet(
+            ["pursers"], {"pursers": board_snapshot}, stale_now
+        )
+    )
+
+    assert stale["status"] == "shadow"
+    assert stale["effective_state"] == "shadow"
+    assert stale["reason_code"] == "stale_config_revision"
+    assert stale["audit_evidence"] == [
+        {
+            "board_id": "pursers",
+            "action": "reconcile",
+            "outcome": "denied",
+            "reason_code": "stale_config_revision",
+            "current_revision": 3,
+            "durable_revision": 4,
+            "observed_at": stale_now.isoformat(),
+            "detail_redacted": True,
+        }
+    ]
+    assert stale_publications == []
+    assert json.loads(options.fleet_state_file.read_text()) == durable
