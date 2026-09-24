@@ -957,6 +957,7 @@ def _diagnose_disposable_systemd_start_failure(
                 "show",
                 unit_name,
                 *(f"--property={name}" for name in property_names),
+                "--all",
                 "--no-pager",
             ],
             check=False,
@@ -996,13 +997,10 @@ def _diagnose_disposable_systemd_start_failure(
         if trace is not None:
             trace.append("property_parse_error")
         return None
-    allowed_properties = set(property_names)
-    required_properties = allowed_properties - {"DropInPaths"}
-    if not required_properties.issubset(properties) or set(properties) - allowed_properties:
+    if set(properties) != set(property_names):
         if trace is not None:
             trace.append("property_set_mismatch")
         return None
-    properties.setdefault("DropInPaths", "")
     signature = tuple(properties[name] for name in property_names[:6])
     if status.returncode == 4 and signature == (
         "not-found",
@@ -1274,6 +1272,7 @@ def test_transient_probe_success_but_exact_persistent_unit_is_unavailable(
         )
 
     assert not (unit_dir / "worker-a.service").exists()
+    assert any("show" in command and "--all" in command for command in calls)
     assert calls[-1] == ["systemctl", "--user", "daemon-reload"]
 
 
