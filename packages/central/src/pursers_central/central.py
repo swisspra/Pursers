@@ -51,6 +51,7 @@ from pursers_client import (
     CLAIM_GATE_EVENT_KINDS,
     COORDINATOR_QUESTION_ASKED,
     COORDINATOR_QUESTION_ACCEPTED,
+    COORDINATOR_QUESTION_RELEASED,
     COORDINATOR_QUESTION_ANSWERED,
     COORDINATOR_MESSAGE_EVENT_KINDS,
     coordinator_host_binding,
@@ -10507,14 +10508,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         message: str | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
-        """Accept or answer a coordinator question without changing ticket state."""
+        """Accept, answer, or release a question without changing ticket state."""
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
         question_id = require_id("question_id", question_id)
         principal = current_principal()
         require_board_write_or_coordinate(principal)
-        if action not in {"accept", "answer"}:
-            raise ValueError("action must be accept or answer")
+        if action not in {"accept", "answer", "release"}:
+            raise ValueError("action must be accept, answer, or release")
         if action == "answer" and not message:
             raise ValueError("answer requires a message")
         now = time.time()
@@ -10548,6 +10549,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if entry is None:
                 raise ValueError("question not found")
             if entry.get("state") == "answered":
+                if action == "release":
+                    raise ValueError("answered question cannot be released")
                 # Idempotent: a retried answer returns the stored one.
                 public = copy.deepcopy(entry)
                 public.pop("binding", None)
@@ -10556,8 +10559,51 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "duplicate": True, "recipients": [], "released": released,
                     "renewed": renewed, "scrub_audit": None, "kind": None,
                 }
-            existing_binding = entry.get("binding")
             accepted_by = entry.get("accepted_by") or {}
+            if action == "release":
+                released_by = entry.get("released_by") or {}
+                if (
+                    entry.get("state") == "open"
+                    and not accepted_by
+                    and released_by.get("agent_id") == actor["agent_id"]
+                ):
+                    public = copy.deepcopy(entry)
+                    public.pop("binding", None)
+                    return {
+                        "actor": actor, "question": public,
+                        "duplicate": True, "recipients": [],
+                        "released": released, "renewed": renewed,
+                        "scrub_audit": None, "kind": None,
+                    }
+                if (
+                    entry.get("state") != "accepted"
+                    or accepted_by.get("agent_id") != actor["agent_id"]
+                ):
+                    raise PermissionError(
+                        "release requires the authenticated accepting coordinator"
+                    )
+                entry["state"] = "open"
+                entry["released_from"] = copy.deepcopy(accepted_by)
+                entry["released_by"] = {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                }
+                entry["released_at"] = iso_at(now)
+                entry["accepted_by"] = None
+                entry.pop("binding", None)
+                ticket["updated_at"] = iso_at(now)
+                asked_by = entry.get("asked_by") or {}
+                recipients = [asked_by["agent_id"]] if asked_by.get("agent_id") else []
+                public = copy.deepcopy(entry)
+                public.pop("binding", None)
+                return {
+                    "actor": actor, "question": public,
+                    "duplicate": False, "recipients": recipients,
+                    "released": released, "renewed": renewed,
+                    "scrub_audit": None, "kind": COORDINATOR_QUESTION_RELEASED,
+                }
+            existing_binding = entry.get("binding")
             if accepted_by and accepted_by.get("agent_id") != actor["agent_id"]:
                 current_owners = set(project_coordinator_ids(document, project))
                 if accepted_by.get("agent_id") in current_owners:

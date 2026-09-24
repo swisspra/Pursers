@@ -557,7 +557,7 @@ Response fields: `ok, questions, total, release_events, implicitly_renewed`.
 
 ### `ticket_question_answer`
 
-Accept or answer a coordinator question without changing ticket state.
+Accept, answer, or release a question without changing ticket state.
 
 Required authorization: `board:coordinate` and project-coordinator binding.
 

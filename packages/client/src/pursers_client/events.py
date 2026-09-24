@@ -28,6 +28,7 @@ HUMAN_INPUT_REQUESTED = "human_input_requested"
 HUMAN_INPUT_RESOLVED = "human_input_resolved"
 COORDINATOR_QUESTION_ASKED = "coordinator_question_asked"
 COORDINATOR_QUESTION_ACCEPTED = "coordinator_question_accepted"
+COORDINATOR_QUESTION_RELEASED = "coordinator_question_released"
 COORDINATOR_QUESTION_ANSWERED = "coordinator_question_answered"
 TICKET_CLAIM_REFUSED = "ticket_claim_refused"
 REVIEW_CLAIM_REFUSED = "review_claim_refused"
@@ -103,6 +104,7 @@ COORDINATOR_MESSAGE_EVENT_KINDS = frozenset(
     {
         COORDINATOR_QUESTION_ASKED,
         COORDINATOR_QUESTION_ACCEPTED,
+        COORDINATOR_QUESTION_RELEASED,
         COORDINATOR_QUESTION_ANSWERED,
     }
 )

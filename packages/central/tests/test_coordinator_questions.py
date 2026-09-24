@@ -21,6 +21,7 @@ from pursers_client import (  # noqa: E402
     COORDINATOR_QUESTION_ACCEPTED,
     COORDINATOR_QUESTION_ANSWERED,
     COORDINATOR_QUESTION_ASKED,
+    COORDINATOR_QUESTION_RELEASED,
     KNOWN_EVENT_KINDS,
     WORKER_WAIT_KINDS,
 )
@@ -456,6 +457,48 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
                 question_id=asked["question_id"], action="answer",
                 message="wrong profile", host_binding=self.binding("coord2"),
             )
+
+    async def test_accepting_coordinator_can_release_question_idempotently(self) -> None:
+        await self.register_coordinators("coord", "coord2")
+        await self.claimed_ticket()
+        asked = (await self.ask()).structured_content
+        self.principal = self.coordinator
+        await self.call(
+            "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
+            question_id=asked["question_id"], action="accept",
+            host_binding=self.binding("coord"),
+        )
+        self.principal = self.coordinator_two
+        with self.assertRaisesRegex(ToolError, "accepting coordinator"):
+            await self.call(
+                "ticket_question_answer", ticket_id="TK-comm", agent_name="coord2",
+                question_id=asked["question_id"], action="release",
+                host_binding=self.binding("coord2"),
+            )
+        self.principal = self.coordinator
+        released = (
+            await self.call(
+                "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
+                question_id=asked["question_id"], action="release",
+                host_binding=self.binding("coord"),
+            )
+        ).structured_content
+        self.assertEqual(released["question"]["state"], "open")
+        self.assertIsNone(released["question"]["accepted_by"])
+        self.assertEqual(
+            released["question"]["released_from"]["agent_id"],
+            self.agent_ids["coord"],
+        )
+        self.assertEqual(released["event"]["kind"], COORDINATOR_QUESTION_RELEASED)
+        retry = (
+            await self.call(
+                "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
+                question_id=asked["question_id"], action="release",
+                host_binding=self.binding("coord"),
+            )
+        ).structured_content
+        self.assertTrue(retry["duplicate"])
+        self.assertIsNone(retry["event"])
 
     async def test_binding_is_required_and_must_match_authenticated_agent(self) -> None:
         await self.register_coordinators("coord")

@@ -8,7 +8,7 @@
       "kind": "decision",
       "message": "Current-source conflict in scope item 4 at origin/main@b3861ac3811438ecd1f3d2ceb62efbf759c88da0: packages/{central,client,personal}/pyproject.toml pin mcp 2.2.0; TK-da393a0cdcb4 (CodeQL regex), TK-6fa1eabbe4f3 (Connect-helper origin), and TK-a2115c493a18 (principal independence) are closed and their fixes are on main; TK-37bfac747069 is also closed/landed and concerns ACP sandbox prefixes, not an unshipped ACP P1. Including these as current b2 limitations would be false. Should the document omit resolved items and state only currently evidenced limitations, or record them separately as resolved-before-freeze notes? I will continue drafting the non-conflicting Browser201 TBD slots and operational traps meanwhile.",
       "answer": "Superseded by your own ancestry correction in CQ-7bf548bf5e084198, which is answered. No separate decision. Disposition: AN-000000001048.",
-      "expected_verdict": "MECHANICAL",
+      "expected_verdict": "ESCALATE",
       "recorded_disposition": "ESCALATE",
       "mark": "should_have_escalated",
       "mark_population": "retrospective_operator",

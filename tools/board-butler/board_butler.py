@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Registry-wide coordinator findings refresher and shadow question drafter.
+"""Registry-wide coordinator findings refresher and policy-gated question answerer.
 
 The butler runs the real coordinator derivation for every active registry board
 on a bounded cycle and listens for coordinator questions through the same
-journal/seat resource subscriptions used by the wait bridge. It never answers a
-question. Its Central writes are CAS-protected findings and identifier-only
-evaluation records; the only ticket mutations are two explicitly configured,
-mechanically checkable safety actions: parking repeated ``no_live_candidates``
-loops and recording refusal of an escalation target that cannot work.
+journal/seat resource subscriptions used by the wait bridge. Question answers
+are disabled or assist-only unless a board explicitly selects ``autonomous``;
+even then only deterministic, fully evidenced information answers cross the
+existing coordinator binding. Its Central writes are CAS-protected findings
+and per-question audit records. The other ticket mutations remain the two
+explicitly configured, mechanically checkable safety actions: parking repeated
+``no_live_candidates`` loops and recording refusal of an escalation target
+that cannot work.
 """
 
 from __future__ import annotations
@@ -62,6 +65,7 @@ DEFAULT_DRAFTS_PER_TICKET = 2
 DEFAULT_DRAFTS_PER_BOARD = 20
 DEFAULT_HOLD_BEFORE_POST_S = 3_600
 DEFAULT_VETO_COUNT = 3
+DEFAULT_FAILURE_COUNT = 3
 DEFAULT_VETO_WINDOW_S = 3_600
 DEFAULT_REFRESH_SECONDS = 60
 DEFAULT_NO_LIVE_CANDIDATES_CYCLES = 3
@@ -77,6 +81,7 @@ MAX_STATE_CHARS = 4_800
 MAX_PROVIDER_RESPONSE_BYTES = 1_000_000
 MAX_PROVIDER_DRAFT_CHARS = 2_000
 MAX_PROVIDER_PROMPT_CHARS = 12_000
+MAX_AUTONOMOUS_ANSWER_CHARS = 2_000
 PROVIDER_TIMEOUT_S = 30.0
 MAX_MODEL_RUN_SECONDS = 600.0
 PROVIDER_DRAFT_PROTOCOLS = frozenset(
@@ -186,6 +191,7 @@ BOARD_BUTLER_CONFIG_SCHEMA: dict[str, Any] = {
     "keys": ("schema_version", "global", "projects", "boards"),
     "setting_keys": (
         "mode",
+        "answering_mode",
         "answer_scope",
         "required_evidence_kinds",
         "ceilings",
@@ -197,7 +203,7 @@ BOARD_BUTLER_CONFIG_SCHEMA: dict[str, Any] = {
         "drafting",
     ),
     "precedence": ("safe_defaults", "global", "project", "board"),
-    "runtime": "shadow-only",
+    "runtime": "policy-gated",
 }
 
 # Coordinators are ineligible for work and review dispatch, so their tier does
@@ -229,6 +235,36 @@ class PolicyRule:
 # "is this SHA merged" and "waive the gate" is an escalation, never a lookup.
 POLICY_TABLE: tuple[PolicyRule, ...] = (
     PolicyRule(
+        "credentials-or-secrets",
+        Outcome.ESCALATE,
+        re.compile(
+            r"\b(?:credential(?:s)?|password(?:s)?|bearer[ -]?token|access[ -]?token|"
+            r"api[ -]?key|private[ -]?key|signing[ -]?key|secret(?:s)?|"
+            r"host[ -]?binding)\b",
+            re.I,
+        ),
+    ),
+    PolicyRule(
+        "authority-or-budget-change",
+        Outcome.ESCALATE,
+        re.compile(
+            r"(?=.*\b(?:change|raise|increase|lower|decrease|reduce|expand|grant|"
+            r"extend|override|set|"
+            r"modify|amend)\w*\b)(?=.*\b(?:authority|authorities|budget|ceiling|"
+            r"concurrency|limit)\w*\b)",
+            re.I | re.S,
+        ),
+    ),
+    PolicyRule(
+        "review-policy",
+        Outcome.ESCALATE,
+        re.compile(
+            r"\b(?:review[ -]?policy|independent[ -]?review|self[ -]?review|"
+            r"reviewer[ -]?(?:assignment|authority|requirement))\b",
+            re.I,
+        ),
+    ),
+    PolicyRule(
         "gate-waiver",
         Outcome.ESCALATE,
         re.compile(
@@ -250,14 +286,21 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         re.compile(
             r"\b(?:should|may|can|could|please|do we|must we|ready to)\b.{0,60}\b(?:release(?!-)|publish|tag|ship|promote)\b"
             r"|\bversion bump\b"
-            r"|\b(?:release(?!-)|publish|tag|ship|promote)\b.{0,60}\b(?:now|to production|this release)\b",
+            r"|\b(?:release(?!-)|publish|tag|ship|promote)\b.{0,60}"
+            r"\b(?:now|to production|this release|package|artifact|version)\b"
+            r"|\b(?:publish|release|tag)\b.{0,60}\b(?:package|artifact|version|commit|sha)\b",
             re.I | re.S,
         ),
     ),
     PolicyRule(
         "membership-or-registry",
         Outcome.ESCALATE,
-        re.compile(r"\b(?:membership|invite|admit|retire seat|registry|register board|project registry|change role)\b", re.I),
+        re.compile(
+            r"\b(?:membership|invite|admit|retire seat|registry|register board|"
+            r"project registry|change role|(?:add|remove|delete)\w*\s+(?:a\s+)?"
+            r"(?:member|seat|agent|worker|reviewer))\b",
+            re.I,
+        ),
     ),
     PolicyRule(
         "coverage-blindness",
@@ -276,6 +319,15 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         re.compile(
             r"\b(?:may|can|could|should|please|authorize|approve)\b.{0,100}"
             r"\b(?:merge|land|change|modify|edit|patch|write|deploy|ship)\w*\b",
+            re.I | re.S,
+        ),
+    ),
+    PolicyRule(
+        "pr-review-merge",
+        Outcome.ESCALATE,
+        re.compile(
+            r"\b(?:approve|review|merge|land)\w*\b.{0,80}\b(?:PR|pull request)\b"
+            r"|\b(?:PR|pull request)\b.{0,80}\b(?:approve|review|merge|land)\w*\b",
             re.I | re.S,
         ),
     ),
@@ -304,6 +356,33 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         "seat_capability",
     ),
 )
+
+
+MECHANICAL_REQUEST_PATTERNS: dict[str, re.Pattern[str]] = {
+    "git-ancestry": re.compile(
+        r"\s*(?:is|was)\s+(?:(?:the\s+)?mentioned\s+commit|[0-9a-f]{7,40})\s+"
+        r"(?:(?:an?\s+)?(?:ancestor|descendant)\s+of|"
+        r"(?:merged\s+into|contained\s+in|reachable\s+from))\s+"
+        r"(?:main|origin/main|[0-9a-f]{7,40})\s*[?.]?\s*",
+        re.I,
+    ),
+    "ticket-status": re.compile(
+        r"\s*(?:(?:what\s+is|what's)\s+the\s+status\s+of\s+"
+        r"TK-[0-9A-Za-z-]+|is\s+TK-[0-9A-Za-z-]+\s+"
+        r"(?:closed|open|submitted|rejected|claimed|canceled))\s*[?.]?\s*",
+        re.I,
+    ),
+    "annotation-coverage": re.compile(
+        r"\s*does\s+AN-[0-9A-Za-z-]+\s+on\s+TK-[0-9A-Za-z-]+\s+"
+        r"cover\s+(?:this|the)\s+(?:decision|waiver|requirement|failure)\s*[?.]?\s*",
+        re.I,
+    ),
+    "seat-capability": re.compile(
+        r"\s*is\s+(?:seat|agent|worker|reviewer)\s+`?[0-9A-Za-z_.-]+`?\s+"
+        r"capable\s+of\s+(?:can_work|can_review)\s*[?.]?\s*",
+        re.I,
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -396,6 +475,9 @@ class ObservationRule:
 @dataclass(frozen=True)
 class EffectiveConfig:
     configured_mode: str
+    answering_mode: str
+    effective_answering_mode: str
+    runtime_authorized: bool
     future_active_state: str
     demotion_reason: str | None
     answer_scope: dict[str, str]
@@ -407,6 +489,7 @@ class EffectiveConfig:
     active_windows: tuple[dict[str, Any], ...]
     kill_switch: bool
     veto_count: int
+    failure_count: int
     veto_window_s: int
     classification_model: str | None
     classification_endpoint_ref: str | None
@@ -432,8 +515,9 @@ class EffectiveConfig:
         return {
             "schema_version": BOARD_BUTLER_CONFIG_SCHEMA["schema_version"],
             "configured_mode": self.configured_mode,
-            # Sending code intentionally does not exist in this ticket.
-            "effective_mode": "shadow",
+            "answering_mode": self.answering_mode,
+            "effective_mode": self.effective_answering_mode,
+            "runtime_authorized": self.runtime_authorized,
             "future_active_state": self.future_active_state,
             "demotion_reason": self.demotion_reason,
             "answer_scope": dict(self.answer_scope),
@@ -448,6 +532,7 @@ class EffectiveConfig:
             "kill_switch": self.kill_switch,
             "auto_demote": {
                 "veto_count": self.veto_count,
+                "failure_count": self.failure_count,
                 "window_s": self.veto_window_s,
             },
             "classification": {
@@ -3224,6 +3309,12 @@ def _validate_settings(value: Any, path: str) -> dict[str, Any]:
         if value["mode"] not in {"shadow", "active"}:
             raise ButlerConfigError(f"{path}.mode must be shadow or active")
         result["mode"] = value["mode"]
+    if "answering_mode" in value:
+        if value["answering_mode"] not in {"off", "assist", "autonomous"}:
+            raise ButlerConfigError(
+                f"{path}.answering_mode must be off, assist, or autonomous"
+            )
+        result["answering_mode"] = value["answering_mode"]
     if "answer_scope" in value:
         scope = value["answer_scope"]
         if not isinstance(scope, Mapping):
@@ -3288,12 +3379,15 @@ def _validate_settings(value: Any, path: str) -> dict[str, Any]:
         if not isinstance(demote, Mapping):
             raise ButlerConfigError(f"{path}.auto_demote must be an object")
         _reject_unknown_keys(
-            demote, ("veto_count", "window_s"), f"{path}.auto_demote"
+            demote,
+            ("veto_count", "failure_count", "window_s"),
+            f"{path}.auto_demote",
         )
         result["auto_demote"] = {
             name: _bounded_int(raw, f"{path}.auto_demote.{name}", minimum, maximum)
             for name, raw, minimum, maximum in (
                 ("veto_count", demote.get("veto_count"), 1, 100),
+                ("failure_count", demote.get("failure_count"), 1, 100),
                 ("window_s", demote.get("window_s"), 60, 2_592_000),
             )
             if name in demote
@@ -3451,6 +3545,26 @@ def _recent_vetoes(state: Mapping[str, Any], now: datetime, window_s: int) -> in
     return total
 
 
+def _recent_answer_failures(
+    state: Mapping[str, Any], now: datetime, window_s: int
+) -> int:
+    board_butler = state.get("board_butler", {})
+    history = (
+        board_butler.get("answer_failure_history", [])
+        if isinstance(board_butler, Mapping)
+        else []
+    )
+    if not isinstance(history, list):
+        return 0
+    return sum(
+        1
+        for item in history
+        if isinstance(item, Mapping)
+        and (stamp := parse_time(item.get("at"))) is not None
+        and now - stamp < timedelta(seconds=window_s)
+    )
+
+
 def resolve_config(
     document: Mapping[str, Any],
     args: argparse.Namespace,
@@ -3470,6 +3584,9 @@ def resolve_config(
     )
     merged: dict[str, Any] = {
         "mode": "shadow",
+        # Preserve the pre-answering behavior for existing configurations:
+        # drafts remain visible, but no answer is sent without explicit opt-in.
+        "answering_mode": "assist",
         "answer_scope": {name: "escalate" for name in ANSWER_CLASSES},
         "required_evidence_kinds": list(CITABLE_EVIDENCE_KINDS),
         "ceilings": {
@@ -3482,6 +3599,7 @@ def resolve_config(
         "kill_switch": True,
         "auto_demote": {
             "veto_count": DEFAULT_VETO_COUNT,
+            "failure_count": DEFAULT_FAILURE_COUNT,
             "window_s": DEFAULT_VETO_WINDOW_S,
         },
         "classification": {
@@ -3558,6 +3676,9 @@ def resolve_config(
     )
     kill_switch = bool(merged["kill_switch"] or persisted_kill)
     veto_count = _recent_vetoes(state, now, merged["auto_demote"]["window_s"])
+    failure_count = _recent_answer_failures(
+        state, now, merged["auto_demote"]["window_s"]
+    )
     demotion_reason: str | None = None
     if kill_switch:
         future_state = "killed"
@@ -3571,10 +3692,29 @@ def resolve_config(
         demotion_reason = (
             f"{veto_count} vetoes in {merged['auto_demote']['window_s']} seconds"
         )
+    elif failure_count >= merged["auto_demote"]["failure_count"]:
+        future_state = "auto_demoted"
+        demotion_reason = (
+            f"{failure_count} answer failures in "
+            f"{merged['auto_demote']['window_s']} seconds"
+        )
     else:
         future_state = "eligible"
+    answering_mode = str(merged["answering_mode"])
+    runtime_authorized = bool(
+        getattr(args, "runtime_mode", "shadow") == "active"
+        and args.home_board in getattr(args, "act_on_board", [])
+    )
+    effective_answering_mode = answering_mode
+    if answering_mode == "autonomous" and (
+        future_state != "eligible" or not runtime_authorized
+    ):
+        effective_answering_mode = "assist"
     return EffectiveConfig(
         configured_mode=merged["mode"],
+        answering_mode=answering_mode,
+        effective_answering_mode=effective_answering_mode,
+        runtime_authorized=runtime_authorized,
         future_active_state=future_state,
         demotion_reason=demotion_reason,
         answer_scope=dict(merged["answer_scope"]),
@@ -3586,6 +3726,7 @@ def resolve_config(
         active_windows=tuple(dict(item) for item in merged["active_windows"]),
         kill_switch=kill_switch,
         veto_count=merged["auto_demote"]["veto_count"],
+        failure_count=merged["auto_demote"]["failure_count"],
         veto_window_s=merged["auto_demote"]["window_s"],
         classification_model=merged["classification"]["model"],
         classification_endpoint_ref=merged["classification"]["endpoint_ref"],
@@ -3610,16 +3751,22 @@ def resolve_config(
 
 
 def classify_question(message: str, kind: str = "information") -> Classification:
-    # An approval request is itself authority-bearing.  A decision-labelled
-    # question can still ask for a deterministic fact, so content rules get a
-    # chance to prove it mechanical before the fail-closed kind fallback.
-    if kind == "approval":
-        return Classification(Outcome.ESCALATE, "question-kind:approval")
+    # Kind is an authority boundary, not a hint.  Fail closed before inspecting
+    # content so a mechanical substring cannot launder a human-only request.
+    if kind in {"approval", "decision", "deliverable"}:
+        return Classification(Outcome.ESCALATE, f"question-kind:{kind}")
+    mechanical_signal: PolicyRule | None = None
     for rule in POLICY_TABLE:
-        if rule.pattern.search(message):
+        if not rule.pattern.search(message):
+            continue
+        if rule.outcome is Outcome.ESCALATE:
             return Classification(rule.outcome, rule.name, rule.evaluator)
-    if kind == "decision":
-        return Classification(Outcome.ESCALATE, "question-kind:decision")
+        full_request = MECHANICAL_REQUEST_PATTERNS.get(rule.name)
+        if full_request is not None and full_request.fullmatch(message):
+            return Classification(rule.outcome, rule.name, rule.evaluator)
+        mechanical_signal = mechanical_signal or rule
+    if mechanical_signal is not None:
+        return Classification(Outcome.ESCALATE, "mixed-or-unsupported-request")
     return Classification(Outcome.UNKNOWN, "no-confident-policy-match")
 
 
@@ -3808,7 +3955,7 @@ def record_draft_evaluation(
     identity: Any,
     now: datetime,
 ) -> dict[str, Any]:
-    """Upsert an identifier-only pairing row without authored text."""
+    """Upsert a pairing row plus a bounded autonomous-delivery audit."""
     result = dict(state)
     existing = result.get("evaluation")
     question_id = str(question.get("question_id", ""))
@@ -3841,6 +3988,25 @@ def record_draft_evaluation(
         "marked_by": None,
         "marked_at": None,
     }
+    if finding.get("auto_eligible") is True:
+        row["answer_audit"] = {
+            "schema": "autonomous_butler_answer_audit_v1",
+            "status": "pending",
+            "authority_digest_sha256": str(
+                (finding.get("authority_proof") or {}).get("digest_sha256", "")
+            ),
+            "answer_sha256": hashlib.sha256(
+                str(finding.get("message", "")).encode("utf-8")
+            ).hexdigest(),
+            "answer": str(finding.get("message", ""))[:MAX_AUTONOMOUS_ANSWER_CHARS],
+            "evidence": str(finding.get("evidence", ""))[:1_000],
+            "hold": dict(finding.get("hold", {})),
+            "accepted_at": None,
+            "answered_at": None,
+            "event_id": None,
+            "attempts": 0,
+            "reason_code": None,
+        }
     if isinstance(existing, Mapping):
         if existing.get("question_id") != question_id:
             raise ValueError("evaluation state key contains another question")
@@ -3854,6 +4020,7 @@ def record_draft_evaluation(
                     "marked_by",
                     "marked_at",
                     "answered_by",
+                    "answer_audit",
                 )
                 if key in existing
             }
@@ -4807,7 +4974,12 @@ def merge_finding(
     omitted = len(rows) + 1 - len(selected)
     result["findings"] = selected
     result["generated_at"] = now.isoformat()
-    result["effective_mode"] = "shadow"
+    effective = finding.get("effective_config", {})
+    result["effective_mode"] = (
+        str(effective.get("effective_mode", "assist"))
+        if isinstance(effective, Mapping)
+        else "assist"
+    )
     truncation = dict(result.get("truncation", {}))
     truncation["findings"] = int(truncation.get("findings", 0) or 0) + omitted
     result["truncation"] = truncation
@@ -4969,21 +5141,46 @@ def decorate_finding(
         and configured_action == "auto"
         and evidence_allowed
         and config.future_active_state == "eligible"
+        and config.effective_answering_mode == "autonomous"
     )
     if configured_action == "auto" and not evidence_allowed:
         result["auto_eligible"] = False
         result["next_action"] = (
             "Coordinator handles the question because the configured evidence floor was not met."
         )
+    if config.answering_mode == "off":
+        result["auto_eligible"] = False
+        result["next_action"] = "Question answering is disabled for this board."
     release_at = now + timedelta(seconds=config.hold_before_post_s)
+    hold_status = "pending" if result["auto_eligible"] else config.effective_answering_mode
     result["hold"] = {
-        "status": "shadow",
+        "status": hold_status,
         "drafted_at": now.isoformat(),
         "release_at": release_at.isoformat(),
         "vetoable_until": release_at.isoformat(),
         "veto_reason": None,
     }
     result["effective_config"] = config.as_finding()
+    authority = {
+        "question_id": str(result.get("question_id", "")),
+        "ticket_id": str(result.get("ticket_id", "")),
+        "question_kind": str(result.get("question_kind", "")),
+        "verdict": str(result.get("verdict", "")),
+        "policy_rule": str(result.get("policy_rule", "")),
+        "answer_class": answer_class,
+        "evidence_kind": evidence_kind,
+        "evidence": str(result.get("evidence", "")),
+        "configured_action": configured_action,
+        "required_evidence_kinds": list(config.required_evidence_kinds),
+        "answering_mode": config.effective_answering_mode,
+    }
+    result["authority_proof"] = {
+        "schema": "autonomous_butler_answer_authority_v1",
+        "digest_sha256": _sha256_json(authority),
+        "policy_rule": authority["policy_rule"],
+        "evidence_kind": evidence_kind,
+        "config_sources": list(config.source_layers),
+    }
     return result
 
 
@@ -5445,6 +5642,70 @@ class CentralBackend:
         result = await self.client.board_question_inbox(state="answered", limit=100)
         rows = result.get("questions", [])
         return rows if isinstance(rows, list) else []
+
+    async def pending_questions(self) -> Sequence[Mapping[str, Any]]:
+        """Return coordinator-owned work without exposing the host binding."""
+        result = await self.client.board_question_inbox(limit=100)
+        rows = result.get("questions", [])
+        pending = [
+            {**dict(row), "board_id": self.args.home_board}
+            for row in rows
+            if isinstance(row, Mapping) and row.get("state") in {"open", "accepted"}
+        ]
+        own_agent_id = str(getattr(self.identity, "agent_id", ""))
+        for row in rows:
+            if not isinstance(row, Mapping) or row.get("state") != "answered":
+                continue
+            answered_by = row.get("answered_by") or {}
+            if answered_by.get("agent_id") != own_agent_id:
+                continue
+            question_id = str(row.get("question_id", ""))
+            raw = await self.evaluation(question_id)
+            evaluation_state, _previous = _decode_evaluation(raw)
+            evaluation = evaluation_state.get("evaluation", {})
+            audit = (
+                evaluation.get("answer_audit", {})
+                if isinstance(evaluation, Mapping)
+                else {}
+            )
+            if isinstance(audit, Mapping) and audit.get("status") in {
+                "pending",
+                "accepted",
+            }:
+                pending.append({**dict(row), "board_id": self.args.home_board})
+        return pending
+
+    async def question(self, ticket_id: str, question_id: str) -> Mapping[str, Any] | None:
+        result = await self.client.board_question_inbox(ticket_id=ticket_id, limit=100)
+        return next(
+            (
+                {**dict(row), "board_id": self.args.home_board}
+                for row in result.get("questions", [])
+                if isinstance(row, Mapping) and row.get("question_id") == question_id
+            ),
+            None,
+        )
+
+    async def accept_question(
+        self, ticket_id: str, question_id: str
+    ) -> Mapping[str, Any]:
+        return await self.client.ticket_question_answer(
+            ticket_id, question_id, action="accept"
+        )
+
+    async def answer_question(
+        self, ticket_id: str, question_id: str, message: str
+    ) -> Mapping[str, Any]:
+        return await self.client.ticket_question_answer(
+            ticket_id, question_id, action="answer", message=message
+        )
+
+    async def release_question(
+        self, ticket_id: str, question_id: str
+    ) -> Mapping[str, Any]:
+        return await self.client.ticket_question_answer(
+            ticket_id, question_id, action="release"
+        )
 
     async def coordinator_config(self) -> Mapping[str, Any]:
         try:
@@ -6051,6 +6312,252 @@ def save_cursor(path: Path, cursor: int) -> None:
     temporary.replace(path)
 
 
+def _answer_audit_document(
+    evaluation_state: Mapping[str, Any], **updates: Any
+) -> dict[str, Any]:
+    result = copy.deepcopy(dict(evaluation_state))
+    evaluation = result.get("evaluation")
+    if not isinstance(evaluation, dict):
+        raise ValueError("answer audit requires a durable draft evaluation")
+    audit = evaluation.get("answer_audit")
+    if not isinstance(audit, dict):
+        raise ValueError("answer audit requires an autonomous answer plan")
+    audit.update(updates)
+    evaluation["answer_audit"] = audit
+    result["evaluation"] = evaluation
+    return result
+
+
+async def _write_answer_audit(
+    backend: CentralBackend,
+    question_id: str,
+    evaluation_state: Mapping[str, Any],
+    previous_value: str,
+    **updates: Any,
+) -> tuple[dict[str, Any], str]:
+    updated = _answer_audit_document(evaluation_state, **updates)
+    encoded = json.dumps(updated, sort_keys=True, separators=(",", ":"))
+    await backend.write_evaluation(question_id, encoded, previous_value)
+    return updated, encoded
+
+
+async def _record_answer_failure(
+    backend: CentralBackend,
+    question_id: str,
+    reason_code: str,
+    now: datetime,
+) -> None:
+    """Persist only a bounded reason code; provider/credential detail is dropped."""
+    raw = await backend.findings()
+    state, previous_value = _decode_state(raw)
+    board_butler = dict(state.get("board_butler", {}))
+    history = [
+        dict(item)
+        for item in board_butler.get("answer_failure_history", [])
+        if isinstance(item, Mapping)
+    ]
+    history.append(
+        {"question_id": question_id, "reason_code": reason_code, "at": now.isoformat()}
+    )
+    board_butler["answer_failure_history"] = history[-100:]
+    board_butler["updated_at"] = now.isoformat()
+    state["board_butler"] = board_butler
+    state["generated_at"] = now.isoformat()
+    bounded = _bound_control_state(state, preserve_question_id=question_id)
+    await backend.write_findings(
+        json.dumps(bounded, sort_keys=True, separators=(",", ":")), previous_value
+    )
+
+
+async def advance_autonomous_answer(
+    backend: CentralBackend,
+    question: Mapping[str, Any],
+    finding: Mapping[str, Any],
+    evaluation_state: Mapping[str, Any],
+    previous_evaluation_value: str,
+    args: argparse.Namespace,
+    now: datetime,
+) -> dict[str, Any]:
+    """Accept and, after the durable hold, answer through Central's bound client."""
+    question_id = str(question.get("question_id", ""))
+    ticket_id = str(question.get("ticket_id", ""))
+    evaluation = evaluation_state.get("evaluation", {})
+    audit = evaluation.get("answer_audit", {}) if isinstance(evaluation, Mapping) else {}
+    if not isinstance(audit, Mapping) or audit.get("status") in {
+        "answered",
+        "escalated",
+        "failed",
+    }:
+        return dict(finding)
+    current = await backend.question(ticket_id, question_id)
+    if current is None:
+        await _write_answer_audit(
+            backend,
+            question_id,
+            evaluation_state,
+            previous_evaluation_value,
+            status="escalated",
+            reason_code="question_missing",
+        )
+        return dict(finding)
+    if current.get("state") == "answered":
+        await _write_answer_audit(
+            backend,
+            question_id,
+            evaluation_state,
+            previous_evaluation_value,
+            status="answered",
+            answered_at=current.get("answered_at"),
+            reason_code="central_already_answered",
+        )
+        return dict(finding)
+
+    accepted_by = current.get("accepted_by") or {}
+    own_agent_id = str(getattr(backend.identity, "agent_id", ""))
+    if accepted_by and accepted_by.get("agent_id") != own_agent_id:
+        await _write_answer_audit(
+            backend,
+            question_id,
+            evaluation_state,
+            previous_evaluation_value,
+            status="escalated",
+            reason_code="owned_by_other_coordinator",
+        )
+        return dict(finding)
+    if (
+        current.get("state") == "accepted"
+        and accepted_by.get("agent_id") == own_agent_id
+    ):
+        response = await backend.release_question(ticket_id, question_id)
+        released = response.get("question", {})
+        if released.get("state") != "open" or released.get("accepted_by"):
+            raise RuntimeError("Central did not release accepted question ownership")
+
+    # Leave an open question unowned throughout the vetoable hold and every
+    # policy/evidence recheck.  Central's atomic answer call is the ownership
+    # boundary; if delivery fails, a human coordinator can still answer it.
+    audit_state = dict(evaluation_state)
+    audit_previous = previous_evaluation_value
+
+    raw = await backend.findings()
+    state, _previous_state_value = _decode_state(raw)
+    durable_finding = next(
+        (
+            dict(item)
+            for item in state.get("findings", [])
+            if isinstance(item, Mapping)
+            and item.get("question_id") == question_id
+            and item.get("kind") == "would_answer"
+        ),
+        None,
+    )
+    if durable_finding is None:
+        await _write_answer_audit(
+            backend,
+            question_id,
+            audit_state,
+            audit_previous,
+            status="escalated",
+            reason_code="durable_plan_missing",
+        )
+        return dict(finding)
+    hold = durable_finding.get("hold", {})
+    if not isinstance(hold, Mapping) or hold.get("status") == "vetoed":
+        await _write_answer_audit(
+            backend,
+            question_id,
+            audit_state,
+            audit_previous,
+            status="escalated",
+            reason_code="vetoed",
+        )
+        return dict(finding)
+
+    document = await backend.coordinator_config()
+    config = resolve_config(
+        document,
+        args,
+        state,
+        now,
+        project_name=getattr(backend, "project_name", None),
+    )
+    if config.effective_answering_mode != "autonomous":
+        await _write_answer_audit(
+            backend,
+            question_id,
+            audit_state,
+            audit_previous,
+            status="escalated",
+            reason_code="autonomy_disabled",
+        )
+        return dict(finding)
+
+    refreshed = decorate_finding(
+        await make_finding(question, backend, args.repo, args.integration_ref, now),
+        config,
+        now,
+    )
+    expected_digest = str(audit.get("authority_digest_sha256", ""))
+    actual_digest = str((refreshed.get("authority_proof") or {}).get("digest_sha256", ""))
+    if not refreshed.get("auto_eligible") or actual_digest != expected_digest:
+        await _write_answer_audit(
+            backend,
+            question_id,
+            audit_state,
+            audit_previous,
+            status="escalated",
+            reason_code="authority_or_evidence_changed",
+        )
+        return dict(finding)
+
+    release_at = parse_time(hold.get("release_at"))
+    if release_at is None or now < release_at:
+        return dict(finding)
+    answer = str(audit.get("answer", ""))
+    if not answer or len(answer) > MAX_AUTONOMOUS_ANSWER_CHARS:
+        await _record_answer_failure(backend, question_id, "answer_bounds", now)
+        await _write_answer_audit(
+            backend,
+            question_id,
+            audit_state,
+            audit_previous,
+            status="failed",
+            reason_code="answer_bounds",
+            attempts=int(audit.get("attempts", 0) or 0) + 1,
+        )
+        return dict(finding)
+    try:
+        response = await backend.answer_question(ticket_id, question_id, answer)
+    except Exception:
+        await _record_answer_failure(backend, question_id, "central_answer_failed", now)
+        await _write_answer_audit(
+            backend,
+            question_id,
+            audit_state,
+            audit_previous,
+            status="failed",
+            reason_code="central_answer_failed",
+            attempts=int(audit.get("attempts", 0) or 0) + 1,
+        )
+        return dict(finding)
+    answered = response.get("question", {})
+    event = response.get("event") or {}
+    await _write_answer_audit(
+        backend,
+        question_id,
+        audit_state,
+        audit_previous,
+        status="answered",
+        answered_at=answered.get("answered_at") or now.isoformat(),
+        event_id=event.get("id"),
+        attempts=int(audit.get("attempts", 0) or 0) + 1,
+        reason_code="duplicate" if response.get("duplicate") else None,
+    )
+    delivered = dict(finding)
+    delivered["answer_status"] = "answered"
+    return delivered
+
+
 async def process_question(
     backend: CentralBackend,
     question: Mapping[str, Any],
@@ -6077,6 +6584,27 @@ async def process_question(
         None,
     )
     if existing is not None:
+        evaluation = evaluation_state.get("evaluation", {})
+        answer_audit = (
+            evaluation.get("answer_audit", {})
+            if isinstance(evaluation, Mapping)
+            else {}
+        )
+        if (
+            isinstance(answer_audit, Mapping)
+            and answer_audit.get("status") in {"pending", "accepted"}
+            and previous_evaluation_value is not None
+            and callable(getattr(backend, "question", None))
+        ):
+            return await advance_autonomous_answer(
+                backend,
+                question,
+                existing,
+                evaluation_state,
+                previous_evaluation_value,
+                args,
+                now,
+            )
         if not isinstance(evaluation_state.get("evaluation"), Mapping):
             repaired = record_draft_evaluation(
                 evaluation_state, question, existing, backend.identity, now
@@ -6144,7 +6672,7 @@ async def process_question(
         finding = await make_finding(
             question, backend, args.repo, args.integration_ref, now
         )
-        if drafting_provider is not None:
+        if drafting_provider is not None and config.answering_mode != "off":
             try:
                 finding["message"] = await draft_with_provider(
                     drafting_provider, question, finding
@@ -6165,6 +6693,7 @@ async def process_question(
     paired = record_draft_evaluation(
         evaluation_state, question, finding, backend.identity, now
     )
+    paired_encoded = json.dumps(paired, sort_keys=True, separators=(",", ":"))
     merged = merge_finding(state, finding, now)
     encoded = json.dumps(merged, sort_keys=True, separators=(",", ":"))
     if args.dry_run:
@@ -6172,10 +6701,22 @@ async def process_question(
     else:
         await backend.write_evaluation(
             question_id,
-            json.dumps(paired, sort_keys=True, separators=(",", ":")),
+            paired_encoded,
             previous_evaluation_value,
         )
         await backend.write_findings(encoded, previous_value)
+        if finding.get("auto_eligible") is True and callable(
+            getattr(backend, "answer_question", None)
+        ):
+            return await advance_autonomous_answer(
+                backend,
+                question,
+                finding,
+                paired,
+                paired_encoded,
+                args,
+                now,
+            )
     return finding
 
 
@@ -6227,8 +6768,10 @@ async def run(
                 next_refresh = 0.0
                 while True:
                     monotonic_now = asyncio.get_running_loop().time()
+                    refreshed_cycle = False
                     if refresh is not None and monotonic_now >= next_refresh:
                         observation = await refresh(utc_now())
+                        refreshed_cycle = True
                         runtime.mark("registry_refresh")
                         print(
                             "board-butler: refresh "
@@ -6238,6 +6781,13 @@ async def run(
                         next_refresh = (
                             asyncio.get_running_loop().time() + args.refresh_seconds
                         )
+                    pending_reader = getattr(backend, "pending_questions", None)
+                    if refreshed_cycle and callable(pending_reader):
+                        # Accepted ownership and hold timers are durable. This
+                        # replay closes the crash window without polling: it is
+                        # tied to the existing bounded registry refresh cycle.
+                        for pending in await pending_reader():
+                            await process_question(backend, pending, args, utc_now())
                     timeout = (
                         float(args.wait_timeout)
                         if args.once

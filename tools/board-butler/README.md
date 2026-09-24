@@ -1,4 +1,4 @@
-# Board butler (shadow mode)
+# Board butler
 
 `board_butler.py` is a single resident coordinator seat that keeps findings
 fresh for every active board in `project_registry` and drafts evidence-backed
@@ -7,7 +7,11 @@ runs the real `tools/coordinator/coordinator.py` derivation in shadow mode; the
 butler never manufactures a timestamp or finding merely to satisfy freshness.
 Inactive registry projects are not read or acted on.
 
-Question handling remains shadow-only: the butler never answers a question.
+Question handling is independently configured per board as `off`, `assist`, or
+`autonomous`. `off` disables delivery, `assist` preserves the existing
+evidence-backed draft, and `autonomous` may answer only an
+`information` question whose deterministic class, evidence kind, active window,
+rate limits, hold, kill state, and immutable answer scope all pass.
 Two ticket actions are permitted, both derived entirely from current board
 state and disabled unless the operator opts that board in with
 `--act-on-board`: it parks (without canceling) an open ticket after the configured
@@ -16,9 +20,11 @@ number of `no_live_candidates` dispatch cycles when the board has no live
 whose identity cannot work. Every other judgment, including scope, gate,
 release, option, and version decisions, remains a draft for a human.
 
-The policy is intentionally fail-closed. Gate waivers, scope changes, release
-actions, membership changes, and registry changes always escalate. Unknown or
-incomplete evidence also escalates. Mechanical drafts cite one named product or
+The policy is intentionally fail-closed. A mechanical class must match the
+complete request; any residual or mixed clause escalates. Gate waivers, scope
+changes, credentials, authority or budget changes, membership changes, and
+PR/review/merge/publish/release actions always escalate. Unknown or incomplete
+evidence also escalates. Mechanical drafts cite one named product or
 repository source: `git merge-base`, `ticket_get`, a ticket annotation, or a
 seat capability row.
 
@@ -76,9 +82,10 @@ The current duties are directly traceable:
    `test_observation_coverage_gap_refuses_negative_claim`.
 
 Shadow and active runtime modes observe and report identically. Active mode
-adds only the two existing, separately authorized mechanical actions. No
-observer deletes files or board data, answers a question, merges work, changes
-membership, assigns a seat, dispatches cleanup, or performs an operator action.
+adds the two existing, separately authorized mechanical actions and is also a
+prerequisite for `answering_mode=autonomous`. No observer deletes files or board
+data, merges work, changes membership, assigns a seat, dispatches cleanup, or
+performs an operator action.
 
 ## MCP v2 connector boundary
 
@@ -204,9 +211,10 @@ python3 tools/board-butler/authorize_active.py \
 Then the operator stages a plist whose `PURSERS_BUTLER_RUNTIME_MODE` is
 `active`, reviews the separately declared active board, and reloads the job.
 The resident refuses active mode unless the authorization file is valid and at
-least one `--act-on-board` is present. Active mode enables only the two
-mechanical ticket actions described above; coordinator-question answers remain
-shadow drafts.
+least one `--act-on-board` is present. Active mode enables the two mechanical
+ticket actions described above. A board still cannot answer questions unless
+its resolved `answering_mode` is `autonomous` and deterministic answer scope
+authorizes the exact class.
 
 Repeat `--act-on-board` to opt in additional active registry boards. The acting
 set is empty by default, and a configured board that is not active in the
@@ -249,6 +257,7 @@ registry row is unavailable or ambiguous.
     "schema_version": 1,
     "global": {
       "mode": "shadow",
+      "answering_mode": "assist",
       "answer_scope": {
         "ancestry": "escalate",
         "ticket_status": "escalate",
@@ -267,14 +276,25 @@ registry row is unavailable or ambiguous.
         {"days": ["mon", "tue"], "start": "00:00", "end": "06:00", "timezone": "UTC"}
       ],
       "kill_switch": true,
-      "auto_demote": {"veto_count": 3, "window_s": 3600},
+      "auto_demote": {
+        "veto_count": 3, "failure_count": 3, "window_s": 3600
+      },
       "classification": {
         "model": null, "endpoint_ref": null, "key_ref": null
       },
       "drafting": {"model": null, "endpoint_ref": null, "key_ref": null}
     },
     "projects": {"Pursers": {"ceilings": {"per_hour": 4}}},
-    "boards": {"pursers": {"hold_before_post_s": 7200}}
+    "boards": {
+      "pursers": {
+        "mode": "active",
+        "answering_mode": "autonomous",
+        "kill_switch": false,
+        "answer_scope": {"ticket_status": "auto"},
+        "required_evidence_kinds": ["ticket_status"],
+        "hold_before_post_s": 7200
+      }
+    }
   }
 }
 ```
@@ -307,7 +327,7 @@ contracts use the optional headers and credential read from `key_ref`; secret
 bytes never enter the prompt. Responses and draft text remain bounded, and
 cross-origin redirects are refused before credentials can be forwarded.
 Deterministic policy and evidence still set the verdict, and the provider supplies
-only the shadow draft text. A provider failure or a response that contains the
+only bounded phrasing. A provider failure or a response that contains the
 credential fails closed to a fixed, key-free escalation message.
 
 ## Provider-neutral autonomous model runner
@@ -368,21 +388,31 @@ python3 tools/board-butler/board_butler.py <normal arguments> \
   --kill-switch --control-reason "operator incident"
 ```
 
-Vetoes inside `auto_demote.window_s` are counted from durable control state;
-at `auto_demote.veto_count` the future active-mode eligibility demotes to
-shadow and reports the reason. Active windows accept IANA timezones and
-weekday names (`mon` through `sun`), including overnight windows.
+Vetoes and bounded answer failures inside `auto_demote.window_s` are counted
+from durable control state. Reaching either configured threshold demotes
+`autonomous` to `assist` and reports the reason. Active windows accept IANA
+timezones and weekday names (`mon` through `sun`), including overnight windows.
 
-Question answering remains shadow-only even if configuration requests
-`active`: `effective_mode` in a draft is always `shadow`, and there is no
-sending method. The separately authorized runtime active mode governs only the
-two mechanical actions. `future_active_state` still reports whether a future
-answer-sending implementation would be eligible, outside its window, killed,
-or auto-demoted.
+Autonomous delivery first persists the deterministic authority digest, answer
+digest, evidence citation, hold, and coordinator identity in the per-question
+evaluation record while leaving the Central question open for a human throughout
+the vetoable hold. At release time Butler rereads the question, config,
+kill/demotion state, veto state, and product evidence, then uses `BoardClient`
+to make the atomic answer call. The client computes Central's host binding
+internally, so neither the model request nor the audit record contains the
+binding or credential. Any drift or delivery failure leaves the question open
+and falls back to `assist`. Central's answer operation is idempotent, and the
+per-question audit preserves the answered event ID across restart.
 
 Question handling is replay-safe. The durable cursor advances only after the
-finding write succeeds, and a repeated question ID reuses its existing finding
-without consuming a cap or issuing another write.
+finding write succeeds. Each bounded registry refresh replays open or accepted
+coordinator-owned questions. A legacy/self-accepted replay first uses Central's
+authenticated, owner-only `release` action to restore the question to `open`
+before any veto, kill, policy, evidence, hold, or delivery exit. A crash after
+the finding then resumes the same plan without retaining ownership or answering
+twice. Rate ceilings are
+enforced before provider work, output is bounded to 2,000 characters, and the
+deterministic fallback consumes no model budget.
 
 Run the suite with:
 
@@ -400,9 +430,7 @@ records. The committed fixture therefore replays those three records and names
 all 24 unavailable ticket/question pairs without inventing messages or answers,
 as the correction explicitly permits for a truthfully partial corpus.
 
-The available replay classifies one question as `MECHANICAL`, two as
-`ESCALATE`, and none as `UNKNOWN`. It disagrees with the recorded disposition
-for `CQ-53524d65cdb51016`: ticket-status phrasing wins the current policy match
-even though the question ultimately asked the coordinator to decide how
-resolved items should appear in the document. That disagreement is retained as
-a finding rather than hidden.
+The available replay classifies zero questions as `MECHANICAL`, three as
+`ESCALATE`, and none as `UNKNOWN`. All three match their recorded disposition;
+`CQ-53524d65cdb51016` escalates because a mechanical status fragment cannot
+launder the residual document decision.
