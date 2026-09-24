@@ -249,7 +249,7 @@ def autonomous_state(board_id: str = "pursers") -> dict[str, Any]:
 
 def product_autonomous_state(board_id: str = "pursers") -> dict[str, Any]:
     """Generate actual state through the landed production reconciler."""
-    observed_at = datetime(2026, 9, 24, tzinfo=timezone.utc)
+    observed_at = datetime.now(timezone.utc)
     roles = {
         role: board_butler.FleetRolePolicy(0, 1, 2, 1)
         for role in board_butler.FLEET_ROLES
@@ -1739,9 +1739,41 @@ def test_autonomous_view_marks_stale_health_unknown() -> None:
     )
 
     assert view["actual_state_stale"] is True
+    assert view["actual_state_available"] is False
+    assert view["actual_state_status"] == "stale"
+    assert view["effective_state"] == "shadow"
     assert view["actual_state"]["executor"]["status"] == "unknown"
     assert view["actual_state"]["connectors"][0]["status"] == "unknown"
     assert state["executor"]["status"] == "healthy"
+
+
+def test_autonomous_view_quarantines_prior_revision_observation() -> None:
+    config = autonomous_config()
+    config["revision"] = 4
+    config["enabled"] = False
+    config["desired"]["mode"] = "shadow"
+    state = autonomous_state()
+    state["config_revision"] = 3
+    state["effective_state"] = "autonomous"
+
+    view = butler_settings.autonomous_butler_view(
+        {
+            "board_id": "pursers",
+            "revision": 4,
+            "effective_mode": "shadow",
+            "config": config,
+        },
+        {"commands": []},
+        state,
+        now=datetime(2026, 9, 24, 1, tzinfo=timezone.utc),
+    )
+
+    assert view["effective_state"] == "shadow"
+    assert view["actual_state_available"] is False
+    assert view["actual_state_stale"] is False
+    assert view["actual_state_revision_mismatch"] is True
+    assert view["actual_state_status"] == "revision_mismatch"
+    assert view["actual_state"]["config_revision"] == 3
 
 
 def test_prepare_autonomous_config_is_shadow_only_cas_and_preserves_envelope() -> None:

@@ -337,9 +337,23 @@ def autonomous_butler_view(
                     if isinstance(connector, dict):
                         connector["status"] = "unknown"
                         connector["reason_code"] = "stale_observation"
+    config_revision = config_payload.get("revision", 0)
+    state_revision_mismatch = (
+        state is not None and state.get("config_revision") != config_revision
+    )
+    state_current = state is not None and not state_stale and not state_revision_mismatch
     effective = config_payload.get("effective_mode", "shadow")
-    if state is not None and state.get("effective_state") in AUTONOMOUS_STATES:
+    if state_current and state.get("effective_state") in AUTONOMOUS_STATES:
         effective = state["effective_state"]
+    state_status = (
+        "unavailable"
+        if state is None
+        else "revision_mismatch"
+        if state_revision_mismatch
+        else "stale"
+        if state_stale
+        else "current"
+    )
     return {
         "schema_version": 1,
         "board_id": config_payload.get("board_id"),
@@ -348,8 +362,10 @@ def autonomous_butler_view(
         "effective_state": effective if effective in AUTONOMOUS_STATES else "shadow",
         "config": clean_config,
         "actual_state": state,
-        "actual_state_available": state is not None,
+        "actual_state_available": state_current,
         "actual_state_stale": state_stale,
+        "actual_state_revision_mismatch": state_revision_mismatch,
+        "actual_state_status": state_status,
         "commands": projected_commands,
         "history_truncated": command_payload.get("truncated") is True,
     }

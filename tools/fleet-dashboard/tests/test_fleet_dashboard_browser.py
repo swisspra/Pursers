@@ -203,7 +203,7 @@ def test_autonomous_butler_browser_accessibility_and_conflict(
         "schema": "autonomous_butler_config_v1",
         "schema_version": 1,
         "board_id": "pursers",
-        "revision": 3,
+        "revision": 4,
         "enabled": False,
         "host_runtime": {
             "agent_process_ceiling": 8,
@@ -302,10 +302,11 @@ def test_autonomous_butler_browser_accessibility_and_conflict(
             return {
                 "schema_version": 1,
                 "board_id": board_id,
-                "revision": 3,
-                "effective_state": "degraded",
+                "revision": 4,
+                "effective_state": "shadow",
                 "config": config,
                 "actual_state": {
+                    "config_revision": 3,
                     "observed_at": "2030-01-01T00:00:00Z",
                     "capacity": {},
                     "connectors": [
@@ -315,8 +316,10 @@ def test_autonomous_butler_browser_accessibility_and_conflict(
                         }
                     ],
                 },
-                "actual_state_available": True,
+                "actual_state_available": False,
                 "actual_state_stale": False,
+                "actual_state_revision_mismatch": True,
+                "actual_state_status": "revision_mismatch",
                 "commands": [],
             }
 
@@ -387,6 +390,7 @@ const before = await page.evaluate(() => {{
   const focused = form.querySelector(":focus");
   return {{
     state: form.closest("[data-pursers-autonomous-board]").dataset.pursersState,
+    observation: form.closest("[data-pursers-autonomous-board]").querySelector("[data-autonomous-observation]").textContent,
     fieldCount: fields.length,
     allFieldsLabeled: fields.every(field => field.labels?.length === 1),
     allButtons44: controls.every(button => button.getBoundingClientRect().height >= 44),
@@ -410,7 +414,14 @@ const after = await page.evaluate(() => ({{
   role: document.querySelector(".autonomous-result")?.getAttribute("role"),
   buttonEnabled: !document.querySelector(".autonomous-config-form button[type=submit]").disabled,
 }}));
-console.log(JSON.stringify({{before, after}}));
+await page.evaluate(() => {{ location.hash = "#/team"; }});
+await page.waitForSelector('[data-pursers-autonomous-team="pursers"] [data-autonomous-observation="revision_mismatch"]', {{state: "visible", timeout: 10000}});
+const team = await page.evaluate(() => ({{
+  state: document.querySelector('[data-pursers-autonomous-team="pursers"] .status')?.textContent,
+  observation: document.querySelector('[data-pursers-autonomous-team="pursers"] [data-autonomous-observation]')?.textContent,
+  capacity: [...document.querySelectorAll('[data-pursers-autonomous-team="pursers"] .autonomous-capacity .meta')].map(node => node.textContent),
+}}));
+console.log(JSON.stringify({{before, after, team}}));
 """
         completed = subprocess.run(
             [ego_browser, "nodejs", "-e", script],
@@ -426,7 +437,10 @@ console.log(JSON.stringify({{before, after}}));
 
     evidence = json.loads(completed.stderr.strip().splitlines()[-1])
     print(json.dumps(evidence, sort_keys=True))
-    assert evidence["before"]["state"] == "degraded"
+    assert evidence["before"]["state"] == "shadow"
+    assert evidence["before"]["observation"] == (
+        "Actual observation revision mismatch (observed 3, config 4)"
+    )
     assert evidence["before"]["fieldCount"] == 21
     assert evidence["before"]["allFieldsLabeled"] is True
     assert evidence["before"]["allButtons44"] is True
@@ -441,4 +455,13 @@ console.log(JSON.stringify({{before, after}}));
         "message": "Save failed: configuration changed; reload before saving",
         "role": "status",
         "buttonEnabled": True,
+    }
+    assert evidence["team"] == {
+        "state": "shadow",
+        "observation": "Actual observation revision mismatch (observed 3, config 4)",
+        "capacity": [
+            "Actual revision mismatch (observed 3, config 4)",
+            "Actual revision mismatch (observed 3, config 4)",
+            "Actual revision mismatch (observed 3, config 4)",
+        ],
     }
