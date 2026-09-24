@@ -997,11 +997,14 @@ def _diagnose_disposable_systemd_start_failure(
         if trace is not None:
             trace.append("property_parse_error")
         return None
-    if set(properties) != set(property_names):
+    signature_names = property_names[:6]
+    unexpected_properties = set(properties) - set(property_names)
+    missing_signature = [name for name in signature_names if name not in properties]
+    if unexpected_properties or missing_signature:
         if trace is not None:
             trace.append("property_set_mismatch")
         return None
-    signature = tuple(properties[name] for name in property_names[:6])
+    signature = tuple(properties[name] for name in signature_names)
     if status.returncode == 4 and signature == (
         "not-found",
         "inactive",
@@ -1014,16 +1017,19 @@ def _diagnose_disposable_systemd_start_failure(
     if status.returncode == 3 and signature in {
         ("loaded", "failed", "failed", "exit-code", "1", "200"),
         ("loaded", "failed", "failed", "exit-code", "1", "203"),
-    } and _systemd_unit_execution_paths_are_accessible(
-        adapter, template, unit_path, properties
-    ):
-        return "systemd_user_service_path_unavailable"
-    if status.returncode == 3 and signature in {
-        ("loaded", "failed", "failed", "exit-code", "1", "200"),
-        ("loaded", "failed", "failed", "exit-code", "1", "203"),
     }:
+        execution_names = property_names[6:]
+        missing_execution = [name for name in execution_names if name not in properties]
+        if not missing_execution and _systemd_unit_execution_paths_are_accessible(
+            adapter, template, unit_path, properties
+        ):
+            return "systemd_user_service_path_unavailable"
         if trace is not None:
-            trace.append("execution_path_unproven")
+            if missing_execution:
+                suffix = "_".join(name.lower() for name in missing_execution)
+                trace.append(f"execution_properties_missing_{suffix}")
+            else:
+                trace.append("execution_path_unproven")
         return None
     if status.returncode == 3 and signature == (
         "loaded",
