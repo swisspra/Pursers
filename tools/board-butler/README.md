@@ -9,7 +9,7 @@ Inactive registry projects are not read or acted on.
 
 Question handling is independently configured per board as `off`, `assist`, or
 `autonomous`. `off` disables delivery, `assist` preserves the existing
-evidence-backed draft, and `autonomous` may accept and answer only an
+evidence-backed draft, and `autonomous` may answer only an
 `information` question whose deterministic class, evidence kind, active window,
 rate limits, hold, kill state, and immutable answer scope all pass.
 Two ticket actions are permitted, both derived entirely from current board
@@ -393,17 +393,19 @@ timezones and weekday names (`mon` through `sun`), including overnight windows.
 
 Autonomous delivery first persists the deterministic authority digest, answer
 digest, evidence citation, hold, and coordinator identity in the per-question
-evaluation record. It then accepts ownership through `BoardClient`; the client
-computes Central's host binding internally, so neither the model request nor the
-audit record contains the binding or credential. At release time Butler rereads
-the question, config, kill/demotion state, veto state, and product evidence. Any
-drift falls back to `assist`. Central's answer operation is idempotent, and the
-per-question audit preserves accepted and answered event IDs across restart.
+evaluation record while leaving the Central question open for a human throughout
+the vetoable hold. At release time Butler rereads the question, config,
+kill/demotion state, veto state, and product evidence, then uses `BoardClient`
+to make the atomic answer call. The client computes Central's host binding
+internally, so neither the model request nor the audit record contains the
+binding or credential. Any drift or delivery failure leaves the question open
+and falls back to `assist`. Central's answer operation is idempotent, and the
+per-question audit preserves the answered event ID across restart.
 
 Question handling is replay-safe. The durable cursor advances only after the
 finding write succeeds. Each bounded registry refresh replays open or accepted
-coordinator-owned questions, so a crash after the finding or accept resumes the
-same plan without taking ownership twice or answering twice. Rate ceilings are
+coordinator-owned questions, so a crash after the finding resumes the same plan
+without taking ownership early or answering twice. Rate ceilings are
 enforced before provider work, output is bounded to 2,000 characters, and the
 deterministic fallback consumes no model budget.
 

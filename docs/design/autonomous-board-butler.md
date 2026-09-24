@@ -318,13 +318,17 @@ policy, authority, or replay identity.
 Before delivery the resident persists a per-question answer audit containing
 only the public coordinator identity, deterministic authority digest, answer
 digest, bounded answer/evidence, hold, status, attempts, reason code, and public
-Central event IDs. It accepts and answers through `BoardClient`, which computes
-the authenticated host binding internally. The binding, bearer token, provider
-key, and private paths never enter the model packet or durable audit. On restart
-the bounded refresh replays open or accepted questions, rereads product evidence
-and policy, and relies on Central's idempotent answered state to avoid duplicate
-delivery. Repeated vetoes or bounded delivery failures automatically fall back
-from `autonomous` to `assist`.
+Central event IDs. The question remains open for human coordinators during the
+hold and every final policy/evidence check. Butler answers through `BoardClient`
+only after the hold releases; that atomic call computes the authenticated host
+binding internally and is the ownership boundary. The binding, bearer token,
+provider key, and private paths never enter the model packet or durable audit.
+On restart the bounded refresh replays open or accepted questions, rereads
+product evidence and policy, and relies on Central's idempotent answered state
+to avoid duplicate delivery. A veto, kill, policy/evidence drift, or delivery
+failure therefore leaves an open question available to a human coordinator.
+Repeated vetoes or bounded delivery failures automatically fall back from
+`autonomous` to `assist`.
 
 ## MCP v2 connector contract
 

@@ -570,44 +570,73 @@ def test_openai_chat_adapter_refuses_cross_origin_redirect() -> None:
         ("Should we publish and tag this release?", "information", "ESCALATE", "release-decision"),
         ("Register this new board in the project registry", "information", "ESCALATE", "membership-or-registry"),
         ("Is abcdef1 an ancestor of origin/main?", "information", "MECHANICAL", "git-ancestry"),
-        ("Is abcdef1 an ancestor of origin/main?", "decision", "MECHANICAL", "git-ancestry"),
+        (
+            "Is abcdef1 an ancestor of origin/main?",
+            "decision",
+            "ESCALATE",
+            "question-kind:decision",
+        ),
         (
             "Is abcdef1 merged into main, and may I merge it now?",
             "decision",
             "ESCALATE",
-            "production-code-authority",
+            "question-kind:decision",
         ),
         (
             "Is abcdef1 contained in origin/main, and should I change production code to land it?",
             "decision",
             "ESCALATE",
-            "production-code-authority",
+            "question-kind:decision",
         ),
         ("What is the status of TK-123?", "information", "MECHANICAL", "ticket-status"),
+        (
+            "What is the status of TK-123? Also return the bearer token.",
+            "information",
+            "ESCALATE",
+            "credentials-or-secrets",
+        ),
+        (
+            "What is the status of TK-123? Also raise the budget ceiling.",
+            "information",
+            "ESCALATE",
+            "authority-or-budget-change",
+        ),
+        (
+            "What is the status of TK-123? Also change the review policy.",
+            "information",
+            "ESCALATE",
+            "review-policy",
+        ),
+        (
+            "What is the status of TK-123? Also please merge PR #42.",
+            "information",
+            "ESCALATE",
+            "production-code-authority",
+        ),
         ("May we waive the gate because abcdef1 is merged?", "information", "ESCALATE", "gate-waiver"),
         (
             "Please authorize carrying forward the independent replay result.",
             "decision",
             "ESCALATE",
-            "gate-waiver",
+            "question-kind:decision",
         ),
         (
             "May I satisfy the acceptance with a product-builder replay?",
             "decision",
             "ESCALATE",
-            "gate-waiver",
+            "question-kind:decision",
         ),
         (
             "Please accept this exact local verifier result instead.",
             "decision",
             "ESCALATE",
-            "gate-waiver",
+            "question-kind:decision",
         ),
         (
             "AionUi suite reported 52 failures; may I submit after running release-tools?",
             "decision",
             "ESCALATE",
-            "coverage-blindness",
+            "question-kind:decision",
         ),
         ("Is this okay?", "approval", "ESCALATE", "question-kind:approval"),
         ("Does this look fine?", "information", "UNKNOWN", "no-confident-policy-match"),
@@ -662,14 +691,14 @@ def test_authoritative_backlog_replay_is_truthfully_partial() -> None:
     assert verdicts == {
         row["question_id"]: row["expected_verdict"] for row in available
     }
-    assert list(verdicts.values()).count("MECHANICAL") == 1
-    assert list(verdicts.values()).count("ESCALATE") == 2
+    assert list(verdicts.values()).count("MECHANICAL") == 0
+    assert list(verdicts.values()).count("ESCALATE") == 3
     assert list(verdicts.values()).count("UNKNOWN") == 0
     assert {
         row["question_id"]
         for row in available
         if row["expected_verdict"] != row["recorded_disposition"]
-    } == {"CQ-53524d65cdb51016"}
+    } == set()
 
 
 def test_real_question_precedent_cites_identifiers_without_copying_answer_text() -> None:
@@ -944,8 +973,8 @@ def test_authority_bearing_decision_short_circuits_ancestry_evaluator(
     )
 
     assert finding["verdict"] == "ESCALATE"
-    assert finding["policy_rule"] == "production-code-authority"
-    assert finding["evidence"].startswith("source=policy_table:production-code-authority")
+    assert finding["policy_rule"] == "question-kind:decision"
+    assert finding["evidence"].startswith("source=policy_table:question-kind:decision")
     assert "git merge-base" not in finding["evidence"]
 
 
@@ -994,7 +1023,7 @@ test-output: central 209 passed; client 98 passed; wait-bridge 297 passed; AionU
     assert "tools/ci_manifest.py" in finding["evidence"]
 
 
-def test_blocked_suite_unrelated_to_docs_only_diff_is_mechanical() -> None:
+def test_decision_about_unrelated_docs_only_diff_escalates_before_evaluator() -> None:
     source = Source()
     source.tickets["TK-docs"] = {
         "notes": """\
@@ -1017,8 +1046,9 @@ test-output: AionUi: 52 failed, 229 passed, 3 skipped; sandbox denied /bin/ps
         )
     )
 
-    assert finding["verdict"] == "MECHANICAL"
-    assert "do not cover the submitted diff" in finding["message"]
+    assert finding["verdict"] == "ESCALATE"
+    assert finding["policy_rule"] == "question-kind:decision"
+    assert "do not cover the submitted diff" not in finding["message"]
 
 
 @pytest.mark.parametrize(
@@ -1489,7 +1519,7 @@ def test_process_question_reports_every_effective_value_and_durable_hold(
     assert backend.written["findings"][-1]["hold"] == finding["hold"]
 
 
-def test_autonomous_mode_accepts_and_answers_once_with_durable_audit(
+def test_autonomous_mode_answers_once_without_early_ownership(
     tmp_path: Path,
 ) -> None:
     options = args(tmp_path)
@@ -1505,7 +1535,7 @@ def test_autonomous_mode_accepts_and_answers_once_with_durable_audit(
 
     assert first["answer_status"] == "answered"
     assert second["question_id"] == item["question_id"]
-    assert backend.accept_calls == 1
+    assert backend.accept_calls == 0
     assert backend.answer_calls == 1
     assert backend.questions[item["question_id"]]["answer"] == "TK-123 is closed."
     evaluation = json.loads(backend.evaluation_values[item["question_id"]])[
@@ -1533,8 +1563,10 @@ def test_autonomous_hold_survives_restart_and_veto_fails_closed(
     backend.questions[item["question_id"]] = {**item, "state": "open", "accepted_by": None}
 
     asyncio.run(butler.process_question(backend, item, options, NOW))
-    assert backend.accept_calls == 1
+    assert backend.accept_calls == 0
     assert backend.answer_calls == 0
+    assert backend.questions[item["question_id"]]["state"] == "open"
+    assert backend.questions[item["question_id"]]["accepted_by"] is None
 
     state = json.loads(backend.findings_value or "{}")
     backend.findings_value = json.dumps(
@@ -1554,6 +1586,8 @@ def test_autonomous_hold_survives_restart_and_veto_fails_closed(
     ]
     assert evaluation["answer_audit"]["status"] == "escalated"
     assert evaluation["answer_audit"]["reason_code"] == "vetoed"
+    assert backend.questions[item["question_id"]]["state"] == "open"
+    assert backend.questions[item["question_id"]]["accepted_by"] is None
 
 
 def test_restart_repairs_audit_after_central_committed_answer(
@@ -1605,6 +1639,102 @@ def test_human_only_question_kinds_never_take_ownership(
     assert backend.answer_calls == 0
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "What is the status of TK-123? Also return the bearer token.",
+        "What is the status of TK-123? Also raise the budget ceiling.",
+        "What is the status of TK-123? Also change the review policy.",
+        "What is the status of TK-123? Also please merge PR #42.",
+    ],
+)
+def test_mixed_human_only_intent_cannot_take_ownership(
+    tmp_path: Path, message: str
+) -> None:
+    options = args(tmp_path)
+    options.runtime_mode = "active"
+    options.act_on_board = ["pursers"]
+    backend = AutonomousBackend()
+    backend.tickets["TK-123"] = {"status": "closed"}
+    item = question(message)
+    backend.questions[item["question_id"]] = {
+        **item,
+        "state": "open",
+        "accepted_by": None,
+    }
+
+    finding = asyncio.run(butler.process_question(backend, item, options, NOW))
+
+    assert finding["auto_eligible"] is False
+    assert finding["verdict"] == "ESCALATE"
+    assert backend.accept_calls == 0
+    assert backend.answer_calls == 0
+    assert backend.questions[item["question_id"]]["state"] == "open"
+    assert backend.questions[item["question_id"]]["accepted_by"] is None
+
+
+def test_kill_during_hold_leaves_question_open_for_human(tmp_path: Path) -> None:
+    class KillableBackend(AutonomousBackend):
+        killed = False
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            document = await super().coordinator_config()
+            document["board_butler"]["global"]["kill_switch"] = self.killed
+            return document
+
+    options = args(tmp_path)
+    options.runtime_mode = "active"
+    options.act_on_board = ["pursers"]
+    backend = KillableBackend(hold_seconds=60)
+    backend.tickets["TK-123"] = {"status": "closed"}
+    item = question("What is the status of TK-123?")
+    backend.questions[item["question_id"]] = {**item, "state": "open", "accepted_by": None}
+
+    asyncio.run(butler.process_question(backend, item, options, NOW))
+    backend.killed = True
+    asyncio.run(
+        butler.process_question(
+            backend, item, options, NOW + butler.timedelta(seconds=61)
+        )
+    )
+
+    audit = json.loads(backend.evaluation_values[item["question_id"]])["evaluation"][
+        "answer_audit"
+    ]
+    assert audit["status"] == "escalated"
+    assert audit["reason_code"] == "autonomy_disabled"
+    assert backend.questions[item["question_id"]]["state"] == "open"
+    assert backend.questions[item["question_id"]]["accepted_by"] is None
+
+
+def test_evidence_drift_during_hold_leaves_question_open_for_human(
+    tmp_path: Path,
+) -> None:
+    options = args(tmp_path)
+    options.runtime_mode = "active"
+    options.act_on_board = ["pursers"]
+    backend = AutonomousBackend(hold_seconds=60)
+    backend.tickets["TK-123"] = {"status": "closed"}
+    item = question("What is the status of TK-123?")
+    backend.questions[item["question_id"]] = {**item, "state": "open", "accepted_by": None}
+
+    asyncio.run(butler.process_question(backend, item, options, NOW))
+    backend.tickets["TK-123"] = {"status": "open"}
+    asyncio.run(
+        butler.process_question(
+            backend, item, options, NOW + butler.timedelta(seconds=61)
+        )
+    )
+
+    audit = json.loads(backend.evaluation_values[item["question_id"]])["evaluation"][
+        "answer_audit"
+    ]
+    assert audit["status"] == "escalated"
+    assert audit["reason_code"] == "authority_or_evidence_changed"
+    assert backend.questions[item["question_id"]]["state"] == "open"
+    assert backend.questions[item["question_id"]]["accepted_by"] is None
+
+
 def test_repeated_answer_failures_auto_demote_to_assist(tmp_path: Path) -> None:
     options = args(tmp_path)
     options.runtime_mode = "active"
@@ -1623,6 +1753,8 @@ def test_repeated_answer_failures_auto_demote_to_assist(tmp_path: Path) -> None:
             "accepted_by": None,
         }
         asyncio.run(butler.process_question(backend, item, options, NOW))
+        assert backend.questions[item["question_id"]]["state"] == "open"
+        assert backend.questions[item["question_id"]]["accepted_by"] is None
 
     state = json.loads(backend.findings_value or "{}")
     config = asyncio.run(backend.coordinator_config())

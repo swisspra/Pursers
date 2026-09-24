@@ -153,7 +153,7 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
                                 "kill_switch": False,
                                 "answer_scope": {"ticket_status": "auto"},
                                 "required_evidence_kinds": ["ticket_status"],
-                                "hold_before_post_s": 0,
+                                "hold_before_post_s": 60,
                                 "active_windows": [
                                     {
                                         "days": [
@@ -253,6 +253,36 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
                         "answer": None,
                         "answered_at": None,
                     },
+                    *[
+                        {
+                            "question_id": question_id,
+                            "project": "butler-real-join",
+                            "asker_role": "worker",
+                            "message_id": f"MSG-{question_id}",
+                            "in_reply_to": None,
+                            "message": "What is the status of TK-observed?",
+                            "kind": "information",
+                            "state": "open",
+                            "asked_by": {
+                                "agent_id": "AI-worker",
+                                "agent_name": "worker",
+                                "principal_id": "PR-worker",
+                            },
+                            "asked_at": asked_at.isoformat(),
+                            "accepted_by": None,
+                            "accepted_at": None,
+                            "binding": None,
+                            "rebound_at": None,
+                            "answer": None,
+                            "answered_at": None,
+                        }
+                        for question_id in (
+                            "CQ-veto",
+                            "CQ-failure-0",
+                            "CQ-failure-1",
+                            "CQ-failure-2",
+                        )
+                    ],
                 ],
                 "dispatch_history": [],
             }
@@ -413,24 +443,34 @@ def test_butler_reaches_first_working_state_against_real_central(
             options.project = "butler-real-join"
             options.integration_ref = "origin/main"
             options.drafts_per_hour = 5
-            options.drafts_per_ticket = 2
+            options.drafts_per_ticket = 10
             options.drafts_per_board = 20
             options.provider_secrets_dir = None
+            drafted_at = butler.utc_now()
             pending = await backend.pending_questions()
             answerable = next(row for row in pending if row["question_id"] == "CQ-answer")
             result = await butler.process_question(
-                backend, answerable, options, butler.utc_now()
+                backend, answerable, options, drafted_at
             )
             immediate_evaluation = await backend.evaluation("CQ-answer")
             immediate_audit = json.loads(immediate_evaluation["state"]["value"])[
                 "evaluation"
             ]["answer_audit"]
             assert result["auto_eligible"] is True, result
-            assert result["hold"]["release_at"] == result["hold"]["drafted_at"], result[
-                "hold"
-            ]
-            assert immediate_audit["status"] == "answered", immediate_audit
-            assert result.get("answer_status") == "answered", immediate_audit
+            assert immediate_audit["status"] == "pending", immediate_audit
+            assert result.get("answer_status") is None, immediate_audit
+            still_open = await backend.question("TK-observed", "CQ-answer")
+            assert still_open is not None
+            assert still_open["state"] == "open"
+            assert still_open["accepted_by"] is None
+
+            result = await butler.process_question(
+                backend,
+                answerable,
+                options,
+                drafted_at + timedelta(seconds=61),
+            )
+            assert result.get("answer_status") == "answered", result
             answered = await backend.client.board_question_inbox(
                 state="answered", ticket_id="TK-observed", limit=10
             )
@@ -439,6 +479,7 @@ def test_butler_reaches_first_working_state_against_real_central(
             )
             assert row["answer"] == "TK-observed is open."
             assert row["answered_by"]["agent_id"] == backend.identity.agent_id
+            assert row["accepted_by"] is None
             await butler.process_question(backend, row, options, butler.utc_now())
             answered_again = await backend.client.board_question_inbox(
                 state="answered", ticket_id="TK-observed", limit=10
@@ -453,6 +494,105 @@ def test_butler_reaches_first_working_state_against_real_central(
             ]
             assert audit["status"] == "answered"
             assert audit["event_id"].startswith("EV-")
+
+            pending = await backend.pending_questions()
+            held_ids = {
+                "CQ-veto",
+                "CQ-failure-0",
+                "CQ-failure-1",
+                "CQ-failure-2",
+            }
+            held = {row["question_id"]: row for row in pending if row["question_id"] in held_ids}
+            assert set(held) == held_ids
+            for question_id in (
+                "CQ-failure-0",
+                "CQ-failure-1",
+                "CQ-failure-2",
+                "CQ-veto",
+            ):
+                row = held[question_id]
+                await butler.process_question(backend, row, options, drafted_at)
+                current = await backend.question("TK-observed", row["question_id"])
+                assert current is not None
+                assert current["state"] == "open"
+                assert current["accepted_by"] is None
+
+            raw_findings = await backend.findings()
+            finding_state, previous_findings = butler._decode_state(raw_findings)
+            vetoed = butler.veto_question(
+                finding_state, "CQ-veto", "real Central veto", drafted_at
+            )
+            await backend.write_findings(
+                json.dumps(vetoed, sort_keys=True, separators=(",", ":")),
+                previous_findings,
+            )
+
+        class FailingDeliveryBackend(butler.CentralBackend):
+            answer_attempts = 0
+
+            async def answer_question(
+                self, ticket_id: str, question_id: str, message: str
+            ) -> dict[str, object]:
+                self.answer_attempts += 1
+                raise RuntimeError("private injected delivery detail")
+
+        async with FailingDeliveryBackend(options, token) as restarted:
+            pending = await restarted.pending_questions()
+            by_id = {row["question_id"]: row for row in pending}
+            release_time = drafted_at + timedelta(seconds=61)
+            await butler.process_question(
+                restarted, by_id["CQ-veto"], options, release_time
+            )
+            veto_question = await restarted.question("TK-observed", "CQ-veto")
+            assert veto_question is not None
+            assert veto_question["state"] == "open"
+            assert veto_question["accepted_by"] is None
+            veto_evaluation = await restarted.evaluation("CQ-veto")
+            veto_audit = json.loads(veto_evaluation["state"]["value"])["evaluation"][
+                "answer_audit"
+            ]
+            assert veto_audit["status"] == "escalated"
+            assert veto_audit["reason_code"] == "vetoed"
+
+            for question_id in ("CQ-failure-0", "CQ-failure-1", "CQ-failure-2"):
+                await butler.process_question(
+                    restarted, by_id[question_id], options, release_time
+                )
+                evaluation = await restarted.evaluation(question_id)
+                failure_audit = json.loads(evaluation["state"]["value"])[
+                    "evaluation"
+                ]["answer_audit"]
+                if failure_audit["status"] == "pending":
+                    await butler.process_question(
+                        restarted,
+                        by_id[question_id],
+                        options,
+                        release_time + timedelta(seconds=61),
+                    )
+                current = await restarted.question("TK-observed", question_id)
+                assert current is not None
+                assert current["state"] == "open"
+                assert current["accepted_by"] is None
+                evaluation = await restarted.evaluation(question_id)
+                failure_audit = json.loads(evaluation["state"]["value"])[
+                    "evaluation"
+                ]["answer_audit"]
+                assert failure_audit["status"] == "failed"
+                assert failure_audit["reason_code"] == "central_answer_failed"
+
+            assert restarted.answer_attempts == 3
+            raw_findings = await restarted.findings()
+            finding_state, _ = butler._decode_state(raw_findings)
+            effective = butler.resolve_config(
+                await restarted.coordinator_config(),
+                options,
+                finding_state,
+                release_time + timedelta(seconds=61),
+                project_name=restarted.project_name,
+            )
+            assert effective.future_active_state == "auto_demoted"
+            assert effective.effective_answering_mode == "assist"
+            assert "private injected delivery detail" not in json.dumps(finding_state)
 
     with _central_process(data_root, port, environment) as url:
         asyncio.run(connect(url))

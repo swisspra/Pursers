@@ -235,6 +235,34 @@ class PolicyRule:
 # "is this SHA merged" and "waive the gate" is an escalation, never a lookup.
 POLICY_TABLE: tuple[PolicyRule, ...] = (
     PolicyRule(
+        "credentials-or-secrets",
+        Outcome.ESCALATE,
+        re.compile(
+            r"\b(?:credential(?:s)?|bearer[ -]?token|api[ -]?key|private[ -]?key|"
+            r"secret(?:s)?|host[ -]?binding)\b",
+            re.I,
+        ),
+    ),
+    PolicyRule(
+        "authority-or-budget-change",
+        Outcome.ESCALATE,
+        re.compile(
+            r"(?=.*\b(?:change|raise|increase|expand|grant|extend|override|set|"
+            r"modify|amend)\w*\b)(?=.*\b(?:authority|authorities|budget|ceiling|"
+            r"concurrency|limit)\w*\b)",
+            re.I | re.S,
+        ),
+    ),
+    PolicyRule(
+        "review-policy",
+        Outcome.ESCALATE,
+        re.compile(
+            r"\b(?:review[ -]?policy|independent[ -]?review|self[ -]?review|"
+            r"reviewer[ -]?(?:assignment|authority|requirement))\b",
+            re.I,
+        ),
+    ),
+    PolicyRule(
         "gate-waiver",
         Outcome.ESCALATE,
         re.compile(
@@ -3678,16 +3706,13 @@ def resolve_config(
 
 
 def classify_question(message: str, kind: str = "information") -> Classification:
-    # An approval request is itself authority-bearing.  A decision-labelled
-    # question can still ask for a deterministic fact, so content rules get a
-    # chance to prove it mechanical before the fail-closed kind fallback.
-    if kind == "approval":
-        return Classification(Outcome.ESCALATE, "question-kind:approval")
+    # Kind is an authority boundary, not a hint.  Fail closed before inspecting
+    # content so a mechanical substring cannot launder a human-only request.
+    if kind in {"approval", "decision", "deliverable"}:
+        return Classification(Outcome.ESCALATE, f"question-kind:{kind}")
     for rule in POLICY_TABLE:
         if rule.pattern.search(message):
             return Classification(rule.outcome, rule.name, rule.evaluator)
-    if kind == "decision":
-        return Classification(Outcome.ESCALATE, "question-kind:decision")
     return Classification(Outcome.UNKNOWN, "no-confident-policy-match")
 
 
@@ -6339,25 +6364,11 @@ async def advance_autonomous_answer(
         )
         return dict(finding)
 
+    # Leave an open question unowned throughout the vetoable hold and every
+    # policy/evidence recheck.  Central's atomic answer call is the ownership
+    # boundary; if delivery fails, a human coordinator can still answer it.
     audit_state = dict(evaluation_state)
     audit_previous = previous_evaluation_value
-    if current.get("state") == "open":
-        accepted = await backend.accept_question(ticket_id, question_id)
-        accepted_question = accepted.get("question", {})
-        accepted_event = accepted.get("event") or {}
-        attempts = int(audit.get("attempts", 0) or 0) + 1
-        audit_state, audit_previous = await _write_answer_audit(
-            backend,
-            question_id,
-            audit_state,
-            audit_previous,
-            status="accepted",
-            accepted_at=accepted_question.get("accepted_at") or now.isoformat(),
-            event_id=accepted_event.get("id"),
-            attempts=attempts,
-            reason_code=None,
-        )
-        audit = audit_state["evaluation"]["answer_audit"]
 
     raw = await backend.findings()
     state, _previous_state_value = _decode_state(raw)
@@ -6443,6 +6454,7 @@ async def advance_autonomous_answer(
             audit_previous,
             status="failed",
             reason_code="answer_bounds",
+            attempts=int(audit.get("attempts", 0) or 0) + 1,
         )
         return dict(finding)
     try:
@@ -6456,6 +6468,7 @@ async def advance_autonomous_answer(
             audit_previous,
             status="failed",
             reason_code="central_answer_failed",
+            attempts=int(audit.get("attempts", 0) or 0) + 1,
         )
         return dict(finding)
     answered = response.get("question", {})
