@@ -1371,6 +1371,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         cases = {
             "codex": 560,
             "codex-cli": 560,
+            "zed": 560,
             "goose": 270,
             "claude-code": 21_540,
             "claude-desktop": 200,

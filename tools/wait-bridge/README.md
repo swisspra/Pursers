@@ -83,7 +83,7 @@ roles fail closed and tell the operator which selector to set.
 | `PURSERS_CENTRAL_CONNECTION_CAP` | no | Process-wide Central connection ceiling; defaults to `4` and accepts `1`-`64`. One slot is reserved for ordinary calls and excess board subscriptions fall back to polling with a clear stderr warning. |
 | `PURSERS_KEEPALIVE_IDLE_LIMIT_S` | no | Maximum seconds since this stdio session's last model tool call before background lease renewal pauses. Defaults to three times each claim's live TTL. |
 | `PURSERS_BACKLOG_RESURFACE_INTERVAL_S` | no | Seconds before an unchanged open broadcast ticket may wake the same idle identity again; defaults to `600`. |
-| `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling. |
+| `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `zed`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling and preserves Zed as the board host/platform marker. |
 | `PURSERS_HOST_TIMEOUT_S` | no | Explicit host/runner deadline in seconds; overrides the named profile. |
 | `PURSERS_TIER_MAX` | no | Maximum dispatch tier (`1`-`3`) declared when the seat joins. |
 | `PURSERS_SKILLS` | no | Comma-separated dispatch skills declared when the seat joins. |
@@ -643,12 +643,21 @@ latest renewal came from the model or the bridge keepalive.
 
 The requested `timeout_s` is capped at `host_timeout - margin`, where
 `margin=min(60,max(30,ceil(10% of host_timeout)))`; Claude Desktop uses at
-least 40s. Defaults are Codex/Codex CLI 620s/560s, Goose 300s/270s, Claude
+least 40s. Defaults are Codex/Codex CLI/Zed 620s/560s, Goose 300s/270s, Claude
 Desktop 240s/200s, and Claude Code/headless 21,600s/21,540s. A normal timeout
 returns `timed_out=true`; re-arm immediately with the returned cursor. Claude
 Code receives a progress notification every 300s so its 30-minute stdio idle
 timer does not cancel a healthy long wait. Progress never extends the hard
 deadline.
+
+If an unexpected runtime or transport exception prevents the wait from
+producing a normal cue or timeout, the stdio tool returns a bounded structured
+result with `reason=push_unavailable`, `mode=error`, an empty event list, and
+the caller's cursor unchanged in `new_seq`. The `error` object contains only a
+safe cause class and re-arm action; raw exception text, credentials, and host
+paths are not returned. Authentication and authorization failures are marked
+non-retryable until the named configuration is repaired. This is not a polling
+fallback or a cursor reset.
 
 For a per-call identity, the entry snapshot exact-filters
 `claimed_by_agent_id`. This prevents substring matches such as `session-a` and

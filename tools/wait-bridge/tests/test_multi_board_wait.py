@@ -253,6 +253,54 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         wait_server._IMMEDIATE_SYNTHETIC_CURSORS.clear()
         wait_server._BOARD_DENIALS.clear()
 
+    async def test_zed_wait_rejoin_preserves_platform_and_capabilities(
+        self,
+    ) -> None:
+        transport = FakeTransport(["alpha"])
+        client = FakeRootClient(transport)
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PURSERS_HOST": "zed",
+                    "PURSERS_MODEL": "gpt-5.6-sol",
+                    "PURSERS_PROVIDER": "openai",
+                    "PURSERS_ROLE": "worker",
+                    "PURSERS_CAN_WORK": "true",
+                    "PURSERS_CAN_REVIEW": "false",
+                    "PURSERS_TIER_MAX": "2",
+                },
+            ),
+            patch.object(wait_server, "WAIT_MODE", "poll"),
+            patch.object(wait_server, "clamp_timeout", return_value=0.01),
+        ):
+            await wait_server._wait_for_work_many(
+                client,
+                boards=["alpha"],
+                since_seq={"alpha": 38_519},
+                timeout_s=1,
+                only_mine=True,
+                agent_name="zed-seat",
+                wait_for="claimable",
+            )
+
+        join = next(call for call in transport.calls if call[0] == "board_join")
+        payload = join[2]
+        self.assertEqual(payload["agent_name"], "zed-seat")
+        self.assertEqual(payload["agent_platform"], "zed")
+        self.assertEqual(
+            payload["capabilities"],
+            {
+                "host": "zed",
+                "max_parallel": 1,
+                "tier_max": 2,
+                "can_review": False,
+                "can_work": True,
+                "model": "gpt-5.6-sol",
+                "provider": "openai",
+            },
+        )
+
     async def test_single_board_function_keeps_original_response_shape(self) -> None:
         from test_per_call_wait import FakeClient
 

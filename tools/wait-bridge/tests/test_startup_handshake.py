@@ -41,6 +41,55 @@ class _UnauthorizedHandler(BaseHTTPRequestHandler):
 
 
 class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_zed_stdio_wait_failure_is_structured_and_preserves_cursor(
+        self,
+    ) -> None:
+        fixture = ROOT / "tests" / "fixtures" / "zed_stdio_wait_server.py"
+        env = os.environ.copy()
+        env.update(
+            {
+                "ONBOARD_CENTRAL_TOKEN": "TOKEN_PLACEHOLDER",
+                "PURSERS_HOST": "zed",
+                "PURSERS_WAIT_MODE": "push",
+                "PYTHONPATH": os.pathsep.join((str(CLIENT_SRC), str(ROOT))),
+            }
+        )
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=[str(fixture)],
+            env=env,
+        )
+        async with Client(
+            params,
+            mode="2026-07-28",
+            read_timeout_seconds=TEST_TIMEOUT_S,
+        ) as client:
+            result = await client.call_tool(
+                "a2a_wait",
+                {
+                    "agent_name": "zed-seat",
+                    "boards": ["pursers"],
+                    "only_mine": True,
+                    "since_seq": {"pursers": 38_519},
+                    "timeout_s": 1,
+                    "wait_for": "claimable",
+                },
+            )
+
+        self.assertFalse(result.is_error)
+        payload = dict(result.structured_content or {})
+        value = dict(payload.get("result", payload))
+        self.assertEqual(value["new_seq"], {"pursers": 38_519})
+        self.assertEqual(value["events"], [])
+        self.assertEqual(value["mode"], "error")
+        self.assertEqual(value["reason"], "push_unavailable")
+        self.assertEqual(
+            value["error"]["action"], "rearm_from_unchanged_cursor"
+        )
+        rendered = repr(value)
+        self.assertNotIn("TOKEN_PLACEHOLDER", rendered)
+        self.assertNotIn("/private/host/path", rendered)
+
     async def test_fingerprint_mismatch_refuses_start_and_match_passes(self) -> None:
         connection = wait_server.DeferredBoardConnection(
             wait_server.BridgeStats(Path(tempfile.gettempdir()) / "unused.json")
