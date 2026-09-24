@@ -202,6 +202,7 @@ class SeatAdminTests(unittest.TestCase):
         state = StrictFakeBackend()
         active_admins: dict[tuple[str, str], str] = {}
         constructor_calls: list[dict[str, Any]] = []
+        snapshot_calls: list[tuple[str, int, int]] = []
 
         class CollisionAwareClient:
             def __init__(
@@ -259,8 +260,16 @@ class SeatAdminTests(unittest.TestCase):
             async def board_members(self) -> dict[str, Any]:
                 return await state.members(self.board_id)
 
-            async def board_snapshot(self, **_kwargs: Any) -> dict[str, Any]:
-                return await state.snapshot(self.board_id)
+            async def board_snapshot(
+                self, *, limit: int, max_bytes: int
+            ) -> dict[str, Any]:
+                snapshot_calls.append((self.board_id, limit, max_bytes))
+                snapshot = await state.snapshot(self.board_id)
+                if max_bytes == seat_admin.INITIAL_INVENTORY_MAX_BYTES:
+                    snapshot["agents"] = snapshot["agents"][:-1]
+                    snapshot["omitted_counts"]["agents"] = 1
+                    snapshot["omitted_counts"]["tickets"] = 1
+                return snapshot
 
             async def board_member_add(
                 self, principal_id: str, *, role: str = "member"
@@ -274,6 +283,12 @@ class SeatAdminTests(unittest.TestCase):
                 self, principal_id: str, role: str
             ) -> dict[str, bool]:
                 await state.member_set_role(self.board_id, principal_id, role)
+                return {"ok": True}
+
+            async def board_member_remove(
+                self, principal_id: str
+            ) -> dict[str, bool]:
+                await state.member_remove(self.board_id, principal_id)
                 return {"ok": True}
 
         backend = seat_admin.LiveBackend(
@@ -312,13 +327,59 @@ class SeatAdminTests(unittest.TestCase):
             "--token-path",
             "/tokens/reviewer-b.jwt",
         )
+        registry = invoke(
+            backend,
+            "add",
+            "--name",
+            "worker-registry",
+            "--role",
+            "worker",
+            "--principal",
+            "PR-registry-worker",
+            "--token-path",
+            "/tokens/worker-registry.jwt",
+        )
+        retired = json.loads(
+            invoke(
+                backend,
+                "retire",
+                "--name",
+                "worker-registry",
+                "--boards",
+                "registry",
+                "--force",
+            )
+        )
 
         self.assertIn("worker-b", worker)
         self.assertIn("reviewer-b", reviewer)
+        self.assertIn("worker-registry", registry)
+        self.assertEqual(
+            retired["boards_removed"], ["home", "board-one", "board-two"]
+        )
+        self.assertNotIn("worker-registry", state.seats["seats"])
+        self.assertTrue(
+            all(
+                "PR-registry-worker" not in state.roles[board]
+                for board in ("home", "board-one", "board-two")
+            )
+        )
         self.assertEqual(state.seats["seats"]["worker-b"]["role"], "worker")
         self.assertEqual(state.seats["seats"]["reviewer-b"]["role"], "reviewer")
         self.assertTrue(constructor_calls)
         self.assertTrue(all(call["allow_takeover"] for call in constructor_calls))
+        self.assertTrue(snapshot_calls)
+        self.assertEqual(
+            {limit for _board, limit, _max_bytes in snapshot_calls},
+            {seat_admin.INVENTORY_SNAPSHOT_LIMIT},
+        )
+        self.assertEqual(
+            {max_bytes for _board, _limit, max_bytes in snapshot_calls},
+            {
+                seat_admin.INITIAL_INVENTORY_MAX_BYTES,
+                seat_admin.MAX_INVENTORY_MAX_BYTES,
+            },
+        )
         with self.assertRaisesRegex(seat_admin.RegistryError, "pass --force"):
             invoke(
                 backend,
@@ -570,7 +631,10 @@ class SeatAdminTests(unittest.TestCase):
 
     def test_incomplete_pool_scan_fails_closed(self) -> None:
         backend = StrictFakeBackend(omitted_agents=1)
-        with self.assertRaisesRegex(seat_admin.RegistryError, "incomplete"):
+        with self.assertRaisesRegex(
+            seat_admin.RegistryError,
+            "limit=1000, max_bytes=750000.*partition the board",
+        ):
             invoke(backend, "check", "--name", "worker-a")
         self.assertEqual(backend.calls, [])
 

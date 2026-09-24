@@ -28,6 +28,9 @@ CENTRAL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 SEAT_REGISTRY_KEY = "seat_registry"
 SEAT_REGISTRY_SCHEMA_VERSION = 1
 DEFAULT_STALE_SECONDS = 300
+INVENTORY_SNAPSHOT_LIMIT = 1_000
+INITIAL_INVENTORY_MAX_BYTES = 300_000
+MAX_INVENTORY_MAX_BYTES = 750_000
 ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 ACTIVE_REVIEW_STATES = frozenset({"submitted", "reviewing", "in_review"})
 
@@ -156,7 +159,21 @@ class LiveBackend:
 
     async def snapshot(self, board_id: str) -> dict[str, Any]:
         async with self._client(board_id) as client:
-            return await client.board_snapshot(limit=1_000, max_bytes=300_000)
+            snapshot = await client.board_snapshot(
+                limit=INVENTORY_SNAPSHOT_LIMIT,
+                max_bytes=INITIAL_INVENTORY_MAX_BYTES,
+            )
+            omitted = snapshot.get("omitted_counts", {})
+            if not any(
+                type(omitted.get(collection)) is int
+                and omitted[collection] > 0
+                for collection in ("agents", "tickets")
+            ):
+                return snapshot
+            return await client.board_snapshot(
+                limit=INVENTORY_SNAPSHOT_LIMIT,
+                max_bytes=MAX_INVENTORY_MAX_BYTES,
+            )
 
     async def member_add(self, board_id: str, principal_id: str) -> None:
         async with self._client(board_id) as client:
@@ -276,7 +293,10 @@ async def _inventory(
         if omitted_agents:
             raise RegistryError(
                 f"agent scan on {board_id!r} omitted {omitted_agents} rows; "
-                "refusing an incomplete duplicate-name check"
+                "refusing an incomplete duplicate-name check after Central's "
+                f"maximum inventory snapshot (limit={INVENTORY_SNAPSHOT_LIMIT}, "
+                f"max_bytes={MAX_INVENTORY_MAX_BYTES}); retire stale agents or "
+                "partition the board before provisioning"
             )
         agents = {
             (agent.get("principal_id"), agent.get("agent_name")): agent
@@ -334,7 +354,10 @@ def _active_claims(
         if omitted:
             raise RegistryError(
                 f"ticket scan on {board_id!r} omitted {omitted} rows; "
-                "refusing an incomplete active-claim check"
+                "refusing an incomplete active-claim check after Central's "
+                f"maximum inventory snapshot (limit={INVENTORY_SNAPSHOT_LIMIT}, "
+                f"max_bytes={MAX_INVENTORY_MAX_BYTES}); close stale tickets or "
+                "partition the board before retiring seats"
             )
         agent_principals: dict[str, set[str]] = {}
         for agent in snapshot.get("agents", []):
