@@ -80,7 +80,7 @@ roles fail closed and tell the operator which selector to set.
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
 | `PURSERS_ROLE` | no | Explicit seat role: `worker`, `reviewer`, `orchestrator`, or `coordinator`. When omitted, Central maps reviewer membership to `reviewer`; admin/member membership maps to `worker`. |
 | `PURSERS_WAIT_MODE` | no | `push` (default) or explicit compatibility `poll`; a subscription error polls only that board for the current call and push is retried on re-arm. |
-| `PURSERS_CENTRAL_CONNECTION_CAP` | no | Process-wide Central connection ceiling; defaults to `4` and accepts `1`-`64`. One slot is reserved for ordinary calls and excess board subscriptions fall back to polling with a clear stderr warning. |
+| `PURSERS_CENTRAL_CONNECTION_CAP` | no | Process-wide Central connection ceiling; defaults to `5` and accepts `1`-`64`. Two slots are reserved for ordinary calls and lease keepalive; excess board subscriptions fall back to polling with a clear stderr warning. |
 | `PURSERS_KEEPALIVE_IDLE_LIMIT_S` | no | Maximum seconds since this stdio session's last model tool call before background lease renewal pauses. Defaults to three times each claim's live TTL. |
 | `PURSERS_BACKLOG_RESURFACE_INTERVAL_S` | no | Seconds before an unchanged open broadcast ticket may wake the same idle identity again; defaults to `600`. |
 | `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `zed`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling and preserves Zed as the board host/platform marker. |

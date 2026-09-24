@@ -54,7 +54,7 @@ Unset means the component applies its documented default or requires an explicit
 | `PURSERS_BRIDGE_STATS` | Wait bridge | state directory/bridge-stats.json | JSON statistics file written by the wait bridge. |
 | `PURSERS_CAN_REVIEW` | Wait bridge | unset | Boolean review capability advertised by the seat. |
 | `PURSERS_CAN_WORK` | Wait bridge | unset | Boolean work capability advertised by the seat. |
-| `PURSERS_CENTRAL_CONNECTION_CAP` | Wait bridge | `4` | Maximum pooled Central connections used by the bridge. |
+| `PURSERS_CENTRAL_CONNECTION_CAP` | Wait bridge | `5` | Maximum pooled Central connections used by the bridge. |
 | `PURSERS_DOCTOR_TOKEN_PATH` | Wait bridge | unset | Credential file inspected by registry doctor. |
 | `PURSERS_HOST` | Wait bridge | `codex` | Named host profile used for wait timeouts and capability provenance. |
 | `PURSERS_HOST_TIMEOUT_S` | Wait bridge | named-host timeout | Explicit host-response timeout override in seconds. |

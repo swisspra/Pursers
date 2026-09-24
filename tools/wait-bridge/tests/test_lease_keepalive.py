@@ -92,6 +92,11 @@ class DiscoveryClient:
         )
 
 
+class FalseyDiscoveryClient(DiscoveryClient):
+    def __bool__(self) -> bool:
+        return False
+
+
 class NoDiscoveryKeepalive(wait_server.LeaseKeepalive):
     async def _discover(self) -> None:
         return None
@@ -120,6 +125,43 @@ class ClaimOnDiscoveryKeepalive(NoDiscoveryKeepalive):
 
 
 class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discovery_uses_falsey_metered_client_transport(self) -> None:
+        transport = FalseyDiscoveryClient()
+        meter = SimpleNamespace(record=AsyncMock())
+        client = wait_server.MeteredBoardClient(
+            "http://central.invalid/mcp",
+            "test-token",
+            "pursers",
+            agent_name="configured-worker",
+            role="worker",
+            meter=meter,
+        )
+        client._client = transport
+        keepalive = wait_server.LeaseKeepalive(Connection(client))
+
+        with (
+            patch.object(
+                wait_server,
+                "_read_project_registry",
+                AsyncMock(
+                    return_value={"schema_version": 1, "projects": {}}
+                ),
+            ),
+            patch.object(
+                wait_server,
+                "_seat_capabilities",
+                return_value={"can_work": True, "can_review": False},
+            ),
+        ):
+            await keepalive._discover()
+
+        joins = [
+            arguments
+            for name, arguments in transport.calls
+            if name == "board_join"
+        ]
+        self.assertEqual(len(joins), 1)
+
     async def test_work_projection_preserves_holder_for_renewal_failure(self) -> None:
         full_agent_id = "AI-" + "a" * 64
         full_principal_id = "PR-" + "b" * 64

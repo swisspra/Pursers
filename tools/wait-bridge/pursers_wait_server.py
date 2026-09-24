@@ -214,8 +214,9 @@ CONNECTOR_TOKEN_SHA256_ENV = "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256"
 DEFAULT_TIMEOUT_S = 180
 DEFAULT_POLL_INTERVAL_S = 2.0
 DEFAULT_CLAIM_TTL_S = 900
-DEFAULT_CENTRAL_CONNECTION_CAP = 4
+DEFAULT_CENTRAL_CONNECTION_CAP = 5
 MAX_CENTRAL_CONNECTION_CAP = 64
+CENTRAL_RESERVED_CONNECTIONS = 2
 DEFAULT_KEEPALIVE_IDLE_TTL_MULTIPLIER = 3
 MAX_LEASE_RENEW_INTERVAL_S = 300.0
 PROGRESS_INTERVAL_S = 300.0
@@ -1171,12 +1172,16 @@ def _central_connection_cap() -> int:
 
 
 class CentralConnectionLimiter:
-    """Reserve one main Central connection and bound concurrent subscriptions."""
+    """Reserve ordinary-call and keepalive slots; bound board subscriptions."""
 
     def __init__(self, limit: int) -> None:
         self.limit = limit
-        self.active = 1
-        self.peak = 1
+        # The lifespan BoardClient needs one slot for ordinary tool calls while
+        # LeaseKeepalive holds a second long-lived subscription. Per-board
+        # wait streams share the same HTTP pool and may consume only the rest.
+        self.reserved = min(CENTRAL_RESERVED_CONNECTIONS, limit)
+        self.active = self.reserved
+        self.peak = self.reserved
         self._lock = asyncio.Lock()
         self._cap_logged = False
 
@@ -1199,7 +1204,7 @@ class CentralConnectionLimiter:
             yield
         finally:
             async with self._lock:
-                self.active = max(1, self.active - 1)
+                self.active = max(self.reserved, self.active - 1)
                 if self.active < self.limit:
                     self._cap_logged = False
 
@@ -1223,11 +1228,14 @@ class _BoardView:
     """Board-scoped calls over the lifespan client's open transport."""
 
     def __init__(self, parent: BoardClient, board_id: str) -> None:
-        raw_client = (
-            getattr(parent, "_client", None)
-            or getattr(parent, "_raw_client", None)
-            or parent
-        )
+        # MCP Client instances are allowed to be falsey. Select adapters by
+        # presence, not truthiness, or a live MeteredBoardClient is mistaken
+        # for its raw transport and later reports a bogus missing call_tool.
+        raw_client = getattr(parent, "_client", None)
+        if raw_client is None:
+            raw_client = getattr(parent, "_raw_client", None)
+        if raw_client is None:
+            raw_client = parent
         self.board_id = board_id
         self._parent = parent
         self.agent_name = getattr(parent, "agent_name", AGENT_NAME)

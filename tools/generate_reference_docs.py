@@ -243,7 +243,7 @@ ENV_DEFAULTS: dict[str, str] = {
     "PURSERS_BACKLOG_SCAN_INTERVAL_S": "`30` seconds", "PURSERS_BOARDS": "unset",
     "PURSERS_BOARD_CONNECTOR_TOKEN": "unset", "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256": "unset",
     "PURSERS_BRIDGE_STATE": "derived from state directory", "PURSERS_BRIDGE_STATE_DIR": "platform state directory",
-    "PURSERS_BRIDGE_STATS": "state directory/bridge-stats.json", "PURSERS_CENTRAL_CONNECTION_CAP": "`4`",
+    "PURSERS_BRIDGE_STATS": "state directory/bridge-stats.json", "PURSERS_CENTRAL_CONNECTION_CAP": "`5`",
     "PURSERS_DOCTOR_TOKEN_PATH": "unset", "PURSERS_HOST": "`codex`",
     "PURSERS_HOST_TIMEOUT_S": "named-host timeout", "PURSERS_KEEPALIVE_IDLE_LIMIT_S": "three claim-TTL periods",
     "PURSERS_REQUEST_STATE_KEY_FILE": "state directory/request-state.keys",
