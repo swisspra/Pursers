@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -1089,6 +1090,12 @@ class CentralBoard:
             if value:
                 capabilities[field] = value
         self.capabilities = capabilities
+        self._readiness_session_id = f"managed-acp-{uuid.uuid4().hex}"
+        self._readiness_sequence = 0
+        self._readiness_ttl_s = min(
+            3_600, max(360, int(getattr(config, "wait_timeout_s", 180) * 3))
+        )
+        initial_readiness = self._readiness(dispatch_ready=True)
         self.client = BoardClient(
             config.central_url,
             token,
@@ -1096,17 +1103,44 @@ class CentralBoard:
             agent_name=config.agent_name,
             role="worker",
             capabilities=self.capabilities,
+            readiness=initial_readiness,
             allow_takeover=True,
         )
         self.agent_id = ""
         self.principal_id = ""
         self._claim_identities: dict[str, tuple[str, str, str]] = {}
 
+    def _readiness(
+        self, *, dispatch_ready: bool, transport_connected: bool = True
+    ) -> JSON:
+        return {
+            "transport_connected": transport_connected,
+            "session_idle": True,
+            "foreground_running": False,
+            "dispatch_ready": dispatch_ready,
+            "managed_autonomous": dispatch_ready,
+            "session_id": self._readiness_session_id,
+            "sequence": self._readiness_sequence,
+            "ttl_s": self._readiness_ttl_s,
+        }
+
+    async def _publish_readiness(
+        self, *, dispatch_ready: bool, transport_connected: bool = True
+    ) -> None:
+        self._readiness_sequence += 1
+        await self.client.agent_readiness_set(
+            self._readiness(
+                dispatch_ready=dispatch_ready,
+                transport_connected=transport_connected,
+            )
+        )
+
     async def __aenter__(self) -> "CentralBoard":
         await self.client.__aenter__()
         joined = await self.client.board_onboard(
             role="worker",
             capabilities=self.capabilities,
+            readiness=self._readiness(dispatch_ready=True),
             allow_takeover=True,
             task_focus="ACP seat runtime",
         )
@@ -1120,12 +1154,20 @@ class CentralBoard:
             raise PermissionError("Central returned a different ACP seat agent_id")
         if self.principal_id != self.config.expected_principal_id:
             raise PermissionError("Central returned a different ACP seat principal_id")
+        await self._publish_readiness(dispatch_ready=True)
         return self
 
     async def __aexit__(self, *args: object) -> None:
+        try:
+            await self._publish_readiness(
+                dispatch_ready=False, transport_connected=False
+            )
+        except Exception:
+            pass
         await self.client.__aexit__(*args)
 
     async def wait(self, cursor: int | None) -> JSON:
+        await self._publish_readiness(dispatch_ready=True)
         return await self.wait_bridge._a2a_wait_impl(
             self.client,
             since_seq=None if cursor is None else {self.config.board_id: cursor},

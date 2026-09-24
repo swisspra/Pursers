@@ -32,6 +32,7 @@ class FakeBoard:
         self.closed = False
         self.mutations: list[JSON] = []
         self.watch_started = asyncio.Event()
+        self.readiness_calls: list[JSON] = []
 
     async def close(self) -> None:
         self.closed = True
@@ -62,6 +63,16 @@ class FakeBoard:
                 }
             ],
         }
+
+    async def set_readiness(
+        self,
+        session_id: str,
+        sequence: int,
+        **state: object,
+    ) -> None:
+        self.readiness_calls.append(
+            {"session_id": session_id, "sequence": sequence, **state}
+        )
 
     async def ticket_evidence(self, ticket_id: str) -> JSON:
         return {
@@ -347,12 +358,20 @@ async def _conformance_honest_capabilities_and_read_intents(tmp_path: Path) -> N
             "answer",
         ]
         assert (await client.prompt(session, "my tickets"))["stopReason"] == "end_turn"
+        assert [row["dispatch_ready"] for row in board.readiness_calls] == [
+            True,
+            False,
+        ]
+        assert board.readiness_calls[0]["foreground_running"] is True
+        assert board.readiness_calls[1]["session_idle"] is True
+        assert board.readiness_calls[1]["sequence"] == 2
         text = client.updates[-1]["update"]["content"]["text"]
         assert "TK-owned" in text
         assert str(tmp_path) not in text
     finally:
         await client.close()
     assert board.closed
+    assert board.readiness_calls[-1]["transport_connected"] is False
 
 
 def test_board_transport_is_opened_and_closed_by_run_loop_task() -> None:
@@ -2000,6 +2019,7 @@ class InProcessPersonalBoard(PersonalBoardSurface):
         self._coordinator_binding = coordinator_binding
         self._wait_bridge_factory = None
         self._client = raw
+        self._readiness_enabled = True
 
     async def close(self) -> None:
         self._client = None
@@ -2059,6 +2079,136 @@ async def _end_to_end_create_against_in_process_central(
             )
             assert fetched["ticket"]["title"] == "ACP E2E"
             assert fetched["ticket"]["created_by_principal_id"] == principal.principal_id
+        finally:
+            await client.close()
+
+
+def test_real_acp_turn_controls_dispatch_readiness_and_preserves_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asyncio.run(
+        _real_acp_turn_controls_dispatch_readiness_and_preserves_claim(
+            tmp_path, monkeypatch
+        )
+    )
+
+
+async def _real_acp_turn_controls_dispatch_readiness_and_preserves_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jwks = tmp_path / "readiness-jwks.json"
+    jwks.write_text('{"keys": []}', encoding="utf-8")
+    monkeypatch.setenv("CENTRAL_AUTH_MODE", "jwt")
+    monkeypatch.setenv("CENTRAL_JWT_ISSUER", "https://issuer.invalid")
+    monkeypatch.setenv("CENTRAL_JWT_AUDIENCE", "http://localhost:8765/mcp")
+    monkeypatch.setenv("CENTRAL_JWKS_PATH", str(jwks))
+    monkeypatch.setenv("CENTRAL_ADMISSION", "invite")
+    monkeypatch.setenv("STORE_BACKEND", "sqlite")
+    mcp, _service = central.build_server(
+        "localhost", 8765, tmp_path / "readiness-central"
+    )
+    principal = central.Principal(
+        "PR-acp-worker",
+        "acp-worker",
+        frozenset({"board:read", "board:write", "board:review"}),
+    )
+    monkeypatch.setattr(central, "current_principal", lambda: principal)
+
+    class BlockingBridge:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def digests(
+            self, board_id: str, cursor: int | None, cancel: asyncio.Event
+        ) -> AsyncIterator[JSON]:
+            assert board_id == "acp-e2e"
+            self.started.set()
+            await cancel.wait()
+            if False:
+                yield {"latest_seq": cursor or 0}
+
+        async def close(self) -> None:
+            return None
+
+    async with Client(mcp, mode="2026-07-28", cache=None) as raw:
+        joined = BoardClient._decode(
+            await raw.call_tool(
+                "board_join",
+                {
+                    "board_id": "acp-e2e",
+                    "agent_name": "interactive-worker",
+                    "role": "worker",
+                    "capabilities": {
+                        "can_work": True,
+                        "can_review": False,
+                        "tier_max": 2,
+                        "max_parallel": 1,
+                    },
+                },
+            )
+        )
+        agent_id = joined["agent_id"]
+        bridge = BlockingBridge()
+        board = InProcessPersonalBoard(
+            raw,
+            principal.principal_id,
+            agent_name="interactive-worker",
+            agent_id=agent_id,
+        )
+        board._wait_bridge_factory = lambda: bridge
+        client = FakeACPClient(PursersACPAgent(lambda: board))
+
+        async def call(name: str, **params: object) -> JSON:
+            return BoardClient._decode(
+                await raw.call_tool(name, {"board_id": "acp-e2e", **params})
+            )
+
+        try:
+            await client.initialize()
+            session = await client.new_session(tmp_path)
+            assert await client.prompt(session, "/board") == {
+                "stopReason": "end_turn"
+            }
+
+            created = await call(
+                "ticket_create",
+                agent_name="interactive-worker",
+                title="Later ACP work",
+                description="Must wait for a consuming model turn",
+                target_url="acp-e2e",
+                scope="interactive-no-send",
+                required_fields=["test_output"],
+                prefer_agents=[agent_id],
+            )
+            ticket_id = created["ticket"]["ticket_id"]
+            assert "work_offer" not in created["ticket"]
+            assert created["ticket"].get("work_offer_expirations", 0) == 0
+            assert not client.task.done(), "ACP transport stays connected after end_turn"
+
+            prompt = asyncio.create_task(client.prompt(session, "watch acp-e2e"))
+            await asyncio.wait_for(bridge.started.wait(), TEST_TIMEOUT_S)
+            offered = (await call("ticket_get", ticket_id=ticket_id))["ticket"]
+            assert offered["work_offer"]["agent_id"] == agent_id
+            await call(
+                "ticket_claim",
+                agent_name="interactive-worker",
+                ticket_id=ticket_id,
+            )
+            claimed = (await call("ticket_get", ticket_id=ticket_id))["ticket"]
+            lease_expires_at = claimed["lease_expires_at"]
+
+            await client.notify("session/cancel", {"sessionId": session})
+            assert await prompt == {"stopReason": "cancelled"}
+            held = (await call("ticket_get", ticket_id=ticket_id))["ticket"]
+            assert held["status"] == "claimed"
+            assert held["claimed_by_agent_id"] == agent_id
+            assert held["lease_expires_at"] >= lease_expires_at
+            status = await call("board_status")
+            worker = next(
+                row for row in status["agents"] if row["agent_id"] == agent_id
+            )
+            assert worker["readiness"]["transport_connected"] is True
+            assert worker["readiness"]["dispatch_ready"] is False
         finally:
             await client.close()
 

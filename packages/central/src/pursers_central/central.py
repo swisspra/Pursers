@@ -210,6 +210,9 @@ MAX_CLAIM_TTL_S = 86_400
 DEFAULT_PRINCIPAL_STREAM_CAP = 32
 MAX_PRINCIPAL_STREAM_CAP = 4_096
 DISPATCH_ACTIVITY_WINDOW_MULTIPLIER = 3.0
+DEFAULT_READINESS_TTL_S = 360
+MIN_READINESS_TTL_S = 1
+MAX_READINESS_TTL_S = 3_600
 BRANCH_AND_COMMIT_RE = re.compile(
     r"(?im)^\s*branch_and_commit\s*:\s*(.+?)\s*$"
 )
@@ -3764,6 +3767,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             document, ticket, member, kind
         ):
             return False
+        if not member_dispatch_ready(member, now):
+            return False
         if agent_is_busy(
             document,
             str(member["agent_id"]),
@@ -3837,6 +3842,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         )
         if busy_conflicts:
             failures.append("busy_elsewhere")
+        dispatch_ready = member_dispatch_ready(member, now)
+        if not dispatch_ready:
+            failures.append("not_dispatch_ready")
         policy = dispatch_policy(document)
         offer_ttl_s = int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S))
         active_listener = str(member["agent_id"]) in service.active_listeners.get(
@@ -3893,6 +3901,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "member_last_activity_at": member.get("last_activity_at"),
                 "window_s": DISPATCH_ACTIVITY_WINDOW_MULTIPLIER * offer_ttl_s,
             },
+            "readiness": projected_readiness(member, now),
             "busy_conflicts": busy_conflicts,
         }
 
@@ -3944,6 +3953,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             excluding_ticket_id=str(ticket.get("ticket_id", "")),
         ):
             return "pinned_seat_busy"
+        if not member_dispatch_ready(member, now):
+            return "pinned_seat_not_dispatch_ready"
         policy = dispatch_policy(document)
         if not service.is_agent_live(
             str(document["board_id"]),
@@ -3972,6 +3983,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             document, ticket, member, kind
         ):
             return "offer_recipient_ineligible"
+        if not member_dispatch_ready(member, now):
+            return "offer_recipient_not_dispatch_ready"
         if kind == "work" and ticket.get("claimed_by_agent_id"):
             return "offer_conflicts_with_work_lease"
         if kind == "review" and review_lease_is_live(ticket, now):
@@ -4967,6 +4980,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         document: dict[str, Any], *, include_retired: bool = False
     ) -> list[dict[str, Any]]:
         service.ensure_schema(document)
+        now = time.time()
         lease_by_agent: dict[str, list[str]] = {}
         offer_by_agent: dict[str, dict[str, Any]] = {}
         for ticket in document["tickets"].values():
@@ -4996,16 +5010,22 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if lifecycle in {"retired", "stale"} and not include_retired:
                 continue
             current_offer = offer_by_agent.get(member["agent_id"])
+            readiness = projected_readiness(member, now)
             projected.append(
                 {
                     **copy.deepcopy(member),
                     "capabilities": member_capabilities(member),
+                    "readiness": readiness,
                     "membership_role": membership["role"],
                     "status": (
                         "handed_off" if lifecycle == "handed_off"
                         else "busy" if dispatch_enabled(document) and (leases or current_offer)
+                        else "working" if leases
+                        else "idle" if readiness["dispatch_ready"]
+                        else "connected" if readiness.get("transport_connected") is True
+                        else "not_ready" if readiness["reported"]
                         else "idle" if dispatch_enabled(document)
-                        else "working" if leases else lifecycle
+                        else lifecycle
                     ),
                     "lease_expires_at": leases[0] if leases else None,
                     "current_offer": current_offer,
@@ -6336,6 +6356,108 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             role=str(member.get("role") or "worker"),
         )
 
+    def normalized_readiness(
+        value: Mapping[str, Any], *, now: float
+    ) -> dict[str, Any]:
+        """Validate one host-neutral, session-bound dispatch readiness report."""
+        raw = dict(value)
+        allowed = {
+            "transport_connected", "session_idle", "foreground_running",
+            "dispatch_ready", "managed_autonomous", "session_id", "sequence",
+            "ttl_s",
+        }
+        unknown = sorted(set(raw) - allowed)
+        if unknown:
+            raise ValueError("unsupported readiness fields: " + ", ".join(unknown))
+        for field in (
+            "transport_connected", "session_idle", "foreground_running",
+            "dispatch_ready", "managed_autonomous",
+        ):
+            if type(raw.get(field)) is not bool:
+                raise ValueError(f"readiness.{field} must be boolean")
+        session_id = raw.get("session_id")
+        if (
+            not isinstance(session_id, str)
+            or not session_id.strip()
+            or len(session_id) > 128
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in session_id)
+        ):
+            raise ValueError("readiness.session_id must be a non-empty bounded string")
+        sequence = raw.get("sequence")
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+            raise ValueError("readiness.sequence must be a non-negative integer")
+        ttl_s = raw.get("ttl_s", DEFAULT_READINESS_TTL_S)
+        if (
+            isinstance(ttl_s, bool)
+            or not isinstance(ttl_s, int)
+            or not MIN_READINESS_TTL_S <= ttl_s <= MAX_READINESS_TTL_S
+        ):
+            raise ValueError(
+                f"readiness.ttl_s must be between {MIN_READINESS_TTL_S} "
+                f"and {MAX_READINESS_TTL_S}"
+            )
+        if raw["session_idle"] and raw["foreground_running"]:
+            raise ValueError(
+                "readiness.session_idle and readiness.foreground_running are mutually exclusive"
+            )
+        if raw["dispatch_ready"] and (
+            not raw["transport_connected"]
+            or not (raw["foreground_running"] or raw["managed_autonomous"])
+        ):
+            raise ValueError(
+                "readiness.dispatch_ready requires a connected foreground turn "
+                "or managed autonomous driver"
+            )
+        return {
+            **{field: raw[field] for field in (
+                "transport_connected", "session_idle", "foreground_running",
+                "dispatch_ready", "managed_autonomous",
+            )},
+            "session_id": session_id.strip(),
+            "sequence": sequence,
+            "ttl_s": ttl_s,
+            "observed_at": iso_at(now),
+            "expires_at": iso_at(now + ttl_s),
+            "expires_at_epoch": now + ttl_s,
+        }
+
+    def readiness_is_current(readiness: Mapping[str, Any], now: float) -> bool:
+        try:
+            expires = float(readiness.get("expires_at_epoch", 0))
+        except (TypeError, ValueError):
+            return False
+        return expires > now
+
+    def member_dispatch_ready(member: Mapping[str, Any], now: float) -> bool:
+        readiness = member.get("readiness")
+        # Existing CLI/Goose/daemon seats predate the additive readiness contract
+        # and remain eligible. ACP runtimes opt in and are then fail-closed.
+        if not isinstance(readiness, Mapping):
+            return True
+        return bool(
+            readiness_is_current(readiness, now)
+            and readiness.get("transport_connected") is True
+            and readiness.get("dispatch_ready") is True
+            and (
+                readiness.get("foreground_running") is True
+                or readiness.get("managed_autonomous") is True
+            )
+        )
+
+    def projected_readiness(member: Mapping[str, Any], now: float) -> dict[str, Any]:
+        readiness = member.get("readiness")
+        if not isinstance(readiness, Mapping):
+            return {
+                "reported": False,
+                "dispatch_ready": True,
+                "stale": False,
+            }
+        projected = copy.deepcopy(dict(readiness))
+        projected["reported"] = True
+        projected["stale"] = not readiness_is_current(readiness, now)
+        projected["dispatch_ready"] = member_dispatch_ready(member, now)
+        return projected
+
     def model_usage_record(
         value: Mapping[str, Any] | None,
         *,
@@ -6531,6 +6653,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         agent_platform: str | None, task_focus: str | None,
         role: str,
         capabilities: Mapping[str, Any] | None = None,
+        readiness: Mapping[str, Any] | None = None,
         *, allow_workflow_side_effects: bool = True,
         lease_renewal_source: str = "model",
         allow_takeover: bool = False,
@@ -6642,6 +6765,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
             member["capabilities"]["legacy_tools"] = True
+        if readiness is not None:
+            member["readiness"] = normalized_readiness(readiness, now=now)
         document["members"][identity_id] = member
         lifecycle_change = None
         if previous_lifecycle in {"retired", "stale", "handed_off"}:
@@ -7142,6 +7267,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         invite_token: str | None = None,
         role: str | None = None,
         capabilities: dict[str, Any] | None = None,
+        readiness: dict[str, Any] | None = None,
         renewal_source: str | None = None,
         allow_takeover: bool = False,
         allow_matching_takeover: bool = False,
@@ -7240,6 +7366,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             joined = join_member(
                 document, principal, agent_name, now, claim_ttl_s,
                 safe_platform, safe_focus, effective_role, capabilities,
+                readiness,
                 allow_workflow_side_effects=not coordinate_only,
                 lease_renewal_source=selected_renewal_source,
                 allow_takeover=allow_takeover,
@@ -7259,6 +7386,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "membership_role": member["membership_role"],
                 "lifecycle_status": member["lifecycle_status"],
                 "capabilities": member_capabilities(member),
+                "readiness": projected_readiness(member, now),
                 "generation_token": document.get("generation_token"),
                 "generation_revision": int(document.get("generation_revision", 0)),
                 "rejoined": joined["rejoined"],
@@ -7334,6 +7462,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         snapshot_max_bytes: int = DEFAULT_SNAPSHOT_MAX_BYTES,
         role: str = "worker",
         capabilities: dict[str, Any] | None = None,
+        readiness: dict[str, Any] | None = None,
         allow_takeover: bool = False,
         allow_matching_takeover: bool = False,
     ) -> dict[str, Any]:
@@ -7391,6 +7520,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             joined = join_member(
                 document, principal, agent_name, now, claim_ttl_s,
                 safe_platform, safe_focus, role, capabilities,
+                readiness,
                 allow_workflow_side_effects=not coordinate_only,
                 allow_takeover=allow_takeover,
                 allow_matching_takeover=allow_matching_takeover,
@@ -7462,6 +7592,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "membership_role": result["actor"]["membership_role"],
             "lifecycle_status": result["actor"]["lifecycle_status"],
             "capabilities": member_capabilities(result["actor"]),
+            "readiness": projected_readiness(result["actor"], time.time()),
             "generation_token": result["generation_token"],
             "generation_revision": result["generation_revision"],
             "rejoined": result["rejoined"],
@@ -8018,6 +8149,101 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "journal_compaction": compacted,
             "renewed_ticket_ids": result["renewed"],
             "events": events,
+        }
+
+    @tool()
+    async def agent_readiness_set(
+        board_id: str,
+        agent_name: str,
+        readiness: dict[str, Any],
+        ctx: Context,
+        replace_session: bool = False,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Publish session-bound dispatch readiness without altering live leases."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        if type(replace_session) is not bool:
+            raise ValueError("replace_session must be a boolean")
+        principal = current_principal()
+        require_scope(principal, "board:write")
+
+        def set_readiness(document: dict[str, Any]) -> dict[str, Any]:
+            now = time.time()
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            normalized = normalized_readiness(readiness, now=now)
+            previous = actor.get("readiness")
+            if isinstance(previous, Mapping):
+                same_session = previous.get("session_id") == normalized["session_id"]
+                previous_current = readiness_is_current(previous, now)
+                previous_ready = member_dispatch_ready(actor, now)
+                if not same_session and previous_current and previous_ready:
+                    raise PermissionError(
+                        "readiness session replacement refused while the prior session is dispatch-ready"
+                    )
+                if not same_session and not replace_session:
+                    raise PermissionError(
+                        "readiness session mismatch; replace_session is required"
+                    )
+                if same_session:
+                    prior_sequence = previous.get("sequence")
+                    if (
+                        isinstance(prior_sequence, int)
+                        and normalized["sequence"] <= prior_sequence
+                    ):
+                        raise ValueError(
+                            "readiness.sequence must increase within one session"
+                        )
+            actor["readiness"] = normalized
+            actor["readiness_updated_at"] = normalized["observed_at"]
+            if not member_dispatch_ready(actor, now):
+                for ticket in document["tickets"].values():
+                    kind = "work" if ticket.get("status") == "open" else (
+                        "review" if ticket.get("status") == "submitted" else None
+                    )
+                    if kind is None:
+                        continue
+                    key = f"{kind}_offer"
+                    offer = ticket.get(key)
+                    if not (
+                        isinstance(offer, Mapping)
+                        and offer.get("agent_id") == actor["agent_id"]
+                    ):
+                        continue
+                    revoked = ticket.pop(key)
+                    ticket.pop("dispatch_state", None)
+                    released.append(
+                        {
+                            "kind": OFFER_REVOKED,
+                            "ticket_id": ticket["ticket_id"],
+                            "offer_kind": kind,
+                            "offered_agent_id": actor["agent_id"],
+                            "offered_agent_name": actor["agent_name"],
+                            "offer_expires_at": revoked.get("expires_at"),
+                            "dispatch_reason": "dispatch_readiness_withdrawn",
+                            "recipients": [actor["agent_id"]],
+                        }
+                    )
+                released.extend(redispatch_queue(document, now))
+            else:
+                released.extend(redispatch_queue(document, now))
+            return {
+                "actor": copy.deepcopy(actor),
+                "released": released,
+                "renewed": renewed,
+            }
+
+        result = service.mutate(board_id, set_readiness)
+        events = await publish_releases(board_id, result["released"], principal, ctx)
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "agent_id": result["actor"]["agent_id"],
+            "readiness": projected_readiness(result["actor"], time.time()),
+            "dispatch_events": events,
+            "implicitly_renewed": result["renewed"],
         }
 
     @tool()

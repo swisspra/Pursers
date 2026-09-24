@@ -254,6 +254,183 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             **extra,
         )
 
+    @staticmethod
+    def readiness(
+        session_id: str,
+        sequence: int,
+        *,
+        dispatch_ready: bool,
+        managed_autonomous: bool = False,
+        ttl_s: int = 360,
+    ) -> dict[str, object]:
+        return {
+            "transport_connected": True,
+            "session_idle": not dispatch_ready,
+            "foreground_running": dispatch_ready and not managed_autonomous,
+            "dispatch_ready": dispatch_ready,
+            "managed_autonomous": managed_autonomous,
+            "session_id": session_id,
+            "sequence": sequence,
+            "ttl_s": ttl_s,
+        }
+
+    async def test_interactive_readiness_withdrawal_blocks_offers_and_keeps_lease(
+        self,
+    ) -> None:
+        worker_id = await self.add_seat(
+            self.worker_a,
+            "interactive-worker",
+            {"tier_max": 2, "can_work": True, "can_review": False},
+        )
+        self.principal = self.worker_a
+        idle = await self.call(
+            "agent_readiness_set",
+            agent_name="interactive-worker",
+            readiness=self.readiness("acp-session-a", 1, dispatch_ready=False),
+            replace_session=True,
+        )
+        self.assertFalse(idle.structured_content["readiness"]["dispatch_ready"])
+
+        created = await self.create(prefer_agents=[worker_id])
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.assertNotIn("work_offer", created.structured_content["ticket"])
+
+        self.principal = self.worker_a
+        ready = await self.call(
+            "agent_readiness_set",
+            agent_name="interactive-worker",
+            readiness=self.readiness("acp-session-a", 2, dispatch_ready=True),
+        )
+        self.assertTrue(ready.structured_content["readiness"]["dispatch_ready"])
+        ticket = (await self.call("ticket_get", ticket_id=ticket_id)).structured_content[
+            "ticket"
+        ]
+        self.assertEqual(ticket["work_offer"]["agent_id"], worker_id)
+        claimed = await self.call(
+            "ticket_claim", agent_name="interactive-worker", ticket_id=ticket_id
+        )
+        lease_expires_at = claimed.structured_content["ticket"]["lease_expires_at"]
+
+        withdrawn = await self.call(
+            "agent_readiness_set",
+            agent_name="interactive-worker",
+            readiness=self.readiness("acp-session-a", 3, dispatch_ready=False),
+        )
+        self.assertFalse(withdrawn.structured_content["readiness"]["dispatch_ready"])
+        held = (await self.call("ticket_get", ticket_id=ticket_id)).structured_content[
+            "ticket"
+        ]
+        self.assertEqual(held["status"], "claimed")
+        self.assertEqual(held["claimed_by_agent_id"], worker_id)
+        self.assertGreaterEqual(held["lease_expires_at"], lease_expires_at)
+
+    async def test_readiness_session_takeover_is_monotonic_and_fail_closed(
+        self,
+    ) -> None:
+        worker_id = await self.add_seat(
+            self.worker_a,
+            "race-worker",
+            {"tier_max": 2, "can_work": True, "can_review": False},
+        )
+        self.principal = self.worker_a
+        await self.call(
+            "agent_readiness_set",
+            agent_name="race-worker",
+            readiness=self.readiness("old-session", 1, dispatch_ready=True),
+            replace_session=True,
+        )
+        with self.assertRaisesRegex(ToolError, "prior session is dispatch-ready"):
+            await self.call(
+                "agent_readiness_set",
+                agent_name="race-worker",
+                readiness=self.readiness("new-session", 1, dispatch_ready=True),
+                replace_session=True,
+            )
+        await self.call(
+            "agent_readiness_set",
+            agent_name="race-worker",
+            readiness=self.readiness("old-session", 2, dispatch_ready=False),
+        )
+        await self.call(
+            "agent_readiness_set",
+            agent_name="race-worker",
+            readiness=self.readiness("new-session", 1, dispatch_ready=True),
+            replace_session=True,
+        )
+        with self.assertRaisesRegex(ToolError, "prior session is dispatch-ready"):
+            await self.call(
+                "agent_readiness_set",
+                agent_name="race-worker",
+                readiness=self.readiness("old-session", 3, dispatch_ready=False),
+            )
+        created = await self.create(prefer_agents=[worker_id])
+        self.assertEqual(
+            created.structured_content["ticket"]["work_offer"]["agent_id"],
+            worker_id,
+        )
+
+    async def test_stale_readiness_and_reviewer_readiness_fail_closed(self) -> None:
+        worker_id = await self.add_seat(
+            self.worker_a,
+            "worker-a",
+            {"tier_max": 2, "can_work": True, "can_review": False},
+        )
+        reviewer_id = await self.add_seat(
+            self.reviewer_a,
+            "reviewer-a",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        self.principal = self.reviewer_a
+        await self.call(
+            "agent_readiness_set",
+            agent_name="reviewer-a",
+            readiness=self.readiness("review-session", 1, dispatch_ready=False),
+            replace_session=True,
+        )
+        self.principal = self.worker_a
+        await self.call(
+            "agent_readiness_set",
+            agent_name="worker-a",
+            readiness=self.readiness(
+                "managed-session", 1, dispatch_ready=True,
+                managed_autonomous=True, ttl_s=1,
+            ),
+            replace_session=True,
+        )
+        with patch.object(central.time, "time", return_value=time.time() + 2):
+            expired = await self.create(prefer_agents=[worker_id])
+        self.assertNotIn("work_offer", expired.structured_content["ticket"])
+        ticket_id = expired.structured_content["ticket"]["ticket_id"]
+
+        self.principal = self.worker_a
+        await self.call(
+            "agent_readiness_set",
+            agent_name="worker-a",
+            readiness=self.readiness(
+                "managed-session", 2, dispatch_ready=True,
+                managed_autonomous=True,
+            ),
+        )
+        self.principal = self.worker_a
+        await self.call("ticket_claim", agent_name="worker-a", ticket_id=ticket_id)
+        submitted = await self.call(
+            "ticket_submit", agent_name="worker-a", ticket_id=ticket_id,
+            summary="ready",
+        )
+        self.assertNotIn("review_offer", submitted.structured_content["ticket"])
+
+        self.principal = self.reviewer_a
+        await self.call(
+            "agent_readiness_set",
+            agent_name="reviewer-a",
+            readiness=self.readiness("review-session", 2, dispatch_ready=True),
+        )
+        reviewed = (await self.call("ticket_get", ticket_id=ticket_id)).structured_content[
+            "ticket"
+        ]
+        self.assertEqual(reviewed["review_offer"]["agent_id"], reviewer_id)
+
     async def test_board_join_authorization_failure_logs_caller_context(
         self,
     ) -> None:

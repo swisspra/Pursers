@@ -764,6 +764,7 @@ def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
         "online": 1,
         "busy": 1,
         "available": 0,
+        "connected": 0,
         "stale": 0,
         "unknown_model": 2,
     }
@@ -1021,6 +1022,45 @@ def test_available_and_stale_classification() -> None:
     }
 
 
+def test_connected_non_dispatch_ready_seat_is_not_available() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-1",
+                            "agent_name": "interactive-acp",
+                            "agent_id": "AI-1",
+                            "last_activity_at": now.isoformat(),
+                            "status": "connected",
+                            "readiness": {
+                                "reported": True,
+                                "transport_connected": True,
+                                "session_idle": True,
+                                "foreground_running": False,
+                                "dispatch_ready": False,
+                            },
+                        }
+                    ],
+                    "tickets": [],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    assert result["agents"][0]["pool_status"] == "connected"
+    assert result["agents"][0]["seats"][0]["readiness"]["session_idle"] is True
+    assert result["pool_summary"]["connected"] == 1
+    assert result["pool_summary"]["available"] == 0
+
+
 @pytest.mark.parametrize(
     ("agent_status", "activity_age_seconds", "expected_status"),
     [
@@ -1074,6 +1114,7 @@ def test_busy_status_respects_dispatch_activity_window(
         "online": int(expected_status in {"busy", "available"}),
         "busy": int(expected_status == "busy"),
         "available": int(expected_status == "available"),
+        "connected": 0,
         "stale": int(expected_status == "stale"),
         "unknown_model": 1,
     }
@@ -6294,7 +6335,7 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
 def test_dense_agent_grid_filters_counts_and_selector_contract_are_present() -> None:
     html = dashboard.HTML
 
-    for status in ("working", "available", "stale", "offline"):
+    for status in ("working", "available", "connected", "stale", "offline"):
         assert f"data-agent-status-filter=\"${{state}}\"" in html
         assert f"'{status}'" in html
     for filter_name in ("role", "status", "board", "client"):
@@ -6336,6 +6377,7 @@ def test_dense_agent_grid_uses_managed_process_state_for_offline() -> None:
             "  stopped: agentDisplayState({pool_status:'available'},{running:false}),",
             "  working: agentDisplayState({pool_status:'busy'},{running:true}),",
             "  available: agentDisplayState({pool_status:'available'},{running:true}),",
+            "  connected: agentDisplayState({pool_status:'connected'},{running:true}),",
             "  stale: agentDisplayState({pool_status:'stale'},{running:true}),",
             "  unreachable: agentDisplayState({pool_status:'unreachable'},null),",
             "}));",
@@ -6352,6 +6394,7 @@ def test_dense_agent_grid_uses_managed_process_state_for_offline() -> None:
         "stopped": "offline",
         "working": "working",
         "available": "available",
+        "connected": "connected",
         "stale": "stale",
         "unreachable": "offline",
     }

@@ -153,6 +153,47 @@ async def test_declared_role_is_forwarded_for_join_and_onboard(monkeypatch) -> N
 
 
 @pytest.mark.anyio
+async def test_readiness_is_forwarded_on_join_onboard_and_heartbeat(monkeypatch) -> None:
+    readiness = {
+        "transport_connected": True,
+        "session_idle": False,
+        "foreground_running": True,
+        "dispatch_ready": True,
+        "managed_autonomous": False,
+        "session_id": "session-one",
+        "sequence": 1,
+        "ttl_s": 360,
+    }
+    board = client()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_refresh(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return joined(arguments["agent_name"])
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return {"ok": True}
+
+    monkeypatch.setattr(board, "_call_refresh", call_refresh)
+    monkeypatch.setattr(board, "_call", call)
+    await board.board_join(readiness=readiness)
+    await board.board_onboard(readiness=readiness)
+    await board.agent_readiness_set({**readiness, "sequence": 2}, replace_session=True)
+
+    assert calls[0][1]["readiness"] == readiness
+    assert calls[1][1]["readiness"] == readiness
+    assert calls[2] == (
+        "agent_readiness_set",
+        {
+            "agent_name": "env-default",
+            "readiness": {**readiness, "sequence": 2},
+            "replace_session": True,
+        },
+    )
+
+
+@pytest.mark.anyio
 async def test_takeover_and_memory_identity_are_forwarded(monkeypatch) -> None:
     board = client()
     refresh_calls: list[tuple[str, dict[str, Any]]] = []

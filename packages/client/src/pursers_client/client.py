@@ -308,6 +308,7 @@ class BoardClient:
         reconnect_delay_s: float = 0.05,
         claim_ttl_s: int | None = None,
         capabilities: dict[str, Any] | None = None,
+        readiness: dict[str, Any] | None = None,
         allow_takeover: bool = False,
         allow_matching_takeover: bool = False,
         agent_platform: str | None = None,
@@ -329,6 +330,7 @@ class BoardClient:
         self.reconnect_delay_s = reconnect_delay_s
         self.claim_ttl_s = claim_ttl_s
         self.capabilities = capabilities
+        self.readiness = readiness
         self.allow_takeover = allow_takeover
         self.allow_matching_takeover = allow_matching_takeover
         self.agent_platform = agent_platform
@@ -394,14 +396,16 @@ class BoardClient:
             self._client = await self._stack.enter_async_context(
                 Client(transport, mode="2026-07-28", cache=None)
             )
-            await self.board_join(
-                self.claim_ttl_s,
-                agent_platform=self.agent_platform,
-                task_focus=self.task_focus,
-                capabilities=self.capabilities,
-                allow_takeover=self.allow_takeover,
-                allow_matching_takeover=self.allow_matching_takeover,
-            )
+            join_options: dict[str, Any] = {
+                "agent_platform": self.agent_platform,
+                "task_focus": self.task_focus,
+                "capabilities": self.capabilities,
+                "allow_takeover": self.allow_takeover,
+                "allow_matching_takeover": self.allow_matching_takeover,
+            }
+            if self.readiness is not None:
+                join_options["readiness"] = self.readiness
+            await self.board_join(self.claim_ttl_s, **join_options)
         except BaseException:
             await self._close_transport()
             raise
@@ -520,6 +524,7 @@ class BoardClient:
         agent_name: str | None = None,
         role: str | None = None,
         capabilities: dict[str, Any] | None = None,
+        readiness: dict[str, Any] | None = None,
         allow_takeover: bool = False,
         allow_matching_takeover: bool = False,
     ) -> dict[str, Any]:
@@ -539,6 +544,8 @@ class BoardClient:
             caps.setdefault("legacy_tools", True)
         if caps or capabilities is not None:
             arguments["capabilities"] = caps
+        if readiness is not None:
+            arguments["readiness"] = dict(readiness)
         if allow_takeover:
             arguments["allow_takeover"] = True
         if allow_matching_takeover:
@@ -571,6 +578,7 @@ class BoardClient:
         ticket_id: str | None = None,
         role: str | None = None,
         capabilities: dict[str, Any] | None = None,
+        readiness: dict[str, Any] | None = None,
         allow_takeover: bool = False,
         allow_matching_takeover: bool = False,
     ) -> dict[str, Any]:
@@ -592,6 +600,7 @@ class BoardClient:
             "task_focus": task_focus,
             "ticket_id": ticket_id,
             "capabilities": capabilities,
+            "readiness": readiness,
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
         if allow_takeover:
@@ -615,6 +624,20 @@ class BoardClient:
             "agent_capabilities_set",
             {"agent_name": self.agent_name, "capabilities": capabilities},
         )
+
+    async def agent_readiness_set(
+        self,
+        readiness: dict[str, Any],
+        *,
+        replace_session: bool = False,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "readiness": dict(readiness),
+        }
+        if replace_session:
+            arguments["replace_session"] = True
+        return await self._call("agent_readiness_set", arguments)
 
     async def board_dispatch_policy_set(
         self,
