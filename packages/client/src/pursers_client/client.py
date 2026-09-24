@@ -14,7 +14,7 @@ import warnings
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Iterable
+from typing import Any, AsyncIterator, Callable, Iterable, Mapping
 from urllib.parse import urlparse
 
 import httpx2
@@ -34,8 +34,146 @@ from .events import (
 )
 
 
+TOOL_ERROR_SCHEMA = "pursers_tool_error_v1"
+TOOL_ERROR_CODES = frozenset(
+    {
+        "validation",
+        "not_found",
+        "ticket_state",
+        "role_policy",
+        "self_review",
+        "business_rule",
+    }
+)
+_TOOL_ERROR_PREFIX_RE = re.compile(
+    r"^Error executing tool [a-z][a-z0-9_]*: (?P<detail>.+)$", re.DOTALL
+)
+_SAFE_TOOL_ERROR_PATTERNS = (
+    (
+        "validation",
+        re.compile(
+            r"^generated-ID tickets require: "
+            r"(?:description|target_url|scope|required_fields)"
+            r"(?:, (?:description|target_url|scope|required_fields))*$"
+        ),
+    ),
+    ("validation", re.compile(r"^(?:summary|review_notes) is required for generated-ID tickets$")),
+    ("validation", re.compile(r"^priority must be low, medium, high, or critical$")),
+    ("validation", re.compile(r"^scope must be READ-ONLY, interactive-no-send, or interactive$")),
+    ("validation", re.compile(r"^assigned_to and unassigned=true are mutually exclusive$")),
+    ("validation", re.compile(r"^board:intake ticket creation requires coordinator_op_key$")),
+    ("validation", re.compile(r"^verdict must be approve or reject$")),
+    ("validation", re.compile(r"^unsupported ticket status$")),
+    ("validation", re.compile(r"^scope must be private or project$")),
+    ("validation", re.compile(r"^unsupported memory_type$")),
+    ("validation", re.compile(r"^priority must be between 0 and 3$")),
+    ("validation", re.compile(r"^archived must be a boolean$")),
+    ("validation", re.compile(r"^archive provenance requires archived=true$")),
+    ("validation", re.compile(r"^since must be an ISO-8601 timestamp$")),
+    ("validation", re.compile(r"^next_steps must contain at least one item$")),
+    ("validation", re.compile(r"^expected_sha256 must be a lowercase SHA-256 digest$")),
+    ("validation", re.compile(r"^role must be admin, member, or reviewer$")),
+    ("validation", re.compile(r"^token_budget must be between 256 and 50000$")),
+    ("validation", re.compile(r"^scrub_profile must be strict or internal$")),
+    ("validation", re.compile(r"^review_policy must be strict or workflow$")),
+    ("validation", re.compile(r"^invite role must be member or reviewer$")),
+    ("validation", re.compile(r"^expected_status must be open$")),
+    ("validation", re.compile(r"^expires_at must be an ISO-8601 timestamp$")),
+    ("validation", re.compile(r"^expires_at must include a timezone$")),
+    ("validation", re.compile(r"^expires_at must be within the next hour$")),
+    ("validation", re.compile(r"^limit must be between 1 and (?:100|200|500|1000)$")),
+    ("validation", re.compile(r"^since_minutes must be positive$")),
+    ("validation", re.compile(r"^depth must be between 0 and 10$")),
+    (
+        "validation",
+        re.compile(
+            r"^expected generation SHA-256 must be 64 lowercase hex characters$"
+        ),
+    ),
+    (
+        "validation",
+        re.compile(
+            r"^expected_generation argument conflicts with generation metadata$"
+        ),
+    ),
+    ("validation", re.compile(r"^cursor must be a non-negative integer$")),
+    ("validation", re.compile(r"^max_bytes is too small for (?:snapshot|catchup) metadata$")),
+    ("validation", re.compile(r"^max_bytes is too small for one journal event$")),
+    ("not_found", re.compile(r"^ticket not found(?: or not active)?$")),
+    (
+        "ticket_state",
+        re.compile(
+            r"^ticket is (?:open|claimed|in_progress|creating_report|submitted|"
+            r"reviewing|in_review|closed|rejected|canceled|terminated)$"
+        ),
+    ),
+    (
+        "ticket_state",
+        re.compile(
+            r"^ticket is (?:claimed by another identity|waiting for a human answer|"
+            r"parked by the board owner|not offered to this seat; wait for your offer)$"
+        ),
+    ),
+    ("self_review", re.compile(r"^self-review denied: authenticated seat submitted this work$")),
+    ("role_policy", re.compile(r"^board role not authorized$")),
+    (
+        "role_policy",
+        re.compile(
+            r"^(?:reviewing agent|independent principal) lacks reviewer board role "
+            r"and board:review authorization$"
+        ),
+    ),
+    ("role_policy", re.compile(r"^ticket update requires creator or board admin$")),
+    (
+        "role_policy",
+        re.compile(
+            r"^parking a ticket requires board admin membership or "
+            r"board:coordinate authorization$"
+        ),
+    ),
+    ("role_policy", re.compile(r"^ticket assigned to another authenticated identity$")),
+    ("business_rule", re.compile(r"^ticket already exists$")),
+    ("business_rule", re.compile(r"^only open or submitted tickets can be parked$")),
+    ("business_rule", re.compile(r"^idempotency key conflicts with prior assignment$")),
+    ("business_rule", re.compile(r"^ticket already has a pending human request$")),
+    ("business_rule", re.compile(r"^at least one dispatch field is required$")),
+)
+
+
+def tool_error_contract_from_message(message: str) -> dict[str, str] | None:
+    """Return bounded operator-safe metadata for one canonical tool error."""
+    if not isinstance(message, str) or not message or len(message) > 1_024:
+        return None
+    match = _TOOL_ERROR_PREFIX_RE.fullmatch(message)
+    detail = match.group("detail") if match is not None else message
+    if len(detail) > 512 or any(ord(character) < 32 for character in detail):
+        return None
+    for code, pattern in _SAFE_TOOL_ERROR_PATTERNS:
+        if pattern.fullmatch(detail):
+            return {"schema": TOOL_ERROR_SCHEMA, "code": code, "detail": detail}
+    return None
+
+
+def validate_tool_error_contract(value: Any) -> dict[str, str] | None:
+    """Validate typed metadata without trusting a producer-provided code/detail."""
+    if not isinstance(value, Mapping) or set(value) != {"schema", "code", "detail"}:
+        return None
+    schema, code, detail = value.get("schema"), value.get("code"), value.get("detail")
+    if schema != TOOL_ERROR_SCHEMA or code not in TOOL_ERROR_CODES or not isinstance(detail, str):
+        return None
+    canonical = tool_error_contract_from_message(detail)
+    return canonical if canonical is not None and canonical["code"] == code else None
+
+
 class BoardClientError(RuntimeError):
-    pass
+    def __init__(
+        self, message: str, *, error_contract: Mapping[str, Any] | None = None
+    ) -> None:
+        contract = validate_tool_error_contract(error_contract)
+        self.error_contract = contract
+        self.error_code = contract["code"] if contract is not None else None
+        self.safe_detail = contract["detail"] if contract is not None else None
+        super().__init__(message)
 
 
 _SUBSCRIPTION_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
@@ -587,7 +725,15 @@ class BoardClient:
             detail = message or str(result.content)
             if detail.startswith("Central instance mismatch"):
                 raise CentralInstanceMismatchError(INSTANCE_MISMATCH_DETAIL)
-            raise BoardClientError(detail)
+            structured_error = getattr(result, "structured_content", None)
+            contract = validate_tool_error_contract(structured_error)
+            if structured_error is None and contract is None and message:
+                contract = tool_error_contract_from_message(message)
+            if contract is not None:
+                message = contract["detail"]
+            raise BoardClientError(
+                message or str(result.content), error_contract=contract
+            )
         if result.structured_content:
             value = result.structured_content.get("result", result.structured_content)
         else:

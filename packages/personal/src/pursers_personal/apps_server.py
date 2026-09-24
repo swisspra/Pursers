@@ -7,7 +7,6 @@ pass its resulting context to :func:`build_profile_apps_server`.
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import copy
 import hashlib
@@ -83,15 +82,7 @@ CHAT_TOOL_NAMES = frozenset(
     }
 )
 
-_WRAPPED_TOOL_ERROR_RE = re.compile(
-    r"^\[TextContent\(type='text', text=(?P<text>'.*'), "
-    r"annotations=None, meta=None\)\]$",
-    re.DOTALL,
-)
-_CENTRAL_TOOL_ERROR_RE = re.compile(
-    r"^Error executing tool [a-z][a-z0-9_]*: (?P<detail>.+)$",
-    re.DOTALL,
-)
+_TOOL_ERROR_SCHEMA = "pursers_tool_error_v1"
 _SAFE_CENTRAL_VALIDATION_DETAILS = (
     re.compile(
         r"^generated-ID tickets require: "
@@ -151,6 +142,30 @@ _HOSTNAME_ERROR_DETAIL_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}"
     r"(?::[0-9]{1,5})?(?![A-Za-z0-9_-])"
 )
+_SAFE_TYPED_ERROR_DETAILS = {
+    "self_review": frozenset(
+        {"self-review denied: authenticated seat submitted this work"}
+    ),
+    "role_policy": frozenset(
+        {
+            "board role not authorized",
+            "reviewing agent lacks reviewer board role and board:review authorization",
+            "independent principal lacks reviewer board role and board:review authorization",
+            "ticket update requires creator or board admin",
+            "parking a ticket requires board admin membership or board:coordinate authorization",
+            "ticket assigned to another authenticated identity",
+        }
+    ),
+    "business_rule": frozenset(
+        {
+            "ticket already exists",
+            "only open or submitted tickets can be parked",
+            "idempotency key conflicts with prior assignment",
+            "ticket already has a pending human request",
+            "at least one dispatch field is required",
+        }
+    ),
+}
 
 
 def _load_board_client() -> tuple[type[Any], type[BaseException]]:
@@ -659,21 +674,24 @@ class LiveDashboard:
             return detail
         return None
 
-    def _wrapped_validation_detail(self, exc: BaseException) -> str | None:
-        """Extract only allowlisted Central validation text from client errors."""
-        match = _WRAPPED_TOOL_ERROR_RE.fullmatch(str(exc))
-        if match is None:
+    def _typed_client_error_detail(self, exc: BaseException) -> str | None:
+        """Use only validated v1 metadata; never parse exception display text."""
+        contract = getattr(exc, "error_contract", None)
+        if (
+            not isinstance(contract, dict)
+            or set(contract) != {"schema", "code", "detail"}
+            or contract.get("schema") != _TOOL_ERROR_SCHEMA
+            or not isinstance(contract.get("code"), str)
+            or not isinstance(contract.get("detail"), str)
+        ):
             return None
-        try:
-            text = ast.literal_eval(match.group("text"))
-        except (SyntaxError, ValueError):
-            return None
-        if not isinstance(text, str):
-            return None
-        tool_error = _CENTRAL_TOOL_ERROR_RE.fullmatch(text)
-        if tool_error is None:
-            return None
-        return self._safe_validation_detail(tool_error.group("detail"))
+        code = contract["code"]
+        detail = contract["detail"]
+        if code in {"validation", "not_found", "ticket_state"}:
+            return self._safe_validation_detail(detail)
+        if detail in _SAFE_TYPED_ERROR_DETAILS.get(code, frozenset()):
+            return detail
+        return None
 
     def _safe_request_error(self, exc: BaseException) -> str:
         """Expose operator-authored validation details, never transport/auth text."""
@@ -681,10 +699,9 @@ class LiveDashboard:
         if isinstance(exc, (ValueError, TypeError)):
             detail = self._safe_validation_detail(str(exc))
         elif isinstance(exc, self._client_error_class):
-            # pursers-client a10 wraps Central tool failures in BoardClientError.
-            # Only the pinned, canonical envelope plus a validation allowlist is
-            # trusted; generic client/auth failures remain class-name-only.
-            detail = self._wrapped_validation_detail(exc)
+            # Only the versioned, locally revalidated contract is trusted;
+            # generic client/auth failures remain class-name-only.
+            detail = self._typed_client_error_detail(exc)
         prefix = f"Central request failed ({type(exc).__name__})"
         return f"{prefix}: {detail}" if detail else prefix
 

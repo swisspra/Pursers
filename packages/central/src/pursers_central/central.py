@@ -81,6 +81,7 @@ from pursers_client import (
     BUTLER_COMMAND_TRANSITIONED,
     BUTLER_CONFIG_CHANGED,
     BUTLER_EVENT_KINDS,
+    tool_error_contract_from_message,
 )
 
 from butler_commands import (
@@ -3090,6 +3091,37 @@ class SubscriptionAuthorization:
         return await call_next(ctx)
 
 
+class PursersMCPServer(MCPServer[Any]):
+    """Attach safe typed metadata while preserving MCP ToolError behavior."""
+
+    async def _handle_call_tool(
+        self,
+        ctx: ServerRequestContext[Any],
+        params: types.CallToolRequestParams,
+    ) -> Any:
+        result = await super()._handle_call_tool(ctx, params)
+        if not isinstance(result, types.CallToolResult) or not result.is_error:
+            return result
+        message = next(
+            (
+                item.text
+                for item in result.content
+                if isinstance(item, types.TextContent) and item.text
+            ),
+            None,
+        )
+        contract = (
+            tool_error_contract_from_message(message)
+            if isinstance(message, str)
+            else None
+        )
+        return (
+            result.model_copy(update={"structured_content": contract})
+            if contract is not None
+            else result
+        )
+
+
 def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any], CentralBoard]:
     if host != "localhost":
         try:
@@ -3249,7 +3281,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             except (asyncio.CancelledError, Exception):
                 pass
 
-    mcp = MCPServer(
+    mcp = PursersMCPServer(
         "On Board Central Skeleton",
         version="0.1.0a9",
         token_verifier=token_verifier,

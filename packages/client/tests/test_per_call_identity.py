@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from mcp import types
 
 from pursers_client import (
     INSTANCE_META_KEY,
@@ -566,8 +568,78 @@ def test_tool_error_text_is_preserved_verbatim() -> None:
         content=[SimpleNamespace(text=f"Error executing tool ticket_claim: {message}")],
     )
 
-    with pytest.raises(BoardClientError, match=message):
+    with pytest.raises(BoardClientError, match=message) as caught:
         BoardClient._decode(result)
+    assert caught.value.error_contract == {
+        "schema": "pursers_tool_error_v1",
+        "code": "ticket_state",
+        "detail": message,
+    }
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        ("not_found", "ticket not found"),
+        ("self_review", "self-review denied: authenticated seat submitted this work"),
+        ("role_policy", "board role not authorized"),
+        ("business_rule", "only open or submitted tickets can be parked"),
+    ],
+)
+def test_structured_tool_error_contract_is_preserved(
+    code: str, detail: str
+) -> None:
+    contract = {
+        "schema": "pursers_tool_error_v1",
+        "code": code,
+        "detail": detail,
+    }
+    result = types.CallToolResult(
+        content=[types.TextContent(type="text", text=json.dumps(contract))],
+        structuredContent=contract,
+        isError=True,
+    )
+
+    with pytest.raises(BoardClientError) as caught:
+        BoardClient._decode(result)
+
+    assert caught.value.error_contract == contract
+    assert caught.value.error_code == code
+    assert caught.value.safe_detail == detail
+    assert str(caught.value) == detail
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        {
+            "schema": "pursers_tool_error_v1",
+            "code": "unknown",
+            "detail": "ticket not found",
+        },
+        {
+            "schema": "pursers_tool_error_v1",
+            "code": "not_found",
+            "detail": "token at https://central.example/mcp",
+        },
+        {"schema": "pursers_tool_error_v1", "code": "not_found"},
+        "malformed",
+    ],
+)
+def test_unknown_or_malformed_tool_error_contract_is_not_actionable(
+    contract: Any,
+) -> None:
+    result = types.CallToolResult(
+        content=[types.TextContent(type="text", text="opaque failure")],
+        structuredContent=contract,
+        isError=True,
+    )
+
+    with pytest.raises(BoardClientError) as caught:
+        BoardClient._decode(result)
+
+    assert caught.value.error_contract is None
+    assert caught.value.safe_detail is None
 
 
 @pytest.mark.anyio

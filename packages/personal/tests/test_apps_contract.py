@@ -18,7 +18,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
-from mcp import Client
+from mcp import Client, types
 from mcp.client import advertise
 from mcp.server.apps import APP_MIME_TYPE, EXTENSION_ID
 
@@ -41,6 +41,16 @@ from pursers_personal.apps_server import (
 
 class FakeClientError(Exception):
     pass
+
+
+def typed_client_error(code: str, detail: str) -> FakeClientError:
+    error = FakeClientError(detail)
+    error.error_contract = {
+        "schema": "pursers_tool_error_v1",
+        "code": code,
+        "detail": detail,
+    }
+    return error
 
 
 class FakeClient:
@@ -771,16 +781,11 @@ async def test_rpc_surfaces_allowlisted_central_validation_detail(
     tool_name: str,
     detail: str,
 ) -> None:
-    wrapped = (
-        f"[TextContent(type='text', text='Error executing tool {tool_name}: "
-        f"{detail}', annotations=None, meta=None)]"
-    )
-
     class ValidationClient(FakeClient):
         pass
 
     async def fail_validation(_self: FakeClient) -> None:
-        raise FakeClientError(wrapped)
+        raise typed_client_error("validation", detail)
 
     setattr(ValidationClient, tool_name, fail_validation)
 
@@ -807,14 +812,10 @@ async def test_rpc_surfaces_allowlisted_central_validation_detail(
 @pytest.mark.anyio
 async def test_rpc_surfaces_fixed_central_ticket_status_detail() -> None:
     detail = "ticket is submitted"
-    wrapped = (
-        "[TextContent(type='text', text='Error executing tool ticket_claim: "
-        f"{detail}', annotations=None, meta=None)]"
-    )
 
     class FixedStatusClient(FakeClient):
         async def ticket_claim(self) -> None:
-            raise FakeClientError(wrapped)
+            raise typed_client_error("ticket_state", detail)
 
     state = LiveDashboard(
         fake_config(),
@@ -839,14 +840,10 @@ async def test_rpc_surfaces_fixed_central_ticket_status_detail() -> None:
 @pytest.mark.anyio
 async def test_rpc_redacts_bare_hostname_in_wrapped_client_error() -> None:
     leaked_host = "sensitive.central.example"
-    wrapped = (
-        "[TextContent(type='text', text='Error executing tool ticket_create: "
-        f"target must be {leaked_host}', annotations=None, meta=None)]"
-    )
 
     class WrappedHostFailureClient(FakeClient):
         async def ticket_create(self) -> None:
-            raise FakeClientError(wrapped)
+            raise typed_client_error("validation", f"target must be {leaked_host}")
 
     state = LiveDashboard(
         fake_config(),
@@ -871,14 +868,10 @@ async def test_rpc_redacts_bare_hostname_in_wrapped_client_error() -> None:
 @pytest.mark.anyio
 async def test_rpc_redacts_unrecognized_wrapped_ticket_status() -> None:
     leaked_value = "syntheticprivatevalue"
-    wrapped = (
-        "[TextContent(type='text', text='Error executing tool ticket_claim: "
-        f"ticket is {leaked_value}', annotations=None, meta=None)]"
-    )
 
     class WrappedStatusFailureClient(FakeClient):
         async def ticket_claim(self) -> None:
-            raise FakeClientError(wrapped)
+            raise typed_client_error("ticket_state", f"ticket is {leaked_value}")
 
     state = LiveDashboard(
         fake_config(),
@@ -952,6 +945,89 @@ def test_request_error_surfaces_direct_validation_types(
     assert state._safe_request_error(error_type(detail)) == (
         f"Central request failed ({error_type.__name__}): {detail}"
     )
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        ("not_found", "ticket not found"),
+        ("self_review", "self-review denied: authenticated seat submitted this work"),
+        ("role_policy", "board role not authorized"),
+        ("business_rule", "only open or submitted tickets can be parked"),
+    ],
+)
+def test_real_client_error_contract_remains_actionable(
+    code: str, detail: str
+) -> None:
+    from pursers_client import BoardClient, BoardClientError
+
+    contract = {
+        "schema": "pursers_tool_error_v1",
+        "code": code,
+        "detail": detail,
+    }
+    result = types.CallToolResult(
+        content=[
+            types.TextContent(
+                type="text", text=f"Error executing tool ticket_get: {detail}"
+            )
+        ],
+        structuredContent=contract,
+        isError=True,
+    )
+    with pytest.raises(BoardClientError) as caught:
+        BoardClient._decode(result)
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=BoardClientError,
+    )
+
+    assert state._safe_request_error(caught.value) == (
+        f"Central request failed (BoardClientError): {detail}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("detail", "structured"),
+    [
+        ("token secret-value", None),
+        ("transport failed at https://central.example/mcp", None),
+        ("host central.internal.example failed", None),
+        ("credential file /PATH/TO/private.jwt is missing", None),
+        ("authentication failed", None),
+        (
+            "ticket not found",
+            {
+                "schema": "pursers_tool_error_v1",
+                "code": "unknown",
+                "detail": "ticket not found",
+            },
+        ),
+        ("synthetic-private-business-value", {"malformed": True}),
+    ],
+)
+def test_real_client_error_contract_redacts_untrusted_values(
+    detail: str, structured: Any
+) -> None:
+    from pursers_client import BoardClient, BoardClientError
+
+    result = types.CallToolResult(
+        content=[types.TextContent(type="text", text=detail)],
+        structuredContent=structured,
+        isError=True,
+    )
+    with pytest.raises(BoardClientError) as caught:
+        BoardClient._decode(result)
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=BoardClientError,
+    )
+    rendered = state._safe_request_error(caught.value)
+
+    assert rendered == "Central request failed (BoardClientError)"
+    assert detail not in rendered
 
 
 @pytest.mark.parametrize("error_type", [ValueError, TypeError])
@@ -1054,14 +1130,12 @@ async def test_rpc_redacts_unrecognized_direct_ticket_status(
 @pytest.mark.anyio
 async def test_rpc_redacts_transport_and_auth_error_details() -> None:
     leaked_url = "https://user:credential@central.example/mcp"
-    wrapped_auth = (
-        "[TextContent(type='text', text='Error executing tool ticket_create: "
-        f"unauthorized token at {leaked_url}', annotations=None, meta=None)]"
-    )
 
     class AuthFailureClient(FakeClient):
         async def ticket_create(self) -> None:
-            raise FakeClientError(wrapped_auth)
+            raise typed_client_error(
+                "validation", f"unauthorized token at {leaked_url}"
+            )
 
     state = LiveDashboard(
         fake_config(),
