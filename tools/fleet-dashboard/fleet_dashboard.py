@@ -82,7 +82,10 @@ from evidence_trace import CORRELATION_HEADERS, EvidenceTrace, EvidenceTraceConf
 from butler_settings import (
     ButlerSettingsError,
     ButlerSettingsManager,
+    autonomous_butler_view,
+    prepare_autonomous_butler_config,
     validate_board_butler_document,
+    validate_autonomous_command_request,
 )
 
 
@@ -5238,6 +5241,86 @@ class FleetFetcher:
             "concurrency": "cas" if stored_text is not None else "lww",
         }
 
+    async def fetch_autonomous_butler(self, board_id: str) -> dict[str, Any]:
+        """Read the board-owned config and bounded command/audit projection."""
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        async with self._client(board_id) as client:
+            config = await client.butler_config_get()
+            commands = await client.butler_command_inspect(limit=50)
+        return autonomous_butler_view(config, commands)
+
+    async def save_autonomous_butler(
+        self, board_id: str, request: Any
+    ) -> dict[str, Any]:
+        """CAS-write only the mutable desired section of a provisioned config."""
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        async with self._client(board_id) as client:
+            current = await client.butler_config_get()
+            updated, expected, mutation_id = prepare_autonomous_butler_config(
+                current, request
+            )
+            saved = await client.butler_config_set(
+                mutation_id, "human", updated, expected
+            )
+            config = await client.butler_config_get()
+            commands = await client.butler_command_inspect(limit=50)
+        return {
+            **autonomous_butler_view(config, commands),
+            "mutation": {
+                "idempotent_replay": saved.get("idempotent_replay") is True,
+                "rollback_evidence": saved.get("rollback_evidence"),
+            },
+        }
+
+    async def submit_autonomous_butler_command(
+        self, board_id: str, request: Any
+    ) -> dict[str, Any]:
+        """Submit one allowlisted human command; never accept raw tool or shell data."""
+        clean = validate_autonomous_command_request(request)
+        if clean["board_id"] != board_id or not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        boards = await self._boards()
+        labels = {active_board: label for label, active_board in boards}
+        if board_id not in labels:
+            raise ValueError("board_id is not registry-active")
+        now = self.now_factory()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        expires_at = (now.astimezone(timezone.utc) + timedelta(minutes=5)).isoformat()
+        project_id = labels[board_id]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", project_id):
+            project_id = board_id
+        async with self._client(board_id) as client:
+            current = await client.butler_config_get()
+            if current.get("revision", 0) != clean["expected_config_revision"]:
+                raise ConfigConflictError(
+                    "Autonomous Butler config changed; refresh before sending the command"
+                )
+            result = await client.butler_command_submit(
+                clean["request_id"],
+                project_id,
+                "human",
+                clean["intent"],
+                clean["parameters"],
+                clean["expected_config_revision"],
+                expires_at,
+                priority="emergency" if clean["intent"] == "kill" else "normal",
+            )
+            commands = await client.butler_command_inspect(limit=50)
+        return {
+            **autonomous_butler_view(current, commands),
+            "submitted_command": result.get("command"),
+            "idempotent_replay": result.get("idempotent_replay") is True,
+        }
+
     async def fetch_intake(self, board_id: str) -> dict[str, Any]:
         if not BOARD_ID_RE.fullmatch(board_id):
             raise ValueError("invalid board_id")
@@ -7671,6 +7754,41 @@ class DashboardCache:
             self._async_runner.run(self.fetchers[label].fetch_config()), label
         )
 
+    def get_autonomous_butler(
+        self, board_id: str, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            self._async_runner.run(
+                self.fetchers[label].fetch_autonomous_butler(board_id)
+            ),
+            label,
+        )
+
+    def save_autonomous_butler(
+        self, board_id: str, request: Any, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            self._async_runner.run(
+                self.fetchers[label].save_autonomous_butler(board_id, request)
+            ),
+            label,
+        )
+
+    def submit_autonomous_butler_command(
+        self, board_id: str, request: Any, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            self._async_runner.run(
+                self.fetchers[label].submit_autonomous_butler_command(
+                    board_id, request
+                )
+            ),
+            label,
+        )
+
     def get_project_registry(
         self, central: str | None = None
     ) -> dict[str, Any]:
@@ -9170,6 +9288,30 @@ def make_handler(
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            if route == "/api/butler/autonomous":
+                try:
+                    board_id = requested_board(self.path)
+                    body = _json_bytes(
+                        cache_call(
+                            "get_autonomous_butler", board_id, central=central
+                        )
+                    )
+                except (ButlerSettingsError, ValueError) as exc:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc), "central": label}),
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - bounded type only.
+                    self._send(
+                        503,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": type(exc).__name__, "central": label}),
+                    )
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
             if route == "/api/intake":
                 try:
                     board_id = requested_board(self.path)
@@ -9304,6 +9446,8 @@ def make_handler(
                 "/api/config/ops",
                 "/api/config/registry/clone",
                 "/api/butler",
+                "/api/butler/autonomous",
+                "/api/butler/autonomous/command",
                 "/api/butler/kill",
                 "/api/dispatch",
                 "/api/agents/retire",
@@ -9455,6 +9599,32 @@ def make_handler(
                                 expected,
                                 central=central,
                             ),
+                        )
+                    )
+                elif route == "/api/butler/autonomous":
+                    if not isinstance(request, dict) or not isinstance(
+                        request.get("board_id"), str
+                    ):
+                        raise ValueError("request must contain a board_id")
+                    body = _json_bytes(
+                        cache_call(
+                            "save_autonomous_butler",
+                            request["board_id"],
+                            request,
+                            central=central,
+                        )
+                    )
+                elif route == "/api/butler/autonomous/command":
+                    if not isinstance(request, dict) or not isinstance(
+                        request.get("board_id"), str
+                    ):
+                        raise ValueError("request must contain a board_id")
+                    body = _json_bytes(
+                        cache_call(
+                            "submit_autonomous_butler_command",
+                            request["board_id"],
+                            request,
+                            central=central,
                         )
                     )
                 elif route == "/api/butler/kill":
