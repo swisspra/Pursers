@@ -649,6 +649,19 @@ class SystemdUserAdapter:
     def _quote(value: str) -> str:
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
+    @staticmethod
+    def _escape_unit_path(value: str) -> str:
+        safe = b"/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:+-"
+        escaped: list[str] = []
+        for byte in value.encode("utf-8"):
+            if byte == ord("%"):
+                escaped.append("%%")
+            elif byte in safe:
+                escaped.append(chr(byte))
+            else:
+                escaped.append(f"\\x{byte:02x}")
+        return "".join(escaped)
+
     def _unit(self, seat_id: str, template: SeatTemplate) -> str:
         command = " ".join(self._quote(item) for item in template.command)
         credential_path = self.credential_paths.get(template.credential_ref)
@@ -657,9 +670,9 @@ class SystemdUserAdapter:
         return (
             "[Unit]\nDescription=Pursers managed seat " + seat_id + "\n"
             "[Service]\nType=simple\nWorkingDirectory="
-            + self._quote(str(template.repository_root))
+            + self._escape_unit_path(str(template.repository_root))
             + "\n"
-            "EnvironmentFile=" + self._quote(str(credential_path)) + "\n"
+            "EnvironmentFile=" + self._escape_unit_path(str(credential_path)) + "\n"
             "ExecStart=" + command + "\nRestart=no\n"
             "[Install]\nWantedBy=default.target\n"
         )
