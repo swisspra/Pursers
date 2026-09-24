@@ -860,7 +860,7 @@ class _SystemdUserEnvironmentUnavailable(RuntimeError):
     """The exact disposable unit proved a host-specific user-manager gap."""
 
 
-def _effective_execstart_matches(value: str, command: tuple[str, ...]) -> bool:
+def _effective_execstart_path_matches(value: str, command: tuple[str, ...]) -> bool:
     match = re.fullmatch(
         r"\{ path=(.+?) ; argv\[\]=(.+?) ; ignore_errors=(?:yes|no) ;.*\}",
         value,
@@ -869,14 +869,10 @@ def _effective_execstart_matches(value: str, command: tuple[str, ...]) -> bool:
         return False
     try:
         path = shlex.split(match.group(1))
-        argv = shlex.split(match.group(2))
         expected_executable = Path(command[0]).resolve(strict=True)
         return (
             len(path) == 1
-            and len(argv) == len(command)
             and Path(path[0]).resolve(strict=True) == expected_executable
-            and Path(argv[0]).resolve(strict=True) == expected_executable
-            and tuple(argv[1:]) == command[1:]
         )
     except (OSError, TypeError, UnicodeError, ValueError):
         return False
@@ -907,7 +903,9 @@ def _systemd_unit_execution_paths_are_accessible(
             and credential.is_file()
             and not credential.is_symlink()
             and os.access(credential, os.R_OK)
-            and _effective_execstart_matches(properties["ExecStart"], template.command)
+            and _effective_execstart_path_matches(
+                properties["ExecStart"], template.command
+            )
         )
     except (AttributeError, KeyError, OSError, RuntimeError, TypeError, UnicodeError):
         return False
