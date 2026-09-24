@@ -1033,6 +1033,31 @@ async def test_subscription_denial_reports_bounded_identity_and_closes_scope(
     assert opened == closed == 1
 
 
+def test_subscription_denial_redacts_uri_userinfo_and_invalid_identity() -> None:
+    credential = "credential-value"
+    denied = SubscriptionAuthorizationError(
+        board_id=f"{credential}@board",
+        agent_id=f"{credential}@agent",
+        resource_uris=(
+            f"board://{credential}@board-multi-name/journal",
+            "board://board-multi-name/journal?credential=DO_NOT_ECHO",
+        ),
+        denied_resource_uri=(
+            f"board://{credential}@board-multi-name/agent/AI-env-default"
+        ),
+    )
+
+    assert denied.board_id == "<invalid-resource>"
+    assert denied.agent_id == "<invalid-resource>"
+    assert denied.resource_uris == (
+        "<invalid-resource>",
+        "board://board-multi-name/journal",
+    )
+    assert denied.denied_resource_uri == "<invalid-resource>"
+    assert credential not in str(denied)
+    assert "DO_NOT_ECHO" not in str(denied)
+
+
 @pytest.mark.anyio
 async def test_events_redeclares_after_subscription_reconnect(monkeypatch) -> None:
     import pursers_client.client as client_module

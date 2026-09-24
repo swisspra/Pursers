@@ -38,11 +38,37 @@ class BoardClientError(RuntimeError):
     pass
 
 
+_SUBSCRIPTION_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+
+
 def _safe_subscription_resource(uri: object) -> str:
     parsed = urlparse(str(uri))
-    if parsed.scheme != "board" or not parsed.netloc:
+    if (
+        parsed.scheme != "board"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or not _SUBSCRIPTION_IDENTIFIER_RE.fullmatch(parsed.netloc)
+    ):
         return "<invalid-resource>"
-    return f"board://{parsed.netloc}{parsed.path}"[:256]
+    segments = parsed.path.split("/")
+    if (
+        not parsed.path.startswith("/")
+        or not 1 <= len(segments[1:]) <= 2
+        or any(
+            not _SUBSCRIPTION_IDENTIFIER_RE.fullmatch(segment)
+            for segment in segments[1:]
+        )
+    ):
+        return "<invalid-resource>"
+    return f"board://{parsed.netloc}/{'/'.join(segments[1:])}"[:256]
+
+
+def _safe_subscription_identifier(value: object) -> str:
+    rendered = str(value)
+    if not _SUBSCRIPTION_IDENTIFIER_RE.fullmatch(rendered):
+        return "<invalid-resource>"
+    return rendered
 
 
 class SubscriptionAuthorizationError(BoardClientError):
@@ -56,8 +82,8 @@ class SubscriptionAuthorizationError(BoardClientError):
         resource_uris: Iterable[str],
         denied_resource_uri: str | None = None,
     ) -> None:
-        self.board_id = board_id
-        self.agent_id = agent_id
+        self.board_id = _safe_subscription_identifier(board_id)
+        self.agent_id = _safe_subscription_identifier(agent_id)
         denied = (
             _safe_subscription_resource(denied_resource_uri)
             if denied_resource_uri is not None
@@ -73,7 +99,7 @@ class SubscriptionAuthorizationError(BoardClientError):
         denied_label = self.denied_resource_uri or "<unknown>"
         super().__init__(
             "subscription authorization denied: "
-            f"board_id={board_id}; agent_id={agent_id}; "
+            f"board_id={self.board_id}; agent_id={self.agent_id}; "
             f"denied_resource={denied_label}; resources=[{resources}]"
         )
 

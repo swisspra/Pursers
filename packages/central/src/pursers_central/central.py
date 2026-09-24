@@ -1006,6 +1006,27 @@ def require_id(field: str, value: str) -> str:
     return value
 
 
+def _safe_subscription_resource(uri: object) -> str:
+    """Render only canonical board resource identifiers for diagnostics."""
+    parsed = urlparse(str(uri))
+    if (
+        parsed.scheme != "board"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or not ID_RE.fullmatch(parsed.netloc)
+    ):
+        return "<invalid-resource>"
+    segments = parsed.path.split("/")
+    if (
+        not parsed.path.startswith("/")
+        or not 1 <= len(segments[1:]) <= 2
+        or any(not ID_RE.fullmatch(segment) for segment in segments[1:])
+    ):
+        return "<invalid-resource>"
+    return f"board://{parsed.netloc}/{'/'.join(segments[1:])}"[:256]
+
+
 def _memory_is_visible(
     entry: Mapping[str, Any], principal_id: str, agent_id_value: str | None = None
 ) -> bool:
@@ -2985,16 +3006,10 @@ class SubscriptionAuthorization:
             try:
                 for uri in uris:
                     if not self.service.subscription_allowed(str(uri), principal):
-                        parsed_uri = urlparse(str(uri))
-                        safe_uri = (
-                            f"board://{parsed_uri.netloc}{parsed_uri.path}"[:256]
-                            if parsed_uri.scheme == "board" and parsed_uri.netloc
-                            else "<invalid-resource>"
-                        )
                         raise MCPError(
                             INVALID_REQUEST,
                             "subscription denied: principal is not authorized for "
-                            f"resource {safe_uri}",
+                            f"resource {_safe_subscription_resource(uri)}",
                         )
                     parsed = urlparse(str(uri))
                     if parsed.scheme == "board" and parsed.netloc and parsed.path.startswith("/agent/"):

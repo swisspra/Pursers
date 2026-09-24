@@ -198,6 +198,22 @@ class PushWaitCentralTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.worker.canonical, str(denied.exception))
         self.assertEqual(self.service.active_stream_count, 0)
 
+    async def test_subscription_denial_rejects_and_redacts_uri_userinfo(self) -> None:
+        credential = "credential-value"
+        requested_uri = (
+            f"board://{credential}@pursers/agent/{self.worker_id}"
+        )
+
+        with self.assertRaisesRegex(
+            MCPError,
+            r"subscription denied: .*<invalid-resource>",
+        ) as denied:
+            await self.authorize_subscription(self.stranger, requested_uri)
+
+        self.assertNotIn(credential, str(denied.exception))
+        self.assertNotIn(self.worker.canonical, str(denied.exception))
+        self.assertEqual(self.service.active_stream_count, 0)
+
     async def assert_target_only_cue(
         self,
         action,

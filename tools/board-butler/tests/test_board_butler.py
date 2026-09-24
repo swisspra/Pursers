@@ -1459,6 +1459,7 @@ def test_central_wait_persistent_invalid_membership_fails_closed(
     class Client:
         calls = 0
         health_value: str | None = None
+        credential = "credential-value"
 
         def events(self, **arguments: Any) -> Any:
             self.calls += 1
@@ -1467,8 +1468,13 @@ def test_central_wait_persistent_invalid_membership_fails_closed(
                 raise SubscriptionAuthorizationError(
                     board_id="pursers",
                     agent_id="AI-butler",
-                    resource_uris=arguments["resource_subscriptions"],
-                    denied_resource_uri="board://pursers/agent/AI-butler",
+                    resource_uris=[
+                        *arguments["resource_subscriptions"],
+                        f"board://{self.credential}@pursers/journal",
+                    ],
+                    denied_resource_uri=(
+                        f"board://{self.credential}@pursers/agent/AI-butler"
+                    ),
                 )
                 yield {}
 
@@ -1499,6 +1505,9 @@ def test_central_wait_persistent_invalid_membership_fails_closed(
     health = json.loads(client.health_value or "{}")
     assert health["status"] == "failed_closed"
     assert health["last_failure"]["membership_current"] is False
+    assert health["last_failure"]["denied_resource_uri"] == "<invalid-resource>"
+    assert "<invalid-resource>" in health["last_failure"]["resource_uris"]
+    assert client.credential not in (client.health_value or "")
 
 
 def test_resident_survives_failed_wait_then_processes_one_later_event(
