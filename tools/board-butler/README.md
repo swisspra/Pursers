@@ -310,6 +310,46 @@ Deterministic policy and evidence still set the verdict, and the provider suppli
 only the shadow draft text. A provider failure or a response that contains the
 credential fails closed to a fixed, key-free escalation message.
 
+## Provider-neutral autonomous model runner
+
+`AutonomousModelRunner` is the stable execution boundary for the strict
+`autonomous_butler_model_v1` envelope. It takes one `ModelBackend`, an exact
+`TaskSchemaRegistry`, a board policy-digest reader, opaque-token cancellation,
+and a `ModelResultStore`. Direct API and ACP therefore receive the same bounded
+request and return the same normalized result. The runner validates the task
+input digest, current policy digest, deadline, exact task-schema digest,
+proposal byte cap, citations, measured token/cost arithmetic, and reservations
+before it releases a proposal to deterministic Butler policy. A caller's
+deadline can shorten a run but cannot raise the adapter's 600-second hard cap.
+
+`DirectAPIModelBackend` requires the reviewed explicit
+`openai_chat_completions_v1` `ProviderRuntime`. It reuses the same proxy-free,
+same-origin, bounded provider transport as shadow drafting, sends the exact
+configured model, and never places the credential or cancellation token in the
+prompt. `ACPModelBackend` uses the existing ACP v1 client with an absolute
+pre-approved session root, an empty MCP-server list, a minimal environment, and
+deny-by-default permission handling. Before launch it canonicalizes that root
+and applies the production ACP seat's macOS process sandbox. Writes and process
+scratch are confined to the session root; optional read roots and protected
+files must be supplied explicitly. If the OS sandbox cannot be established,
+the run fails closed. An ACP tool or permission request cannot grant filesystem
+or MCP authority through this adapter.
+
+Both backends normalize to `model`, `proposal`, `citations`, measured `usage`,
+and `provider_request_ref`. Direct API usage and request identity come from the
+provider response envelope, not model content. ACP requires a separate host
+`pursers_model_usage` update; the agent message cannot self-report usage.
+Missing measured usage,
+changed model, malformed output, unknown citations, policy drift, timeout,
+provider crash, and cancellation all produce a typed result with
+`proposal_json=null`. No provider exception text is persisted. Use
+`FileModelResultStore` under the Butler's private state directory for production:
+it writes a mode-0600 result atomically before replying, returns the stored
+result for an identical replay, and rejects a changed payload under the same
+request ID. Selecting a backend does not rename or restart the Butler seat and
+does not change its board scopes, work/review eligibility, concurrency, or
+budget ceilings.
+
 The three draft ceilings are real queue boundaries. A hit produces a
 `butler_queued` finding with an `ESCALATE` verdict instead of dropping the
 question. The default hourly value reuses `intake.rate_per_hour` when that
