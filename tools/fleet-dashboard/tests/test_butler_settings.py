@@ -1554,6 +1554,9 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
     assert "MCP v2 connector allowlists" in html
     assert "Kill immediately" in html
     assert "Autonomous · separate authorization required" in html
+    assert "--bad:#984d3d" in html
+    assert ".intake-actions button,.autonomous-card button{min-height:44px" in html
+    assert ".connector-row label{display:flex;align-items:center;gap:8px;min-height:44px}" in html
 
     scripts = _inline_scripts(html)
     assert scripts
