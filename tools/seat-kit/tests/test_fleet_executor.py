@@ -634,9 +634,17 @@ def test_systemd_adapter_uses_argument_vector_and_detects_unit_drift(tmp_path: P
     unit_name = adapter._unit_name("worker-a")
     assert calls[1] == ["systemctl", "--user", "start", unit_name]
     unit = tmp_path / "systemd" / unit_name
-    assert f'EnvironmentFile="{tmp_path / "worker-a.env"}"' in unit.read_text()
+    assert f"WorkingDirectory={repository}" in unit.read_text()
+    assert f"EnvironmentFile={tmp_path / 'worker-a.env'}" in unit.read_text()
     unit.write_text(unit.read_text() + "# drift\n", encoding="utf-8")
     assert adapter.inspect("worker-a", template).identity_verified is False
+
+
+def test_systemd_unit_paths_are_unquoted_and_byte_escaped() -> None:
+    assert (
+        executor.SystemdUserAdapter._escape_unit_path('/tmp/a b%"\té')
+        == "/tmp/a\\x20b%%\\x22\\x09\\xc3\\xa9"
+    )
 
 
 def test_systemd_adapter_rejects_effective_dropin_execstart_drift(tmp_path: Path) -> None:
