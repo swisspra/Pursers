@@ -238,8 +238,9 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         "credentials-or-secrets",
         Outcome.ESCALATE,
         re.compile(
-            r"\b(?:credential(?:s)?|bearer[ -]?token|api[ -]?key|private[ -]?key|"
-            r"secret(?:s)?|host[ -]?binding)\b",
+            r"\b(?:credential(?:s)?|password(?:s)?|bearer[ -]?token|access[ -]?token|"
+            r"api[ -]?key|private[ -]?key|signing[ -]?key|secret(?:s)?|"
+            r"host[ -]?binding)\b",
             re.I,
         ),
     ),
@@ -247,7 +248,8 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         "authority-or-budget-change",
         Outcome.ESCALATE,
         re.compile(
-            r"(?=.*\b(?:change|raise|increase|expand|grant|extend|override|set|"
+            r"(?=.*\b(?:change|raise|increase|lower|decrease|reduce|expand|grant|"
+            r"extend|override|set|"
             r"modify|amend)\w*\b)(?=.*\b(?:authority|authorities|budget|ceiling|"
             r"concurrency|limit)\w*\b)",
             re.I | re.S,
@@ -284,14 +286,21 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         re.compile(
             r"\b(?:should|may|can|could|please|do we|must we|ready to)\b.{0,60}\b(?:release(?!-)|publish|tag|ship|promote)\b"
             r"|\bversion bump\b"
-            r"|\b(?:release(?!-)|publish|tag|ship|promote)\b.{0,60}\b(?:now|to production|this release)\b",
+            r"|\b(?:release(?!-)|publish|tag|ship|promote)\b.{0,60}"
+            r"\b(?:now|to production|this release|package|artifact|version)\b"
+            r"|\b(?:publish|release|tag)\b.{0,60}\b(?:package|artifact|version|commit|sha)\b",
             re.I | re.S,
         ),
     ),
     PolicyRule(
         "membership-or-registry",
         Outcome.ESCALATE,
-        re.compile(r"\b(?:membership|invite|admit|retire seat|registry|register board|project registry|change role)\b", re.I),
+        re.compile(
+            r"\b(?:membership|invite|admit|retire seat|registry|register board|"
+            r"project registry|change role|(?:add|remove|delete)\w*\s+(?:a\s+)?"
+            r"(?:member|seat|agent|worker|reviewer))\b",
+            re.I,
+        ),
     ),
     PolicyRule(
         "coverage-blindness",
@@ -310,6 +319,15 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         re.compile(
             r"\b(?:may|can|could|should|please|authorize|approve)\b.{0,100}"
             r"\b(?:merge|land|change|modify|edit|patch|write|deploy|ship)\w*\b",
+            re.I | re.S,
+        ),
+    ),
+    PolicyRule(
+        "pr-review-merge",
+        Outcome.ESCALATE,
+        re.compile(
+            r"\b(?:approve|review|merge|land)\w*\b.{0,80}\b(?:PR|pull request)\b"
+            r"|\b(?:PR|pull request)\b.{0,80}\b(?:approve|review|merge|land)\w*\b",
             re.I | re.S,
         ),
     ),
@@ -338,6 +356,33 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
         "seat_capability",
     ),
 )
+
+
+MECHANICAL_REQUEST_PATTERNS: dict[str, re.Pattern[str]] = {
+    "git-ancestry": re.compile(
+        r"\s*(?:is|was)\s+(?:(?:the\s+)?mentioned\s+commit|[0-9a-f]{7,40})\s+"
+        r"(?:(?:an?\s+)?(?:ancestor|descendant)\s+of|"
+        r"(?:merged\s+into|contained\s+in|reachable\s+from))\s+"
+        r"(?:main|origin/main|[0-9a-f]{7,40})\s*[?.]?\s*",
+        re.I,
+    ),
+    "ticket-status": re.compile(
+        r"\s*(?:(?:what\s+is|what's)\s+the\s+status\s+of\s+"
+        r"TK-[0-9A-Za-z-]+|is\s+TK-[0-9A-Za-z-]+\s+"
+        r"(?:closed|open|submitted|rejected|claimed|canceled))\s*[?.]?\s*",
+        re.I,
+    ),
+    "annotation-coverage": re.compile(
+        r"\s*does\s+AN-[0-9A-Za-z-]+\s+on\s+TK-[0-9A-Za-z-]+\s+"
+        r"cover\s+(?:this|the)\s+(?:decision|waiver|requirement|failure)\s*[?.]?\s*",
+        re.I,
+    ),
+    "seat-capability": re.compile(
+        r"\s*is\s+(?:seat|agent|worker|reviewer)\s+`?[0-9A-Za-z_.-]+`?\s+"
+        r"capable\s+of\s+(?:can_work|can_review)\s*[?.]?\s*",
+        re.I,
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -3710,9 +3755,18 @@ def classify_question(message: str, kind: str = "information") -> Classification
     # content so a mechanical substring cannot launder a human-only request.
     if kind in {"approval", "decision", "deliverable"}:
         return Classification(Outcome.ESCALATE, f"question-kind:{kind}")
+    mechanical_signal: PolicyRule | None = None
     for rule in POLICY_TABLE:
-        if rule.pattern.search(message):
+        if not rule.pattern.search(message):
+            continue
+        if rule.outcome is Outcome.ESCALATE:
             return Classification(rule.outcome, rule.name, rule.evaluator)
+        full_request = MECHANICAL_REQUEST_PATTERNS.get(rule.name)
+        if full_request is not None and full_request.fullmatch(message):
+            return Classification(rule.outcome, rule.name, rule.evaluator)
+        mechanical_signal = mechanical_signal or rule
+    if mechanical_signal is not None:
+        return Classification(Outcome.ESCALATE, "mixed-or-unsupported-request")
     return Classification(Outcome.UNKNOWN, "no-confident-policy-match")
 
 
@@ -5646,6 +5700,13 @@ class CentralBackend:
             ticket_id, question_id, action="answer", message=message
         )
 
+    async def release_question(
+        self, ticket_id: str, question_id: str
+    ) -> Mapping[str, Any]:
+        return await self.client.ticket_question_answer(
+            ticket_id, question_id, action="release"
+        )
+
     async def coordinator_config(self) -> Mapping[str, Any]:
         try:
             raw = await self.client.board_state_get(CONFIG_KEY)
@@ -6363,6 +6424,14 @@ async def advance_autonomous_answer(
             reason_code="owned_by_other_coordinator",
         )
         return dict(finding)
+    if (
+        current.get("state") == "accepted"
+        and accepted_by.get("agent_id") == own_agent_id
+    ):
+        response = await backend.release_question(ticket_id, question_id)
+        released = response.get("question", {})
+        if released.get("state") != "open" or released.get("accepted_by"):
+            raise RuntimeError("Central did not release accepted question ownership")
 
     # Leave an open question unowned throughout the vetoable hold and every
     # policy/evidence recheck.  Central's atomic answer call is the ownership

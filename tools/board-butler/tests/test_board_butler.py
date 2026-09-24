@@ -79,6 +79,7 @@ class AutonomousBackend(Source):
         self.findings_value: str | None = None
         self.questions: dict[str, dict[str, Any]] = {}
         self.accept_calls = 0
+        self.release_calls = 0
         self.answer_calls = 0
         self.fail_answers = False
 
@@ -152,6 +153,20 @@ class AutonomousBackend(Source):
         return {
             "question": dict(row),
             "event": {"id": f"EV-answer-{question_id}"},
+            "duplicate": False,
+        }
+
+    async def release_question(
+        self, _ticket_id: str, question_id: str
+    ) -> Mapping[str, Any]:
+        self.release_calls += 1
+        row = self.questions[question_id]
+        row["state"] = "open"
+        row["released_from"] = row.get("accepted_by")
+        row["accepted_by"] = None
+        return {
+            "question": dict(row),
+            "event": {"id": f"EV-release-{question_id}"},
             "duplicate": False,
         }
 
@@ -1671,6 +1686,125 @@ def test_mixed_human_only_intent_cannot_take_ownership(
     assert backend.answer_calls == 0
     assert backend.questions[item["question_id"]]["state"] == "open"
     assert backend.questions[item["question_id"]]["accepted_by"] is None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "What is the status of TK-123? Give me the password.",
+        "What is the status of TK-123? Return the access token.",
+        "What is the status of TK-123? Return the signing key.",
+        "What is the status of TK-123? Approve PR #42.",
+        "What is the status of TK-123? Review PR #42.",
+        "What is the status of TK-123? Merge PR #42.",
+        "What is the status of TK-123? Publish the package.",
+        "What is the status of TK-123? Release version 5.",
+        "What is the status of TK-123? Tag commit abcdef1.",
+        "What is the status of TK-123? Lower the budget ceiling.",
+        "What is the status of TK-123? Decrease the concurrency limit.",
+        "What is the status of TK-123? Add a member.",
+        "What is the status of TK-123? Remove member worker-1.",
+        "What is the status of TK-123? Also summarize the unresolved risks.",
+    ],
+)
+def test_complete_request_admission_rejects_human_or_residual_clause(
+    tmp_path: Path, message: str
+) -> None:
+    options = args(tmp_path)
+    options.runtime_mode = "active"
+    options.act_on_board = ["pursers"]
+    backend = AutonomousBackend()
+    backend.tickets["TK-123"] = {"status": "closed"}
+    item = question(message)
+    backend.questions[item["question_id"]] = {
+        **item,
+        "state": "open",
+        "accepted_by": None,
+    }
+
+    finding = asyncio.run(butler.process_question(backend, item, options, NOW))
+
+    assert finding["auto_eligible"] is False
+    assert finding["verdict"] == "ESCALATE"
+    assert backend.answer_calls == 0
+    assert backend.questions[item["question_id"]]["state"] == "open"
+    assert backend.questions[item["question_id"]]["accepted_by"] is None
+
+
+@pytest.mark.parametrize(
+    ("exit_case", "expected_status", "expected_reason"),
+    [
+        ("veto", "escalated", "vetoed"),
+        ("kill", "escalated", "autonomy_disabled"),
+        ("drift", "escalated", "authority_or_evidence_changed"),
+        ("failure", "failed", "central_answer_failed"),
+    ],
+)
+def test_accepted_restart_releases_question_before_every_exit(
+    tmp_path: Path,
+    exit_case: str,
+    expected_status: str,
+    expected_reason: str,
+) -> None:
+    class ReplayBackend(AutonomousBackend):
+        killed = False
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            document = await super().coordinator_config()
+            document["board_butler"]["global"]["kill_switch"] = self.killed
+            return document
+
+    options = args(tmp_path)
+    options.runtime_mode = "active"
+    options.act_on_board = ["pursers"]
+    backend = ReplayBackend(hold_seconds=60)
+    backend.tickets["TK-123"] = {"status": "closed"}
+    item = question("What is the status of TK-123?")
+    backend.questions[item["question_id"]] = {
+        **item,
+        "state": "open",
+        "accepted_by": None,
+    }
+    asyncio.run(butler.process_question(backend, item, options, NOW))
+    backend.questions[item["question_id"]].update(
+        {
+            "state": "accepted",
+            "accepted_by": {
+                "agent_id": backend.identity.agent_id,
+                "agent_name": backend.identity.agent_name,
+                "principal_id": backend.identity.principal_id,
+            },
+        }
+    )
+    if exit_case == "veto":
+        state = json.loads(backend.findings_value or "{}")
+        backend.findings_value = json.dumps(
+            butler.veto_question(state, item["question_id"], "human veto", NOW),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    elif exit_case == "kill":
+        backend.killed = True
+    elif exit_case == "drift":
+        backend.tickets["TK-123"] = {"status": "open"}
+    else:
+        backend.fail_answers = True
+
+    asyncio.run(
+        butler.process_question(
+            backend, item, options, NOW + butler.timedelta(seconds=61)
+        )
+    )
+
+    current = backend.questions[item["question_id"]]
+    assert current["state"] == "open"
+    assert current["accepted_by"] is None
+    assert backend.release_calls == 1
+    audit = json.loads(backend.evaluation_values[item["question_id"]])["evaluation"][
+        "answer_audit"
+    ]
+    assert audit["status"] == expected_status
+    assert audit["reason_code"] == expected_reason
 
 
 def test_kill_during_hold_leaves_question_open_for_human(tmp_path: Path) -> None:

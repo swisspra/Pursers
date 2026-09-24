@@ -278,6 +278,8 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
                         }
                         for question_id in (
                             "CQ-veto",
+                            "CQ-kill",
+                            "CQ-drift",
                             "CQ-failure-0",
                             "CQ-failure-1",
                             "CQ-failure-2",
@@ -326,7 +328,7 @@ def _central_process(
         text=True,
     )
     health_url = f"http://127.0.0.1:{port}/healthz"
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 30
     try:
         while time.monotonic() < deadline:
             if process.poll() is not None:
@@ -341,7 +343,7 @@ def _central_process(
             except OSError:
                 time.sleep(0.02)
         else:
-            raise AssertionError("Central did not become healthy within 10 seconds")
+            raise AssertionError("Central did not become healthy within 30 seconds")
         yield f"http://127.0.0.1:{port}/mcp"
     finally:
         if process.poll() is None:
@@ -496,26 +498,16 @@ def test_butler_reaches_first_working_state_against_real_central(
             assert audit["event_id"].startswith("EV-")
 
             pending = await backend.pending_questions()
-            held_ids = {
-                "CQ-veto",
-                "CQ-failure-0",
-                "CQ-failure-1",
-                "CQ-failure-2",
-            }
-            held = {row["question_id"]: row for row in pending if row["question_id"] in held_ids}
-            assert set(held) == held_ids
-            for question_id in (
-                "CQ-failure-0",
-                "CQ-failure-1",
-                "CQ-failure-2",
-                "CQ-veto",
-            ):
-                row = held[question_id]
-                await butler.process_question(backend, row, options, drafted_at)
-                current = await backend.question("TK-observed", row["question_id"])
-                assert current is not None
-                assert current["state"] == "open"
-                assert current["accepted_by"] is None
+            veto_row = next(
+                row for row in pending if row["question_id"] == "CQ-veto"
+            )
+            await butler.process_question(backend, veto_row, options, drafted_at)
+            accepted = await backend.accept_question("TK-observed", "CQ-veto")
+            assert accepted["question"]["state"] == "accepted"
+            assert (
+                accepted["question"]["accepted_by"]["agent_id"]
+                == backend.identity.agent_id
+            )
 
             raw_findings = await backend.findings()
             finding_state, previous_findings = butler._decode_state(raw_findings)
@@ -527,6 +519,105 @@ def test_butler_reaches_first_working_state_against_real_central(
                 previous_findings,
             )
 
+        release_time = drafted_at + timedelta(seconds=61)
+        async with butler.CentralBackend(options, token) as vetoed_backend:
+            current = await vetoed_backend.question("TK-observed", "CQ-veto")
+            assert current is not None and current["state"] == "accepted"
+            await butler.process_question(
+                vetoed_backend, current, options, release_time
+            )
+            released = await vetoed_backend.question("TK-observed", "CQ-veto")
+            assert released is not None
+            assert released["state"] == "open"
+            assert released["accepted_by"] is None
+            evaluation = await vetoed_backend.evaluation("CQ-veto")
+            audit = json.loads(evaluation["state"]["value"])["evaluation"][
+                "answer_audit"
+            ]
+            assert audit["status"] == "escalated"
+            assert audit["reason_code"] == "vetoed"
+
+        async with butler.CentralBackend(options, token) as prep_kill:
+            current = await prep_kill.question("TK-observed", "CQ-kill")
+            assert current is not None and current["state"] == "open"
+            await butler.process_question(prep_kill, current, options, drafted_at)
+            accepted = await prep_kill.accept_question("TK-observed", "CQ-kill")
+            assert accepted["question"]["state"] == "accepted"
+
+        class KillReplayBackend(butler.CentralBackend):
+            async def coordinator_config(self) -> dict[str, object]:
+                document = dict(await super().coordinator_config())
+                board_butler = dict(document["board_butler"])
+                boards = dict(board_butler["boards"])
+                selected = dict(boards["butler-real-join"])
+                selected["kill_switch"] = True
+                boards["butler-real-join"] = selected
+                board_butler["boards"] = boards
+                document["board_butler"] = board_butler
+                return document
+
+        async with KillReplayBackend(options, token) as killed:
+            current = await killed.question("TK-observed", "CQ-kill")
+            assert current is not None and current["state"] == "accepted"
+            assert current["accepted_by"]["agent_id"] == killed.identity.agent_id
+            evaluation = await killed.evaluation("CQ-kill")
+            before = json.loads(evaluation["state"]["value"])["evaluation"][
+                "answer_audit"
+            ]
+            assert before["status"] == "pending"
+            await butler.process_question(
+                killed, current, options, drafted_at + timedelta(seconds=61)
+            )
+            evaluation = await killed.evaluation("CQ-kill")
+            after = json.loads(evaluation["state"]["value"])["evaluation"][
+                "answer_audit"
+            ]
+            assert after["status"] == "escalated", after
+            released = await killed.question("TK-observed", "CQ-kill")
+            assert released is not None
+            assert released["state"] == "open"
+            assert released["accepted_by"] is None
+            evaluation = await killed.evaluation("CQ-kill")
+            audit = json.loads(evaluation["state"]["value"])["evaluation"][
+                "answer_audit"
+            ]
+            assert audit["reason_code"] == "autonomy_disabled"
+
+        async with butler.CentralBackend(options, token) as prep_drift:
+            current = await prep_drift.question("TK-observed", "CQ-drift")
+            assert current is not None and current["state"] == "open"
+            await butler.process_question(prep_drift, current, options, drafted_at)
+            accepted = await prep_drift.accept_question("TK-observed", "CQ-drift")
+            assert accepted["question"]["state"] == "accepted"
+
+        class DriftReplayBackend(butler.CentralBackend):
+            async def coordinator_config(self) -> dict[str, object]:
+                document = dict(await super().coordinator_config())
+                board_butler = dict(document["board_butler"])
+                boards = dict(board_butler["boards"])
+                selected = dict(boards["butler-real-join"])
+                selected["answer_scope"] = {"ticket_status": "escalate"}
+                boards["butler-real-join"] = selected
+                board_butler["boards"] = boards
+                document["board_butler"] = board_butler
+                return document
+
+        async with DriftReplayBackend(options, token) as drifted:
+            current = await drifted.question("TK-observed", "CQ-drift")
+            assert current is not None and current["state"] == "accepted"
+            await butler.process_question(
+                drifted, current, options, drafted_at + timedelta(seconds=61)
+            )
+            released = await drifted.question("TK-observed", "CQ-drift")
+            assert released is not None
+            assert released["state"] == "open"
+            assert released["accepted_by"] is None
+            evaluation = await drifted.evaluation("CQ-drift")
+            audit = json.loads(evaluation["state"]["value"])["evaluation"][
+                "answer_audit"
+            ]
+            assert audit["reason_code"] == "authority_or_evidence_changed"
+
         class FailingDeliveryBackend(butler.CentralBackend):
             answer_attempts = 0
 
@@ -537,38 +628,23 @@ def test_butler_reaches_first_working_state_against_real_central(
                 raise RuntimeError("private injected delivery detail")
 
         async with FailingDeliveryBackend(options, token) as restarted:
-            pending = await restarted.pending_questions()
-            by_id = {row["question_id"]: row for row in pending}
-            release_time = drafted_at + timedelta(seconds=61)
-            await butler.process_question(
-                restarted, by_id["CQ-veto"], options, release_time
-            )
-            veto_question = await restarted.question("TK-observed", "CQ-veto")
-            assert veto_question is not None
-            assert veto_question["state"] == "open"
-            assert veto_question["accepted_by"] is None
-            veto_evaluation = await restarted.evaluation("CQ-veto")
-            veto_audit = json.loads(veto_evaluation["state"]["value"])["evaluation"][
-                "answer_audit"
-            ]
-            assert veto_audit["status"] == "escalated"
-            assert veto_audit["reason_code"] == "vetoed"
-
             for question_id in ("CQ-failure-0", "CQ-failure-1", "CQ-failure-2"):
+                current = await restarted.question("TK-observed", question_id)
+                assert current is not None and current["state"] == "open"
                 await butler.process_question(
-                    restarted, by_id[question_id], options, release_time
+                    restarted, current, options, drafted_at
                 )
-                evaluation = await restarted.evaluation(question_id)
-                failure_audit = json.loads(evaluation["state"]["value"])[
-                    "evaluation"
-                ]["answer_audit"]
-                if failure_audit["status"] == "pending":
-                    await butler.process_question(
-                        restarted,
-                        by_id[question_id],
-                        options,
-                        release_time + timedelta(seconds=61),
-                    )
+                accepted = await restarted.accept_question(
+                    "TK-observed", question_id
+                )
+                assert accepted["question"]["state"] == "accepted"
+                accepted_current = await restarted.question(
+                    "TK-observed", question_id
+                )
+                assert accepted_current is not None
+                await butler.process_question(
+                    restarted, accepted_current, options, release_time
+                )
                 current = await restarted.question("TK-observed", question_id)
                 assert current is not None
                 assert current["state"] == "open"

@@ -323,10 +323,17 @@ hold and every final policy/evidence check. Butler answers through `BoardClient`
 only after the hold releases; that atomic call computes the authenticated host
 binding internally and is the ownership boundary. The binding, bearer token,
 provider key, and private paths never enter the model packet or durable audit.
-On restart the bounded refresh replays open or accepted questions, rereads
-product evidence and policy, and relies on Central's idempotent answered state
-to avoid duplicate delivery. A veto, kill, policy/evidence drift, or delivery
-failure therefore leaves an open question available to a human coordinator.
+Mechanical admission requires one allowlisted grammar to consume the complete
+request. A recognized lookup plus any residual clause escalates, as do all
+human-only credential, authority, budget, membership, registry, review, merge,
+publish, and release categories.
+On restart the bounded refresh replays open or accepted questions. A question
+accepted by the same Butler identity is first returned to `open` through
+Central's authenticated, accepting-owner-only, idempotent `release` action.
+The resident then rereads product evidence and policy and relies on Central's
+idempotent answered state to avoid duplicate delivery. A veto, kill,
+policy/evidence drift, or delivery failure therefore leaves an open question
+available to a human coordinator.
 Repeated vetoes or bounded delivery failures automatically fall back from
 `autonomous` to `assist`.
 

@@ -20,9 +20,11 @@ number of `no_live_candidates` dispatch cycles when the board has no live
 whose identity cannot work. Every other judgment, including scope, gate,
 release, option, and version decisions, remains a draft for a human.
 
-The policy is intentionally fail-closed. Gate waivers, scope changes, release
-actions, membership changes, and registry changes always escalate. Unknown or
-incomplete evidence also escalates. Mechanical drafts cite one named product or
+The policy is intentionally fail-closed. A mechanical class must match the
+complete request; any residual or mixed clause escalates. Gate waivers, scope
+changes, credentials, authority or budget changes, membership changes, and
+PR/review/merge/publish/release actions always escalate. Unknown or incomplete
+evidence also escalates. Mechanical drafts cite one named product or
 repository source: `git merge-base`, `ticket_get`, a ticket annotation, or a
 seat capability row.
 
@@ -404,8 +406,11 @@ per-question audit preserves the answered event ID across restart.
 
 Question handling is replay-safe. The durable cursor advances only after the
 finding write succeeds. Each bounded registry refresh replays open or accepted
-coordinator-owned questions, so a crash after the finding resumes the same plan
-without taking ownership early or answering twice. Rate ceilings are
+coordinator-owned questions. A legacy/self-accepted replay first uses Central's
+authenticated, owner-only `release` action to restore the question to `open`
+before any veto, kill, policy, evidence, hold, or delivery exit. A crash after
+the finding then resumes the same plan without retaining ownership or answering
+twice. Rate ceilings are
 enforced before provider work, output is bounded to 2,000 characters, and the
 deterministic fallback consumes no model budget.
 
@@ -425,9 +430,7 @@ records. The committed fixture therefore replays those three records and names
 all 24 unavailable ticket/question pairs without inventing messages or answers,
 as the correction explicitly permits for a truthfully partial corpus.
 
-The available replay classifies one question as `MECHANICAL`, two as
-`ESCALATE`, and none as `UNKNOWN`. It disagrees with the recorded disposition
-for `CQ-53524d65cdb51016`: ticket-status phrasing wins the current policy match
-even though the question ultimately asked the coordinator to decide how
-resolved items should appear in the document. That disagreement is retained as
-a finding rather than hidden.
+The available replay classifies zero questions as `MECHANICAL`, three as
+`ESCALATE`, and none as `UNKNOWN`. All three match their recorded disposition;
+`CQ-53524d65cdb51016` escalates because a mechanical status fragment cannot
+launder the residual document decision.
