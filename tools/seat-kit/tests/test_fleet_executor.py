@@ -912,6 +912,44 @@ def _systemd_unit_execution_paths_are_accessible(
         return False
 
 
+def _classify_systemd_bad_setting(output: str) -> str:
+    lowered = output.lower()
+    directive = next(
+        (
+            category
+            for token, category in (
+                ("execstart", "execstart"),
+                ("workingdirectory", "working_directory"),
+                ("environmentfile", "environment_file"),
+                ("restart", "restart"),
+                ("wantedby", "wanted_by"),
+                ("description", "description"),
+            )
+            if token in lowered
+        ),
+        "unit",
+    )
+    reason = next(
+        (
+            category
+            for token, category in (
+                ("neither a valid executable name nor an absolute path", "invalid_path"),
+                ("executable path is not absolute", "relative_path"),
+                ("more than one execstart", "multiple_commands"),
+                ("lacks execstart", "missing_command"),
+                ("invalid escape", "invalid_escape"),
+                ("unknown key", "unknown_key"),
+                ("unknown lvalue", "unknown_key"),
+                ("failed to parse", "parse_error"),
+                ("bad unit file setting", "generic"),
+            )
+            if token in lowered
+        ),
+        "other",
+    )
+    return f"bad_setting_{directive}_{reason}"
+
+
 def _diagnose_disposable_systemd_start_failure(
     adapter: Any,
     seat_id: str,
@@ -1006,6 +1044,27 @@ def _diagnose_disposable_systemd_start_failure(
             trace.append("property_set_mismatch")
         return None
     signature = tuple(properties[name] for name in signature_names)
+    if signature[0] == "bad-setting":
+        try:
+            verified = runner(
+                ["systemd-analyze", "--user", "verify", str(unit_path)],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            verify_output = verified.stdout + verified.stderr
+            verify_size = len(verify_output.encode("utf-8"))
+        except (AttributeError, OSError, subprocess.TimeoutExpired, UnicodeError):
+            verify_output = ""
+            verify_size = 4097
+        if trace is not None:
+            trace.append(
+                _classify_systemd_bad_setting(verify_output)
+                if verify_size <= 4096
+                else "bad_setting_analysis_unavailable"
+            )
+        return None
     if status.returncode == 4 and signature == (
         "not-found",
         "inactive",
@@ -1288,6 +1347,25 @@ def test_transient_probe_success_but_exact_persistent_unit_is_unavailable(
     assert not (unit_dir / "worker-a.service").exists()
     assert any("show" in command and "--all" in command for command in calls)
     assert calls[-1] == ["systemctl", "--user", "daemon-reload"]
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (
+            "example.service: Executable path is not absolute: ./runner",
+            "bad_setting_unit_relative_path",
+        ),
+        (
+            "example.service:7: Unknown key 'Example' in section [Service]",
+            "bad_setting_unit_unknown_key",
+        ),
+    ],
+)
+def test_bad_setting_diagnostic_uses_fixed_categories(
+    output: str, expected: str
+) -> None:
+    assert _classify_systemd_bad_setting(output) == expected
 
 
 @pytest.mark.parametrize(
