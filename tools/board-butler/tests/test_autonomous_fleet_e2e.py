@@ -181,6 +181,19 @@ class CentralScenarioBackend:
         )
 
 
+class RecordingFleetClient:
+    def __init__(self) -> None:
+        self.operations: list[Any] = []
+
+    def execute(self, operation: Any) -> Mapping[str, Any]:
+        self.operations.append(operation)
+        return {
+            "operation_id": operation.operation_id,
+            "outcome": "succeeded",
+            "committed": True,
+        }
+
+
 def _butler_args(board_id: str) -> argparse.Namespace:
     return argparse.Namespace(
         home_board=board_id,
@@ -249,6 +262,7 @@ def test_real_board_arrival_questions_and_independent_review(
         return result.structured_content
 
     async def run() -> None:
+        now = datetime.fromisoformat(scenario["observed_at"])
         admin = await call(
             "board_join",
             agent_name="fleet-admin",
@@ -360,6 +374,7 @@ def test_real_board_arrival_questions_and_independent_review(
                 required_fields=["test_output"],
                 priority="high" if row["tier"] == 1 else "medium",
                 tier=row["tier"],
+                tags=["acp-worker"] if row["tier"] == 3 else [],
                 assigned_to=row["assignee"],
                 model_usage={
                     "schema_version": 1,
@@ -370,6 +385,96 @@ def test_real_board_arrival_questions_and_independent_review(
                 },
             )
             tickets.append(created["ticket"]["ticket_id"])
+
+        current[0] = principals["butler"]
+        board_snapshot = await call("board_snapshot", limit=100, max_bytes=250_000)
+        templates = {
+            row["seat_id"]: _seat_template(
+                tmp_path,
+                row,
+                principal_id=(
+                    principals["acp"].principal_id
+                    if row["role"] == "acp_worker"
+                    else None
+                ),
+            )
+            for row in scenario["seats"]
+        }
+        executor_seats = [
+            {
+                "seat_id": row["seat_id"],
+                "board_id": board_id,
+                "role": row["role"],
+                "provider": row["provider"],
+                "template_id": templates[row["seat_id"]].template_id,
+                "template_digest_sha256": templates[row["seat_id"]].digest_sha256,
+                "generation": 1,
+                "lifecycle": "stopped",
+                "transition_at": (now - timedelta(minutes=5)).isoformat(),
+                "managed": True,
+            }
+            for row in scenario["seats"]
+        ]
+        snapshot = butler.fleet_snapshot_from_products(
+            {board_id: board_snapshot},
+            executor_seats,
+            {
+                board_id: {
+                    "direct": {"status": "healthy", "latency_ms": 12}
+                }
+            },
+            {
+                "load_ratio": 0.1,
+                "capacity_available": True,
+                "executor_status": "healthy",
+            },
+            now,
+        )
+        demand = snapshot.demands[board_id]
+        assert demand.open_by_tier == {1: 1, 2: 1, 3: 0}
+        assert demand.acp_backlog == 1
+        roles = {
+            "worker": butler.FleetRolePolicy(0, 2, 2, 1),
+            "reviewer": butler.FleetRolePolicy(0, 1, 1, 1),
+            "acp_worker": butler.FleetRolePolicy(0, 1, 1, 1),
+        }
+        board_policy = butler.FleetBoardPolicy(
+            board_id=board_id,
+            roles=roles,
+            board_maximum=4,
+            provider_maximums={"direct": 4},
+            approved_template_ids=frozenset(
+                template.template_id for template in templates.values()
+            ),
+            idle_grace_s=60,
+            scale_up_cooldown_s=0,
+            scale_down_cooldown_s=0,
+            failure_backoff_s=1,
+            provider_latency_limit_ms=1000,
+        )
+        engine = butler.FleetReconciler(
+            butler.FleetHostPolicy(4, 2, 6),
+            {board_id: board_policy},
+            config_revision=3,
+            authorization_fingerprint_sha256="a" * 64,
+        )
+        fleet_store = butler.MemoryFleetStateStore()
+        fleet_client = RecordingFleetClient()
+        scaled = engine.reconcile(snapshot, fleet_store, fleet_client)
+        assert scaled["desired"][board_id] == {
+            "worker": 2,
+            "reviewer": 0,
+            "acp_worker": 1,
+        }
+        acp_operation = next(
+            operation
+            for operation in fleet_client.operations
+            if operation.seat_id == "fleet-acp-a"
+        )
+        acp_template = templates[acp_operation.seat_id]
+        assert acp_template.template_id in board_policy.approved_template_ids
+        assert acp_template.principal_id == principals["acp"].principal_id
+        assert acp_template.capabilities["tier_max"] == 3
 
         current[0] = principals["worker"]
         await call("ticket_claim", agent_name="fleet-worker", ticket_id=tickets[0])
@@ -396,7 +501,6 @@ def test_real_board_arrival_questions_and_independent_review(
             board_id,
             config,
         )
-        now = datetime.fromisoformat(scenario["observed_at"])
         info_question = {
             **asked["question"],
             "board_id": board_id,
@@ -449,6 +553,38 @@ def test_real_board_arrival_questions_and_independent_review(
             ticket_id=tickets[2],
             summary="Synthetic MCP inspection complete.",
             model_usage={"schema_version": 1, "turns": 1, "reported_turns": 1, "input_tokens": 60, "output_tokens": 10},
+        )
+
+        current[0] = principals["butler"]
+        submitted_snapshot = await call(
+            "board_snapshot", limit=100, max_bytes=250_000
+        )
+        projected_submitted = butler.fleet_snapshot_from_products(
+            {board_id: submitted_snapshot},
+            executor_seats,
+            {
+                board_id: {
+                    "direct": {"status": "healthy", "latency_ms": 12}
+                }
+            },
+            {
+                "load_ratio": 0.1,
+                "capacity_available": True,
+                "executor_status": "healthy",
+            },
+            now + timedelta(seconds=1),
+        )
+        assert projected_submitted.demands[board_id].review_backlog == 3
+        reviewer_client = RecordingFleetClient()
+        reviewer_scaled = engine.reconcile(
+            projected_submitted,
+            butler.MemoryFleetStateStore(),
+            reviewer_client,
+        )
+        assert reviewer_scaled["desired"][board_id]["reviewer"] == 1
+        assert any(
+            operation.seat_id == "fleet-reviewer-a"
+            for operation in reviewer_client.operations
         )
 
         assert sum(
@@ -614,7 +750,12 @@ class DirectSignedExecutorClient:
         return receipt
 
 
-def _seat_template(tmp_path: Path, row: Mapping[str, Any]) -> Any:
+def _seat_template(
+    tmp_path: Path,
+    row: Mapping[str, Any],
+    *,
+    principal_id: str | None = None,
+) -> Any:
     repository = tmp_path / "repositories" / "fleet-lab"
     seat_root = tmp_path / "seats" / row["seat_id"]
     repository.mkdir(parents=True, exist_ok=True)
@@ -624,7 +765,7 @@ def _seat_template(tmp_path: Path, row: Mapping[str, Any]) -> Any:
         f"template:{row['role']}:{row['provider']}:{row['seat_id']}",
         {
             "role": role,
-            "principal_id": f"PR-{row['seat_id']}",
+            "principal_id": principal_id or f"PR-{row['seat_id']}",
             "credential_ref": f"credential.{row['seat_id']}",
             "repository_root": str(repository),
             "seat_root": str(seat_root),
@@ -633,7 +774,7 @@ def _seat_template(tmp_path: Path, row: Mapping[str, Any]) -> Any:
             "capabilities": {
                 "can_work": role in {"worker", "acp_worker"},
                 "can_review": role == "reviewer",
-                "tier_max": 2,
+                "tier_max": 3 if role == "acp_worker" else 2,
                 "max_parallel": 1,
             },
         },
@@ -721,7 +862,7 @@ def test_real_executor_restart_caps_live_lease_and_dashboard(tmp_path: Path) -> 
     )
     demand = butler.FleetDemand(
         board_id=scenario["board_id"],
-        open_by_tier={0: 1, 1: 1, 2: 1},
+        open_by_tier={1: 1, 2: 1, 3: 1},
         review_backlog=2,
         acp_backlog=1,
         oldest_ticket_age_s=600,
@@ -845,7 +986,7 @@ def test_real_executor_restart_caps_live_lease_and_dashboard(tmp_path: Path) -> 
 
     idle_demand = butler.FleetDemand(
         board_id=scenario["board_id"],
-        open_by_tier={0: 0, 1: 0, 2: 0},
+        open_by_tier={1: 0, 2: 0, 3: 0},
         review_backlog=0,
         acp_backlog=0,
         oldest_ticket_age_s=0,

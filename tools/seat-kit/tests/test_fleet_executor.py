@@ -417,6 +417,17 @@ def test_template_must_be_registry_mode_and_paths_stay_inside_roots(tmp_path: Pa
     with pytest.raises(executor.PolicyError, match="template_capabilities_invalid"):
         executor.SeatTemplate.from_record("template", invalid_capabilities)
 
+    tier_three = template_record(repository, seat)
+    tier_three["capabilities"]["tier_max"] = 3
+    assert executor.SeatTemplate.from_record("template", tier_three).capabilities[
+        "tier_max"
+    ] == 3
+
+    tier_zero = template_record(repository, seat)
+    tier_zero["capabilities"]["tier_max"] = 0
+    with pytest.raises(executor.PolicyError, match="template_capabilities_invalid"):
+        executor.SeatTemplate.from_record("template", tier_zero)
+
 
 def test_file_lease_provider_fails_closed_on_stale_or_missing_state(tmp_path: Path) -> None:
     path = tmp_path / "leases.json"

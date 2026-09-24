@@ -46,7 +46,7 @@ product response.
 
 | Event | Product evidence |
 | --- | --- |
-| Mixed ticket arrival | Central creates and routes tier 1, 2, and 3 tickets to eligible worker identities. |
+| Mixed ticket arrival | Central creates tier 1, 2, and 3 tickets. Its real `board_snapshot` feeds the production fleet projector and reconciler; the tagged tier-3 ticket raises ACP pressure, scales an approved `tier_max=3` ACP template, and is claimed and completed by that template's principal. |
 | Coordinator question | The Butler answers a ticket-status question from Central evidence. A request to publish and raise its own budget remains open with an escalation verdict. |
 | Reviewer backlog | Reconciliation requests two workers, one reviewer, and one ACP worker while retaining the four-agent ceiling. |
 | Provider failure | One model provider crashes with a private error; the normalized result is `provider_crash`, leaks no private detail, and a separate request still succeeds. An unavailable fleet provider is excluded from capacity. |
