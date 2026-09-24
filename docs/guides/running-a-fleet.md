@@ -5,6 +5,11 @@ approved after a rejection and resubmission. The example fleet has one
 coordinator, two workers, and one reviewer. It assumes that you already ran
 `pip install pursers` and `pursers-central init`.
 
+For a deterministic proof that also covers autonomous scaling, process
+restart, MCP v2 replay, provider failure, budgets, dashboard evidence, and
+independent review, see the
+[autonomous fleet end-to-end case study](autonomous-fleet.md).
+
 Use [Adding agents](adding-agents.md) to issue credentials and admit each
 principal. Do not reuse one credential for every role, and do not put a token,
 door, or key in a prompt, command argument, ticket, or repository.
