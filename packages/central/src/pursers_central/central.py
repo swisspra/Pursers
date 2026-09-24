@@ -410,7 +410,9 @@ COORDINATOR_SCOPE = "board:coordinate"
 INTAKE_SCOPE = "board:intake"
 INTAKE_ORIGIN = "coordinator-intake"
 INTAKE_STATE_KEYS = frozenset({"coordinator_intake", "coordinator_findings"})
-COORDINATOR_STATE_KEYS = frozenset({"coordinator_findings"})
+COORDINATOR_STATE_KEYS = frozenset(
+    {"coordinator_findings", "board_butler_subscription_health"}
+)
 BUTLER_EVALUATION_STATE_RE = re.compile(
     r"^board_butler_evaluation\.CQ-[0-9A-Za-z-]+$"
 )
@@ -2983,7 +2985,17 @@ class SubscriptionAuthorization:
             try:
                 for uri in uris:
                     if not self.service.subscription_allowed(str(uri), principal):
-                        raise MCPError(INVALID_REQUEST, "subscription denied: principal is not a board member")
+                        parsed_uri = urlparse(str(uri))
+                        safe_uri = (
+                            f"board://{parsed_uri.netloc}{parsed_uri.path}"[:256]
+                            if parsed_uri.scheme == "board" and parsed_uri.netloc
+                            else "<invalid-resource>"
+                        )
+                        raise MCPError(
+                            INVALID_REQUEST,
+                            "subscription denied: principal is not authorized for "
+                            f"resource {safe_uri}",
+                        )
                     parsed = urlparse(str(uri))
                     if parsed.scheme == "board" and parsed.netloc and parsed.path.startswith("/agent/"):
                         segments = parsed.path.split("/")
@@ -13885,8 +13897,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             and not BUTLER_EVALUATION_STATE_RE.fullmatch(key)
         ):
             raise PermissionError(
-                "coordinator authorization permits only coordinator_findings "
-                "and per-question board_butler_evaluation state"
+                "coordinator authorization permits only coordinator_findings, "
+                "board_butler_subscription_health, and per-question "
+                "board_butler_evaluation state"
             )
         if authority == "intake" and key not in INTAKE_STATE_KEYS:
             raise PermissionError(

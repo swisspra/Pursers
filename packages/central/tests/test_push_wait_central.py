@@ -183,6 +183,21 @@ class PushWaitCentralTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await first, {"accepted": True})
         self.assertEqual(self.service.active_stream_count, 0)
 
+    async def test_subscription_denial_identifies_exact_bounded_resource(self) -> None:
+        denied_uri = f"board://pursers/agent/{self.worker_id}"
+        requested_uri = f"{denied_uri}?credential=DO_NOT_ECHO"
+
+        with self.assertRaisesRegex(
+            MCPError,
+            rf"subscription denied: .*{self.worker_id}",
+        ) as denied:
+            await self.authorize_subscription(self.stranger, requested_uri)
+
+        self.assertIn(denied_uri, str(denied.exception))
+        self.assertNotIn("DO_NOT_ECHO", str(denied.exception))
+        self.assertNotIn(self.worker.canonical, str(denied.exception))
+        self.assertEqual(self.service.active_stream_count, 0)
+
     async def assert_target_only_cue(
         self,
         action,

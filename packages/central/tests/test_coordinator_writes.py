@@ -1000,6 +1000,12 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
             key="coordinator_findings",
             value='{"schema_version":2}',
         )
+        subscription_health = await self.call(
+            "board_state_update",
+            agent_name="coordinator-1",
+            key="board_butler_subscription_health",
+            value='{"schema_version":1,"status":"healthy"}',
+        )
         evaluations = await self.call(
             "board_state_update",
             agent_name="coordinator-1",
@@ -1016,6 +1022,7 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
             tags=["coordinator", "digest", "daily"],
         )
         self.assertFalse(report.is_error)
+        self.assertFalse(subscription_health.is_error)
         self.assertFalse(evaluations.is_error)
         self.assertFalse(digest.is_error)
 

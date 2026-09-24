@@ -11,7 +11,12 @@ from typing import Any
 
 import pytest
 
-from pursers_client import BoardClient, BoardClientError, JoinedIdentity
+from pursers_client import (
+    BoardClient,
+    BoardClientError,
+    JoinedIdentity,
+    SubscriptionAuthorizationError,
+)
 from pursers_client.client import expand_response_id_map
 
 
@@ -915,6 +920,117 @@ async def test_events_reports_each_honored_subscription_handshake(
     pending.cancel()
     await asyncio.gather(pending, return_exceptions=True)
     await events.aclose()
+
+
+@pytest.mark.anyio
+async def test_explicit_event_resources_exclude_stale_watched_agent(
+    monkeypatch,
+) -> None:
+    import pursers_client.client as client_module
+
+    board = joined_event_client()
+    journal_uri = "board://board-multi-name/journal"
+    stale_uri = "board://board-multi-name/agent/AI-retired"
+    board.watch_resource(stale_uri)
+    ready = asyncio.Event()
+    hold = asyncio.Event()
+    listened: list[str] = []
+
+    @asynccontextmanager
+    async def context(value):
+        yield value
+
+    class Subscription:
+        honored = SimpleNamespace(resource_subscriptions=[journal_uri])
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            ready.set()
+            await hold.wait()
+            raise StopAsyncIteration
+
+    class Session:
+        def listen(self, **arguments):
+            listened.extend(arguments["resource_subscriptions"])
+            return context(Subscription())
+
+    async def drain(*_args, **_kwargs):
+        if False:
+            yield {}
+
+    monkeypatch.setattr(board, "_http", lambda: context(object()))
+    monkeypatch.setattr(board, "_drain", drain)
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        client_module,
+        "Client",
+        lambda *_args, **_kwargs: context(Session()),
+    )
+
+    events = board.events(resource_subscriptions=(journal_uri,))
+    pending = asyncio.create_task(anext(events))
+    await asyncio.wait_for(ready.wait(), timeout=1)
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await events.aclose()
+
+    assert listened == [journal_uri]
+    assert board._watched_uris == {journal_uri, stale_uri}
+
+
+@pytest.mark.anyio
+async def test_subscription_denial_reports_bounded_identity_and_closes_scope(
+    monkeypatch,
+) -> None:
+    import pursers_client.client as client_module
+
+    board = joined_event_client()
+    journal_uri = "board://board-multi-name/journal"
+    requested_uri = f"{journal_uri}?credential=DO_NOT_ECHO"
+    opened = 0
+    closed = 0
+
+    @asynccontextmanager
+    async def context(value):
+        yield value
+
+    @asynccontextmanager
+    async def session_context(*_args, **_kwargs):
+        nonlocal opened, closed
+        opened += 1
+        try:
+            yield Session()
+        finally:
+            closed += 1
+
+    class Session:
+        def listen(self, **_arguments):
+            raise RuntimeError(
+                f"subscription denied: principal is not authorized for resource {journal_uri}"
+            )
+
+    monkeypatch.setattr(board, "_http", lambda: context(object()))
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(client_module, "Client", session_context)
+
+    events = board.events(resource_subscriptions=(requested_uri,))
+    with pytest.raises(SubscriptionAuthorizationError) as denied:
+        await anext(events)
+    await events.aclose()
+
+    assert denied.value.board_id == "board-multi-name"
+    assert denied.value.agent_id == "AI-env-default"
+    assert denied.value.resource_uris == (journal_uri,)
+    assert denied.value.denied_resource_uri == journal_uri
+    assert "TOKEN_PLACEHOLDER" not in str(denied.value)
+    assert "DO_NOT_ECHO" not in str(denied.value)
+    assert opened == closed == 1
 
 
 @pytest.mark.anyio

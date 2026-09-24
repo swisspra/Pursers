@@ -15,6 +15,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Iterable
+from urllib.parse import urlparse
 
 import httpx2
 from mcp import Client
@@ -35,6 +36,46 @@ from .events import (
 
 class BoardClientError(RuntimeError):
     pass
+
+
+def _safe_subscription_resource(uri: object) -> str:
+    parsed = urlparse(str(uri))
+    if parsed.scheme != "board" or not parsed.netloc:
+        return "<invalid-resource>"
+    return f"board://{parsed.netloc}{parsed.path}"[:256]
+
+
+class SubscriptionAuthorizationError(BoardClientError):
+    """A bounded, credential-free subscription authorization failure."""
+
+    def __init__(
+        self,
+        *,
+        board_id: str,
+        agent_id: str,
+        resource_uris: Iterable[str],
+        denied_resource_uri: str | None = None,
+    ) -> None:
+        self.board_id = board_id
+        self.agent_id = agent_id
+        denied = (
+            _safe_subscription_resource(denied_resource_uri)
+            if denied_resource_uri is not None
+            else None
+        )
+        resources = sorted({_safe_subscription_resource(uri) for uri in resource_uris})
+        selected = resources[:8]
+        if denied in resources and denied not in selected:
+            selected = sorted([*selected[:7], denied])
+        self.resource_uris = tuple(selected)
+        self.denied_resource_uri = denied if denied in self.resource_uris else None
+        resources = ", ".join(self.resource_uris)
+        denied_label = self.denied_resource_uri or "<unknown>"
+        super().__init__(
+            "subscription authorization denied: "
+            f"board_id={board_id}; agent_id={agent_id}; "
+            f"denied_resource={denied_label}; resources=[{resources}]"
+        )
 
 
 class ScrubRejectedError(BoardClientError):
@@ -236,6 +277,27 @@ def _subscription_loss(exc: BaseException) -> SubscriptionLost | None:
             if found:
                 return found
     return None
+
+
+def _subscription_authorization_denied(exc: BaseException) -> bool:
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_subscription_authorization_denied(item) for item in exc.exceptions)
+    return "subscription denied" in str(exc).lower()
+
+
+def _subscription_denied_resource(exc: BaseException) -> str | None:
+    if isinstance(exc, BaseExceptionGroup):
+        for item in exc.exceptions:
+            if found := _subscription_denied_resource(item):
+                return found
+        return None
+    match = re.search(
+        r"subscription denied:.*?resource "
+        r"(board://[A-Za-z0-9._~:/-]{1,256})",
+        str(exc),
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else None
 
 
 def _retryable_connection_error(exc: BaseException) -> bool:
@@ -1781,6 +1843,15 @@ class BoardClient:
             self.watch_resource(str(uri))
         if not self._watched_uris:
             await self.cold_discover()
+        # An explicit subscription list is a per-call authorization boundary.
+        # Long-lived clients remember ticket and agent resources for implicit
+        # discovery, but those stale resources must not leak into a targeted
+        # journal/current-agent wait.
+        subscription_uris = tuple(
+            sorted(set(map(str, explicit_uris)))
+            if explicit_uris
+            else sorted(self._watched_uris)
+        )
 
         async def publish_with_http(http: httpx2.AsyncClient) -> None:
             nonlocal initial_cursor
@@ -1792,7 +1863,7 @@ class BoardClient:
                     async with Client(
                         transport, mode="2026-07-28", cache=None
                     ) as event_client:
-                        uris = sorted(self._watched_uris)
+                        uris = list(subscription_uris)
                         if not uris:
                             raise BoardClientError(
                                 "events() requires a known ticket/memory URI"
@@ -1859,6 +1930,19 @@ class BoardClient:
                 except asyncio.CancelledError:
                     raise
                 except BaseException as exc:
+                    if _subscription_authorization_denied(exc):
+                        await queue.put(
+                            (
+                                "error",
+                                SubscriptionAuthorizationError(
+                                    board_id=self.board_id,
+                                    agent_id=self.identity.agent_id,
+                                    resource_uris=subscription_uris,
+                                    denied_resource_uri=_subscription_denied_resource(exc),
+                                ),
+                            )
+                        )
+                        return
                     if not reconnect or not _retryable_connection_error(exc):
                         await queue.put(("error", exc))
                         return

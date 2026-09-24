@@ -66,6 +66,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 STATE_KEY = "coordinator_findings"
+SUBSCRIPTION_HEALTH_KEY = "board_butler_subscription_health"
 FLEET_STATE_KEY = "autonomous_butler_state"
 EVALUATION_STATE_PREFIX = "board_butler_evaluation."
 CONFIG_KEY = "coordinator_config"
@@ -103,6 +104,8 @@ SUPPORTED_MCP_PROTOCOL_REVISIONS = frozenset({"2026-07-28"})
 SUPPORTED_MCP_TRANSPORTS = frozenset({"stdio", "streamable_http"})
 MAX_CONNECTOR_AUDIT_DETAIL_CHARS = 1_000
 QUESTION_EVENT = "coordinator_question_asked"
+SUBSCRIPTION_RECONNECT_ATTEMPTS = 3
+SUBSCRIPTION_RECONNECT_BASE_DELAY_S = 0.25
 OBSERVATION_TICKET_LIMIT = 100
 OBSERVATION_HISTORY_DAYS = 7
 OBSERVATION_FINDING_KIND = "butler_observation"
@@ -7713,6 +7716,8 @@ class CentralBackend:
         self.project_name: str | None = None
         self._coordinator: dict[str, Any] | None = None
         self._registry_failures: dict[str, list[dict[str, str]]] = {}
+        self.subscription_healthy = True
+        self._subscription_failure_active = False
 
     async def __aenter__(self) -> "CentralBackend":
         from pursers_client import BoardClient
@@ -8140,25 +8145,113 @@ class CentralBackend:
             evaluation_state_key(question_id), value, expected_sha256=expected
         )
 
+    async def _subscription_membership_current(self) -> bool:
+        """Verify the wait identity without rejoining or mutating membership."""
+        try:
+            snapshot = await self.client.board_snapshot(limit=1_000, max_bytes=750_000)
+        except Exception:
+            return False
+        identity = self.identity
+        return any(
+            isinstance(row, Mapping)
+            and row.get("agent_id") == identity.agent_id
+            and row.get("principal_id") == identity.principal_id
+            and row.get("lifecycle_status", "active") == "active"
+            for row in snapshot.get("agents", [])
+        )
+
+    async def _write_subscription_health(
+        self,
+        *,
+        status: str,
+        attempts: int | None = None,
+        membership_current: bool | None = None,
+        resource_uris: Sequence[str] = (),
+        denied_resource_uri: str | None = None,
+    ) -> None:
+        """Persist one bounded, credential-free wait diagnostic."""
+        try:
+            raw = await self.client.board_state_get(SUBSCRIPTION_HEALTH_KEY)
+        except Exception as exc:
+            if "state key not found" not in str(exc).lower():
+                print(
+                    "board-butler: subscription diagnostic read failed",
+                    file=sys.stderr,
+                )
+                return
+            previous = None
+            document: dict[str, Any] = {"schema_version": 1}
+        else:
+            state = raw.get("state", {})
+            previous = state.get("value") if isinstance(state, Mapping) else None
+            try:
+                decoded = json.loads(previous) if isinstance(previous, str) else {}
+            except json.JSONDecodeError:
+                decoded = {}
+            document = dict(decoded) if isinstance(decoded, Mapping) else {}
+            document["schema_version"] = 1
+        now = utc_now().isoformat()
+        document.update(
+            {
+                "status": status,
+                "board_id": self.args.home_board,
+                "agent_id": str(self.identity.agent_id),
+                "updated_at": now,
+            }
+        )
+        if status == "healthy":
+            document["recovered_at"] = now
+        else:
+            document["last_failure"] = {
+                "reason_code": "subscription_authorization_denied",
+                "attempts": int(attempts or 1),
+                "membership_current": bool(membership_current),
+                "denied_resource_uri": denied_resource_uri,
+                "resource_uris": [str(uri)[:256] for uri in resource_uris[:8]],
+                "observed_at": now,
+            }
+        encoded = json.dumps(document, sort_keys=True, separators=(",", ":"))
+        expected = (
+            hashlib.sha256(previous.encode("utf-8")).hexdigest()
+            if isinstance(previous, str)
+            else None
+        )
+        try:
+            await self.client.board_state_update(
+                SUBSCRIPTION_HEALTH_KEY,
+                encoded,
+                expected_sha256=expected,
+            )
+        except Exception:
+            print(
+                "board-butler: subscription diagnostic write failed",
+                file=sys.stderr,
+            )
+
+    async def _mark_subscription_recovered(self) -> None:
+        self.subscription_healthy = True
+        if not self._subscription_failure_active:
+            return
+        await self._write_subscription_health(status="healthy")
+        self._subscription_failure_active = False
+
     async def wait_for_question(
         self, cursor: int, timeout_s: float | None
     ) -> tuple[int, Mapping[str, Any] | None]:
+        from pursers_client import SubscriptionAuthorizationError
+
         current = [cursor]
         resources = [
             f"board://{self.args.home_board}/journal",
             f"board://{self.args.home_board}/agent/{self.identity.agent_id}",
         ]
-        events = self.client.events(
-            from_cursor=cursor,
-            only_mine=False,
-            kinds=[QUESTION_EVENT],
-            resource_subscriptions=resources,
-            acknowledge=False,
-            touch=False,
-            cursor_callback=lambda value: current.__setitem__(0, max(current[0], int(value))),
+        deadline = (
+            asyncio.get_running_loop().time() + timeout_s
+            if timeout_s is not None
+            else None
         )
 
-        async def next_question() -> Mapping[str, Any] | None:
+        async def next_question(events: AsyncIterator[Mapping[str, Any]]) -> Mapping[str, Any] | None:
             async with aclosing(events):
                 async for event in events:
                     seq = event.get("seq")
@@ -8180,15 +8273,75 @@ class CentralBackend:
                             }
             return None
 
-        try:
-            if timeout_s is None:
-                question = await next_question()
-            else:
-                async with asyncio.timeout(timeout_s):
-                    question = await next_question()
-        except TimeoutError:
-            question = None
-        return current[0], question
+        attempts = 0
+        while True:
+            remaining = (
+                max(0.0, deadline - asyncio.get_running_loop().time())
+                if deadline is not None
+                else None
+            )
+            if remaining == 0.0:
+                return current[0], None
+            handshake = [False]
+            events = self.client.events(
+                from_cursor=current[0],
+                only_mine=False,
+                kinds=[QUESTION_EVENT],
+                resource_subscriptions=resources,
+                acknowledge=False,
+                touch=False,
+                cursor_callback=lambda value: current.__setitem__(
+                    0, max(current[0], int(value))
+                ),
+                subscription_callback=lambda: handshake.__setitem__(0, True),
+            )
+            try:
+                if remaining is None:
+                    question = await next_question(events)
+                else:
+                    async with asyncio.timeout(remaining):
+                        question = await next_question(events)
+            except TimeoutError:
+                if handshake[0]:
+                    await self._mark_subscription_recovered()
+                return current[0], None
+            except SubscriptionAuthorizationError as exc:
+                attempts += 1
+                membership_current = await self._subscription_membership_current()
+                retrying = (
+                    membership_current
+                    and attempts < SUBSCRIPTION_RECONNECT_ATTEMPTS
+                )
+                self.subscription_healthy = False
+                self._subscription_failure_active = True
+                await self._write_subscription_health(
+                    status="retrying" if retrying else "failed_closed",
+                    attempts=attempts,
+                    membership_current=membership_current,
+                    resource_uris=exc.resource_uris,
+                    denied_resource_uri=exc.denied_resource_uri,
+                )
+                if retrying:
+                    delay = SUBSCRIPTION_RECONNECT_BASE_DELAY_S * (2 ** (attempts - 1))
+                    if deadline is not None:
+                        delay = min(
+                            delay,
+                            max(0.0, deadline - asyncio.get_running_loop().time()),
+                        )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+                quiet_for = (
+                    max(0.0, deadline - asyncio.get_running_loop().time())
+                    if deadline is not None
+                    else max(0.1, float(self.args.refresh_seconds))
+                )
+                if quiet_for > 0:
+                    await asyncio.sleep(quiet_for)
+                return current[0], None
+            if handshake[0]:
+                await self._mark_subscription_recovered()
+            return current[0], question
 
     def _coordinator_api(self) -> dict[str, Any]:
         if self._coordinator is None:
@@ -9177,7 +9330,11 @@ async def run(
                             asyncio.get_running_loop().time() + args.refresh_seconds
                         )
                     pending_reader = getattr(backend, "pending_questions", None)
-                    if refreshed_cycle and callable(pending_reader):
+                    if (
+                        refreshed_cycle
+                        and callable(pending_reader)
+                        and getattr(backend, "subscription_healthy", True)
+                    ):
                         # Accepted ownership and hold timers are durable. This
                         # replay closes the crash window without polling: it is
                         # tied to the existing bounded registry refresh cycle.
@@ -9196,6 +9353,8 @@ async def run(
                         )
                     )
                     cursor, question = await backend.wait_for_question(cursor, timeout)
+                    if not getattr(backend, "subscription_healthy", True):
+                        runtime.mark("subscription_failed_closed")
                     if question is not None:
                         await process_question(backend, question, args, utc_now())
                         runtime.mark("question_processed")

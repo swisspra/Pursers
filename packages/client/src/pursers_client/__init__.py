@@ -7,6 +7,7 @@ from .client import (
     BoardClientError,
     JoinedIdentity,
     ScrubRejectedError,
+    SubscriptionAuthorizationError,
 )
 from .events import (
     ADMISSION_EVENT_KINDS,
@@ -144,6 +145,7 @@ __all__ = [
     "OFFER_REVOKED",
     "PARK_EVENT_KINDS",
     "ScrubRejectedError",
+    "SubscriptionAuthorizationError",
     "SENSITIVE_FORM_FALLBACK",
     "SCRUB_EVENT_KINDS",
     "SEAT_NAME_COLLISION",
