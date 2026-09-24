@@ -247,6 +247,54 @@ def autonomous_state(board_id: str = "pursers") -> dict[str, Any]:
     }
 
 
+def product_autonomous_state(board_id: str = "pursers") -> dict[str, Any]:
+    """Generate actual state through the landed production reconciler."""
+    observed_at = datetime(2026, 9, 24, tzinfo=timezone.utc)
+    roles = {
+        role: board_butler.FleetRolePolicy(0, 1, 2, 1)
+        for role in board_butler.FLEET_ROLES
+    }
+    policy = board_butler.FleetBoardPolicy(
+        board_id=board_id,
+        roles=roles,
+        board_maximum=3,
+        provider_maximums={"direct": 3},
+        approved_template_ids=frozenset(
+            f"template:{role}:direct" for role in board_butler.FLEET_ROLES
+        ),
+        idle_grace_s=60,
+        scale_up_cooldown_s=30,
+        scale_down_cooldown_s=60,
+        failure_backoff_s=10,
+    )
+    demand = board_butler.FleetDemand(
+        board_id=board_id,
+        open_by_tier={1: 1},
+        review_backlog=1,
+        acp_backlog=1,
+        oldest_ticket_age_s=600,
+        expiring_offers=0,
+        provider_health={"direct": "healthy"},
+        provider_latency_ms={"direct": 10},
+    )
+    snapshot = board_butler.FleetSnapshot(
+        observed_at=observed_at,
+        demands={board_id: demand},
+        seats=(),
+        host_load_ratio=0.1,
+        host_capacity_available=True,
+        executor_healthy=True,
+    )
+    reconciler = board_butler.FleetReconciler(
+        board_butler.FleetHostPolicy(3, 2, 5),
+        {board_id: policy},
+        config_revision=3,
+        authorization_fingerprint_sha256="f" * 64,
+    )
+    plan = reconciler.plan(snapshot, {})
+    return reconciler.desired_state_document(board_id, snapshot, plan)
+
+
 def write_runtime(path: Path, *, mode: str, pid: int = 4321) -> None:
     path.write_text(
         json.dumps(
@@ -1890,7 +1938,7 @@ def test_autonomous_http_api_routes_typed_reads_writes_and_commands() -> None:
     ]
 
 
-def test_fetcher_projects_product_config_and_command_responses() -> None:
+def test_fetcher_consumes_product_config_commands_and_actual_state() -> None:
     calls: list[tuple[str, int | None]] = []
 
     class Client:
@@ -1914,6 +1962,10 @@ def test_fetcher_projects_product_config_and_command_responses() -> None:
             calls.append(("commands", limit))
             return {"commands": [], "truncated": False}
 
+        async def board_state_get(self, *, key: str) -> dict[str, Any]:
+            calls.append((key, None))
+            return {"state": {"value": json.dumps(product_autonomous_state())}}
+
     class Fetcher(dashboard.FleetFetcher):
         async def _boards(self) -> list[tuple[str, str]]:
             return [("Project", "pursers")]
@@ -1932,12 +1984,86 @@ def test_fetcher_projects_product_config_and_command_responses() -> None:
     finally:
         fetcher.close()
 
-    assert calls == [("config", None), ("commands", 50)]
+    assert calls == [
+        ("config", None),
+        ("commands", 50),
+        ("autonomous_butler_state", None),
+    ]
     assert view["revision"] == 3
-    assert view["effective_state"] == "shadow"
+    assert view["effective_state"] == "autonomous"
+    assert view["actual_state_available"] is True
+    assert view["actual_state"]["schema"] == "autonomous_butler_state_v1"
+    assert view["actual_state"]["config_revision"] == 3
     assert view["config"]["desired"]["connectors"][0][
         "secret_configured"
     ] is True
+
+
+def test_fetcher_maps_product_cas_conflict_to_reloadable_conflict() -> None:
+    class Client:
+        async def __aenter__(self) -> "Client":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def butler_config_get(self) -> dict[str, Any]:
+            return {
+                "board_id": "pursers",
+                "revision": 3,
+                "effective_mode": "shadow",
+                "config_digest_sha256": "a" * 64,
+                "config": autonomous_config(),
+            }
+
+        async def butler_config_set(self, *_args: object) -> dict[str, Any]:
+            raise dashboard.BoardClientError(
+                "Butler config CAS conflict: expected 3, current 4"
+            )
+
+    class Fetcher(dashboard.FleetFetcher):
+        async def _boards(self) -> list[tuple[str, str]]:
+            return [("Project", "pursers")]
+
+    request = {
+        "board_id": "pursers",
+        "mutation_id": "mutation-conflict",
+        "expected_revision": 3,
+        "mode": "shadow",
+        "runner": "direct_api",
+        "capacity": {
+            role: {"min": 0, "target": 1, "max": 2}
+            for role in ("worker", "reviewer", "acp_worker")
+        },
+        "host_concurrency": 4,
+        "board_concurrency": 3,
+        "cooldowns": {
+            "scale_up_s": 30,
+            "scale_down_s": 60,
+            "failure_backoff_s": 10,
+        },
+        "budget": {
+            "period": "day",
+            "max_tokens": 10_000,
+            "max_cost_microunits": 1_000_000,
+            "max_external_calls": 100,
+        },
+        "connectors": [{"connector_id": "github", "enabled": True}],
+    }
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = Fetcher(config, client_factory=lambda *_args, **_kwargs: Client())
+    try:
+        with pytest.raises(dashboard.ConfigConflictError, match="reload before saving"):
+            asyncio.run(fetcher.save_autonomous_butler("pursers", request))
+    finally:
+        fetcher.close()
 
 
 class _InlineScripts(HTMLParser):

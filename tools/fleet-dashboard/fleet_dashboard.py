@@ -232,6 +232,7 @@ CONFIG_STATE_KEY = "coordinator_config"
 INTAKE_STATE_KEY = "coordinator_intake"
 FINDINGS_STATE_KEY = "coordinator_findings"
 BUTLER_EVALUATION_STATE_PREFIX = "board_butler_evaluation."
+AUTONOMOUS_FLEET_STATE_KEY = "autonomous_butler_state"
 DASHBOARD_WRITE_KEYS = frozenset({CONFIG_STATE_KEY, INTAKE_STATE_KEY})
 BUTLER_DRAFT_MARK_VALUES = ("send_as_is", "needed_edits", "wrong")
 BUTLER_ROUTING_MARK_VALUES = (
@@ -5242,7 +5243,7 @@ class FleetFetcher:
         }
 
     async def fetch_autonomous_butler(self, board_id: str) -> dict[str, Any]:
-        """Read the board-owned config and bounded command/audit projection."""
+        """Read config, commands, and the product-owned actual-state projection."""
         if not BOARD_ID_RE.fullmatch(board_id):
             raise ValueError("invalid board_id")
         active = {active_board for _label, active_board in await self._boards()}
@@ -5251,7 +5252,16 @@ class FleetFetcher:
         async with self._client(board_id) as client:
             config = await client.butler_config_get()
             commands = await client.butler_command_inspect(limit=50)
-        return autonomous_butler_view(config, commands)
+            try:
+                raw_state = await client.board_state_get(
+                    key=AUTONOMOUS_FLEET_STATE_KEY
+                )
+            except BoardClientError as exc:
+                if "state key not found" not in str(exc).casefold():
+                    raise
+                raw_state = {}
+        actual_state, _raw_text = _state_value(raw_state)
+        return autonomous_butler_view(config, commands, actual_state)
 
     async def save_autonomous_butler(
         self, board_id: str, request: Any
@@ -5267,13 +5277,29 @@ class FleetFetcher:
             updated, expected, mutation_id = prepare_autonomous_butler_config(
                 current, request
             )
-            saved = await client.butler_config_set(
-                mutation_id, "human", updated, expected
-            )
+            try:
+                saved = await client.butler_config_set(
+                    mutation_id, "human", updated, expected
+                )
+            except BoardClientError as exc:
+                if "cas conflict" in str(exc).casefold():
+                    raise ConfigConflictError(
+                        "Autonomous Butler config changed; reload before saving"
+                    ) from exc
+                raise
             config = await client.butler_config_get()
             commands = await client.butler_command_inspect(limit=50)
+            try:
+                raw_state = await client.board_state_get(
+                    key=AUTONOMOUS_FLEET_STATE_KEY
+                )
+            except BoardClientError as exc:
+                if "state key not found" not in str(exc).casefold():
+                    raise
+                raw_state = {}
+        actual_state, _raw_text = _state_value(raw_state)
         return {
-            **autonomous_butler_view(config, commands),
+            **autonomous_butler_view(config, commands, actual_state),
             "mutation": {
                 "idempotent_replay": saved.get("idempotent_replay") is True,
                 "rollback_evidence": saved.get("rollback_evidence"),
@@ -5304,19 +5330,35 @@ class FleetFetcher:
                 raise ConfigConflictError(
                     "Autonomous Butler config changed; refresh before sending the command"
                 )
-            result = await client.butler_command_submit(
-                clean["request_id"],
-                project_id,
-                "human",
-                clean["intent"],
-                clean["parameters"],
-                clean["expected_config_revision"],
-                expires_at,
-                priority="emergency" if clean["intent"] == "kill" else "normal",
-            )
+            try:
+                result = await client.butler_command_submit(
+                    clean["request_id"],
+                    project_id,
+                    "human",
+                    clean["intent"],
+                    clean["parameters"],
+                    clean["expected_config_revision"],
+                    expires_at,
+                    priority="emergency" if clean["intent"] == "kill" else "normal",
+                )
+            except BoardClientError as exc:
+                if "config precondition failed" in str(exc).casefold():
+                    raise ConfigConflictError(
+                        "Autonomous Butler config changed; refresh before sending the command"
+                    ) from exc
+                raise
             commands = await client.butler_command_inspect(limit=50)
+            try:
+                raw_state = await client.board_state_get(
+                    key=AUTONOMOUS_FLEET_STATE_KEY
+                )
+            except BoardClientError as exc:
+                if "state key not found" not in str(exc).casefold():
+                    raise
+                raw_state = {}
+        actual_state, _raw_text = _state_value(raw_state)
         return {
-            **autonomous_butler_view(current, commands),
+            **autonomous_butler_view(current, commands, actual_state),
             "submitted_command": result.get("command"),
             "idempotent_replay": result.get("idempotent_replay") is True,
         }
