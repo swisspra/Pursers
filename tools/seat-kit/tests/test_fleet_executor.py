@@ -918,6 +918,7 @@ def _diagnose_disposable_systemd_start_failure(
     unit_dir: Path,
     *,
     runner: Any = subprocess.run,
+    trace: list[str] | None = None,
 ) -> str | None:
     """Return a bounded reason only for proven host/layout restrictions."""
     unit_name = adapter._unit_name(seat_id)
@@ -929,8 +930,12 @@ def _diagnose_disposable_systemd_start_failure(
             and unit_path.read_text(encoding="utf-8") == adapter._unit(seat_id, template)
         )
     except (AttributeError, OSError, RuntimeError, UnicodeError):
+        if trace is not None:
+            trace.append("unit_identity_error")
         return None
     if not exact_unit:
+        if trace is not None:
+            trace.append("unit_identity_mismatch")
         return None
     property_names = (
         "LoadState",
@@ -974,6 +979,8 @@ def _diagnose_disposable_systemd_start_failure(
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        if trace is not None:
+            trace.append("acquisition_error")
         return None
     try:
         diagnostic_size = sum(
@@ -981,11 +988,17 @@ def _diagnose_disposable_systemd_start_failure(
             for value in (shown.stdout, shown.stderr, status.stdout, status.stderr)
         )
         if shown.returncode not in {0, 1} or diagnostic_size > 4096:
+            if trace is not None:
+                trace.append("bounded_output_invalid")
             return None
         properties = executor.SystemdUserAdapter._show_properties(shown.stdout)
     except (AttributeError, TypeError, UnicodeError, ValueError):
+        if trace is not None:
+            trace.append("property_parse_error")
         return None
     if set(properties) != set(property_names):
+        if trace is not None:
+            trace.append("property_set_mismatch")
         return None
     signature = tuple(properties[name] for name in property_names[:6])
     if status.returncode == 4 and signature == (
@@ -1004,6 +1017,13 @@ def _diagnose_disposable_systemd_start_failure(
         adapter, template, unit_path, properties
     ):
         return "systemd_user_service_path_unavailable"
+    if status.returncode == 3 and signature in {
+        ("loaded", "failed", "failed", "exit-code", "1", "200"),
+        ("loaded", "failed", "failed", "exit-code", "1", "203"),
+    }:
+        if trace is not None:
+            trace.append("execution_path_unproven")
+        return None
     if status.returncode == 3 and signature == (
         "loaded",
         "failed",
@@ -1013,6 +1033,8 @@ def _diagnose_disposable_systemd_start_failure(
         "0",
     ):
         return "systemd_user_service_resources_unavailable"
+    if trace is not None:
+        trace.append("status_signature_unclassified")
     return None
 
 
@@ -1033,6 +1055,7 @@ def _exercise_disposable_systemd_user_service(
         assert observation.identity_verified
     except BaseException as primary_error:
         unavailable_reason = None
+        diagnostic_trace: list[str] = []
         if isinstance(primary_error, RuntimeError) and str(primary_error) == "systemd_start_failed":
             unavailable_reason = _diagnose_disposable_systemd_start_failure(
                 adapter,
@@ -1040,6 +1063,7 @@ def _exercise_disposable_systemd_user_service(
                 template,
                 unit_dir,
                 runner=runner,
+                trace=diagnostic_trace,
             )
         _cleanup_disposable_systemd_user_service(
             adapter,
@@ -1052,6 +1076,8 @@ def _exercise_disposable_systemd_user_service(
         )
         if unavailable_reason is not None:
             raise _SystemdUserEnvironmentUnavailable(unavailable_reason) from primary_error
+        if diagnostic_trace:
+            primary_error.add_note(f"systemd_diagnostic={diagnostic_trace[-1]}")
         raise
     _cleanup_disposable_systemd_user_service(
         adapter,
@@ -1333,7 +1359,7 @@ def test_generated_unit_defect_remains_a_failure(tmp_path: Path) -> None:
     template = executor.SeatTemplate.from_record(
         "worker-standard", template_record(repository, seat)
     )
-    with pytest.raises(RuntimeError, match="^systemd_start_failed$"):
+    with pytest.raises(RuntimeError, match="^systemd_start_failed"):
         _exercise_disposable_systemd_user_service(
             DefectiveAdapter(),
             "worker-a",
@@ -1388,7 +1414,7 @@ def test_exact_generated_execstart_defect_remains_a_failure(tmp_path: Path) -> N
         runner=runner,
     )
 
-    with pytest.raises(RuntimeError, match="^systemd_start_failed$"):
+    with pytest.raises(RuntimeError, match="^systemd_start_failed"):
         _exercise_disposable_systemd_user_service(
             adapter,
             "worker-a",
@@ -1434,7 +1460,7 @@ def test_undecodable_diagnostic_preserves_primary_error_and_cleans(tmp_path: Pat
     template = executor.SeatTemplate.from_record(
         "worker-standard", template_record(repository, seat)
     )
-    with pytest.raises(RuntimeError, match="^systemd_start_failed$"):
+    with pytest.raises(RuntimeError, match="^systemd_start_failed"):
         _exercise_disposable_systemd_user_service(
             UndecodableDiagnosticAdapter(),
             "worker-a",
