@@ -126,10 +126,15 @@ _SAFE_CENTRAL_VALIDATION_DETAILS = (
     re.compile(r"^max_bytes is too small for snapshot metadata$"),
     re.compile(r"^max_bytes is too small for catchup metadata$"),
     re.compile(r"^max_bytes is too small for one journal event$"),
-    re.compile(r"^ticket (?:not found|already exists)$"),
+    re.compile(r"^ticket not found(?: or not active)?$"),
+    re.compile(r"^ticket already exists$"),
     re.compile(
         r"^ticket is (?:open|claimed|in_progress|creating_report|submitted|"
         r"reviewing|in_review|closed|rejected|canceled|terminated)$"
+    ),
+    re.compile(
+        r"^ticket is (?:claimed by another identity|waiting for a human answer|"
+        r"parked by the board owner|not offered to this seat; wait for your offer)$"
     ),
 )
 _SENSITIVE_ERROR_DETAIL_RE = re.compile(

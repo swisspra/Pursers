@@ -951,6 +951,15 @@ def test_request_error_surfaces_direct_validation_types(
     ("code", "detail"),
     [
         ("not_found", "ticket not found"),
+        ("not_found", "ticket not found or not active"),
+        ("ticket_state", "ticket is submitted"),
+        ("ticket_state", "ticket is claimed by another identity"),
+        ("ticket_state", "ticket is waiting for a human answer"),
+        ("ticket_state", "ticket is parked by the board owner"),
+        (
+            "ticket_state",
+            "ticket is not offered to this seat; wait for your offer",
+        ),
         ("self_review", "self-review denied: authenticated seat submitted this work"),
         ("role_policy", "board role not authorized"),
         ("business_rule", "only open or submitted tickets can be parked"),
@@ -1002,6 +1011,14 @@ def test_real_client_error_contract_remains_actionable(
                 "schema": "pursers_tool_error_v1",
                 "code": "unknown",
                 "detail": "ticket not found",
+            },
+        ),
+        (
+            "ticket not found or not active",
+            {
+                "schema": "pursers_tool_error_v1",
+                "code": "ticket_state",
+                "detail": "ticket not found or not active",
             },
         ),
         ("synthetic-private-business-value", {"malformed": True}),
