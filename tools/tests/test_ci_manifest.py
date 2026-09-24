@@ -598,6 +598,103 @@ def test_batch_rejects_review_sha_mismatch(tmp_path: Path) -> None:
         )
 
 
+def test_batch_accepts_cumulative_scope_across_rejected_correction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, base = _git_fixture(tmp_path)
+    paths = [
+        "docs/QUALITY.md",
+        "tools/aionui-extension/INTEGRATION_FILES.sha256",
+        "tools/ci_manifest.py",
+        "tools/tests/test_ci_manifest.py",
+    ]
+    _git(root, "switch", "-c", "initial-candidate")
+    for index, relative in enumerate(paths):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"initial-{index}\n", encoding="utf-8")
+    initial = _commit(root, "initial four-file submission")
+    corrected_path = paths[-1]
+    (root / corrected_path).write_text("corrected\n", encoding="utf-8")
+    corrected = _commit(root, "one-file correction")
+    row = _approval("TK-one", corrected, paths)
+    authority = _authority(row)
+    authority["ticket"]["files_changed"] = [corrected_path]  # type: ignore[index]
+    authority["ticket"]["submission_history"] = [  # type: ignore[index]
+        {
+            "files_changed": paths,
+            "notes": f"branch_and_commit: codex/TK-one@{initial}",
+        },
+        {
+            "files_changed": [corrected_path],
+            "notes": f"branch_and_commit: codex/TK-one@{corrected}",
+        },
+    ]
+    _git(root, "switch", "--detach", base)
+    approvals = tmp_path / "approvals.json"
+    approvals.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "board_id": "pursers",
+                "frozen_base": base,
+                "tickets": [row],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "result.json"
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    monkeypatch.setattr(ci_manifest, "validate_integration_files", lambda _root: None)
+    gate_calls: list[Path] = []
+
+    def full_gate(worktree: Path, **_kwargs: object) -> FullGateAdmissionTiming:
+        gate_calls.append(worktree)
+        return FullGateAdmissionTiming("release", 1, 0.0, 0.1)
+
+    monkeypatch.setattr(ci_manifest, "run_full_gate", full_gate)
+
+    result = run_approved_batch(
+        root,
+        base=base,
+        approvals_path=approvals,
+        output=output,
+        main_ref="HEAD",
+        jobs=1,
+        admission_class="release",
+        lease_id=None,
+        signing_key_file=None,
+        authority_lookup=lambda _ticket_id: authority,
+    )
+
+    assert len(gate_calls) == 1
+    assert result["tickets"][0]["files_changed"] == paths
+    assert result["aggregate_files_changed"] == paths
+
+
+def test_batch_rejects_caller_changed_file_drift(tmp_path: Path) -> None:
+    root, base = _git_fixture(tmp_path)
+    relative = "packages/client/src/example.py"
+    candidate = _branch_change(root, base, "candidate", relative, "change\n")
+    authoritative_row = _approval("TK-one", candidate, [relative])
+    caller_row = _approval("TK-one", candidate, [])
+
+    with pytest.raises(ValueError, match="changed-file drift"):
+        ci_manifest.validate_batch_approvals(
+            root,
+            {
+                "schema": 1,
+                "board_id": "pursers",
+                "frozen_base": base,
+                "tickets": [caller_row],
+            },
+            base,
+            authority_lookup=lambda _ticket_id: _authority(authoritative_row),
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [

@@ -96,8 +96,14 @@ ticket with `ticket_id`, `candidate_sha`, and exact sorted `files_changed`.
 Caller-authored verdicts or principal IDs are not authority. The command reads
 each current ticket directly from Central and requires a closed strict approval
 whose latest submission binds the same exact SHA and files to distinct
-submitter and reviewer principals. A rejection, resubmission, stale/retracted
-review, inaccessible authority, or any mismatch fails closed. Then, from a clean checkout whose `HEAD` and
+submitter and reviewer principals. For a rejected ticket followed by a smaller
+correction commit, cumulative scope is reconstructed only from Central's
+authoritative submission history on the frozen-base-to-candidate lineage. Each
+lineage entry must bind one exact, single-parent tip SHA to its sorted, unique
+tip diff; their union must equal the exact frozen-base Git diff. Divergent
+rejected candidates do not expand the accepted scope. A malformed lineage,
+unrecorded changed path, rejection, stale/retracted review, inaccessible
+authority, or any mismatch fails closed. Then, from a clean checkout whose `HEAD` and
 `origin/main` both equal the frozen base:
 
 ```sh

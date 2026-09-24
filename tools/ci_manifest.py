@@ -1411,6 +1411,84 @@ def _load_batch_approvals(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _authoritative_cumulative_files(
+    root: Path,
+    *,
+    base: str,
+    candidate: str,
+    histories: Sequence[Any],
+    ticket_id: str,
+) -> list[str]:
+    """Reconstruct cumulative scope from exact, linear Central submissions."""
+    cumulative: set[str] = set()
+    lineage_count = 0
+    for index, raw_submission in enumerate(histories):
+        if not isinstance(raw_submission, Mapping):
+            raise ValueError(
+                f"{ticket_id}: authoritative submission {index} is malformed"
+            )
+        notes = raw_submission.get("notes")
+        matches = BRANCH_AND_COMMIT_RE.findall(
+            notes if isinstance(notes, str) else ""
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                f"{ticket_id}: authoritative submission {index} has no exact SHA"
+            )
+        submission_sha = resolve_exact_commit(
+            root, matches[0], f"{ticket_id} submission {index}"
+        )
+        based_on_frozen = (
+            _git(root, ["merge-base", base, submission_sha]).stdout.strip() == base
+        )
+        reaches_candidate = (
+            _git(root, ["merge-base", submission_sha, candidate]).stdout.strip()
+            == submission_sha
+        )
+        if not based_on_frozen or not reaches_candidate:
+            # A rejected divergent candidate is authoritative history, but it is not
+            # part of the exact candidate lineage being approved for this batch.
+            continue
+        lineage_count += 1
+        declared_files = raw_submission.get("files_changed")
+        if not isinstance(declared_files, list) or not all(
+            isinstance(path, str) for path in declared_files
+        ):
+            raise ValueError(
+                f"{ticket_id}: authoritative submission {index} files are malformed"
+            )
+        normalized_files = sorted(set(declared_files))
+        if declared_files != normalized_files:
+            raise ValueError(
+                f"{ticket_id}: authoritative submission {index} files are not "
+                "sorted and unique"
+            )
+        parents = _git(
+            root, ["rev-list", "--parents", "-n", "1", submission_sha]
+        ).stdout.split()
+        if len(parents) != 2:
+            raise ValueError(
+                f"{ticket_id}: authoritative submission {index} must be a "
+                "single-parent tip commit"
+            )
+        actual_tip_files = sorted(
+            {
+                path
+                for record in diff_change_records(root, parents[1], submission_sha)
+                for path in record.paths
+            }
+        )
+        if normalized_files != actual_tip_files:
+            raise ValueError(
+                f"{ticket_id}: authoritative submission {index} files drifted: "
+                f"recorded={normalized_files}, actual_tip={actual_tip_files}"
+            )
+        cumulative.update(normalized_files)
+    if lineage_count == 0:
+        raise ValueError(f"{ticket_id}: no authoritative submission lineage")
+    return sorted(cumulative)
+
+
 def validate_batch_approvals(
     root: Path,
     payload: dict[str, Any],
@@ -1505,8 +1583,18 @@ def validate_batch_approvals(
                 f"{ticket_id}: changed-file drift: claimed={files_changed}, "
                 f"actual={actual_files}"
             )
-        if ticket.get("files_changed") != actual_files:
-            raise ValueError(f"{ticket_id}: authoritative submission files drifted")
+        authoritative_files = _authoritative_cumulative_files(
+            root,
+            base=base,
+            candidate=exact_candidate,
+            histories=histories,
+            ticket_id=ticket_id,
+        )
+        if authoritative_files != actual_files:
+            raise ValueError(
+                f"{ticket_id}: authoritative cumulative submission files drifted: "
+                f"recorded={authoritative_files}, actual={actual_files}"
+            )
         validated.append(
             {
                 "ticket_id": ticket_id,
