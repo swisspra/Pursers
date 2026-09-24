@@ -1031,17 +1031,24 @@ def _diagnose_disposable_systemd_start_failure(
             else:
                 trace.append("execution_path_unproven")
         return None
-    if status.returncode == 3 and signature == (
-        "loaded",
-        "failed",
-        "failed",
-        "resources",
-        "0",
-        "0",
+    if (
+        status.returncode == 3
+        and signature[:4] == ("loaded", "failed", "failed", "resources")
+        and properties["ExecMainCode"].isdigit()
+        and properties["ExecMainStatus"].isdigit()
+        and _systemd_unit_execution_paths_are_accessible(
+            adapter, template, unit_path, properties
+        )
     ):
         return "systemd_user_service_resources_unavailable"
     if trace is not None:
-        trace.append("status_signature_unclassified")
+        safe_signature = "_".join(
+            value if re.fullmatch(r"(?:[a-z-]{1,24}|[0-9]{1,3})", value) else "other"
+            for value in signature
+        )
+        trace.append(
+            f"status_signature_unclassified_rc{status.returncode}_{safe_signature}"
+        )
     return None
 
 
@@ -1282,8 +1289,19 @@ def test_transient_probe_success_but_exact_persistent_unit_is_unavailable(
     assert calls[-1] == ["systemctl", "--user", "daemon-reload"]
 
 
-def test_exact_accessible_generated_unit_proves_203_is_environmental(
+@pytest.mark.parametrize(
+    ("result", "exec_main_code", "exec_main_status", "expected_reason"),
+    [
+        ("exit-code", "1", "203", "systemd_user_service_path_unavailable"),
+        ("resources", "1", "226", "systemd_user_service_resources_unavailable"),
+    ],
+)
+def test_exact_accessible_generated_unit_proves_host_failure_is_environmental(
     tmp_path: Path,
+    result: str,
+    exec_main_code: str,
+    exec_main_status: str,
+    expected_reason: str,
 ) -> None:
     unit_dir = tmp_path / "systemd"
     repository = tmp_path / "repository"
@@ -1308,7 +1326,8 @@ def test_exact_accessible_generated_unit_proves_203_is_environmental(
         if "show" in command:
             output = (
                 "LoadState=loaded\nActiveState=failed\nSubState=failed\n"
-                "Result=exit-code\nExecMainCode=1\nExecMainStatus=203\n"
+                f"Result={result}\nExecMainCode={exec_main_code}\n"
+                f"ExecMainStatus={exec_main_status}\n"
                 f"FragmentPath={adapter._unit_path('worker-a')}\nDropInPaths=\n"
                 f"WorkingDirectory={repository}\n"
                 f"ExecStart={{ path={effective_executable} ; "
@@ -1326,7 +1345,7 @@ def test_exact_accessible_generated_unit_proves_203_is_environmental(
             unit_dir,
             runner=runner,
         )
-        == "systemd_user_service_path_unavailable"
+        == expected_reason
     )
 
 
@@ -1378,7 +1397,15 @@ def test_generated_unit_defect_remains_a_failure(tmp_path: Path) -> None:
     assert not (unit_dir / "worker-a.service").exists()
 
 
-def test_exact_generated_execstart_defect_remains_a_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("result", "exec_main_status"),
+    [("exit-code", "203"), ("resources", "226")],
+)
+def test_exact_generated_execstart_defect_remains_a_failure(
+    tmp_path: Path,
+    result: str,
+    exec_main_status: str,
+) -> None:
     unit_dir = tmp_path / "systemd"
     repository = tmp_path / "repository"
     seat = tmp_path / "seat"
@@ -1403,7 +1430,8 @@ def test_exact_generated_execstart_defect_remains_a_failure(tmp_path: Path) -> N
         if "show" in command:
             output = (
                 "LoadState=loaded\nActiveState=failed\nSubState=failed\n"
-                "Result=exit-code\nExecMainCode=1\nExecMainStatus=203\n"
+                f"Result={result}\nExecMainCode=1\n"
+                f"ExecMainStatus={exec_main_status}\n"
                 f"FragmentPath={unit_path}\nDropInPaths=\n"
                 f"WorkingDirectory={repository}\n"
                 f"ExecStart={{ path={missing_executable} ; "
