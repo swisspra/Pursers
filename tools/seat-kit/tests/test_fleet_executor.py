@@ -858,6 +858,37 @@ class _SystemdUserEnvironmentUnavailable(RuntimeError):
     """The exact disposable unit proved a host-specific user-manager gap."""
 
 
+def _systemd_unit_execution_paths_are_accessible(
+    adapter: Any,
+    template: executor.SeatTemplate,
+    unit_path: Path,
+    properties: dict[str, str],
+) -> bool:
+    """Prove that a 200/CHDIR or 203/EXEC result is not our unit defect."""
+    try:
+        fragment = Path(properties["FragmentPath"])
+        working_directory = Path(properties["WorkingDirectory"])
+        executable = Path(template.command[0])
+        credential = adapter.credential_paths[template.credential_ref]
+        return (
+            not fragment.is_symlink()
+            and fragment.resolve(strict=True) == unit_path.resolve(strict=True)
+            and not properties["DropInPaths"]
+            and working_directory.resolve(strict=True)
+            == template.repository_root.resolve(strict=True)
+            and template.repository_root.is_dir()
+            and os.access(template.repository_root, os.R_OK | os.X_OK)
+            and executable.is_file()
+            and os.access(executable, os.X_OK)
+            and credential.is_file()
+            and not credential.is_symlink()
+            and os.access(credential, os.R_OK)
+            and adapter._execstart_matches(properties["ExecStart"], template.command)
+        )
+    except (AttributeError, KeyError, OSError, RuntimeError, TypeError, UnicodeError):
+        return False
+
+
 def _diagnose_disposable_systemd_start_failure(
     adapter: Any,
     seat_id: str,
@@ -886,6 +917,10 @@ def _diagnose_disposable_systemd_start_failure(
         "Result",
         "ExecMainCode",
         "ExecMainStatus",
+        "FragmentPath",
+        "DropInPaths",
+        "WorkingDirectory",
+        "ExecStart",
     )
     try:
         shown = runner(
@@ -916,21 +951,21 @@ def _diagnose_disposable_systemd_start_failure(
             capture_output=True,
             timeout=10,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    diagnostic_size = sum(
-        len(value.encode("utf-8"))
-        for value in (shown.stdout, shown.stderr, status.stdout, status.stderr)
-    )
-    if shown.returncode not in {0, 1} or diagnostic_size > 4096:
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
         return None
     try:
+        diagnostic_size = sum(
+            len(value.encode("utf-8"))
+            for value in (shown.stdout, shown.stderr, status.stdout, status.stderr)
+        )
+        if shown.returncode not in {0, 1} or diagnostic_size > 4096:
+            return None
         properties = executor.SystemdUserAdapter._show_properties(shown.stdout)
-    except ValueError:
+    except (AttributeError, TypeError, UnicodeError, ValueError):
         return None
     if set(properties) != set(property_names):
         return None
-    signature = tuple(properties[name] for name in property_names)
+    signature = tuple(properties[name] for name in property_names[:6])
     if status.returncode == 4 and signature == (
         "not-found",
         "inactive",
@@ -943,7 +978,9 @@ def _diagnose_disposable_systemd_start_failure(
     if status.returncode == 3 and signature in {
         ("loaded", "failed", "failed", "exit-code", "1", "200"),
         ("loaded", "failed", "failed", "exit-code", "1", "203"),
-    }:
+    } and _systemd_unit_execution_paths_are_accessible(
+        adapter, template, unit_path, properties
+    ):
         return "systemd_user_service_path_unavailable"
     if status.returncode == 3 and signature == (
         "loaded",
@@ -1150,6 +1187,10 @@ def test_transient_probe_success_but_exact_persistent_unit_is_unavailable(
             output = (
                 "LoadState=not-found\nActiveState=inactive\nSubState=dead\n"
                 "Result=success\nExecMainCode=0\nExecMainStatus=0\n"
+                f"FragmentPath={unit_dir / 'worker-a.service'}\nDropInPaths=\n"
+                f"WorkingDirectory={repository}\n"
+                "ExecStart={ path=/usr/bin/true ; argv[]=/usr/bin/true ; "
+                "ignore_errors=no ; start_time=[n/a] ; }\n"
             )
             return subprocess.CompletedProcess(command, 0, output, "")
         if "status" in command:
@@ -1183,6 +1224,52 @@ def test_transient_probe_success_but_exact_persistent_unit_is_unavailable(
 
     assert not (unit_dir / "worker-a.service").exists()
     assert calls[-1] == ["systemctl", "--user", "daemon-reload"]
+
+
+def test_exact_accessible_generated_unit_proves_203_is_environmental(
+    tmp_path: Path,
+) -> None:
+    unit_dir = tmp_path / "systemd"
+    repository = tmp_path / "repository"
+    seat = tmp_path / "seat"
+    credential = tmp_path / "worker-a.env"
+    repository.mkdir()
+    seat.mkdir()
+    credential.write_text("", encoding="utf-8")
+    template = executor.SeatTemplate.from_record(
+        "worker-standard", template_record(repository, seat)
+    )
+    adapter = executor.SystemdUserAdapter(
+        unit_dir,
+        tmp_path / "drain",
+        {"credential.worker-a": credential},
+        runner=lambda command, **_: subprocess.CompletedProcess(command, 0, "", ""),
+    )
+    adapter.instantiate("worker-a", template)
+
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        if "show" in command:
+            output = (
+                "LoadState=loaded\nActiveState=failed\nSubState=failed\n"
+                "Result=exit-code\nExecMainCode=1\nExecMainStatus=203\n"
+                f"FragmentPath={adapter._unit_path('worker-a')}\nDropInPaths=\n"
+                f"WorkingDirectory={repository}\n"
+                f"ExecStart={{ path={sys.executable} ; argv[]={sys.executable} -c "
+                '"raise SystemExit(0)" ; ignore_errors=no ; start_time=[n/a] ; }\n'
+            )
+            return subprocess.CompletedProcess(command, 0, output, "")
+        return subprocess.CompletedProcess(command, 3, "", "")
+
+    assert (
+        _diagnose_disposable_systemd_start_failure(
+            adapter,
+            "worker-a",
+            template,
+            unit_dir,
+            runner=runner,
+        )
+        == "systemd_user_service_path_unavailable"
+    )
 
 
 def test_generated_unit_defect_remains_a_failure(tmp_path: Path) -> None:
@@ -1231,6 +1318,109 @@ def test_generated_unit_defect_remains_a_failure(tmp_path: Path) -> None:
             runner=runner,
         )
     assert not (unit_dir / "worker-a.service").exists()
+
+
+def test_exact_generated_execstart_defect_remains_a_failure(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "systemd"
+    repository = tmp_path / "repository"
+    seat = tmp_path / "seat"
+    credential = tmp_path / "worker-a.env"
+    repository.mkdir()
+    seat.mkdir()
+    credential.write_text("", encoding="utf-8")
+    missing_executable = tmp_path / "missing-executable"
+    record = template_record(repository, seat)
+    record["command"] = [str(missing_executable), "--run"]
+    template = executor.SeatTemplate.from_record("worker-standard", record)
+    calls: list[list[str]] = []
+
+    class DefectiveGeneratedUnitAdapter(executor.SystemdUserAdapter):
+        def start(self, seat_id: str, template: executor.SeatTemplate) -> None:
+            raise RuntimeError("systemd_start_failed")
+
+    unit_path = unit_dir / executor.SystemdUserAdapter._unit_name("worker-a")
+
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "show" in command:
+            output = (
+                "LoadState=loaded\nActiveState=failed\nSubState=failed\n"
+                "Result=exit-code\nExecMainCode=1\nExecMainStatus=203\n"
+                f"FragmentPath={unit_path}\nDropInPaths=\n"
+                f"WorkingDirectory={repository}\n"
+                f"ExecStart={{ path={missing_executable} ; "
+                f"argv[]={missing_executable} --run ; ignore_errors=no ; "
+                "start_time=[n/a] ; }\n"
+            )
+            return subprocess.CompletedProcess(command, 0, output, "")
+        if "status" in command:
+            return subprocess.CompletedProcess(command, 3, "", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    adapter = DefectiveGeneratedUnitAdapter(
+        unit_dir,
+        tmp_path / "drain",
+        {"credential.worker-a": credential},
+        runner=runner,
+    )
+
+    with pytest.raises(RuntimeError, match="^systemd_start_failed$"):
+        _exercise_disposable_systemd_user_service(
+            adapter,
+            "worker-a",
+            template,
+            unit_dir,
+            runner=runner,
+        )
+
+    assert not adapter._unit_path("worker-a").exists()
+    assert calls[-1] == ["systemctl", "--user", "daemon-reload"]
+
+
+def test_undecodable_diagnostic_preserves_primary_error_and_cleans(tmp_path: Path) -> None:
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    calls: list[list[str]] = []
+
+    class UndecodableDiagnosticAdapter:
+        @staticmethod
+        def _unit_name(seat_id: str) -> str:
+            return f"{seat_id}.service"
+
+        @staticmethod
+        def _unit(seat_id: str, template: executor.SeatTemplate) -> str:
+            return "unit"
+
+        def instantiate(self, seat_id: str, template: executor.SeatTemplate) -> None:
+            (unit_dir / self._unit_name(seat_id)).write_text("unit", encoding="utf-8")
+
+        def start(self, seat_id: str, template: executor.SeatTemplate) -> None:
+            raise RuntimeError("systemd_start_failed")
+
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if "show" in command:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    repository = tmp_path / "repository"
+    seat = tmp_path / "seat"
+    repository.mkdir()
+    seat.mkdir()
+    template = executor.SeatTemplate.from_record(
+        "worker-standard", template_record(repository, seat)
+    )
+    with pytest.raises(RuntimeError, match="^systemd_start_failed$"):
+        _exercise_disposable_systemd_user_service(
+            UndecodableDiagnosticAdapter(),
+            "worker-a",
+            template,
+            unit_dir,
+            runner=runner,
+        )
+
+    assert not (unit_dir / "worker-a.service").exists()
+    assert calls[-1] == ["systemctl", "--user", "daemon-reload"]
 
 
 def test_disposable_systemd_success_stops_removes_and_reloads(tmp_path: Path) -> None:
