@@ -996,10 +996,13 @@ def _diagnose_disposable_systemd_start_failure(
         if trace is not None:
             trace.append("property_parse_error")
         return None
-    if set(properties) != set(property_names):
+    allowed_properties = set(property_names)
+    required_properties = allowed_properties - {"DropInPaths"}
+    if not required_properties.issubset(properties) or set(properties) - allowed_properties:
         if trace is not None:
             trace.append("property_set_mismatch")
         return None
+    properties.setdefault("DropInPaths", "")
     signature = tuple(properties[name] for name in property_names[:6])
     if status.returncode == 4 and signature == (
         "not-found",
