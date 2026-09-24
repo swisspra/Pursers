@@ -673,6 +673,9 @@ usage: board_butler.py [-h] [--url URL] --token-path TOKEN_PATH [--home-board HO
                        --repo REPO [--integration-ref INTEGRATION_REF] --pid-file PID_FILE --cursor-file CURSOR_FILE
                        [--runtime-status-file RUNTIME_STATUS_FILE] [--local-kill-file LOCAL_KILL_FILE]
                        [--runtime-mode {shadow,active}] [--active-authorization-file ACTIVE_AUTHORIZATION_FILE]
+                       [--fleet-observation-file FLEET_OBSERVATION_FILE] [--fleet-state-file FLEET_STATE_FILE]
+                       [--fleet-executor-socket FLEET_EXECUTOR_SOCKET] [--fleet-executor-key-id FLEET_EXECUTOR_KEY_ID]
+                       [--fleet-executor-private-key FLEET_EXECUTOR_PRIVATE_KEY]
                        [--provider-secrets-dir PROVIDER_SECRETS_DIR] [--drafts-per-hour DRAFTS_PER_HOUR]
                        [--drafts-per-ticket DRAFTS_PER_TICKET] [--drafts-per-board DRAFTS_PER_BOARD]
                        [--project PROJECT] [--wait-timeout WAIT_TIMEOUT] [--refresh-seconds REFRESH_SECONDS]
@@ -704,6 +707,11 @@ options:
   --runtime-mode {shadow,active}
                         local service mode; active additionally requires an authorization file
   --active-authorization-file ACTIVE_AUTHORIZATION_FILE
+  --fleet-observation-file FLEET_OBSERVATION_FILE
+  --fleet-state-file FLEET_STATE_FILE
+  --fleet-executor-socket FLEET_EXECUTOR_SOCKET
+  --fleet-executor-key-id FLEET_EXECUTOR_KEY_ID
+  --fleet-executor-private-key FLEET_EXECUTOR_PRIVATE_KEY
   --provider-secrets-dir PROVIDER_SECRETS_DIR
   --drafts-per-hour DRAFTS_PER_HOUR
   --drafts-per-ticket DRAFTS_PER_TICKET
