@@ -141,6 +141,34 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
                 central.PROJECT_COORDINATORS_STATE_KEY,
                 {"butler-real-join": [butler_agent_id]},
             ),
+            (
+                butler.CONFIG_KEY,
+                {
+                    "board_butler": {
+                        "schema_version": 1,
+                        "boards": {
+                            "butler-real-join": {
+                                "mode": "active",
+                                "answering_mode": "autonomous",
+                                "kill_switch": False,
+                                "answer_scope": {"ticket_status": "auto"},
+                                "required_evidence_kinds": ["ticket_status"],
+                                "hold_before_post_s": 0,
+                                "active_windows": [
+                                    {
+                                        "days": [
+                                            "mon", "tue", "wed", "thu", "fri", "sat", "sun"
+                                        ],
+                                        "start": "00:00",
+                                        "end": "23:59",
+                                        "timezone": "UTC",
+                                    }
+                                ],
+                            }
+                        },
+                    }
+                },
+            ),
         ):
             updated = await mcp.call_tool(
                 "board_state_update",
@@ -202,7 +230,29 @@ async def _seed_board(data_root: Path, port: int, principal_id: str) -> None:
                         "rebound_at": None,
                         "answer": None,
                         "answered_at": None,
-                    }
+                    },
+                    {
+                        "question_id": "CQ-answer",
+                        "project": "butler-real-join",
+                        "asker_role": "worker",
+                        "message_id": "MSG-answer",
+                        "in_reply_to": None,
+                        "message": "What is the status of TK-observed?",
+                        "kind": "information",
+                        "state": "open",
+                        "asked_by": {
+                            "agent_id": "AI-worker",
+                            "agent_name": "worker",
+                            "principal_id": "PR-worker",
+                        },
+                        "asked_at": asked_at.isoformat(),
+                        "accepted_by": None,
+                        "accepted_at": None,
+                        "binding": None,
+                        "rebound_at": None,
+                        "answer": None,
+                        "answered_at": None,
+                    },
                 ],
                 "dispatch_history": [],
             }
@@ -341,8 +391,8 @@ def test_butler_reaches_first_working_state_against_real_central(
                 if row.get("observer") == "stale_open_question"
             ]
             assert context.questions_complete is True
-            assert stale[0]["question_id"] == "CQ-observed"
-            assert stale[0]["annotation_id"] == "AN-observed"
+            observed = next(row for row in stale if row["question_id"] == "CQ-observed")
+            assert observed["annotation_id"] == "AN-observed"
             await backend._write_observation_findings(
                 "butler-real-join", observations, context.now
             )
@@ -353,7 +403,56 @@ def test_butler_reaches_first_working_state_against_real_central(
                 for row in state["findings"]
                 if row.get("kind") == butler.OBSERVATION_FINDING_KIND
             ]
-            assert written[0]["observation_key"] == stale[0]["observation_key"]
+            assert any(
+                row["observation_key"] == observed["observation_key"] for row in written
+            )
+
+            options.dry_run = False
+            options.runtime_mode = "active"
+            options.act_on_board = ["butler-real-join"]
+            options.project = "butler-real-join"
+            options.integration_ref = "origin/main"
+            options.drafts_per_hour = 5
+            options.drafts_per_ticket = 2
+            options.drafts_per_board = 20
+            options.provider_secrets_dir = None
+            pending = await backend.pending_questions()
+            answerable = next(row for row in pending if row["question_id"] == "CQ-answer")
+            result = await butler.process_question(
+                backend, answerable, options, butler.utc_now()
+            )
+            immediate_evaluation = await backend.evaluation("CQ-answer")
+            immediate_audit = json.loads(immediate_evaluation["state"]["value"])[
+                "evaluation"
+            ]["answer_audit"]
+            assert result["auto_eligible"] is True, result
+            assert result["hold"]["release_at"] == result["hold"]["drafted_at"], result[
+                "hold"
+            ]
+            assert immediate_audit["status"] == "answered", immediate_audit
+            assert result.get("answer_status") == "answered", immediate_audit
+            answered = await backend.client.board_question_inbox(
+                state="answered", ticket_id="TK-observed", limit=10
+            )
+            row = next(
+                item for item in answered["questions"] if item["question_id"] == "CQ-answer"
+            )
+            assert row["answer"] == "TK-observed is open."
+            assert row["answered_by"]["agent_id"] == backend.identity.agent_id
+            await butler.process_question(backend, row, options, butler.utc_now())
+            answered_again = await backend.client.board_question_inbox(
+                state="answered", ticket_id="TK-observed", limit=10
+            )
+            assert sum(
+                item["question_id"] == "CQ-answer"
+                for item in answered_again["questions"]
+            ) == 1
+            evaluation = await backend.evaluation("CQ-answer")
+            audit = json.loads(evaluation["state"]["value"])["evaluation"][
+                "answer_audit"
+            ]
+            assert audit["status"] == "answered"
+            assert audit["event_id"].startswith("EV-")
 
     with _central_process(data_root, port, environment) as url:
         asyncio.run(connect(url))

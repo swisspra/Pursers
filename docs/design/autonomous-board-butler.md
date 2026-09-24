@@ -272,6 +272,14 @@ Central scopes and separation of duties remain in force.
 
 ## Question answering and model execution
 
+The resident resolves a per-board `answering_mode` of `off`, `assist`, or
+`autonomous`. Omitted legacy configuration resolves to `assist`, so migration
+cannot silently acquire answer authority. `autonomous` additionally requires
+the existing active runtime authorization, an allowed answer class and evidence
+kind, an active window, available rate limits, no kill/demotion state, and an
+elapsed durable hold. The `pursers` showcase selects `autonomous` explicitly;
+other boards inherit no such authority.
+
 Question answering is opt-in by question kind. Only `information` questions
 covered by a deterministic rule and complete cited evidence can be answered.
 Decision, deliverable, approval, waiver, scope, version, release, merge,
@@ -306,6 +314,17 @@ Provider selection is per board. Provider credentials are resolved in the
 adapter process from private references and are absent from task packets,
 logs, state, audit details, and model output. Switching provider does not alter
 policy, authority, or replay identity.
+
+Before delivery the resident persists a per-question answer audit containing
+only the public coordinator identity, deterministic authority digest, answer
+digest, bounded answer/evidence, hold, status, attempts, reason code, and public
+Central event IDs. It accepts and answers through `BoardClient`, which computes
+the authenticated host binding internally. The binding, bearer token, provider
+key, and private paths never enter the model packet or durable audit. On restart
+the bounded refresh replays open or accepted questions, rereads product evidence
+and policy, and relies on Central's idempotent answered state to avoid duplicate
+delivery. Repeated vetoes or bounded delivery failures automatically fall back
+from `autonomous` to `assist`.
 
 ## MCP v2 connector contract
 
