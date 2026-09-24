@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import subprocess
 import stat
 import sys
@@ -1570,6 +1571,9 @@ def test_real_disposable_systemd_user_service_when_available(tmp_path: Path) -> 
     repository.mkdir()
     seat.mkdir()
     record = template_record(repository, seat)
+    sleep_executable = shutil.which("sleep")
+    assert sleep_executable is not None
+    record["command"] = [str(Path(sleep_executable).resolve(strict=True)), "30"]
     (tmp_path / "empty.env").write_text("", encoding="utf-8")
     template = executor.SeatTemplate.from_record("worker-standard", record)
     unit_dir = Path.home() / ".config/systemd/user"
