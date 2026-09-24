@@ -388,6 +388,113 @@ def test_full_gate_requires_lease_and_orders_priority(tmp_path: Path) -> None:
     ]
 
 
+def _lease_authority(
+    ticket_id: str = "TK-live",
+    *,
+    admission_class: str = "active-worker",
+    expires_at_epoch: float | None = None,
+    status: str | None = None,
+) -> dict[str, object]:
+    reviewer = admission_class in {"critical-reviewer", "active-reviewer"}
+    identity = {
+        "agent_id": "AI-reviewer" if reviewer else "AI-worker",
+        "agent_name": "reviewer" if reviewer else "worker",
+        "principal_id": "PR-reviewer" if reviewer else "PR-worker",
+        "role": "reviewer" if reviewer else "worker",
+    }
+    expiry = time.time() + 300 if expires_at_epoch is None else expires_at_epoch
+    ticket: dict[str, object] = {
+        "ticket_id": ticket_id,
+        "status": status or ("submitted" if reviewer else "claimed"),
+    }
+    if reviewer:
+        ticket["review_lease"] = {
+            "reviewer_agent_id": identity["agent_id"],
+            "reviewer_principal_id": identity["principal_id"],
+            "expires_at_epoch": expiry,
+        }
+    else:
+        ticket.update(
+            {
+                "claimed_by_agent_id": identity["agent_id"],
+                "claimed_by_principal_id": identity["principal_id"],
+                "lease_expires_at_epoch": expiry,
+            }
+        )
+    return {
+        "source": "live-central-ticket-get-v1",
+        "board_id": "pursers",
+        "identity": identity,
+        "ticket": ticket,
+    }
+
+
+def test_full_gate_rejects_unverified_forged_and_expired_leases(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="live Central lease verification"):
+        with ci_manifest.full_gate_admission(
+            "active-worker", "TK-forged", state_dir=tmp_path
+        ):
+            pass
+
+    forged = _lease_authority("TK-other")
+    with pytest.raises(RuntimeError, match="wrong ticket"):
+        with ci_manifest.full_gate_admission(
+            "active-worker",
+            "TK-forged",
+            state_dir=tmp_path,
+            authority_lookup=lambda _ticket_id: forged,
+        ):
+            pass
+
+    expired = _lease_authority("TK-expired", expires_at_epoch=time.time() - 1)
+    with pytest.raises(RuntimeError, match="expired, released, or malformed"):
+        with ci_manifest.full_gate_admission(
+            "active-worker",
+            "TK-expired",
+            state_dir=tmp_path,
+            authority_lookup=lambda _ticket_id: expired,
+        ):
+            pass
+
+    released = _lease_authority("TK-released", status="open")
+    with pytest.raises(RuntimeError, match="no active board-issued work lease"):
+        with ci_manifest.full_gate_admission(
+            "active-worker",
+            "TK-released",
+            state_dir=tmp_path,
+            authority_lookup=lambda _ticket_id: released,
+        ):
+            pass
+
+    wrong_class = _lease_authority("TK-review", admission_class="active-reviewer")
+    with pytest.raises(RuntimeError, match="authenticated worker authority identity"):
+        with ci_manifest.full_gate_admission(
+            "active-worker",
+            "TK-review",
+            state_dir=tmp_path,
+            authority_lookup=lambda _ticket_id: wrong_class,
+        ):
+            pass
+
+
+def test_full_gate_rechecks_live_lease_after_slot_acquisition(tmp_path: Path) -> None:
+    calls = 0
+
+    def lookup(_ticket_id: str) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return _lease_authority("TK-live")
+
+    with ci_manifest.full_gate_admission(
+        "active-worker",
+        "TK-live",
+        state_dir=tmp_path,
+        authority_lookup=lookup,
+    ):
+        pass
+    assert calls == 2
+
+
 def _approval(ticket_id: str, candidate: str, files: list[str]) -> dict[str, object]:
     return {
         "ticket_id": ticket_id,
@@ -400,6 +507,61 @@ def _approval(ticket_id: str, candidate: str, files: list[str]) -> dict[str, obj
             "submitter_principal_id": "PR-worker",
         },
     }
+
+
+def _authority(
+    row: dict[str, object],
+    *,
+    reviewer: str = "PR-reviewer",
+    submitter: str = "PR-worker",
+    verdict: str = "approve",
+    status: str = "closed",
+) -> dict[str, object]:
+    ticket_id = str(row["ticket_id"])
+    candidate = str(row["candidate_sha"])
+    files = list(row["files_changed"])  # type: ignore[arg-type]
+    review_label = "independent-principal-review"
+    return {
+        "source": "live-central-ticket-get-v1",
+        "board_id": "pursers",
+        "latest_seq": 42,
+        "identity": {
+            "agent_id": "AI-coordinator",
+            "agent_name": "coordinator",
+            "principal_id": "PR-coordinator",
+            "role": "coordinator",
+        },
+        "ticket": {
+            "ticket_id": ticket_id,
+            "status": status,
+            "files_changed": files,
+            "submitted_by_principal_id": submitter,
+            "reviewed_by_principal_id": reviewer,
+            "reviewed_at": "2026-09-24T00:00:00+00:00",
+            "review_verdict": verdict,
+            "review_label": review_label,
+            "submission_history": [
+                {
+                    "files_changed": files,
+                    "notes": f"branch_and_commit: codex/{ticket_id}@{candidate}",
+                }
+            ],
+            "review_history": [
+                {
+                    "verdict": verdict,
+                    "status_to": status,
+                    "review_label": review_label,
+                    "reviewed_by_principal_id": reviewer,
+                    "submitted_by_principal_id": submitter,
+                }
+            ],
+        },
+    }
+
+
+def _authority_lookup(*rows: dict[str, object]):
+    states = {str(row["ticket_id"]): _authority(row) for row in rows}
+    return states.__getitem__
 
 
 def _branch_change(root: Path, base: str, branch: str, relative: str, text: str) -> str:
@@ -417,13 +579,64 @@ def test_batch_rejects_review_sha_mismatch(tmp_path: Path) -> None:
         root, base, "candidate", "packages/client/src/example.py", "change\n"
     )
     row = _approval("TK-one", candidate, ["packages/client/src/example.py"])
-    row["review"]["candidate_sha"] = base  # type: ignore[index]
+    authority = _authority(row)
+    authority["ticket"]["submission_history"][0]["notes"] = (  # type: ignore[index]
+        f"branch_and_commit: codex/TK-one@{base}"
+    )
 
     with pytest.raises(ValueError, match="review/SHA mismatch"):
         ci_manifest.validate_batch_approvals(
             root,
-            {"schema": 1, "frozen_base": base, "tickets": [row]},
+            {
+                "schema": 1,
+                "board_id": "pursers",
+                "frozen_base": base,
+                "tickets": [row],
+            },
             base,
+            authority_lookup=lambda _ticket_id: authority,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("no_authority", "requires live Central review verification"),
+        ("self_review", "not independent"),
+        ("rejected", "no current strict approved review"),
+        ("retracted", "stale or retracted"),
+    ],
+)
+def test_batch_rejects_fabricated_or_stale_review_authority(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    root, base = _git_fixture(tmp_path)
+    candidate = _branch_change(
+        root, base, "candidate", "packages/client/src/example.py", "change\n"
+    )
+    row = _approval("TK-one", candidate, ["packages/client/src/example.py"])
+    payload = {
+        "schema": 1,
+        "board_id": "pursers",
+        "frozen_base": base,
+        "tickets": [row],
+    }
+    lookup = None
+    if mutation != "no_authority":
+        state = _authority(
+            row,
+            reviewer="PR-same" if mutation == "self_review" else "PR-reviewer",
+            submitter="PR-same" if mutation == "self_review" else "PR-worker",
+            verdict="reject" if mutation == "rejected" else "approve",
+            status="open" if mutation == "rejected" else "closed",
+        )
+        if mutation == "retracted":
+            state["ticket"]["review_history"][-1]["status_to"] = "open"  # type: ignore[index]
+        lookup = lambda _ticket_id: state
+
+    with pytest.raises((RuntimeError, ValueError), match=message):
+        ci_manifest.validate_batch_approvals(
+            root, payload, base, authority_lookup=lookup
         )
 
 
@@ -453,6 +666,7 @@ def test_approved_batch_constructs_candidate_and_runs_full_gate_once(
         json.dumps(
             {
                 "schema": 1,
+                "board_id": "pursers",
                 "frozen_base": base,
                 "tickets": [
                     _approval("TK-first", first, [first_path]),
@@ -484,6 +698,10 @@ def test_approved_batch_constructs_candidate_and_runs_full_gate_once(
         admission_class="release",
         lease_id=None,
         signing_key_file=None,
+        authority_lookup=_authority_lookup(
+            _approval("TK-first", first, [first_path]),
+            _approval("TK-second", second, [second_path]),
+        ),
     )
 
     assert len(calls) == 1
@@ -506,6 +724,7 @@ def test_approved_batch_rejects_conflicting_branches_before_gate(
         json.dumps(
             {
                 "schema": 1,
+                "board_id": "pursers",
                 "frozen_base": base,
                 "tickets": [
                     _approval("TK-first", first, [relative]),
@@ -535,6 +754,10 @@ def test_approved_batch_rejects_conflicting_branches_before_gate(
             admission_class="release",
             lease_id=None,
             signing_key_file=None,
+            authority_lookup=_authority_lookup(
+                _approval("TK-first", first, [relative]),
+                _approval("TK-second", second, [relative]),
+            ),
         )
 
 
@@ -550,6 +773,7 @@ def test_approved_batch_rejects_generated_drift_before_gate(
         json.dumps(
             {
                 "schema": 1,
+                "board_id": "pursers",
                 "frozen_base": base,
                 "tickets": [_approval("TK-one", candidate, [relative])],
             }
@@ -580,6 +804,9 @@ def test_approved_batch_rejects_generated_drift_before_gate(
             admission_class="release",
             lease_id=None,
             signing_key_file=None,
+            authority_lookup=_authority_lookup(
+                _approval("TK-one", candidate, [relative])
+            ),
         )
 
 

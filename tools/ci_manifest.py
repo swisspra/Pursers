@@ -12,6 +12,7 @@ state and process providers rather than depend on operator-machine access.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import concurrent.futures
 import contextlib
 import fcntl
@@ -22,13 +23,14 @@ import os
 import re
 import secrets
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Sequence, TextIO
+from typing import Any, Callable, Iterator, Mapping, Sequence, TextIO
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,21 @@ class FullGateAdmissionTiming:
     budget: int
     queue_wait_s: float
     execution_s: float | None = None
+
+
+@dataclass(frozen=True)
+class BoardAuthorityConfig:
+    """Authenticated Central connection used for live authority checks."""
+
+    url: str
+    token_file: Path
+    board_id: str
+    agent_name: str
+    role: str
+    ca_file: Path | None = None
+    python: Path | None = None
+    expected_agent_id: str | None = None
+    expected_principal_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -214,6 +231,20 @@ FULL_GATE_BUDGET_ENV = "PURSERS_FULL_GATE_CONCURRENCY"
 FULL_GATE_STATE_DIR_ENV = "PURSERS_FULL_GATE_STATE_DIR"
 FULL_GATE_CLASS_ENV = "PURSERS_FULL_GATE_CLASS"
 FULL_GATE_LEASE_ENV = "PURSERS_TICKET_LEASE_ID"
+AUTHORITY_URL_ENV = "ONBOARD_CENTRAL_URL"
+AUTHORITY_TOKEN_FILE_ENV = "ONBOARD_CENTRAL_TOKEN_FILE"
+AUTHORITY_BOARD_ENV = "ONBOARD_BOARD_ID"
+AUTHORITY_AGENT_ENV = "ONBOARD_AGENT_NAME"
+AUTHORITY_ROLE_ENV = "PURSERS_ROLE"
+AUTHORITY_CA_FILE_ENV = "SSL_CERT_FILE"
+AUTHORITY_PYTHON_ENV = "PURSERS_CENTRAL_AUTHORITY_PYTHON"
+AUTHORITY_EXPECTED_AGENT_ENV = "PURSERS_EXPECTED_AGENT_ID"
+AUTHORITY_EXPECTED_PRINCIPAL_ENV = "PURSERS_EXPECTED_PRINCIPAL_ID"
+BRANCH_AND_COMMIT_RE = re.compile(
+    r"(?im)^\s*branch_and_commit:\s*"
+    r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+"
+    r"\s*@\s*([0-9a-f]{40})\s*$"
+)
 FULL_GATE_PRIORITIES = {
     "critical-reviewer": 40,
     "active-reviewer": 30,
@@ -792,11 +823,214 @@ def _queue_order(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _authority_config_from_args(args: argparse.Namespace) -> BoardAuthorityConfig:
+    values = {
+        "url": getattr(args, "authority_url", None),
+        "token_file": getattr(args, "authority_token_file", None),
+        "board_id": getattr(args, "authority_board", None),
+        "agent_name": getattr(args, "authority_agent", None),
+        "role": getattr(args, "authority_role", None),
+        "expected_agent_id": getattr(args, "authority_expected_agent_id", None),
+        "expected_principal_id": getattr(
+            args, "authority_expected_principal_id", None
+        ),
+    }
+    missing = [name for name, value in values.items() if not value]
+    if missing:
+        raise RuntimeError(
+            "live Central authority configuration is required: missing "
+            + ", ".join(missing)
+        )
+    return BoardAuthorityConfig(
+        url=str(values["url"]),
+        token_file=Path(values["token_file"]),
+        board_id=str(values["board_id"]),
+        agent_name=str(values["agent_name"]),
+        role=str(values["role"]),
+        ca_file=(
+            Path(args.authority_ca_file) if getattr(args, "authority_ca_file", None) else None
+        ),
+        python=(
+            Path(args.authority_python) if getattr(args, "authority_python", None) else None
+        ),
+        expected_agent_id=str(values["expected_agent_id"]),
+        expected_principal_id=str(values["expected_principal_id"]),
+    )
+
+
+def _live_authority_lookup(
+    config: BoardAuthorityConfig,
+) -> Callable[[str], dict[str, Any]]:
+    """Return a lookup backed by authenticated, current Central state."""
+    if config.role not in {"worker", "reviewer", "coordinator", "orchestrator"}:
+        raise ValueError("authority role is invalid")
+    if not config.token_file.is_file() or not config.token_file.read_text(
+        encoding="utf-8"
+    ).strip():
+        raise RuntimeError("Central authority token file is empty")
+
+    def lookup(ticket_id: str) -> dict[str, Any]:
+        python = config.python or Path(sys.executable)
+        command = [
+            str(python),
+            str(Path(__file__).resolve()),
+            "_authority-read",
+            "--authority-url",
+            config.url,
+            "--authority-token-file",
+            str(config.token_file),
+            "--authority-board",
+            config.board_id,
+            "--authority-agent",
+            config.agent_name,
+            "--authority-role",
+            config.role,
+            "--authority-expected-agent-id",
+            str(config.expected_agent_id),
+            "--authority-expected-principal-id",
+            str(config.expected_principal_id),
+            "--ticket-id",
+            ticket_id,
+        ]
+        if config.ca_file is not None:
+            command.extend(["--authority-ca-file", str(config.ca_file)])
+        completed = subprocess.run(
+            command, check=False, capture_output=True, text=True, timeout=60
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or "authority helper failed"
+            raise RuntimeError(
+                f"live Central authority verification failed for {ticket_id}: {detail}"
+            )
+        try:
+            state = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Central authority helper returned invalid JSON") from exc
+        if not isinstance(state, dict) or len(completed.stdout.encode()) > MAX_EVIDENCE_BYTES:
+            raise RuntimeError("Central authority helper returned an invalid response")
+        identity = state.get("identity")
+        if not isinstance(identity, Mapping):
+            raise RuntimeError("Central authority helper omitted authenticated identity")
+        if identity.get("agent_id") != config.expected_agent_id:
+            raise RuntimeError("Central authority authenticated the wrong agent")
+        if identity.get("principal_id") != config.expected_principal_id:
+            raise RuntimeError("Central authority authenticated the wrong principal")
+        return state
+
+    return lookup
+
+
+async def _fetch_live_authority(
+    config: BoardAuthorityConfig, ticket_id: str
+) -> dict[str, Any]:
+    client_src = repository_root() / "packages" / "client" / "src"
+    if str(client_src) not in sys.path:
+        sys.path.insert(0, str(client_src))
+    try:
+        import httpx2
+        from pursers_client import BoardClient
+    except ImportError as exc:
+        raise RuntimeError("Central authority client dependencies are unavailable") from exc
+    token = config.token_file.read_text(encoding="utf-8").strip()
+    verify: ssl.SSLContext | bool = True
+    if config.ca_file is not None:
+        verify = ssl.create_default_context(cafile=str(config.ca_file))
+    capabilities = {
+        "can_work": config.role == "worker",
+        "can_review": config.role == "reviewer",
+        "tier_max": 2,
+        "max_parallel": 1,
+    }
+    async with httpx2.AsyncClient(
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=httpx2.Timeout(30.0, read=30.0),
+        verify=verify,
+        trust_env=False,
+    ) as transport:
+        client = BoardClient(
+            config.url,
+            token,
+            config.board_id,
+            agent_name=config.agent_name,
+            role=config.role,
+            capabilities=capabilities,
+            allow_takeover=True,
+            allow_matching_takeover=True,
+            http_client=transport,
+        )
+        async with client:
+            response = await client.ticket_get(
+                ticket_id, view="full", include_dispatch_history=True
+            )
+            status = await client.board_status()
+            identity = client.identity
+            if identity is None:
+                raise RuntimeError("Central did not establish an authenticated identity")
+            ticket = response.get("ticket")
+            if not isinstance(ticket, dict):
+                raise RuntimeError(f"Central returned no ticket for {ticket_id}")
+            return {
+                "source": "live-central-ticket-get-v1",
+                "board_id": identity.board_id,
+                "identity": {
+                    "agent_id": identity.agent_id,
+                    "agent_name": identity.agent_name,
+                    "principal_id": identity.principal_id,
+                    "role": identity.role,
+                },
+                "latest_seq": status.get("latest_seq"),
+                "observed_at_epoch": time.time(),
+                "ticket": ticket,
+            }
+
+
+def _require_authoritative_active_lease(
+    state: Mapping[str, Any], ticket_id: str, admission_class: str
+) -> None:
+    if state.get("source") != "live-central-ticket-get-v1":
+        raise RuntimeError("ticket lease authority is not a live Central observation")
+    ticket = state.get("ticket")
+    identity = state.get("identity")
+    if not isinstance(ticket, Mapping) or not isinstance(identity, Mapping):
+        raise RuntimeError("ticket lease authority response is malformed")
+    if ticket.get("ticket_id") != ticket_id:
+        raise RuntimeError("ticket lease authority returned the wrong ticket")
+    reviewer_class = admission_class in {"critical-reviewer", "active-reviewer"}
+    expected_role = "reviewer" if reviewer_class else "worker"
+    if identity.get("role") != expected_role:
+        raise RuntimeError(
+            f"{admission_class} requires an authenticated {expected_role} authority identity"
+        )
+    if reviewer_class:
+        lease = ticket.get("review_lease")
+        if ticket.get("status") != "submitted" or not isinstance(lease, Mapping):
+            raise RuntimeError("review ticket has no active board-issued review lease")
+        agent_key, principal_key = "reviewer_agent_id", "reviewer_principal_id"
+        expiry = lease.get("expires_at_epoch")
+    else:
+        lease = ticket
+        if ticket.get("status") not in {"claimed", "in_progress"}:
+            raise RuntimeError("work ticket has no active board-issued work lease")
+        agent_key, principal_key = "claimed_by_agent_id", "claimed_by_principal_id"
+        expiry = ticket.get("lease_expires_at_epoch")
+    if lease.get(agent_key) != identity.get("agent_id"):
+        raise RuntimeError("ticket lease belongs to a different authenticated agent")
+    if lease.get(principal_key) != identity.get("principal_id"):
+        raise RuntimeError("ticket lease belongs to a different authenticated principal")
+    try:
+        live = float(expiry) > time.time()
+    except (TypeError, ValueError):
+        live = False
+    if not live:
+        raise RuntimeError("ticket lease is expired, released, or malformed")
+
+
 @contextlib.contextmanager
 def full_gate_admission(
     admission_class: str,
     lease_id: str | None,
     *,
+    authority_lookup: Callable[[str], dict[str, Any]] | None = None,
     budget: int | None = None,
     state_dir: Path | None = None,
     poll_interval_s: float = 0.1,
@@ -804,10 +1038,19 @@ def full_gate_admission(
     """Admit one host-wide full gate using a priority-ordered file queue."""
     if admission_class not in FULL_GATE_PRIORITIES:
         raise ValueError(f"unknown full-gate admission class: {admission_class}")
-    if admission_class in LEASE_REQUIRED_CLASSES and not (lease_id or "").strip():
-        raise RuntimeError(
-            f"{admission_class} full gate requires an active ticket lease; "
-            f"set {FULL_GATE_LEASE_ENV} or pass --ticket-lease"
+    if admission_class in LEASE_REQUIRED_CLASSES:
+        ticket_id = (lease_id or "").strip()
+        if not ticket_id:
+            raise RuntimeError(
+                f"{admission_class} full gate requires an active ticket lease; "
+                f"set {FULL_GATE_LEASE_ENV} or pass --ticket-lease"
+            )
+        if authority_lookup is None:
+            raise RuntimeError(
+                f"{admission_class} full gate requires live Central lease verification"
+            )
+        _require_authoritative_active_lease(
+            authority_lookup(ticket_id), ticket_id, admission_class
         )
     configured_budget = (
         int(os.environ.get(FULL_GATE_BUDGET_ENV, "1")) if budget is None else budget
@@ -891,6 +1134,11 @@ def full_gate_admission(
             if slot_handle is None:
                 time.sleep(poll_interval_s)
 
+        if admission_class in LEASE_REQUIRED_CLASSES:
+            # Queueing can outlive a lease. Re-read Central after acquiring the slot.
+            _require_authoritative_active_lease(
+                authority_lookup(ticket_id), ticket_id, admission_class
+            )
         timing = FullGateAdmissionTiming(
             admission_class=admission_class,
             budget=configured_budget,
@@ -911,8 +1159,11 @@ def run_full_gate(
     jobs: int | None,
     admission_class: str,
     lease_id: str | None,
+    authority_lookup: Callable[[str], dict[str, Any]] | None = None,
 ) -> FullGateAdmissionTiming:
-    with full_gate_admission(admission_class, lease_id) as admission:
+    with full_gate_admission(
+        admission_class, lease_id, authority_lookup=authority_lookup
+    ) as admission:
         started = time.monotonic()
         run_suites(root, jobs=jobs)
         elapsed = time.monotonic() - started
@@ -1097,6 +1348,7 @@ def run_affected(
     jobs: int | None,
     admission_class: str,
     lease_id: str | None,
+    authority_lookup: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     head = _git(root, ["rev-parse", "--verify", "HEAD^{commit}"]).stdout.strip()
     if head != selection.candidate:
@@ -1116,6 +1368,7 @@ def run_affected(
             jobs=jobs,
             admission_class=admission_class,
             lease_id=lease_id,
+            authority_lookup=authority_lookup,
         )
     else:
         run_suites(root, suites=selected, jobs=jobs)
@@ -1147,7 +1400,10 @@ def validate_batch_approvals(
     root: Path,
     payload: dict[str, Any],
     base: str,
+    authority_lookup: Callable[[str], dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], ...]:
+    if authority_lookup is None:
+        raise RuntimeError("approved-batch requires live Central review verification")
     if payload.get("frozen_base") != base:
         raise ValueError(
             "stale base: approvals frozen_base does not match requested exact base"
@@ -1159,7 +1415,6 @@ def validate_batch_approvals(
             raise ValueError("approval rows must be objects")
         ticket_id = raw.get("ticket_id")
         candidate = raw.get("candidate_sha")
-        review = raw.get("review")
         files_changed = raw.get("files_changed")
         if not isinstance(ticket_id, str) or not ticket_id.startswith("TK-"):
             raise ValueError("approval row has invalid ticket_id")
@@ -1169,18 +1424,51 @@ def validate_batch_approvals(
         if not isinstance(candidate, str):
             raise ValueError(f"{ticket_id}: missing candidate_sha")
         exact_candidate = resolve_exact_commit(root, candidate, f"{ticket_id} candidate")
-        if not isinstance(review, dict) or review.get("status") != "approved":
-            raise ValueError(f"{ticket_id}: missing approved review")
-        reviewer = review.get("reviewer_principal_id")
-        submitter = review.get("submitter_principal_id")
+        authority = authority_lookup(ticket_id)
+        if authority.get("source") != "live-central-ticket-get-v1":
+            raise ValueError(f"{ticket_id}: review authority is not live Central")
+        if authority.get("board_id") != payload.get("board_id"):
+            raise ValueError(f"{ticket_id}: review authority board mismatch")
+        ticket = authority.get("ticket")
+        if not isinstance(ticket, Mapping) or ticket.get("ticket_id") != ticket_id:
+            raise ValueError(f"{ticket_id}: review authority returned the wrong ticket")
+        if (
+            ticket.get("status") != "closed"
+            or ticket.get("review_verdict") != "approve"
+            or ticket.get("review_label") != "independent-principal-review"
+        ):
+            raise ValueError(f"{ticket_id}: no current strict approved review")
+        reviewer = ticket.get("reviewed_by_principal_id")
+        submitter = ticket.get("submitted_by_principal_id")
         if not isinstance(reviewer, str) or not reviewer.startswith("PR-"):
-            raise ValueError(f"{ticket_id}: missing review identity")
+            raise ValueError(f"{ticket_id}: missing authoritative review identity")
         if not isinstance(submitter, str) or not submitter.startswith("PR-"):
-            raise ValueError(f"{ticket_id}: missing submitter identity")
+            raise ValueError(f"{ticket_id}: missing authoritative submitter identity")
         if reviewer == submitter:
-            raise ValueError(f"{ticket_id}: review is not independent")
-        if review.get("candidate_sha") != exact_candidate:
-            raise ValueError(f"{ticket_id}: review/SHA mismatch")
+            raise ValueError(f"{ticket_id}: authoritative review is not independent")
+        histories = ticket.get("submission_history")
+        if not isinstance(histories, list) or not histories:
+            raise ValueError(f"{ticket_id}: authoritative submission is missing")
+        submission = histories[-1]
+        if not isinstance(submission, Mapping):
+            raise ValueError(f"{ticket_id}: authoritative submission is malformed")
+        notes = submission.get("notes")
+        matches = BRANCH_AND_COMMIT_RE.findall(notes if isinstance(notes, str) else "")
+        if len(matches) != 1 or matches[0] != exact_candidate:
+            raise ValueError(f"{ticket_id}: authoritative review/SHA mismatch")
+        reviews = ticket.get("review_history")
+        if not isinstance(reviews, list) or not reviews:
+            raise ValueError(f"{ticket_id}: authoritative review history is missing")
+        review = reviews[-1]
+        if (
+            not isinstance(review, Mapping)
+            or review.get("verdict") != "approve"
+            or review.get("status_to") != "closed"
+            or review.get("review_label") != "independent-principal-review"
+            or review.get("reviewed_by_principal_id") != reviewer
+            or review.get("submitted_by_principal_id") != submitter
+        ):
+            raise ValueError(f"{ticket_id}: authoritative review is stale or retracted")
         merge_base = _git(root, ["merge-base", base, exact_candidate]).stdout.strip()
         if merge_base != base:
             raise ValueError(
@@ -1202,6 +1490,8 @@ def validate_batch_approvals(
                 f"{ticket_id}: changed-file drift: claimed={files_changed}, "
                 f"actual={actual_files}"
             )
+        if ticket.get("files_changed") != actual_files:
+            raise ValueError(f"{ticket_id}: authoritative submission files drifted")
         validated.append(
             {
                 "ticket_id": ticket_id,
@@ -1212,6 +1502,9 @@ def validate_batch_approvals(
                     "candidate_sha": exact_candidate,
                     "reviewer_principal_id": reviewer,
                     "submitter_principal_id": submitter,
+                    "reviewed_at": ticket.get("reviewed_at"),
+                    "authority": "live-central-ticket-get-v1",
+                    "authority_latest_seq": authority.get("latest_seq"),
                 },
             }
         )
@@ -1242,11 +1535,15 @@ def run_approved_batch(
     admission_class: str,
     lease_id: str | None,
     signing_key_file: Path | None,
+    authority_lookup: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     exact_base = resolve_exact_commit(root, base, "base")
     _require_clean_exact_base(root, exact_base, main_ref)
     approvals = validate_batch_approvals(
-        root, _load_batch_approvals(approvals_path), exact_base
+        root,
+        _load_batch_approvals(approvals_path),
+        exact_base,
+        authority_lookup=authority_lookup,
     )
     request_payload = {
         "schema": 1,
@@ -1301,6 +1598,7 @@ def run_approved_batch(
             jobs=jobs,
             admission_class=admission_class,
             lease_id=lease_id,
+            authority_lookup=authority_lookup,
         )
         if _git(worktree, ["status", "--porcelain"]).stdout:
             raise RuntimeError("full gate changed the aggregate worktree")
@@ -1447,6 +1745,42 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("check", help="compare test directories with the manifest")
+
+    def add_authority_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--authority-url", default=os.environ.get(AUTHORITY_URL_ENV))
+        command.add_argument(
+            "--authority-token-file",
+            type=Path,
+            default=os.environ.get(AUTHORITY_TOKEN_FILE_ENV),
+        )
+        command.add_argument(
+            "--authority-board", default=os.environ.get(AUTHORITY_BOARD_ENV)
+        )
+        command.add_argument(
+            "--authority-agent", default=os.environ.get(AUTHORITY_AGENT_ENV)
+        )
+        command.add_argument(
+            "--authority-role", default=os.environ.get(AUTHORITY_ROLE_ENV)
+        )
+        command.add_argument(
+            "--authority-ca-file",
+            type=Path,
+            default=os.environ.get(AUTHORITY_CA_FILE_ENV),
+        )
+        command.add_argument(
+            "--authority-python",
+            type=Path,
+            default=os.environ.get(AUTHORITY_PYTHON_ENV),
+        )
+        command.add_argument(
+            "--authority-expected-agent-id",
+            default=os.environ.get(AUTHORITY_EXPECTED_AGENT_ENV),
+        )
+        command.add_argument(
+            "--authority-expected-principal-id",
+            default=os.environ.get(AUTHORITY_EXPECTED_PRINCIPAL_ENV),
+        )
+
     collect = subparsers.add_parser("collect", help="collect every required suite")
     collect.add_argument("--output", type=Path, required=True)
     run = subparsers.add_parser("run", help="run every required suite")
@@ -1472,6 +1806,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get(FULL_GATE_LEASE_ENV),
         help="active ticket lease identifier; required outside main/release gates",
     )
+    add_authority_arguments(run)
     affected = subparsers.add_parser(
         "affected",
         help="derive and run fail-closed suites from exact Git commit SHAs",
@@ -1490,6 +1825,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--ticket-lease", default=os.environ.get(FULL_GATE_LEASE_ENV)
     )
     affected.add_argument("--signing-key-file", type=Path)
+    add_authority_arguments(affected)
     batch = subparsers.add_parser(
         "approved-batch",
         help="merge approved exact SHAs on one frozen base and run one full gate",
@@ -1505,6 +1841,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     batch.add_argument("--ticket-lease", default=os.environ.get(FULL_GATE_LEASE_ENV))
     batch.add_argument("--signing-key-file", type=Path)
+    add_authority_arguments(batch)
     seat_run = subparsers.add_parser(
         "seat-suite-report",
         help="run seat suites and report release-owned digest drift; not a CI gate",
@@ -1515,8 +1852,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _authority_read_main(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--authority-url", required=True)
+    parser.add_argument("--authority-token-file", type=Path, required=True)
+    parser.add_argument("--authority-board", required=True)
+    parser.add_argument("--authority-agent", required=True)
+    parser.add_argument("--authority-role", required=True)
+    parser.add_argument("--authority-expected-agent-id", required=True)
+    parser.add_argument("--authority-expected-principal-id", required=True)
+    parser.add_argument("--authority-ca-file", type=Path)
+    parser.add_argument("--ticket-id", required=True)
+    args = parser.parse_args(argv)
+    config = BoardAuthorityConfig(
+        url=args.authority_url,
+        token_file=args.authority_token_file,
+        board_id=args.authority_board,
+        agent_name=args.authority_agent,
+        role=args.authority_role,
+        ca_file=args.authority_ca_file,
+        expected_agent_id=args.authority_expected_agent_id,
+        expected_principal_id=args.authority_expected_principal_id,
+    )
+    try:
+        payload = asyncio.run(_fetch_live_authority(config, args.ticket_id))
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    except Exception as exc:
+        print(f"Central authority error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    selected_argv = list(sys.argv[1:] if argv is None else argv)
+    if selected_argv[:1] == ["_authority-read"]:
+        return _authority_read_main(selected_argv[1:])
+    args = build_parser().parse_args(selected_argv)
     root = repository_root()
     try:
         configured_minimum = int(
@@ -1535,11 +1906,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         elif args.command == "run":
+            authority_lookup = (
+                _live_authority_lookup(_authority_config_from_args(args))
+                if args.admission_class in LEASE_REQUIRED_CLASSES
+                else None
+            )
             run_full_gate(
                 root,
                 jobs=args.jobs,
                 admission_class=args.admission_class,
                 lease_id=args.ticket_lease,
+                authority_lookup=authority_lookup,
             )
         elif args.command == "affected":
             selection = select_affected_suites(
@@ -1548,18 +1925,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.candidate,
                 high_risk=args.high_risk,
             )
+            authority_lookup = (
+                _live_authority_lookup(_authority_config_from_args(args))
+                if selection.full_gate
+                and args.admission_class in LEASE_REQUIRED_CLASSES
+                else None
+            )
             payload = run_affected(
                 root,
                 selection,
                 jobs=args.jobs,
                 admission_class=args.admission_class,
                 lease_id=args.ticket_lease,
+                authority_lookup=authority_lookup,
             )
             write_json_evidence(
                 args.output,
                 add_evidence_integrity(payload, args.signing_key_file),
             )
         elif args.command == "approved-batch":
+            authority_lookup = _live_authority_lookup(
+                _authority_config_from_args(args)
+            )
             payload = run_approved_batch(
                 root,
                 base=args.base,
@@ -1570,6 +1957,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 admission_class=args.admission_class,
                 lease_id=args.ticket_lease,
                 signing_key_file=args.signing_key_file,
+                authority_lookup=authority_lookup,
             )
             print(
                 "ci-manifest approved-batch passed "

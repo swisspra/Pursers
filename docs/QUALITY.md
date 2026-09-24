@@ -45,13 +45,25 @@ runs ticket-focused tests, and then runs the manifest-owned affected selection:
 
 ```sh
 export PURSERS_TICKET_LEASE_ID=TK-EXAMPLE
+export ONBOARD_CENTRAL_URL=https://central.example.invalid/mcp
+export ONBOARD_CENTRAL_TOKEN_FILE=/PATH/OUTSIDE/THE/CHECKOUT/seat.jwt
+export ONBOARD_BOARD_ID=pursers
+export ONBOARD_AGENT_NAME=worker-seat
+export PURSERS_ROLE=worker
+export PURSERS_EXPECTED_AGENT_ID=AI-EXPECTED-SEAT-ID
+export PURSERS_EXPECTED_PRINCIPAL_ID=PR-EXPECTED-PRINCIPAL-ID
+export PURSERS_CENTRAL_AUTHORITY_PYTHON=/PATH/TO/PURSERS/RUNTIME/bin/python
 python3 tools/ci_manifest.py affected \
   --base FULL_40_CHARACTER_BASE_SHA \
   --candidate FULL_40_CHARACTER_CANDIDATE_SHA \
   --output /PATH/OUTSIDE/THE/CHECKOUT/affected.json
 ```
 
-The command obtains changed paths from Git, requires a clean checkout at the
+When selection escalates to a full gate, the command authenticates to Central,
+requires the named ticket to have a current unexpired lease held by that exact
+agent and principal, and rechecks the lease after it acquires the host slot.
+Arbitrary ticket strings, expired or released leases, wrong-ticket leases, and
+worker/reviewer class mismatches fail closed. The command obtains changed paths from Git, requires a clean checkout at the
 exact candidate, and has no option that can narrow its result. It writes
 bounded canonical JSON with the rename-aware diff, selected and skipped suites,
 escalation reasons, execution result, timing, and a SHA-256 integrity value. An
@@ -79,10 +91,13 @@ run the literal full manifest.
 | Release train | All 14 suites | HARD review and exact-candidate full-gate verification | All 14 suites for the frozen release candidate |
 
 After independent approvals, the coordinator/operator prepares a schema-1 JSON
-file outside the checkout. It contains `frozen_base` and one row per ticket with
-`ticket_id`, `candidate_sha`, exact sorted `files_changed`, and an approved
-review binding the same candidate SHA to distinct `reviewer_principal_id` and
-`submitter_principal_id`. Then, from a clean checkout whose `HEAD` and
+file outside the checkout. It contains `board_id`, `frozen_base`, and one row per
+ticket with `ticket_id`, `candidate_sha`, and exact sorted `files_changed`.
+Caller-authored verdicts or principal IDs are not authority. The command reads
+each current ticket directly from Central and requires a closed strict approval
+whose latest submission binds the same exact SHA and files to distinct
+submitter and reviewer principals. A rejection, resubmission, stale/retracted
+review, inaccessible authority, or any mismatch fails closed. Then, from a clean checkout whose `HEAD` and
 `origin/main` both equal the frozen base:
 
 ```sh
@@ -91,6 +106,15 @@ python3 tools/ci_manifest.py approved-batch \
   --approvals /PATH/OUTSIDE/THE/CHECKOUT/approvals.json \
   --output /PATH/OUTSIDE/THE/CHECKOUT/integration.json
 ```
+
+The coordinator/operator supplies the same `ONBOARD_CENTRAL_URL`,
+`ONBOARD_CENTRAL_TOKEN_FILE`, `ONBOARD_BOARD_ID`, and `ONBOARD_AGENT_NAME`
+environment variables with `PURSERS_ROLE=coordinator`. Private CAs use
+`SSL_CERT_FILE=/PATH/TO/CA.pem`. Set `PURSERS_CENTRAL_AUTHORITY_PYTHON` to the
+Pursers runtime Python that provides the BoardClient dependencies. Credential
+contents never enter arguments or evidence. `PURSERS_EXPECTED_AGENT_ID` and
+`PURSERS_EXPECTED_PRINCIPAL_ID` pin the authenticated identity and reject a
+same-name or wrong-seat binding.
 
 The batch command rejects SHA or changed-file drift, stale main, missing or
 non-independent review identity, dirty trees, merge conflicts, and integration
@@ -103,7 +127,8 @@ Full gates use a host-wide file-lock admission queue under
 `~/.cache/pursers/full-gate` by default. `PURSERS_FULL_GATE_CONCURRENCY` sets the
 positive slot budget. Waiting requests are ordered `main/release`, critical
 reviewer, active reviewer, active worker, then background validation, with FIFO
-ordering inside a class. Worker and reviewer classes require a ticket lease;
+ordering inside a class. Worker and reviewer classes require a live
+Central-verified ticket lease bound to the authenticated seat and class;
 focused tests do not enter this queue. Evidence records both queue wait and
 execution time.
 
