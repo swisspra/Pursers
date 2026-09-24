@@ -900,6 +900,12 @@ def test_central_board_onboards_with_explicit_model_and_provider() -> None:
                 "principal_id": "PR-expected",
             }
 
+        async def agent_readiness_set(
+            self, readiness: dict[str, object]
+        ) -> dict[str, object]:
+            calls.setdefault("readiness", []).append(readiness)
+            return {"ok": True}
+
     config = SimpleNamespace(
         central_url="https://central.example/mcp",
         board_id="pursers",
@@ -930,6 +936,9 @@ def test_central_board_onboards_with_explicit_model_and_provider() -> None:
     }
     assert calls["constructor"]["capabilities"] == expected
     assert calls["onboard"]["capabilities"] == expected
+    assert calls["constructor"]["readiness"]["managed_autonomous"] is True
+    assert calls["onboard"]["readiness"]["dispatch_ready"] is True
+    assert calls["readiness"][-1]["dispatch_ready"] is True
 
 
 def test_central_board_keeps_unknown_model_and_provider_undeclared() -> None:
@@ -951,6 +960,12 @@ def test_central_board_keeps_unknown_model_and_provider_undeclared() -> None:
                 "principal_id": "PR-expected",
             }
 
+        async def agent_readiness_set(
+            self, readiness: dict[str, object]
+        ) -> dict[str, object]:
+            calls.setdefault("readiness", []).append(readiness)
+            return {"ok": True}
+
     config = SimpleNamespace(
         central_url="https://central.example/mcp",
         board_id="pursers",
@@ -969,6 +984,8 @@ def test_central_board_keeps_unknown_model_and_provider_undeclared() -> None:
     assert "provider" not in calls["capabilities"]
     assert "model" not in calls["onboard"]["capabilities"]
     assert "provider" not in calls["onboard"]["capabilities"]
+    assert calls["onboard"]["readiness"]["managed_autonomous"] is True
+    assert calls["readiness"][-1]["dispatch_ready"] is True
 
 
 def test_sandbox_profile_allows_lexical_and_real_interpreter_prefixes(

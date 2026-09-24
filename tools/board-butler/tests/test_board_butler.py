@@ -2940,8 +2940,25 @@ def test_mechanical_plan_parks_only_after_threshold_without_live_worker() -> Non
             "last_activity_at": NOW.isoformat(),
             "capabilities_explicit": True,
             "capabilities": {"can_work": True},
+            "readiness": {
+                "reported": True,
+                "transport_connected": True,
+                "dispatch_ready": False,
+            },
         }
     )
+    assert [
+        action.kind
+        for action in butler.plan_mechanical_actions(
+            "fullplatts",
+            snapshot,
+            {"findings": []},
+            {"TK-loop": ticket},
+            NOW,
+            no_live_candidates_cycles=3,
+        )
+    ] == ["park_no_live_candidates"]
+    snapshot["agents"][-1]["readiness"]["dispatch_ready"] = True
     assert butler.plan_mechanical_actions(
         "fullplatts",
         snapshot,

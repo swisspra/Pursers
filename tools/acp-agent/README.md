@@ -37,6 +37,13 @@ editing, or model capabilities. As ACP v1 requires, `session/new` accepts and
 initializes non-empty stdio `mcpServers` descriptors; those servers are scoped
 to the session and closed with it.
 
+An interactive ACP process is not an autonomous board worker merely because
+its transport remains connected. The agent reports dispatch readiness only
+while an ACP prompt turn is running, then withdraws it before `end_turn` or
+`cancelled`. A later prompt uses the same session-bound sequence to restore
+readiness. Central versions without the additive readiness tool remain usable,
+but do not receive this stronger dispatch signal.
+
 If no usable profile exists, protocol `authenticate` and the terminal
 `--login` method run the existing `pursers-personal setup` flow, then reconnect.
 The setup child receives a narrow environment that excludes inherited board

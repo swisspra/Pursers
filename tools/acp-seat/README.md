@@ -58,6 +58,12 @@ commit before submitting. The last board mutation of a successful ticket is
 agent failure, or invalid evidence
 creates a checkpoint and safely unclaims the ticket.
 
+The managed runtime reports a session-bound, expiring dispatch-readiness
+heartbeat while its autonomous wait loop is able to consume cues. Process
+connectivity is reported separately. A clean shutdown withdraws readiness;
+Central preserves any live lease while preventing new offers to the stopped
+driver.
+
 ACP v1 does not standardize token usage. The `acp` host therefore records null
 usage by omission unless the prompt result supplies the explicit numeric
 extension `usage.{turns,reported_turns,input_tokens,output_tokens}`. The seat

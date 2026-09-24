@@ -30,7 +30,7 @@ TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "board_join", "board_onboard", "board_snapshot", "board_invite",
         "board_member_add", "board_member_remove", "board_member_set_role",
         "board_members", "agent_retire", "agent_retire_inert",
-        "agent_capabilities_set",
+        "agent_capabilities_set", "agent_readiness_set",
     )),
     ("Tickets", (
         "ticket_get", "ticket_create", "ticket_update", "ticket_annotate",
@@ -79,6 +79,10 @@ TOOL_SCOPES: dict[str, str] = {
     "agent_retire": "`board:read`; retiring another seat also needs admin or `board:coordinate`",
     "agent_retire_inert": "`board:coordinate`",
     "agent_capabilities_set": "`board:write` for the authenticated seat",
+    "agent_readiness_set": (
+        "`board:write` for the authenticated worker seat, or `board:review` "
+        "for the authenticated reviewer seat"
+    ),
     "ticket_get": "`board:read` and visibility of the ticket",
     "ticket_create": "`board:write`, or restricted `board:intake`",
     "ticket_update": "`board:write` or `board:coordinate`; creator/admin checks also apply",

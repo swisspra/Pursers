@@ -6247,6 +6247,7 @@ async def evaluate_mechanical(
             "can_work": caps.get("can_work"),
             "can_review": caps.get("can_review"),
             "lifecycle_status": agent.get("lifecycle_status"),
+            "readiness": agent.get("readiness"),
         }
         return Evidence(
             kind="seat_capability",
@@ -7296,6 +7297,13 @@ def _capable_live_worker(
         or agent.get("capabilities_explicit") is not True
         or agent.get("lifecycle_status", "active") != "active"
         or agent.get("role") in {"coordinator", "orchestrator"}
+    ):
+        return False
+    readiness = agent.get("readiness")
+    if (
+        isinstance(readiness, Mapping)
+        and readiness.get("reported") is True
+        and readiness.get("dispatch_ready") is not True
     ):
         return False
     seen = parse_time(agent.get("last_activity_at") or agent.get("last_seen"))

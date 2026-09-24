@@ -107,6 +107,17 @@ class BoardSurface(Protocol):
     async def my_tickets(self) -> list[JSON]: ...
     async def my_offers(self) -> list[JSON]: ...
     async def board_status(self) -> JSON: ...
+    async def set_readiness(
+        self,
+        session_id: str,
+        sequence: int,
+        *,
+        transport_connected: bool,
+        session_idle: bool,
+        foreground_running: bool,
+        dispatch_ready: bool,
+        replace_session: bool = False,
+    ) -> None: ...
     async def ticket_evidence(self, ticket_id: str) -> JSON: ...
     def create_action(self, title: str, description: str) -> JSON: ...
     def annotate_action(self, ticket_id: str, text: str) -> JSON: ...
@@ -298,6 +309,7 @@ class PersonalBoardSurface:
         self._stack = AsyncExitStack()
         self._client: Client | None = None
         self._wait_bridge_factory: WaitBridgeFactory | None = None
+        self._readiness_enabled = False
 
     @classmethod
     async def connect(
@@ -323,6 +335,10 @@ class PersonalBoardSurface:
             transport = streamable_http_client(profile.central_url, http_client=http)
             board._client = await board._stack.enter_async_context(
                 Client(transport, mode="2026-07-28", cache=None)
+            )
+            listed = await board._client.list_tools()
+            board._readiness_enabled = any(
+                tool.name == "agent_readiness_set" for tool in listed.tools
             )
             status = await board._call("board_status", {})
             own_agents = sorted(
@@ -377,6 +393,37 @@ class PersonalBoardSurface:
 
     async def _status(self) -> JSON:
         return await self._call("board_status", {})
+
+    async def set_readiness(
+        self,
+        session_id: str,
+        sequence: int,
+        *,
+        transport_connected: bool,
+        session_idle: bool,
+        foreground_running: bool,
+        dispatch_ready: bool,
+        replace_session: bool = False,
+    ) -> None:
+        if not self._readiness_enabled:
+            return
+        await self._call(
+            "agent_readiness_set",
+            {
+                "agent_name": self.agent_name,
+                "replace_session": replace_session,
+                "readiness": {
+                    "transport_connected": transport_connected,
+                    "session_idle": session_idle,
+                    "foreground_running": foreground_running,
+                    "dispatch_ready": dispatch_ready,
+                    "managed_autonomous": False,
+                    "session_id": session_id,
+                    "sequence": sequence,
+                    "ttl_s": 360,
+                },
+            },
+        )
 
     async def my_tickets(self) -> list[JSON]:
         status, page = await asyncio.gather(
@@ -651,6 +698,7 @@ class Session:
     mcp_task: asyncio.Task[None] | None = None
     pending_questions: dict[str, JSON] = field(default_factory=dict)
     next_question_ref: int = 1
+    readiness_sequence: int = 0
 
 
 class PursersACPAgent:
@@ -688,8 +736,48 @@ class PursersACPAgent:
         if mcp_tasks:
             await asyncio.gather(*mcp_tasks, return_exceptions=True)
         if self.board is not None:
+            for session_id, session in self.sessions.items():
+                await self._publish_readiness(
+                    session_id,
+                    session,
+                    transport_connected=False,
+                    session_idle=True,
+                    foreground_running=False,
+                    dispatch_ready=False,
+                )
             await self.board.close()
             self.board = None
+
+    async def _publish_readiness(
+        self,
+        session_id: str,
+        session: Session,
+        *,
+        transport_connected: bool,
+        session_idle: bool,
+        foreground_running: bool,
+        dispatch_ready: bool,
+        replace_session: bool = False,
+    ) -> None:
+        if self.board is None:
+            return
+        publish = getattr(self.board, "set_readiness", None)
+        if not callable(publish):
+            return
+        session.readiness_sequence += 1
+        try:
+            await publish(
+                session_id,
+                session.readiness_sequence,
+                transport_connected=transport_connected,
+                session_idle=session_idle,
+                foreground_running=foreground_running,
+                dispatch_ready=dispatch_ready,
+                replace_session=replace_session,
+            )
+        except Exception:
+            if transport_connected:
+                raise
 
     async def run(
         self,
@@ -907,6 +995,7 @@ class PursersACPAgent:
             await self._error(request_id, -32600, "session prompt is not reserved")
             return
         session.active = True
+        readiness_withdrawn = False
         try:
             try:
                 text = _prompt_text(params.get("prompt"))
@@ -914,6 +1003,15 @@ class PursersACPAgent:
                 await self._error(request_id, -32602, str(exc))
                 return
             try:
+                await self._publish_readiness(
+                    session_id,
+                    session,
+                    transport_connected=True,
+                    session_idle=False,
+                    foreground_running=True,
+                    dispatch_ready=True,
+                    replace_session=True,
+                )
                 stop = await self._dispatch(session_id, session, text)
             except PromptCancelled:
                 stop = "cancelled"
@@ -926,8 +1024,26 @@ class PursersACPAgent:
                 stop = "end_turn"
             if session.cancel.is_set():
                 stop = "cancelled"
+            await self._publish_readiness(
+                session_id,
+                session,
+                transport_connected=True,
+                session_idle=True,
+                foreground_running=False,
+                dispatch_ready=False,
+            )
+            readiness_withdrawn = True
             await self._result(request_id, {"stopReason": stop})
         finally:
+            if not readiness_withdrawn:
+                await self._publish_readiness(
+                    session_id,
+                    session,
+                    transport_connected=True,
+                    session_idle=True,
+                    foreground_running=False,
+                    dispatch_ready=False,
+                )
             session.active = False
             if session.prompt_request_id == request_id:
                 session.prompt_request_id = None
