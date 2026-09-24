@@ -56,6 +56,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 STATE_KEY = "coordinator_findings"
+FLEET_STATE_KEY = "autonomous_butler_state"
 EVALUATION_STATE_PREFIX = "board_butler_evaluation."
 CONFIG_KEY = "coordinator_config"
 SCHEMA_VERSION = 1
@@ -566,8 +567,9 @@ class FleetSnapshot:
             raise ValueError("fleet snapshot is invalid")
         if set(self.demands) != {item.board_id for item in self.demands.values()}:
             raise ValueError("fleet demand keys do not match board ids")
-        if any(seat.board_id not in self.demands for seat in self.seats):
-            raise ValueError("fleet seat has no registry demand projection")
+        # Executor inventory can include seats on another board controlled by
+        # the same host. They are immutable to this plan but still consume the
+        # host ceiling, so dropping them would make scale-up unsafe.
 
 
 @dataclass(frozen=True)
@@ -868,6 +870,81 @@ class FileFleetStateStore:
             return True
 
 
+class FileFleetObservationSource:
+    """Read one fresh, owner-only executor/provider/host observation."""
+
+    REQUIRED_FIELDS = frozenset(
+        {
+            "schema",
+            "schema_version",
+            "observed_at",
+            "stale_after",
+            "executor_seats",
+            "provider_observations",
+            "provider_maximums",
+            "host_observation",
+        }
+    )
+
+    def __init__(self, path: Path, *, max_bytes: int = 2 * 1024 * 1024) -> None:
+        if not path.is_absolute() or max_bytes < 1:
+            raise ValueError("fleet observation path or size bound is invalid")
+        self.path = path
+        self.max_bytes = max_bytes
+
+    def load(self, now: datetime) -> Mapping[str, Any]:
+        if now.tzinfo is None or self.path.is_symlink():
+            raise RuntimeError("fleet observation source is untrusted")
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(self.path, flags)
+            try:
+                info = os.fstat(descriptor)
+                raw = os.read(descriptor, self.max_bytes + 1)
+                if len(raw) > self.max_bytes or os.read(descriptor, 1):
+                    raise RuntimeError("fleet observation exceeds the safe bound")
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise RuntimeError("fleet observation is unavailable") from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise RuntimeError("fleet observation source is not owner-only")
+        try:
+            document = json.loads(raw)
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("fleet observation is invalid") from exc
+        if (
+            not isinstance(document, dict)
+            or set(document) != self.REQUIRED_FIELDS
+            or document.get("schema") != "pursers_fleet_observation_v1"
+            or document.get("schema_version") != 1
+        ):
+            raise RuntimeError("fleet observation envelope is invalid")
+        observed_at = parse_time(document.get("observed_at"))
+        stale_after = parse_time(document.get("stale_after"))
+        if (
+            observed_at is None
+            or stale_after is None
+            or observed_at > now
+            or stale_after < now
+            or observed_at > stale_after
+        ):
+            raise RuntimeError("fleet observation is stale")
+        if (
+            not isinstance(document.get("executor_seats"), list)
+            or not isinstance(document.get("provider_observations"), Mapping)
+            or not isinstance(document.get("provider_maximums"), Mapping)
+            or not isinstance(document.get("host_observation"), Mapping)
+        ):
+            raise RuntimeError("fleet observation payload is invalid")
+        return document
+
+
 def _fleet_operation_id(
     *,
     config_revision: int,
@@ -1159,14 +1236,12 @@ def fleet_snapshot_from_products(
         if not isinstance(row, Mapping) or not required <= set(row):
             raise ValueError("executor seat observation is incomplete")
         board_id = str(row["board_id"])
-        if board_id not in demands:
-            raise ValueError("executor seat belongs to an unknown registry board")
         if not isinstance(row["managed"], bool):
             raise ValueError("executor managed flag is invalid")
         transition_at = parse_time(row["transition_at"])
         if transition_at is None:
             raise ValueError("executor transition time is invalid")
-        agent = agent_indexes[board_id].get(str(row["seat_id"]))
+        agent = agent_indexes.get(board_id, {}).get(str(row["seat_id"]))
         lease_expiry = (
             parse_time(agent.get("lease_expires_at"))
             if isinstance(agent, Mapping)
@@ -1232,6 +1307,8 @@ class FleetReconciler:
         *,
         config_revision: int,
         authorization_fingerprint_sha256: str,
+        config_revisions: Mapping[str, int] | None = None,
+        authorization_fingerprints: Mapping[str, str] | None = None,
         max_cas_retries: int = 3,
         max_operation_attempts: int = 3,
     ) -> None:
@@ -1247,6 +1324,33 @@ class FleetReconciler:
         self.board_policies = dict(board_policies)
         self.config_revision = config_revision
         self.authorization_fingerprint_sha256 = authorization_fingerprint_sha256
+        self.config_revisions = dict(
+            config_revisions
+            or {board_id: config_revision for board_id in board_policies}
+        )
+        self.authorization_fingerprints = dict(
+            authorization_fingerprints
+            or {
+                board_id: authorization_fingerprint_sha256
+                for board_id in board_policies
+            }
+        )
+        if (
+            set(self.config_revisions) != set(board_policies)
+            or set(self.authorization_fingerprints) != set(board_policies)
+            or any(
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 1
+                for value in self.config_revisions.values()
+            )
+            or any(
+                not isinstance(value, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", value)
+                for value in self.authorization_fingerprints.values()
+            )
+        ):
+            raise ValueError("fleet per-board authorization is invalid")
         self.max_cas_retries = max_cas_retries
         self.max_operation_attempts = max_operation_attempts
 
@@ -1480,17 +1584,44 @@ class FleetReconciler:
         for board_id in sorted(requested):
             policy = self.board_policies[board_id]
             demand = snapshot.demands[board_id]
+            board_inventory = [
+                seat for seat in snapshot.seats if seat.board_id == board_id
+            ]
             seats = [
                 seat
-                for seat in snapshot.seats
+                for seat in board_inventory
                 if seat.managed
-                and seat.board_id == board_id
                 and seat.template_id in policy.approved_template_ids
             ]
             board_start_budget = max(
                 0,
-                policy.board_maximum - sum(1 for seat in seats if seat.active),
+                policy.board_maximum
+                - sum(1 for seat in board_inventory if seat.active),
             )
+            role_start_budget = {
+                role: max(
+                    0,
+                    policy.roles[role].maximum
+                    - sum(
+                        1
+                        for seat in board_inventory
+                        if seat.role == role and seat.active
+                    ),
+                )
+                for role in FLEET_ROLES
+            }
+            provider_start_budget = {
+                provider: max(
+                    0,
+                    maximum
+                    - sum(
+                        1
+                        for seat in board_inventory
+                        if seat.provider == provider and seat.active
+                    ),
+                )
+                for provider, maximum in policy.provider_maximums.items()
+            }
             selected: set[str] = set()
             provider_started = {
                 provider: 0 for provider in provider_desired[board_id]
@@ -1527,8 +1658,15 @@ class FleetReconciler:
                     ),
                 )
                 for seat in candidates:
-                    if needed <= 0 or start_budget <= 0 or board_start_budget <= 0:
+                    if (
+                        needed <= 0
+                        or start_budget <= 0
+                        or board_start_budget <= 0
+                        or role_start_budget[role] <= 0
+                    ):
                         break
+                    if provider_start_budget.get(seat.provider, 0) <= 0:
+                        continue
                     if provider_started.get(seat.provider, 0) >= provider_desired[board_id].get(
                         seat.provider, 0
                     ):
@@ -1539,6 +1677,8 @@ class FleetReconciler:
                     needed -= 1
                     start_budget -= 1
                     board_start_budget -= 1
+                    role_start_budget[role] -= 1
+                    provider_start_budget[seat.provider] -= 1
                 excess = [
                     seat
                     for seat in active
@@ -1581,10 +1721,12 @@ class FleetReconciler:
         return tuple(filtered)
 
     def _operation(self, seat: FleetSeat, action: str) -> FleetOperation:
+        config_revision = self.config_revisions[seat.board_id]
+        fingerprint = self.authorization_fingerprints[seat.board_id]
         return FleetOperation(
             operation_id=_fleet_operation_id(
-                config_revision=self.config_revision,
-                authorization_fingerprint_sha256=self.authorization_fingerprint_sha256,
+                config_revision=config_revision,
+                authorization_fingerprint_sha256=fingerprint,
                 seat=seat,
                 action=action,
             ),
@@ -1594,7 +1736,7 @@ class FleetReconciler:
             template_id=seat.template_id,
             template_digest_sha256=seat.template_digest_sha256,
             expected_seat_generation=seat.generation,
-            authorization_fingerprint_sha256=self.authorization_fingerprint_sha256,
+            authorization_fingerprint_sha256=fingerprint,
         )
 
     def plan(self, snapshot: FleetSnapshot, prior: Mapping[str, Any]) -> FleetPlan:
@@ -1682,6 +1824,7 @@ class FleetReconciler:
         return {
             "schema": "pursers_fleet_reconciler_state_v1",
             "config_revision": self.config_revision,
+            "config_revisions": dict(self.config_revisions),
             "observed_at": now.isoformat(),
             "boards": boards,
             "operations": operations,
@@ -1700,8 +1843,13 @@ class FleetReconciler:
             raise RuntimeError("fleet executor is unavailable")
         for _ in range(self.max_cas_retries):
             revision, prior = store.load()
-            if prior and int(prior.get("config_revision", self.config_revision)) != self.config_revision:
-                raise RuntimeError("fleet config revision changed")
+            if prior:
+                prior_revisions = prior.get("config_revisions")
+                if isinstance(prior_revisions, Mapping):
+                    if dict(prior_revisions) != self.config_revisions:
+                        raise RuntimeError("fleet config revision changed")
+                elif int(prior.get("config_revision", self.config_revision)) != self.config_revision:
+                    raise RuntimeError("fleet config revision changed")
             plan = self.plan(snapshot, prior)
             persisted = self._persisted_plan(plan, snapshot, prior)
             if store.compare_and_swap(revision, persisted):
@@ -1787,7 +1935,7 @@ class FleetReconciler:
             "schema": "autonomous_butler_state_v1",
             "schema_version": 1,
             "board_id": board_id,
-            "config_revision": self.config_revision,
+            "config_revision": self.config_revisions[board_id],
             "effective_state": "autonomous" if snapshot.executor_healthy else "degraded",
             "reason_code": "desired_state_reconciled" if snapshot.executor_healthy else "executor_unavailable",
             "observed_at": now.isoformat(),
@@ -6896,6 +7044,184 @@ class CentralBackend:
             return {}
         return parsed if isinstance(parsed, Mapping) else {}
 
+    async def _autonomous_fleet_configs(
+        self, board_ids: Sequence[str]
+    ) -> dict[str, Mapping[str, Any]]:
+        """Read authoritative per-board config through Central's typed API."""
+        from pursers_client import BoardClient
+
+        configs: dict[str, Mapping[str, Any]] = {}
+        for board_id in sorted(set(board_ids)):
+            async with BoardClient(
+                self.args.url,
+                self.token,
+                board_id,
+                agent_name=self.args.agent_name,
+                role="coordinator",
+                capabilities=dict(BOARD_BUTLER_CAPABILITIES),
+                allow_takeover=True,
+            ) as client:
+                result = await client.butler_config_get()
+            config = result.get("config")
+            if result.get("effective_mode") == "autonomous":
+                if not isinstance(config, Mapping):
+                    raise ButlerConfigError(
+                        f"{board_id}: autonomous fleet config is missing"
+                    )
+                configs[board_id] = config
+        return configs
+
+    async def _write_fleet_state(
+        self, board_id: str, document: Mapping[str, Any]
+    ) -> None:
+        """Publish actual/desired state with Central compare-and-swap."""
+        from pursers_client import BoardClient
+
+        async with BoardClient(
+            self.args.url,
+            self.token,
+            board_id,
+            agent_name=self.args.agent_name,
+            role="coordinator",
+            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
+            allow_takeover=True,
+        ) as client:
+            try:
+                current = await client.board_state_get(FLEET_STATE_KEY)
+            except Exception as exc:
+                if "state key not found" not in str(exc).lower():
+                    raise
+                previous = None
+            else:
+                state = current.get("state", {})
+                previous = state.get("value") if isinstance(state, Mapping) else None
+                if previous is not None and not isinstance(previous, str):
+                    raise RuntimeError("autonomous fleet state is malformed")
+            expected = (
+                hashlib.sha256(previous.encode("utf-8")).hexdigest()
+                if previous is not None
+                else None
+            )
+            encoded = json.dumps(
+                document,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            await client.board_state_update(
+                FLEET_STATE_KEY, encoded, expected_sha256=expected
+            )
+
+    async def _reconcile_fleet(
+        self,
+        active_boards: Sequence[str],
+        board_snapshots: Mapping[str, Mapping[str, Any]],
+        now: datetime,
+    ) -> Mapping[str, Any]:
+        """Run one production desired-state cycle when locally enabled."""
+        required_args = (
+            "fleet_observation_file",
+            "fleet_state_file",
+            "fleet_executor_socket",
+            "fleet_executor_key_id",
+            "fleet_executor_private_key",
+        )
+        values = [getattr(self.args, name, None) for name in required_args]
+        if not any(values):
+            return {"status": "disabled"}
+        if not all(values):
+            raise RuntimeError("fleet runtime configuration is incomplete")
+        if getattr(self.args, "runtime_mode", "shadow") != "active":
+            raise RuntimeError("fleet reconciliation requires active runtime mode")
+        configs = await self._autonomous_fleet_configs(active_boards)
+        if not configs:
+            return {"status": "shadow", "boards": []}
+        observation = FileFleetObservationSource(
+            self.args.fleet_observation_file
+        ).load(now)
+        provider_maximums_raw = observation["provider_maximums"]
+        provider_maximums: dict[str, dict[str, int]] = {}
+        for board_id in configs:
+            row = provider_maximums_raw.get(board_id)
+            if (
+                not isinstance(row, Mapping)
+                or not row
+                or any(
+                    not isinstance(key, str)
+                    or not key
+                    or not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                    for key, value in row.items()
+                )
+            ):
+                raise ButlerConfigError(
+                    f"{board_id}: provider fleet maximums are invalid"
+                )
+            provider_maximums[board_id] = dict(row)
+        host_policy, policies = fleet_policies_from_config(
+            configs, provider_maximums, now
+        )
+        selected_snapshots = {
+            board_id: board_snapshots[board_id] for board_id in configs
+        }
+        snapshot = fleet_snapshot_from_products(
+            selected_snapshots,
+            observation["executor_seats"],
+            observation["provider_observations"],
+            observation["host_observation"],
+            now,
+        )
+        revisions = {
+            board_id: int(config["revision"])
+            for board_id, config in configs.items()
+        }
+        fingerprints = {
+            board_id: str(config["envelope"]["fingerprint_sha256"])
+            for board_id, config in configs.items()
+        }
+        registry_material = json.dumps(
+            {"revisions": revisions, "fingerprints": fingerprints},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        registry_digest = hashlib.sha256(registry_material).hexdigest()
+        reconciler = FleetReconciler(
+            host_policy,
+            policies,
+            config_revision=max(1, int(registry_digest[:15], 16)),
+            authorization_fingerprint_sha256=registry_digest,
+            config_revisions=revisions,
+            authorization_fingerprints=fingerprints,
+        )
+        store = FileFleetStateStore(self.args.fleet_state_file)
+        _revision, prior = store.load()
+        plan = reconciler.plan(snapshot, prior)
+        report = reconciler.reconcile(
+            snapshot,
+            store,
+            UnixFleetExecutorClient(
+                self.args.fleet_executor_socket,
+                self.args.fleet_executor_key_id,
+                self.args.fleet_executor_private_key,
+            ),
+        )
+        for board_id in sorted(configs):
+            await self._write_fleet_state(
+                board_id,
+                reconciler.desired_state_document(board_id, snapshot, plan),
+            )
+        return {
+            "status": "reconciled",
+            "boards": sorted(configs),
+            "operations": len(report["operations"]),
+            "receipt_outcomes": [
+                str(item.get("outcome", "unknown"))
+                for item in report["receipts"]
+            ],
+        }
+
     async def _project_name_from_registry(self) -> str | None:
         try:
             raw = await self.client.board_state_get("project_registry")
@@ -7359,6 +7685,9 @@ class CentralBackend:
                 reader, self.args.home_board
             )
         active_boards = {project.board_id for project in projects}
+        fleet = await self._reconcile_fleet(
+            sorted(active_boards), snapshots, now
+        )
         observation_contexts = {
             board_id: await self._observation_context_for_board(
                 board_id, snapshots[board_id], now
@@ -7456,6 +7785,7 @@ class CentralBackend:
                 }
                 for board_id in sorted(active_boards)
             },
+            "fleet": dict(fleet),
             "refreshed_at": now.isoformat(),
         }
 
@@ -7723,6 +8053,46 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--active-authorization-file", type=Path)
     parser.add_argument(
+        "--fleet-observation-file",
+        type=Path,
+        default=(
+            Path(os.environ["PURSERS_BUTLER_FLEET_OBSERVATION_FILE"]).expanduser()
+            if os.environ.get("PURSERS_BUTLER_FLEET_OBSERVATION_FILE")
+            else None
+        ),
+    )
+    parser.add_argument(
+        "--fleet-state-file",
+        type=Path,
+        default=(
+            Path(os.environ["PURSERS_BUTLER_FLEET_STATE_FILE"]).expanduser()
+            if os.environ.get("PURSERS_BUTLER_FLEET_STATE_FILE")
+            else None
+        ),
+    )
+    parser.add_argument(
+        "--fleet-executor-socket",
+        type=Path,
+        default=(
+            Path(os.environ["PURSERS_BUTLER_FLEET_EXECUTOR_SOCKET"]).expanduser()
+            if os.environ.get("PURSERS_BUTLER_FLEET_EXECUTOR_SOCKET")
+            else None
+        ),
+    )
+    parser.add_argument(
+        "--fleet-executor-key-id",
+        default=os.environ.get("PURSERS_BUTLER_FLEET_EXECUTOR_KEY_ID"),
+    )
+    parser.add_argument(
+        "--fleet-executor-private-key",
+        type=Path,
+        default=(
+            Path(os.environ["PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY"]).expanduser()
+            if os.environ.get("PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY")
+            else None
+        ),
+    )
+    parser.add_argument(
         "--provider-secrets-dir",
         type=Path,
         default=(
@@ -7793,6 +8163,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "runtime_status_file",
         "local_kill_file",
         "active_authorization_file",
+        "fleet_observation_file",
+        "fleet_state_file",
+        "fleet_executor_socket",
+        "fleet_executor_private_key",
     ):
         value = getattr(args, name)
         if value is not None and not value.is_absolute():
@@ -7832,6 +8206,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             validate_active_authorization(args.active_authorization_file)
         except ValueError as exc:
             parser.error(str(exc))
+    fleet_values = (
+        args.fleet_observation_file,
+        args.fleet_state_file,
+        args.fleet_executor_socket,
+        args.fleet_executor_key_id,
+        args.fleet_executor_private_key,
+    )
+    if any(fleet_values) and not all(fleet_values):
+        parser.error("fleet runtime options must be configured together")
+    if all(fleet_values) and args.runtime_mode != "active":
+        parser.error("fleet reconciliation requires --runtime-mode active")
+    if args.fleet_executor_key_id is not None and not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", args.fleet_executor_key_id
+    ):
+        parser.error("--fleet-executor-key-id is invalid")
     if (args.kill_switch or args.veto_question) and args.dry_run:
         parser.error("control actions cannot be combined with --dry-run")
     if args.veto_question and not args.control_reason.strip():

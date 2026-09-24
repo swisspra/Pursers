@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import asyncio
 import json
 import os
 import socket
 import sys
 import threading
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -458,6 +460,24 @@ def test_unmanaged_or_unapproved_seats_are_never_mutated() -> None:
     assert plan.operations == ()
 
 
+def test_unmanaged_active_seat_consumes_board_role_and_provider_headroom() -> None:
+    policy = board_policy(maximum=2, provider_maximums={"direct": 2})
+    current = snapshot(
+        {"pursers": demand(work=20)},
+        [
+            seat("manual-worker", "worker", lifecycle="ready", managed=False),
+            seat("worker-a", "worker"),
+            seat("worker-b", "worker"),
+        ],
+    )
+
+    plan = reconciler({"pursers": policy}, host_cap=8).plan(current, {})
+
+    assert [(item.action, item.seat_id) for item in plan.operations] == [
+        ("start", "worker-a")
+    ]
+
+
 def test_high_host_load_suppresses_worker_burst_but_preserves_review_capacity() -> None:
     holder = seat("worker-live", "worker", lifecycle="busy", busy=True, live=True)
     candidates = [holder, *seats_for_board(count=2)]
@@ -687,7 +707,7 @@ def test_real_executor_integration_starts_approved_seat(tmp_path: Path) -> None:
         )
     )
     private_path.chmod(0o600)
-    socket_root = Path.home() / ".cache" / "pursers" / "worker-14" / "test-sockets"
+    socket_root = Path.home() / ".cache" / "pursers" / "worker-10" / "test-sockets"
     socket_root.mkdir(parents=True, exist_ok=True)
     socket_path = (socket_root / f"executor-{os.getpid()}.sock").resolve()
     socket_path.unlink(missing_ok=True)
@@ -747,3 +767,188 @@ def test_real_executor_integration_starts_approved_seat(tmp_path: Path) -> None:
     assert report["receipts"][0]["outcome"] == "succeeded"
     assert report["receipts"][0]["committed"] is True
     assert adapter.observation.ready is True
+
+
+def test_production_fleet_cycle_reads_products_executes_and_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cycle_now = datetime.now(timezone.utc)
+    repository = tmp_path / "repos" / "project"
+    seat_root = tmp_path / "seats" / "worker-a"
+    credential = tmp_path / "worker.env"
+    repository.mkdir(parents=True)
+    seat_root.mkdir(parents=True)
+    credential.write_text("", encoding="utf-8")
+    record = {
+        "role": "worker",
+        "principal_id": "PR-worker-a",
+        "credential_ref": "credential.worker-a",
+        "repository_root": str(repository),
+        "seat_root": str(seat_root),
+        "command": [sys.executable, "-c", "raise SystemExit(0)"],
+        "boards": "registry",
+        "capabilities": {
+            "can_work": True,
+            "can_review": False,
+            "tier_max": 2,
+            "max_parallel": 1,
+        },
+    }
+    template = fleet_executor.SeatTemplate.from_record(
+        "template:worker:direct", record
+    )
+    private = Ed25519PrivateKey.generate()
+    private_path = (tmp_path / "butler.key").resolve()
+    private_path.write_bytes(
+        private.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        )
+    )
+    private_path.chmod(0o600)
+    executor_policy = fleet_executor.ExecutorPolicy(
+        authorization_fingerprint_sha256=FINGERPRINT,
+        templates={template.template_id: template},
+        caller_keys={"butler-local": private.public_key()},
+        credential_paths={"credential.worker-a": credential},
+        repository_roots=(repository.parent.resolve(),),
+        seat_roots=(seat_root.parent.resolve(),),
+        board_caps={"pursers": 2},
+        host_cap=2,
+        signature_skew_s=90,
+        mutation_cooldown_s=0,
+        failure_backoff_s=0,
+    )
+    adapter = FakeServiceAdapter()
+    socket_root = Path.home() / ".cache" / "pursers" / "worker-10" / "test-sockets"
+    socket_root.mkdir(parents=True, exist_ok=True)
+    socket_path = (socket_root / f"cycle-{os.getpid()}.sock").resolve()
+    socket_path.unlink(missing_ok=True)
+    ready = threading.Event()
+
+    def serve_once() -> None:
+        service = fleet_executor.FleetExecutor(
+            executor_policy,
+            fleet_executor.ExecutorStore(tmp_path / "executor" / "executor.sqlite3"),
+            adapter,
+            KnownLease(),
+            ReadyRegistry(),
+            ReceiptSink(),
+            clock=lambda: cycle_now.timestamp(),
+        )
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(os.fspath(socket_path))
+            socket_path.chmod(0o600)
+            listener.listen(1)
+            ready.set()
+            connection, _ = listener.accept()
+            with connection:
+                payload = bytearray()
+                while not payload.endswith(b"\n"):
+                    payload.extend(connection.recv(4096))
+                result = service.handle(json.loads(payload))
+                connection.sendall(fleet_executor.canonical_json(result) + b"\n")
+
+    server = threading.Thread(target=serve_once, daemon=True)
+    server.start()
+    assert ready.wait(timeout=5)
+    observation_path = (tmp_path / "fleet-observation.json").resolve()
+    observation_path.write_text(
+        json.dumps(
+            {
+                "schema": "pursers_fleet_observation_v1",
+                "schema_version": 1,
+                "observed_at": (cycle_now - timedelta(seconds=1)).isoformat(),
+                "stale_after": (cycle_now + timedelta(minutes=1)).isoformat(),
+                "executor_seats": [
+                    {
+                        "seat_id": "worker-a",
+                        "board_id": "pursers",
+                        "role": "worker",
+                        "provider": "direct",
+                        "template_id": template.template_id,
+                        "template_digest_sha256": template.digest_sha256,
+                        "generation": 1,
+                        "lifecycle": "stopped",
+                        "transition_at": (
+                            cycle_now - timedelta(minutes=10)
+                        ).isoformat(),
+                        "managed": True,
+                    }
+                ],
+                "provider_observations": {
+                    "pursers": {
+                        "direct": {"status": "healthy", "latency_ms": 5}
+                    }
+                },
+                "provider_maximums": {"pursers": {"direct": 2}},
+                "host_observation": {
+                    "load_ratio": 0.1,
+                    "capacity_available": True,
+                    "executor_status": "healthy",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    observation_path.chmod(0o600)
+    options = SimpleNamespace(
+        url="https://central.invalid/mcp",
+        home_board="pursers",
+        agent_name="board-butler-test",
+        runtime_mode="active",
+        fleet_observation_file=observation_path,
+        fleet_state_file=(tmp_path / "fleet-state.json").resolve(),
+        fleet_executor_socket=socket_path,
+        fleet_executor_key_id="butler-local",
+        fleet_executor_private_key=private_path,
+    )
+    backend = butler.CentralBackend(options, "opaque")
+    config = active_config()
+    config["authorization"]["expires_at"] = (
+        cycle_now + timedelta(hours=1)
+    ).isoformat()
+    published: dict[str, Mapping[str, Any]] = {}
+
+    async def configs(_board_ids: Any) -> dict[str, Mapping[str, Any]]:
+        return {"pursers": config}
+
+    async def publish(board_id: str, document: Mapping[str, Any]) -> None:
+        published[board_id] = dict(document)
+
+    monkeypatch.setattr(backend, "_autonomous_fleet_configs", configs)
+    monkeypatch.setattr(backend, "_write_fleet_state", publish)
+    board_snapshot = {
+        "truncated": False,
+        "tickets": [
+            {
+                "ticket_id": "TK-burst",
+                "status": "open",
+                "tier": 1,
+                "tags": [],
+                "created_at": (
+                    cycle_now - timedelta(minutes=10)
+                ).isoformat(),
+            }
+        ],
+        "agents": [],
+    }
+
+    result = asyncio.run(
+        backend._reconcile_fleet(
+            ["pursers"], {"pursers": board_snapshot}, cycle_now
+        )
+    )
+    server.join(timeout=5)
+    socket_path.unlink(missing_ok=True)
+
+    assert result == {
+        "status": "reconciled",
+        "boards": ["pursers"],
+        "operations": 1,
+        "receipt_outcomes": ["succeeded"],
+    }
+    assert adapter.observation.ready is True
+    assert published["pursers"]["schema"] == "autonomous_butler_state_v1"
+    assert json.loads(options.fleet_state_file.read_text())["revision"] == 2
