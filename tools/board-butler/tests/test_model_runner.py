@@ -119,6 +119,30 @@ class FakeBackend:
         return self.response
 
 
+@pytest.fixture
+def hermetic_acp_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace only the production OS boundary for ACP protocol unit tests."""
+
+    class ApprovedTestSandbox:
+        @staticmethod
+        def sandboxed_agent_command(
+            command: Any,
+            work_dir: Path,
+            *,
+            readable_roots: Any = (),
+            protected_files: Any = (),
+            scratch_root: Path | None = None,
+        ) -> tuple[str, ...]:
+            assert readable_roots == ()
+            assert protected_files == ()
+            assert scratch_root == work_dir
+            return tuple(command)
+
+    monkeypatch.setattr(
+        butler, "_load_acp_seat_module", lambda: ApprovedTestSandbox
+    )
+
+
 def runner(backend: Any, schemas: Any, **changes: Any) -> Any:
     return butler.AutonomousModelRunner(
         backend,
@@ -669,7 +693,9 @@ def test_direct_api_backend_normalizes_non_object_content_as_malformed() -> None
     assert result["error"]["category"] == "malformed"
 
 
-def test_acp_backend_uses_no_mcp_servers_and_normalizes_result(tmp_path: Path) -> None:
+def test_acp_backend_uses_no_mcp_servers_and_normalizes_result(
+    tmp_path: Path, hermetic_acp_sandbox: None
+) -> None:
     schemas, digest = registry()
     payload = {
         "model": "exact-acp-model",
@@ -730,12 +756,21 @@ def test_acp_backend_fails_closed_when_os_sandbox_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     schemas, digest = registry()
+    acp = butler._load_acp_client_module()
+    launch_attempted = False
+    private_detail = "private sandbox stderr secret"
+
+    def forbidden_acp_client(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal launch_attempted
+        launch_attempted = True
+        raise AssertionError("ACP subprocess must not launch without an OS sandbox")
 
     class UnavailableSandbox:
         @staticmethod
         def sandboxed_agent_command(*_args: Any, **_kwargs: Any) -> tuple[str, ...]:
-            raise RuntimeError("sandbox unavailable")
+            raise RuntimeError(private_detail)
 
+    monkeypatch.setattr(acp, "ACPClient", forbidden_acp_client)
     monkeypatch.setattr(
         butler, "_load_acp_seat_module", lambda: UnavailableSandbox
     )
@@ -746,6 +781,13 @@ def test_acp_backend_fails_closed_when_os_sandbox_is_unavailable(
     assert result["outcome"] == "failed"
     assert result["reason_code"] == "acp_os_sandbox_unavailable"
     assert result["error"]["category"] == "policy"
+    assert result["error"]["retryable"] is False
+    assert result["proposal_json"] is None
+    assert result["citations"] == []
+    assert result["usage"]["total_tokens"] == 0
+    assert launch_attempted is False
+    assert private_detail not in json.dumps(result)
+    validate_contract(result)
 
 
 def test_acp_backend_blocks_shell_write_outside_canonical_session_root(
@@ -835,7 +877,9 @@ def test_acp_backend_blocks_shell_write_outside_canonical_session_root(
     ).returncode != 0
 
 
-def test_acp_backend_drains_all_updates_before_normalizing(tmp_path: Path) -> None:
+def test_acp_backend_drains_all_updates_before_normalizing(
+    tmp_path: Path, hermetic_acp_sandbox: None
+) -> None:
     schemas, digest = registry()
     encoded = json.dumps(
         {
@@ -880,7 +924,9 @@ def test_acp_backend_drains_all_updates_before_normalizing(tmp_path: Path) -> No
     assert result["provider_request_ref"] == "provider:acp-burst"
 
 
-def test_acp_permission_request_is_denied_and_normalized(tmp_path: Path) -> None:
+def test_acp_permission_request_is_denied_and_normalized(
+    tmp_path: Path, hermetic_acp_sandbox: None
+) -> None:
     schemas, digest = registry()
     script = tmp_path / "agent.json"
     script.write_text(
@@ -921,7 +967,9 @@ def acp_backend(tmp_path: Path, script_value: Mapping[str, Any]) -> Any:
     )
 
 
-def test_acp_crash_is_typed_without_stderr_disclosure(tmp_path: Path) -> None:
+def test_acp_crash_is_typed_without_stderr_disclosure(
+    tmp_path: Path, hermetic_acp_sandbox: None
+) -> None:
     schemas, digest = registry()
     backend = acp_backend(
         tmp_path,
@@ -939,7 +987,9 @@ def test_acp_crash_is_typed_without_stderr_disclosure(tmp_path: Path) -> None:
     assert "private-host-detail" not in json.dumps(result)
 
 
-def test_acp_timeout_is_typed(tmp_path: Path) -> None:
+def test_acp_timeout_is_typed(
+    tmp_path: Path, hermetic_acp_sandbox: None
+) -> None:
     schemas, digest = registry()
     backend = acp_backend(
         tmp_path, {"promptActions": [{"type": "sleep", "seconds": 1}]}
@@ -965,7 +1015,9 @@ async def cancel_acp(tmp_path: Path, schemas: Any, digest: str) -> dict[str, Any
     return await pending
 
 
-def test_acp_cancellation_returns_no_partial_result(tmp_path: Path) -> None:
+def test_acp_cancellation_returns_no_partial_result(
+    tmp_path: Path, hermetic_acp_sandbox: None
+) -> None:
     schemas, digest = registry()
     result = asyncio.run(cancel_acp(tmp_path, schemas, digest))
 
