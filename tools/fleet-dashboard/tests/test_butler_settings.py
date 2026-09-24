@@ -207,6 +207,46 @@ def autonomous_config(board_id: str = "pursers") -> dict[str, Any]:
     }
 
 
+def autonomous_state(board_id: str = "pursers") -> dict[str, Any]:
+    return {
+        "schema": "autonomous_butler_state_v1",
+        "schema_version": 1,
+        "board_id": board_id,
+        "config_revision": 3,
+        "effective_state": "autonomous",
+        "reason_code": "desired_state_reconciled",
+        "observed_at": "2026-09-24T00:00:00+00:00",
+        "stale_after": "2026-09-25T00:00:00+00:00",
+        "capacity": {
+            role: {
+                "desired": 1,
+                "ready": 1,
+                "busy": 0,
+                "starting": 0,
+                "draining": 0,
+                "unhealthy": 0,
+                "stopped": 0,
+                "seat_ids": [f"{role}-1"],
+                "template_ids": [f"{role}-template"],
+            }
+            for role in ("worker", "reviewer", "acp_worker")
+        },
+        "host_processes": {
+            "role_agents": 3,
+            "control_plane": 2,
+            "agent_process_ceiling": 12,
+            "total_process_ceiling": 14,
+            "observed_at": "2026-09-24T00:00:00+00:00",
+        },
+        "executor": {
+            "status": "healthy",
+            "observed_at": "2026-09-24T00:00:00+00:00",
+        },
+        "connectors": [],
+        "kill_latched": False,
+    }
+
+
 def write_runtime(path: Path, *, mode: str, pid: int = 4321) -> None:
     path.write_text(
         json.dumps(
@@ -1597,12 +1637,11 @@ def test_autonomous_view_redacts_references_and_projects_truthful_state() -> Non
         ],
         "truncated": True,
     }
-    actual = {
-        "schema": "autonomous_butler_state_v1",
-        "effective_state": "killed",
-        "stale_after": "2026-09-25T00:00:00+00:00",
-        "connectors": [],
-    }
+    actual = autonomous_state()
+    actual["effective_state"] = "killed"
+    actual["reason_code"] = "human_kill_switch"
+    actual["private_path"] = "/private/secret/path"
+    actual["executor"]["secret_ref"] = "executor-secret"
 
     view = butler_settings.autonomous_butler_view(payload, commands, actual)
 
@@ -1613,29 +1652,36 @@ def test_autonomous_view_redacts_references_and_projects_truthful_state() -> Non
     assert "github-secret" not in json.dumps(view)
     assert "github-endpoint" not in json.dumps(view)
     assert "private-principal" not in json.dumps(view)
+    assert "/private/secret/path" not in json.dumps(view)
+    assert "executor-secret" not in json.dumps(view)
     assert view["effective_state"] == "killed"
     assert view["actual_state_available"] is True
     assert view["commands"][0]["audit_id"] == "audit-1"
     assert view["history_truncated"] is True
 
+    malformed = autonomous_state()
+    malformed["executor"]["status"] = "secret-value"
+    rejected = butler_settings.autonomous_butler_view(payload, commands, malformed)
+    assert rejected["actual_state"] is None
+    assert rejected["actual_state_available"] is False
+    assert "secret-value" not in json.dumps(rejected)
+
 
 def test_autonomous_view_marks_stale_health_unknown() -> None:
-    state = {
-        "schema": "autonomous_butler_state_v1",
-        "effective_state": "degraded",
-        "stale_after": "2026-09-24T00:00:00+00:00",
-        "executor": {
+    state = autonomous_state()
+    state["effective_state"] = "degraded"
+    state["stale_after"] = "2026-09-24T00:00:00+00:00"
+    state["executor"] = {
+        "status": "healthy",
+        "observed_at": "2026-09-23T23:59:00+00:00",
+    }
+    state["connectors"] = [
+        {
+            "connector_id": "github",
             "status": "healthy",
             "observed_at": "2026-09-23T23:59:00+00:00",
-        },
-        "connectors": [
-            {
-                "connector_id": "github",
-                "status": "healthy",
-                "observed_at": "2026-09-23T23:59:00+00:00",
-            }
-        ],
-    }
+        }
+    ]
 
     view = butler_settings.autonomous_butler_view(
         {"board_id": "pursers", "revision": 3, "config": autonomous_config()},

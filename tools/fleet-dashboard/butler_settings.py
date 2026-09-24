@@ -88,6 +88,180 @@ def _identifier(value: Any, label: str) -> str:
     return value
 
 
+def _timestamp(value: Any) -> str | None:
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return value if parsed.tzinfo is not None else None
+
+
+def _state_identifier(value: Any) -> str | None:
+    try:
+        return _identifier(value, "state identifier")
+    except ButlerSettingsError:
+        return None
+
+
+def _state_count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10_000:
+        return None
+    return value
+
+
+def _project_health(value: Any, *, connector: bool = False) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    status = value.get("status")
+    observed_at = _timestamp(value.get("observed_at"))
+    if status not in {"healthy", "degraded", "unavailable", "unknown"} or observed_at is None:
+        return None
+    result: dict[str, Any] = {"status": status, "observed_at": observed_at}
+    if connector:
+        connector_id = _state_identifier(value.get("connector_id"))
+        if connector_id is None:
+            return None
+        result["connector_id"] = connector_id
+    reason_code = value.get("reason_code")
+    if reason_code is not None:
+        if not isinstance(reason_code, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,79}", reason_code
+        ):
+            return None
+        result["reason_code"] = reason_code
+    if connector:
+        for name in ("last_success_at", "last_failure_at"):
+            if name in value:
+                timestamp = _timestamp(value[name])
+                if timestamp is None:
+                    return None
+                result[name] = timestamp
+    return result
+
+
+def _project_autonomous_state(value: Any, board_id: Any) -> dict[str, Any] | None:
+    """Allowlist one strict public state projection and discard unknown fields."""
+    if not isinstance(value, Mapping) or value.get("schema") != "autonomous_butler_state_v1":
+        return None
+    state_board = _state_identifier(value.get("board_id"))
+    revision = value.get("config_revision")
+    effective = value.get("effective_state")
+    observed_at = _timestamp(value.get("observed_at"))
+    stale_after = _timestamp(value.get("stale_after"))
+    if (
+        value.get("schema_version") != 1
+        or state_board is None
+        or state_board != board_id
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+        or effective not in AUTONOMOUS_STATES
+        or observed_at is None
+        or stale_after is None
+        or not isinstance(value.get("kill_latched"), bool)
+    ):
+        return None
+    capacity = value.get("capacity")
+    if not isinstance(capacity, Mapping):
+        return None
+    projected_capacity: dict[str, Any] = {}
+    for role in AUTONOMOUS_ROLES:
+        row = capacity.get(role)
+        if not isinstance(row, Mapping):
+            return None
+        counts = {
+            name: _state_count(row.get(name))
+            for name in (
+                "desired",
+                "ready",
+                "busy",
+                "starting",
+                "draining",
+                "unhealthy",
+                "stopped",
+            )
+        }
+        seat_ids = row.get("seat_ids")
+        template_ids = row.get("template_ids")
+        if (
+            any(item is None for item in counts.values())
+            or not isinstance(seat_ids, list)
+            or not isinstance(template_ids, list)
+            or len(seat_ids) > 1_000
+            or len(template_ids) > 1_000
+        ):
+            return None
+        clean_seats = [_state_identifier(item) for item in seat_ids]
+        clean_templates = [_state_identifier(item) for item in template_ids]
+        if any(item is None for item in clean_seats + clean_templates):
+            return None
+        projected_capacity[role] = {
+            **counts,
+            "seat_ids": clean_seats,
+            "template_ids": clean_templates,
+        }
+    host = value.get("host_processes")
+    if not isinstance(host, Mapping):
+        return None
+    host_counts = {
+        name: _state_count(host.get(name))
+        for name in (
+            "role_agents",
+            "control_plane",
+            "agent_process_ceiling",
+            "total_process_ceiling",
+        )
+    }
+    host_observed_at = _timestamp(host.get("observed_at"))
+    executor = _project_health(value.get("executor"))
+    connectors = value.get("connectors")
+    if (
+        any(item is None for item in host_counts.values())
+        or host_counts["agent_process_ceiling"] == 0
+        or host_counts["total_process_ceiling"] == 0
+        or host_observed_at is None
+        or executor is None
+        or not isinstance(connectors, list)
+        or len(connectors) > 32
+    ):
+        return None
+    projected_connectors = [
+        _project_health(item, connector=True) for item in connectors
+    ]
+    if any(item is None for item in projected_connectors):
+        return None
+    result: dict[str, Any] = {
+        "schema": "autonomous_butler_state_v1",
+        "schema_version": 1,
+        "board_id": state_board,
+        "config_revision": revision,
+        "effective_state": effective,
+        "observed_at": observed_at,
+        "stale_after": stale_after,
+        "capacity": projected_capacity,
+        "host_processes": {**host_counts, "observed_at": host_observed_at},
+        "executor": executor,
+        "connectors": projected_connectors,
+        "kill_latched": value["kill_latched"],
+    }
+    reason_code = value.get("reason_code")
+    if reason_code is not None:
+        if not isinstance(reason_code, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,79}", reason_code
+        ):
+            return None
+        result["reason_code"] = reason_code
+    for name in ("current_command_id", "current_operation_id"):
+        if name in value:
+            identifier = _state_identifier(value[name])
+            if identifier is None:
+                return None
+            result[name] = identifier
+    return result
+
+
 def autonomous_butler_view(
     config_payload: Mapping[str, Any],
     command_payload: Mapping[str, Any],
@@ -137,13 +311,7 @@ def autonomous_butler_view(
                 "expired": row.get("expired") is True,
             }
         )
-    state = (
-        copy.deepcopy(dict(actual_state))
-        if isinstance(actual_state, Mapping)
-        else None
-    )
-    if state is not None and state.get("schema") != "autonomous_butler_state_v1":
-        state = None
+    state = _project_autonomous_state(actual_state, config_payload.get("board_id"))
     state_stale = False
     if state is not None:
         stale_after = state.get("stale_after")
