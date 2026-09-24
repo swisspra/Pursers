@@ -8166,13 +8166,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if type(replace_session) is not bool:
             raise ValueError("replace_session must be a boolean")
         principal = current_principal()
-        require_scope(principal, "board:write")
 
         def set_readiness(document: dict[str, Any]) -> dict[str, Any]:
             now = time.time()
-            actor, released, renewed = prepare_board_call(
-                document, principal, agent_name, now
+            actor = resolve_active_actor(document, principal, agent_name)
+            require_scope(
+                principal,
+                "board:review" if actor.get("role") == "reviewer" else "board:write",
             )
+            released = reap_expired(document, now)
+            renewed = touch_actor(document, actor, now)
             normalized = normalized_readiness(readiness, now=now)
             previous = actor.get("readiness")
             if isinstance(previous, Mapping):

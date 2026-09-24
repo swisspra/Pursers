@@ -2213,6 +2213,153 @@ async def _real_acp_turn_controls_dispatch_readiness_and_preserves_claim(
             await client.close()
 
 
+def test_real_acp_reviewer_turn_uses_review_scope_and_controls_offers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asyncio.run(_real_acp_reviewer_turn_uses_review_scope_and_controls_offers(
+        tmp_path, monkeypatch
+    ))
+
+
+async def _real_acp_reviewer_turn_uses_review_scope_and_controls_offers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jwks = tmp_path / "reviewer-readiness-jwks.json"
+    jwks.write_text('{"keys": []}', encoding="utf-8")
+    monkeypatch.setenv("CENTRAL_AUTH_MODE", "jwt")
+    monkeypatch.setenv("CENTRAL_JWT_ISSUER", "https://issuer.invalid")
+    monkeypatch.setenv("CENTRAL_JWT_AUDIENCE", "http://localhost:8765/mcp")
+    monkeypatch.setenv("CENTRAL_JWKS_PATH", str(jwks))
+    monkeypatch.setenv("CENTRAL_ADMISSION", "invite")
+    monkeypatch.setenv("STORE_BACKEND", "sqlite")
+    mcp, _service = central.build_server(
+        "localhost", 8765, tmp_path / "reviewer-readiness-central"
+    )
+    admin = central.Principal(
+        "PR-admin-worker",
+        "admin-worker",
+        frozenset({"board:read", "board:write", "board:review"}),
+    )
+    reviewer_principal = central.Principal(
+        "PR-acp-reviewer",
+        "acp-reviewer",
+        frozenset({"board:read", "board:review"}),
+    )
+    active = {"principal": admin}
+    monkeypatch.setattr(central, "current_principal", lambda: active["principal"])
+
+    class BlockingBridge:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def digests(
+            self, board_id: str, cursor: int | None, cancel: asyncio.Event
+        ) -> AsyncIterator[JSON]:
+            self.started.set()
+            await cancel.wait()
+            if False:
+                yield {"latest_seq": cursor or 0}
+
+        async def close(self) -> None:
+            return None
+
+    async with Client(mcp, mode="2026-07-28", cache=None) as raw:
+        async def call(name: str, **params: object) -> JSON:
+            return BoardClient._decode(
+                await raw.call_tool(name, {"board_id": "review-e2e", **params})
+            )
+
+        worker = await call(
+            "board_join",
+            agent_name="worker-admin",
+            role="worker",
+            capabilities={"can_work": True, "can_review": False},
+        )
+        await call(
+            "board_member_add",
+            agent_name="worker-admin",
+            principal_id=reviewer_principal.principal_id,
+            role="reviewer",
+        )
+        active["principal"] = reviewer_principal
+        reviewer = await call(
+            "board_join",
+            agent_name="interactive-reviewer",
+            role="reviewer",
+            capabilities={"can_work": False, "can_review": True},
+            readiness={
+                "transport_connected": True,
+                "session_idle": True,
+                "foreground_running": False,
+                "dispatch_ready": False,
+                "managed_autonomous": False,
+                "session_id": "reviewer-bootstrap",
+                "sequence": 0,
+                "ttl_s": 360,
+            },
+        )
+        active["principal"] = admin
+        created = await call(
+            "ticket_create",
+            agent_name="worker-admin",
+            title="ACP reviewer target",
+            description="Review only during a consuming ACP prompt",
+            target_url="review-e2e",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            prefer_agents=[worker["agent_id"]],
+        )
+        ticket_id = created["ticket"]["ticket_id"]
+        await call("ticket_claim", agent_name="worker-admin", ticket_id=ticket_id)
+        submitted = await call(
+            "ticket_submit",
+            agent_name="worker-admin",
+            ticket_id=ticket_id,
+            summary="ready for ACP review",
+        )
+        assert "review_offer" not in submitted
+
+        active["principal"] = reviewer_principal
+        bridge = BlockingBridge()
+        board = InProcessPersonalBoard(
+            raw,
+            reviewer_principal.principal_id,
+            agent_name="interactive-reviewer",
+            agent_id=reviewer["agent_id"],
+        )
+        board.board_id = "review-e2e"
+        board._wait_bridge_factory = lambda: bridge
+        client = FakeACPClient(PursersACPAgent(lambda: board))
+        try:
+            await client.initialize()
+            session = await client.new_session(tmp_path)
+            assert await client.prompt(session, "/board") == {"stopReason": "end_turn"}
+            idle = (await call("ticket_get", ticket_id=ticket_id))["ticket"]
+            assert "review_offer" not in idle
+
+            prompt = asyncio.create_task(client.prompt(session, "watch review-e2e"))
+            await asyncio.wait_for(bridge.started.wait(), TEST_TIMEOUT_S)
+            offered = (await call("ticket_get", ticket_id=ticket_id))["ticket"]
+            assert offered["review_offer"]["agent_id"] == reviewer["agent_id"]
+            await call(
+                "ticket_review_claim",
+                agent_name="interactive-reviewer",
+                ticket_id=ticket_id,
+            )
+            await client.notify("session/cancel", {"sessionId": session})
+            assert await prompt == {"stopReason": "cancelled"}
+            held = (await call("ticket_get", ticket_id=ticket_id))["ticket"]
+            assert held["review_lease"]["reviewer_agent_id"] == reviewer["agent_id"]
+            status = await call("board_status")
+            projected = next(
+                row for row in status["agents"]
+                if row["agent_id"] == reviewer["agent_id"]
+            )
+            assert projected["readiness"]["dispatch_ready"] is False
+        finally:
+            await client.close()
+
+
 def test_end_to_end_two_seat_questions_answer_and_refuse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

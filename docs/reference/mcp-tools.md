@@ -195,7 +195,7 @@ Response fields: `ok, board_id, agent_id, capabilities, dispatch_events, implici
 
 Publish session-bound dispatch readiness without altering live leases.
 
-Required authorization: `board:write` for the authenticated seat.
+Required authorization: `board:write` for the authenticated worker seat, or `board:review` for the authenticated reviewer seat.
 
 | Argument | Type | Presence | Default |
 |---|---|---|---|

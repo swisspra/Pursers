@@ -55,13 +55,18 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.mcp, self.service = central.build_server(
             "localhost", 8765, self.root / "data"
         )
+        admin_scopes = frozenset({"board:read", "board:write", "board:review"})
         review_scopes = frozenset({"board:read", "board:write", "board:review"})
+        production_review_scopes = frozenset({"board:read", "board:review"})
         work_scopes = frozenset({"board:read", "board:write"})
-        self.admin = central.Principal("PR-admin", "admin", review_scopes)
+        self.admin = central.Principal("PR-admin", "admin", admin_scopes)
         self.worker_a = central.Principal("PR-worker-a", "worker-a", work_scopes)
         self.worker_b = central.Principal("PR-worker-b", "worker-b", work_scopes)
         self.reviewer_a = central.Principal("PR-review-a", "review-a", review_scopes)
         self.reviewer_b = central.Principal("PR-review-b", "review-b", review_scopes)
+        self.readiness_reviewer = central.Principal(
+            "PR-readiness-reviewer", "readiness-reviewer", production_review_scopes
+        )
         self.principal = self.admin
         self.original_current_principal = central.current_principal
         central.current_principal = lambda: self.principal
@@ -376,12 +381,12 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             {"tier_max": 2, "can_work": True, "can_review": False},
         )
         reviewer_id = await self.add_seat(
-            self.reviewer_a,
+            self.readiness_reviewer,
             "reviewer-a",
             {"tier_max": 2, "can_work": False, "can_review": True},
             role="reviewer",
         )
-        self.principal = self.reviewer_a
+        self.principal = self.readiness_reviewer
         await self.call(
             "agent_readiness_set",
             agent_name="reviewer-a",
@@ -420,7 +425,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("review_offer", submitted.structured_content["ticket"])
 
-        self.principal = self.reviewer_a
+        self.principal = self.readiness_reviewer
         await self.call(
             "agent_readiness_set",
             agent_name="reviewer-a",

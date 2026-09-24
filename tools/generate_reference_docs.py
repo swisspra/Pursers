@@ -79,7 +79,10 @@ TOOL_SCOPES: dict[str, str] = {
     "agent_retire": "`board:read`; retiring another seat also needs admin or `board:coordinate`",
     "agent_retire_inert": "`board:coordinate`",
     "agent_capabilities_set": "`board:write` for the authenticated seat",
-    "agent_readiness_set": "`board:write` for the authenticated seat",
+    "agent_readiness_set": (
+        "`board:write` for the authenticated worker seat, or `board:review` "
+        "for the authenticated reviewer seat"
+    ),
     "ticket_get": "`board:read` and visibility of the ticket",
     "ticket_create": "`board:write`, or restricted `board:intake`",
     "ticket_update": "`board:write` or `board:coordinate`; creator/admin checks also apply",
