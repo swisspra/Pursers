@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import copy
 import fcntl
 import hashlib
 import importlib.util
 import ipaddress
 import json
+import math
 import os
 import re
 import runpy
@@ -49,6 +51,8 @@ from typing import (
     Sequence,
 )
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 STATE_KEY = "coordinator_findings"
@@ -370,6 +374,1439 @@ class MechanicalAction:
     observed_cycles: int | None
     reason: str
     annotation_required: bool = True
+
+
+FLEET_ROLES = ("worker", "reviewer", "acp_worker")
+FLEET_LIFECYCLES = (
+    "starting",
+    "ready",
+    "busy",
+    "draining",
+    "unhealthy",
+    "stopped",
+)
+MAX_FLEET_OPERATION_HISTORY = 512
+MAX_FLEET_EXPLANATIONS = 300
+
+
+@dataclass(frozen=True)
+class FleetRolePolicy:
+    """Human-owned bounds for one role; the reconciler cannot raise them."""
+
+    minimum: int
+    target: int
+    maximum: int
+    backlog_per_seat: int = 1
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, int) or isinstance(value, bool)
+            for value in (self.minimum, self.target, self.maximum, self.backlog_per_seat)
+        ):
+            raise ValueError("fleet role bounds are invalid")
+        if not (
+            0 <= self.minimum <= self.target <= self.maximum <= 100
+            and self.backlog_per_seat >= 1
+        ):
+            raise ValueError("fleet role bounds are invalid")
+
+
+@dataclass(frozen=True)
+class FleetBoardPolicy:
+    board_id: str
+    roles: Mapping[str, FleetRolePolicy]
+    board_maximum: int
+    provider_maximums: Mapping[str, int]
+    approved_template_ids: frozenset[str]
+    idle_grace_s: int
+    scale_up_cooldown_s: int
+    scale_down_cooldown_s: int
+    failure_backoff_s: int
+    provider_latency_limit_ms: int = 30_000
+
+    def __post_init__(self) -> None:
+        if set(self.roles) != set(FLEET_ROLES):
+            raise ValueError("fleet policy must bound every role")
+        if not 0 <= self.board_maximum <= 300:
+            raise ValueError("board fleet maximum is invalid")
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in self.provider_maximums.values()
+        ):
+            raise ValueError("provider fleet maximum is invalid")
+        if not self.approved_template_ids or any(
+            not isinstance(value, str) or not value for value in self.approved_template_ids
+        ):
+            raise ValueError("approved fleet templates are invalid")
+        if any(
+            value < 0
+            for value in (
+                self.idle_grace_s,
+                self.scale_up_cooldown_s,
+                self.scale_down_cooldown_s,
+            )
+        ) or self.failure_backoff_s < 1:
+            raise ValueError("fleet cooldown is invalid")
+        if self.provider_latency_limit_ms < 1:
+            raise ValueError("provider latency limit is invalid")
+
+
+@dataclass(frozen=True)
+class FleetHostPolicy:
+    agent_process_ceiling: int
+    control_plane_processes: int
+    total_process_ceiling: int
+
+    def __post_init__(self) -> None:
+        if (
+            self.agent_process_ceiling < 0
+            or self.control_plane_processes < 0
+            or self.total_process_ceiling < self.control_plane_processes
+        ):
+            raise ValueError("host fleet limits are invalid")
+
+    @property
+    def role_capacity(self) -> int:
+        return min(
+            self.agent_process_ceiling,
+            self.total_process_ceiling - self.control_plane_processes,
+        )
+
+
+@dataclass(frozen=True)
+class FleetDemand:
+    """Product-produced registry projection consumed by desired-state policy."""
+
+    board_id: str
+    open_by_tier: Mapping[int, int]
+    review_backlog: int
+    acp_backlog: int
+    oldest_ticket_age_s: int
+    expiring_offers: int
+    provider_health: Mapping[str, str]
+    provider_latency_ms: Mapping[str, int]
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in (
+                *self.open_by_tier.values(),
+                self.review_backlog,
+                self.acp_backlog,
+                self.oldest_ticket_age_s,
+                self.expiring_offers,
+                *self.provider_latency_ms.values(),
+            )
+        ):
+            raise ValueError("fleet demand counts are invalid")
+        if any(tier not in {0, 1, 2} for tier in self.open_by_tier):
+            raise ValueError("fleet demand tier is invalid")
+        if any(
+            status not in {"healthy", "degraded", "unavailable", "unknown"}
+            for status in self.provider_health.values()
+        ):
+            raise ValueError("provider health is invalid")
+
+    @property
+    def work_pressure(self) -> int:
+        weights = {0: 1, 1: 2, 2: 4}
+        pressure = sum(weights[tier] * count for tier, count in self.open_by_tier.items())
+        # An offer near expiry and an aged queue are starvation signals, not
+        # permission to exceed any human-owned maximum.
+        pressure += self.expiring_offers
+        if pressure and self.oldest_ticket_age_s >= 300:
+            pressure += 1
+        return pressure
+
+    @property
+    def has_work(self) -> bool:
+        return self.work_pressure > 0 or self.review_backlog > 0 or self.acp_backlog > 0
+
+
+@dataclass(frozen=True)
+class FleetSeat:
+    seat_id: str
+    board_id: str
+    role: str
+    provider: str
+    template_id: str
+    template_digest_sha256: str
+    generation: int
+    lifecycle: str
+    ready: bool
+    busy: bool
+    live_lease: bool
+    transition_at: datetime
+    managed: bool = True
+
+    def __post_init__(self) -> None:
+        if self.role not in FLEET_ROLES or self.lifecycle not in FLEET_LIFECYCLES:
+            raise ValueError("fleet seat role or lifecycle is invalid")
+        if self.generation < 1 or self.transition_at.tzinfo is None:
+            raise ValueError("fleet seat generation or transition time is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.template_digest_sha256):
+            raise ValueError("fleet seat template digest is invalid")
+
+    @property
+    def active(self) -> bool:
+        return self.lifecycle in {"starting", "ready", "busy", "draining", "unhealthy"}
+
+
+@dataclass(frozen=True)
+class FleetSnapshot:
+    observed_at: datetime
+    demands: Mapping[str, FleetDemand]
+    seats: tuple[FleetSeat, ...]
+    host_load_ratio: float
+    host_capacity_available: bool
+    executor_healthy: bool
+
+    def __post_init__(self) -> None:
+        if self.observed_at.tzinfo is None or not 0 <= self.host_load_ratio <= 1:
+            raise ValueError("fleet snapshot is invalid")
+        if set(self.demands) != {item.board_id for item in self.demands.values()}:
+            raise ValueError("fleet demand keys do not match board ids")
+        if any(seat.board_id not in self.demands for seat in self.seats):
+            raise ValueError("fleet seat has no registry demand projection")
+
+
+@dataclass(frozen=True)
+class FleetOperation:
+    operation_id: str
+    board_id: str
+    action: str
+    seat_id: str
+    template_id: str
+    template_digest_sha256: str
+    expected_seat_generation: int
+    authorization_fingerprint_sha256: str
+
+    def __post_init__(self) -> None:
+        if self.action not in {"start", "drain", "stop"}:
+            raise ValueError("fleet operation action is invalid")
+
+
+@dataclass(frozen=True)
+class FleetPlan:
+    desired: Mapping[str, Mapping[str, int]]
+    provider_desired: Mapping[str, Mapping[str, int]]
+    operations: tuple[FleetOperation, ...]
+    explanations: tuple[Mapping[str, Any], ...]
+
+
+class FleetExecutorClient(Protocol):
+    def execute(self, operation: FleetOperation) -> Mapping[str, Any]: ...
+
+
+class UnixFleetExecutorClient:
+    """Least-privilege signed client for the host-local fleet executor."""
+
+    def __init__(
+        self,
+        socket_path: Path,
+        key_id: str,
+        private_key_path: Path,
+        *,
+        timeout_s: float = 30.0,
+        max_response_bytes: int = 64 * 1024,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        if (
+            not socket_path.is_absolute()
+            or not private_key_path.is_absolute()
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", key_id)
+            or timeout_s <= 0
+            or max_response_bytes < 1
+        ):
+            raise ValueError("fleet executor client configuration is invalid")
+        self.socket_path = socket_path
+        self.key_id = key_id
+        self.private_key_path = private_key_path
+        self.timeout_s = timeout_s
+        self.max_response_bytes = max_response_bytes
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _private_key(self) -> Ed25519PrivateKey:
+        if self.private_key_path.is_symlink():
+            raise RuntimeError("fleet executor signing key is a symlink")
+        try:
+            info = self.private_key_path.stat()
+            raw = self.private_key_path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError("fleet executor signing key is unavailable") from exc
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or len(raw) != 32
+        ):
+            raise RuntimeError("fleet executor signing key is not a 0600 raw Ed25519 key")
+        return Ed25519PrivateKey.from_private_bytes(raw)
+
+    @staticmethod
+    def _request_digest(request: Mapping[str, Any]) -> str:
+        unsigned = {key: value for key, value in request.items() if key != "caller_auth"}
+        return hashlib.sha256(
+            json.dumps(
+                unsigned,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def execute(self, operation: FleetOperation) -> Mapping[str, Any]:
+        if self.socket_path.is_symlink():
+            raise RuntimeError("fleet executor socket is a symlink")
+        try:
+            socket_info = self.socket_path.stat()
+        except OSError as exc:
+            raise RuntimeError("fleet executor socket is unavailable") from exc
+        if (
+            not stat.S_ISSOCK(socket_info.st_mode)
+            or stat.S_IMODE(socket_info.st_mode) != 0o600
+            or socket_info.st_uid != os.getuid()
+        ):
+            raise RuntimeError("fleet executor socket is not owner-only")
+        now = self.clock().astimezone(timezone.utc)
+        request: dict[str, Any] = {
+            "schema": "autonomous_butler_executor_v1",
+            "schema_version": 1,
+            "message_type": "request",
+            "operation_id": operation.operation_id,
+            "board_id": operation.board_id,
+            "action": operation.action,
+            "seat_id": operation.seat_id,
+            "template_id": operation.template_id,
+            "template_digest_sha256": operation.template_digest_sha256,
+            "expected_seat_generation": operation.expected_seat_generation,
+            "authorization_fingerprint_sha256": (
+                operation.authorization_fingerprint_sha256
+            ),
+            "deadline": (now + timedelta(seconds=self.timeout_s)).isoformat(),
+            "caller_auth": {},
+        }
+        digest = self._request_digest(request)
+        nonce = "nonce:" + hashlib.sha256(
+            operation.operation_id.encode("utf-8")
+        ).hexdigest()[:32]
+        signed_at = now.isoformat()
+        message = b"\0".join(
+            (
+                b"pursers-executor-v1",
+                digest.encode("ascii"),
+                self.key_id.encode("utf-8"),
+                nonce.encode("utf-8"),
+                signed_at.encode("utf-8"),
+            )
+        )
+        request["caller_auth"] = {
+            "scheme": "local_ed25519_v1",
+            "key_id": self.key_id,
+            "nonce": nonce,
+            "signed_at": signed_at,
+            "request_digest_sha256": digest,
+            "signature_base64": base64.b64encode(
+                self._private_key().sign(message)
+            ).decode("ascii"),
+        }
+        encoded = json.dumps(
+            request,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8") + b"\n"
+        chunks = bytearray()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(self.timeout_s)
+            connection.connect(os.fspath(self.socket_path))
+            connection.sendall(encoded)
+            while not chunks.endswith(b"\n"):
+                block = connection.recv(min(4096, self.max_response_bytes + 1 - len(chunks)))
+                if not block:
+                    raise RuntimeError("fleet executor response ended early")
+                chunks.extend(block)
+                if len(chunks) > self.max_response_bytes:
+                    raise RuntimeError("fleet executor response exceeded the safe bound")
+        try:
+            result = json.loads(bytes(chunks))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("fleet executor response is invalid") from exc
+        if (
+            not isinstance(result, dict)
+            or result.get("schema") != "autonomous_butler_executor_v1"
+            or result.get("message_type") != "result"
+            or result.get("operation_id") != operation.operation_id
+            or result.get("board_id") != operation.board_id
+            or result.get("request_digest_sha256") != digest
+            or result.get("outcome")
+            not in {"succeeded", "rejected", "failed", "cancelled", "unknown"}
+            or not isinstance(result.get("committed"), bool)
+        ):
+            raise RuntimeError("fleet executor response contract is invalid")
+        return result
+
+
+class FleetStateStore(Protocol):
+    def load(self) -> tuple[int, Mapping[str, Any]]: ...
+
+    def compare_and_swap(
+        self, expected_revision: int, value: Mapping[str, Any]
+    ) -> bool: ...
+
+
+class MemoryFleetStateStore:
+    """Deterministic CAS store used by simulations and embedders."""
+
+    def __init__(self, value: Mapping[str, Any] | None = None) -> None:
+        self.revision = 0
+        self.value: dict[str, Any] = copy.deepcopy(dict(value or {}))
+
+    def load(self) -> tuple[int, Mapping[str, Any]]:
+        return self.revision, copy.deepcopy(self.value)
+
+    def compare_and_swap(
+        self, expected_revision: int, value: Mapping[str, Any]
+    ) -> bool:
+        if expected_revision != self.revision:
+            return False
+        self.value = copy.deepcopy(dict(value))
+        self.revision += 1
+        return True
+
+
+class FileFleetStateStore:
+    """Owner-only durable CAS state for restart-safe operation replay."""
+
+    def __init__(self, path: Path, *, max_bytes: int = 1_000_000) -> None:
+        if not path.is_absolute() or max_bytes < 1:
+            raise ValueError("fleet state path or size bound is invalid")
+        self.path = path
+        self.lock_path = path.with_suffix(path.suffix + ".lock")
+        self.max_bytes = max_bytes
+
+    def _locked(self) -> Any:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.path.parent, 0o700)
+        descriptor = os.open(
+            self.lock_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        os.chmod(self.lock_path, 0o600)
+        return os.fdopen(descriptor, "r+")
+
+    def _read_unlocked(self) -> tuple[int, dict[str, Any]]:
+        if not self.path.exists():
+            return 0, {}
+        if self.path.is_symlink():
+            raise RuntimeError("fleet state path is a symlink")
+        info = self.path.stat()
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+            raise RuntimeError("fleet state path is not an owner-only file")
+        if info.st_size > self.max_bytes:
+            raise RuntimeError("fleet state exceeds the safe bound")
+        try:
+            document = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("fleet state is unreadable") from exc
+        if (
+            not isinstance(document, dict)
+            or set(document) != {"schema", "revision", "value"}
+            or document.get("schema") != "pursers_fleet_state_store_v1"
+            or not isinstance(document.get("revision"), int)
+            or isinstance(document.get("revision"), bool)
+            or document["revision"] < 0
+            or not isinstance(document.get("value"), dict)
+        ):
+            raise RuntimeError("fleet state envelope is invalid")
+        return document["revision"], document["value"]
+
+    def load(self) -> tuple[int, Mapping[str, Any]]:
+        with self._locked() as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            revision, value = self._read_unlocked()
+            return revision, copy.deepcopy(value)
+
+    def compare_and_swap(
+        self, expected_revision: int, value: Mapping[str, Any]
+    ) -> bool:
+        with self._locked() as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            revision, _ = self._read_unlocked()
+            if revision != expected_revision:
+                return False
+            document = {
+                "schema": "pursers_fleet_state_store_v1",
+                "revision": revision + 1,
+                "value": copy.deepcopy(dict(value)),
+            }
+            encoded = json.dumps(
+                document,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(encoded) > self.max_bytes:
+                raise RuntimeError("fleet state exceeds the safe bound")
+            descriptor, raw = tempfile.mkstemp(
+                prefix=f".{self.path.name}.", dir=self.path.parent
+            )
+            temporary = Path(raw)
+            try:
+                os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(encoded)
+                    handle.write(b"\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                temporary.replace(self.path)
+            finally:
+                temporary.unlink(missing_ok=True)
+            return True
+
+
+def _fleet_operation_id(
+    *,
+    config_revision: int,
+    authorization_fingerprint_sha256: str,
+    seat: FleetSeat,
+    action: str,
+) -> str:
+    material = json.dumps(
+        {
+            "action": action,
+            "authorization": authorization_fingerprint_sha256,
+            "board_id": seat.board_id,
+            "config_revision": config_revision,
+            "generation": seat.generation,
+            "seat_id": seat.seat_id,
+            "template_digest": seat.template_digest_sha256,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "fleet:" + hashlib.sha256(material).hexdigest()
+
+
+def _healthy_provider(
+    demand: FleetDemand, policy: FleetBoardPolicy, provider: str
+) -> bool:
+    return (
+        demand.provider_health.get(provider) == "healthy"
+        and demand.provider_latency_ms.get(provider, policy.provider_latency_limit_ms + 1)
+        <= policy.provider_latency_limit_ms
+        and policy.provider_maximums.get(provider, 0) > 0
+    )
+
+
+def _role_pressure(demand: FleetDemand, role: str) -> int:
+    if role == "worker":
+        return demand.work_pressure
+    if role == "reviewer":
+        return demand.review_backlog
+    return demand.acp_backlog
+
+
+def _fleet_state_time(state: Mapping[str, Any], key: str) -> datetime | None:
+    value = state.get(key)
+    return parse_time(value) if isinstance(value, str) else None
+
+
+def fleet_policies_from_config(
+    configs: Mapping[str, Mapping[str, Any]],
+    provider_maximums: Mapping[str, Mapping[str, int]],
+    now: datetime,
+) -> tuple[FleetHostPolicy, dict[str, FleetBoardPolicy]]:
+    """Validate active human configuration and derive immutable policy bounds."""
+    if now.tzinfo is None or not configs:
+        raise ButlerConfigError("fleet configuration time or registry is invalid")
+    policies: dict[str, FleetBoardPolicy] = {}
+    host_identity: tuple[Any, ...] | None = None
+    effective_host_cap: int | None = None
+    host_document: Mapping[str, Any] | None = None
+    for board_id in sorted(configs):
+        document = configs[board_id]
+        if (
+            document.get("schema") != "autonomous_butler_config_v1"
+            or document.get("schema_version") != 1
+            or document.get("board_id") != board_id
+            or document.get("enabled") is not True
+        ):
+            raise ButlerConfigError(f"{board_id}: autonomous fleet config is invalid")
+        revision = document.get("revision")
+        desired = document.get("desired")
+        envelope = document.get("envelope")
+        authorization = document.get("authorization")
+        host = document.get("host_runtime")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (desired, envelope, authorization, host)
+        ) or not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+            raise ButlerConfigError(f"{board_id}: autonomous fleet config is incomplete")
+        if desired.get("mode") != "autonomous":
+            raise ButlerConfigError(f"{board_id}: autonomous fleet mode is not enabled")
+        fingerprint = envelope.get("fingerprint_sha256")
+        expires_at = parse_time(authorization.get("expires_at"))
+        if (
+            not isinstance(fingerprint, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+            or authorization.get("config_revision") != revision
+            or authorization.get("envelope_fingerprint_sha256") != fingerprint
+            or expires_at is None
+            or expires_at <= now
+        ):
+            raise ButlerConfigError(f"{board_id}: autonomous authorization is invalid")
+        desired_capacity = desired.get("capacity")
+        envelope_capacity = envelope.get("max_capacity")
+        approved_templates = envelope.get("approved_template_ids")
+        cooldowns = desired.get("cooldowns")
+        if (
+            not isinstance(desired_capacity, Mapping)
+            or not isinstance(envelope_capacity, Mapping)
+            or not isinstance(cooldowns, Mapping)
+            or not isinstance(approved_templates, list)
+            or not approved_templates
+            or any(not isinstance(item, str) or not item for item in approved_templates)
+        ):
+            raise ButlerConfigError(f"{board_id}: autonomous fleet bounds are missing")
+        roles: dict[str, FleetRolePolicy] = {}
+        for role in FLEET_ROLES:
+            row = desired_capacity.get(role)
+            ceiling = envelope_capacity.get(role)
+            if not isinstance(row, Mapping) or not isinstance(ceiling, int):
+                raise ButlerConfigError(f"{board_id}: {role} bounds are invalid")
+            try:
+                role_policy = FleetRolePolicy(
+                    row["min"], row["target"], row["max"], 1
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ButlerConfigError(f"{board_id}: {role} bounds are invalid") from exc
+            if role_policy.maximum > ceiling:
+                raise ButlerConfigError(f"{board_id}: {role} exceeds immutable envelope")
+            roles[role] = role_policy
+        desired_board_cap = desired.get("board_concurrency")
+        envelope_board_cap = envelope.get("max_board_concurrency")
+        desired_host_cap = desired.get("host_concurrency")
+        envelope_host_cap = envelope.get("max_host_concurrency")
+        if any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 1
+            for value in (
+                desired_board_cap,
+                envelope_board_cap,
+                desired_host_cap,
+                envelope_host_cap,
+            )
+        ):
+            raise ButlerConfigError(f"{board_id}: concurrency bounds are invalid")
+        if (
+            desired_board_cap > envelope_board_cap
+            or desired_host_cap > envelope_host_cap
+            or sum(item.maximum for item in roles.values()) > desired_board_cap
+        ):
+            raise ButlerConfigError(f"{board_id}: desired capacity exceeds an envelope")
+        try:
+            agent_ceiling = int(host["agent_process_ceiling"])
+            control_processes = int(host["control_plane_processes"])
+            total_ceiling = int(host["total_process_ceiling"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ButlerConfigError(f"{board_id}: host runtime bounds are invalid") from exc
+        identity = (
+            host.get("host_ref"),
+            host.get("revision"),
+            agent_ceiling,
+            control_processes,
+            total_ceiling,
+        )
+        if host_identity is not None and identity != host_identity:
+            raise ButlerConfigError("registry configs disagree on host runtime")
+        host_identity = identity
+        host_document = host
+        board_host_cap = min(agent_ceiling, desired_host_cap, envelope_host_cap)
+        effective_host_cap = (
+            board_host_cap
+            if effective_host_cap is None
+            else min(effective_host_cap, board_host_cap)
+        )
+        try:
+            policies[board_id] = FleetBoardPolicy(
+                board_id=board_id,
+                roles=roles,
+                board_maximum=desired_board_cap,
+                provider_maximums=dict(provider_maximums[board_id]),
+                approved_template_ids=frozenset(str(item) for item in approved_templates),
+                idle_grace_s=int(cooldowns["scale_down_s"]),
+                scale_up_cooldown_s=int(cooldowns["scale_up_s"]),
+                scale_down_cooldown_s=int(cooldowns["scale_down_s"]),
+                failure_backoff_s=int(cooldowns["failure_backoff_s"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ButlerConfigError(f"{board_id}: fleet policy is invalid") from exc
+    assert host_document is not None and effective_host_cap is not None
+    host_policy = FleetHostPolicy(
+        effective_host_cap,
+        int(host_document["control_plane_processes"]),
+        int(host_document["total_process_ceiling"]),
+    )
+    if host_policy.role_capacity < effective_host_cap:
+        raise ButlerConfigError("host total process ceiling is smaller than desired capacity")
+    return host_policy, policies
+
+
+def fleet_snapshot_from_products(
+    board_snapshots: Mapping[str, Mapping[str, Any]],
+    executor_seats: Sequence[Mapping[str, Any]],
+    provider_observations: Mapping[str, Mapping[str, Mapping[str, Any]]],
+    host_observation: Mapping[str, Any],
+    now: datetime,
+    *,
+    offer_horizon_s: int = 120,
+) -> FleetSnapshot:
+    """Consume actual Central/executor observations; incomplete data fails closed."""
+    if now.tzinfo is None or offer_horizon_s < 0:
+        raise ValueError("fleet observation time is invalid")
+    demands: dict[str, FleetDemand] = {}
+    agent_indexes: dict[str, dict[str, Mapping[str, Any]]] = {}
+    for board_id in sorted(board_snapshots):
+        board = board_snapshots[board_id]
+        if board.get("truncated") is True and board.get("coordination_tickets_complete") is not True:
+            raise ValueError(f"{board_id}: ticket snapshot is incomplete")
+        rows = board.get("coordination_tickets", board.get("tickets"))
+        agents = board.get("agents")
+        if not isinstance(rows, list) or not isinstance(agents, list):
+            raise ValueError(f"{board_id}: product snapshot is incomplete")
+        index: dict[str, Mapping[str, Any]] = {}
+        for agent in agents:
+            if not isinstance(agent, Mapping):
+                continue
+            for key in (agent.get("agent_name"), agent.get("agent_id")):
+                if isinstance(key, str) and key:
+                    index[key] = agent
+        agent_indexes[board_id] = index
+        open_by_tier = {0: 0, 1: 0, 2: 0}
+        review_backlog = 0
+        acp_backlog = 0
+        ages: list[int] = []
+        expiring = 0
+        for ticket in rows:
+            if not isinstance(ticket, Mapping):
+                continue
+            status = ticket.get("status")
+            if status == "submitted":
+                review_backlog += 1
+            if status != "open":
+                continue
+            tags = ticket.get("tags", [])
+            is_acp = isinstance(tags, list) and any(
+                tag in {"acp", "acp-worker"} for tag in tags
+            )
+            tier = ticket.get("tier", 0)
+            if not isinstance(tier, int) or isinstance(tier, bool) or tier not in {0, 1, 2}:
+                raise ValueError(f"{board_id}: ticket tier is invalid")
+            if is_acp:
+                acp_backlog += 1
+            else:
+                open_by_tier[tier] += 1
+            created = parse_time(ticket.get("created_at"))
+            if created is not None and created <= now:
+                ages.append(int((now - created).total_seconds()))
+            dispatch = ticket.get("dispatch_state")
+            offer = ticket.get("current_offer")
+            candidate = dispatch if isinstance(dispatch, Mapping) else offer
+            if isinstance(candidate, Mapping) and candidate.get("state", "offered") == "offered":
+                expiry = parse_time(candidate.get("expires_at"))
+                if expiry is not None and now <= expiry <= now + timedelta(seconds=offer_horizon_s):
+                    expiring += 1
+        providers = provider_observations.get(board_id)
+        if not isinstance(providers, Mapping) or not providers:
+            raise ValueError(f"{board_id}: provider observations are missing")
+        health: dict[str, str] = {}
+        latency: dict[str, int] = {}
+        for provider, observation in providers.items():
+            if not isinstance(observation, Mapping):
+                raise ValueError(f"{board_id}: provider observation is invalid")
+            health[str(provider)] = str(observation.get("status", "unknown"))
+            raw_latency = observation.get("latency_ms")
+            if not isinstance(raw_latency, int) or isinstance(raw_latency, bool):
+                raise ValueError(f"{board_id}: provider latency is invalid")
+            latency[str(provider)] = raw_latency
+        demands[board_id] = FleetDemand(
+            board_id=board_id,
+            open_by_tier=open_by_tier,
+            review_backlog=review_backlog,
+            acp_backlog=acp_backlog,
+            oldest_ticket_age_s=max(ages, default=0),
+            expiring_offers=expiring,
+            provider_health=health,
+            provider_latency_ms=latency,
+        )
+    seats: list[FleetSeat] = []
+    required = {
+        "seat_id",
+        "board_id",
+        "role",
+        "provider",
+        "template_id",
+        "template_digest_sha256",
+        "generation",
+        "lifecycle",
+        "transition_at",
+        "managed",
+    }
+    for row in executor_seats:
+        if not isinstance(row, Mapping) or not required <= set(row):
+            raise ValueError("executor seat observation is incomplete")
+        board_id = str(row["board_id"])
+        if board_id not in demands:
+            raise ValueError("executor seat belongs to an unknown registry board")
+        if not isinstance(row["managed"], bool):
+            raise ValueError("executor managed flag is invalid")
+        transition_at = parse_time(row["transition_at"])
+        if transition_at is None:
+            raise ValueError("executor transition time is invalid")
+        agent = agent_indexes[board_id].get(str(row["seat_id"]))
+        lease_expiry = (
+            parse_time(agent.get("lease_expires_at"))
+            if isinstance(agent, Mapping)
+            else None
+        )
+        live = lease_expiry is not None and lease_expiry > now
+        lifecycle = str(row["lifecycle"])
+        agent_ready = (
+            isinstance(agent, Mapping)
+            and agent.get("lifecycle_status", "active") == "active"
+            and agent.get("status") not in {"offline", "retired"}
+        )
+        seats.append(
+            FleetSeat(
+                seat_id=str(row["seat_id"]),
+                board_id=board_id,
+                role=str(row["role"]),
+                provider=str(row["provider"]),
+                template_id=str(row["template_id"]),
+                template_digest_sha256=str(row["template_digest_sha256"]),
+                generation=int(row["generation"]),
+                lifecycle=lifecycle,
+                ready=lifecycle in {"ready", "busy"} and agent_ready,
+                busy=lifecycle == "busy"
+                or (isinstance(agent, Mapping) and agent.get("status") == "busy"),
+                live_lease=live,
+                transition_at=transition_at,
+                managed=row["managed"],
+            )
+        )
+    load_ratio = host_observation.get("load_ratio")
+    capacity_available = host_observation.get("capacity_available")
+    executor_status = host_observation.get("executor_status")
+    if (
+        not isinstance(load_ratio, (int, float))
+        or isinstance(load_ratio, bool)
+        or not isinstance(capacity_available, bool)
+        or executor_status not in {"healthy", "degraded", "unavailable", "unknown"}
+    ):
+        raise ValueError("host observation is invalid")
+    return FleetSnapshot(
+        observed_at=now,
+        demands=demands,
+        seats=tuple(seats),
+        host_load_ratio=float(load_ratio),
+        host_capacity_available=capacity_available,
+        executor_healthy=executor_status == "healthy",
+    )
+
+
+class FleetReconciler:
+    """Registry-wide deterministic desired-state and executor reconciler.
+
+    Model output is intentionally absent from this class. Every ceiling comes
+    from ``FleetHostPolicy`` or ``FleetBoardPolicy`` and every mutation is sent
+    through the typed host executor with a stable operation id.
+    """
+
+    def __init__(
+        self,
+        host_policy: FleetHostPolicy,
+        board_policies: Mapping[str, FleetBoardPolicy],
+        *,
+        config_revision: int,
+        authorization_fingerprint_sha256: str,
+        max_cas_retries: int = 3,
+        max_operation_attempts: int = 3,
+    ) -> None:
+        if set(board_policies) != {item.board_id for item in board_policies.values()}:
+            raise ValueError("fleet board policy keys do not match board ids")
+        if config_revision < 1 or not re.fullmatch(
+            r"[0-9a-f]{64}", authorization_fingerprint_sha256
+        ):
+            raise ValueError("fleet authorization is invalid")
+        if max_cas_retries < 1 or max_operation_attempts < 1:
+            raise ValueError("fleet retry bounds are invalid")
+        self.host_policy = host_policy
+        self.board_policies = dict(board_policies)
+        self.config_revision = config_revision
+        self.authorization_fingerprint_sha256 = authorization_fingerprint_sha256
+        self.max_cas_retries = max_cas_retries
+        self.max_operation_attempts = max_operation_attempts
+
+    def _requested_counts(
+        self, snapshot: FleetSnapshot, prior: Mapping[str, Any]
+    ) -> tuple[dict[str, dict[str, int]], list[dict[str, Any]]]:
+        now = snapshot.observed_at
+        prior_boards = prior.get("boards", {})
+        result: dict[str, dict[str, int]] = {}
+        explanations: list[dict[str, Any]] = []
+        for board_id in sorted(snapshot.demands):
+            demand = snapshot.demands[board_id]
+            policy = self.board_policies[board_id]
+            board_prior = (
+                prior_boards.get(board_id, {})
+                if isinstance(prior_boards, Mapping)
+                else {}
+            )
+            role_prior = (
+                board_prior.get("desired", {})
+                if isinstance(board_prior, Mapping)
+                else {}
+            )
+            idle_since = _fleet_state_time(board_prior, "idle_since")
+            last_up = _fleet_state_time(board_prior, "last_scale_up_at")
+            last_down = _fleet_state_time(board_prior, "last_scale_down_at")
+            seats = [seat for seat in snapshot.seats if seat.board_id == board_id]
+            counts: dict[str, int] = {}
+            for role in FLEET_ROLES:
+                role_policy = policy.roles[role]
+                live = sum(
+                    1
+                    for seat in seats
+                    if seat.managed and seat.role == role and seat.live_lease
+                )
+                pressure = _role_pressure(demand, role)
+                available = sum(
+                    1
+                    for seat in seats
+                    if seat.managed
+                    and seat.role == role
+                    and seat.template_id in policy.approved_template_ids
+                    and _healthy_provider(demand, policy, seat.provider)
+                )
+                if pressure:
+                    requested = max(
+                        role_policy.minimum,
+                        role_policy.target,
+                        math.ceil(pressure / role_policy.backlog_per_seat),
+                    )
+                else:
+                    requested = role_policy.minimum
+                requested = max(requested, live)
+                requested = min(requested, role_policy.maximum, available)
+                previous = int(role_prior.get(role, 0) or 0)
+                if pressure == 0:
+                    active_count = sum(
+                        1
+                        for seat in seats
+                        if seat.managed and seat.role == role and seat.active
+                    )
+                    if idle_since is None:
+                        # The first zero-demand observation starts the durable
+                        # grace window; it never drains immediately after a restart.
+                        requested = max(
+                            requested,
+                            min(active_count, role_policy.maximum, available),
+                        )
+                    elif (now - idle_since).total_seconds() < policy.idle_grace_s:
+                        requested = max(
+                            requested,
+                            min(previous, active_count, role_policy.maximum, available),
+                        )
+                if requested > previous and last_up is not None:
+                    cooldown = (now - last_up).total_seconds() < policy.scale_up_cooldown_s
+                    starvation = pressure > previous * role_policy.backlog_per_seat
+                    if cooldown and not starvation:
+                        requested = previous
+                if requested < previous and last_down is not None:
+                    if (now - last_down).total_seconds() < policy.scale_down_cooldown_s:
+                        requested = previous
+                counts[role] = max(live, requested)
+                explanations.append(
+                    {
+                        "board_id": board_id,
+                        "role": role,
+                        "pressure": pressure,
+                        "live_leases": live,
+                        "healthy_approved_seats": available,
+                        "requested": counts[role],
+                        "reason": (
+                            "demand"
+                            if pressure
+                            else "idle_grace"
+                            if counts[role] > role_policy.minimum
+                            else "minimum"
+                        ),
+                    }
+                )
+            # Board maxima are applied without sacrificing a live lease. Any
+            # impossible live-lease oversubscription is reported and no stop is planned.
+            provider_budget = sum(
+                min(
+                    maximum,
+                    sum(
+                        1
+                        for seat in seats
+                        if seat.managed
+                        and seat.template_id in policy.approved_template_ids
+                        and seat.provider == provider
+                        and _healthy_provider(demand, policy, provider)
+                    ),
+                )
+                for provider, maximum in policy.provider_maximums.items()
+            )
+            budget = min(policy.board_maximum, provider_budget)
+            self._trim_counts(counts, budget, demand)
+            result[board_id] = counts
+        return result, explanations
+
+    @staticmethod
+    def _trim_counts(
+        counts: dict[str, int],
+        budget: int,
+        demand: FleetDemand,
+    ) -> None:
+        # Reviewer demand is allocated before worker and ACP increments so an
+        # independent review bottleneck cannot be created by worker scale-up.
+        while sum(counts.values()) > budget:
+            candidates: list[tuple[int, str]] = []
+            for role in FLEET_ROLES:
+                floor = 0
+                if counts[role] > floor:
+                    priority = (
+                        1_000_000
+                        if role == "reviewer" and demand.review_backlog
+                        else 0
+                    ) + _role_pressure(demand, role)
+                    candidates.append((priority, role))
+            if not candidates:
+                break
+            _, role = min(candidates)
+            counts[role] -= 1
+
+    def _apply_host_cap(
+        self,
+        requested: dict[str, dict[str, int]],
+        snapshot: FleetSnapshot,
+    ) -> None:
+        unmanaged_active = sum(
+            1 for seat in snapshot.seats if not seat.managed and seat.active
+        )
+        host_budget = max(0, self.host_policy.role_capacity - unmanaged_active)
+        # High load is a deterministic no-scale-up signal. Existing desired
+        # state is allowed to drain normally; live holders are always preserved.
+        if not snapshot.host_capacity_available or snapshot.host_load_ratio >= 0.95:
+            managed_active = sum(
+                1 for seat in snapshot.seats if seat.managed and seat.active
+            )
+            host_budget = managed_active
+        while sum(sum(row.values()) for row in requested.values()) > host_budget:
+            candidates: list[tuple[int, str, str]] = []
+            for board_id, counts in requested.items():
+                demand = snapshot.demands[board_id]
+                for role in FLEET_ROLES:
+                    floor = 0
+                    if counts[role] <= floor:
+                        continue
+                    priority = (
+                        1_000_000
+                        if role == "reviewer" and demand.review_backlog
+                        else 0
+                    ) + _role_pressure(demand, role)
+                    candidates.append((priority, board_id, role))
+            if not candidates:
+                return
+            _, board_id, role = min(candidates)
+            requested[board_id][role] -= 1
+
+    def _provider_desired(
+        self,
+        requested: Mapping[str, Mapping[str, int]],
+        snapshot: FleetSnapshot,
+    ) -> dict[str, dict[str, int]]:
+        result: dict[str, dict[str, int]] = {}
+        for board_id, counts in requested.items():
+            demand = snapshot.demands[board_id]
+            policy = self.board_policies[board_id]
+            remaining = sum(counts.values())
+            provider_counts: dict[str, int] = {
+                provider: 0 for provider in sorted(policy.provider_maximums)
+            }
+            providers = sorted(
+                provider_counts,
+                key=lambda provider: (
+                    demand.provider_latency_ms.get(provider, 10**9),
+                    provider,
+                ),
+            )
+            for provider in providers:
+                if not _healthy_provider(demand, policy, provider):
+                    continue
+                approved = sum(
+                    1
+                    for seat in snapshot.seats
+                    if seat.managed
+                    and seat.board_id == board_id
+                    and seat.template_id in policy.approved_template_ids
+                    and seat.provider == provider
+                )
+                assigned = min(remaining, policy.provider_maximums[provider], approved)
+                provider_counts[provider] = assigned
+                remaining -= assigned
+            result[board_id] = provider_counts
+        return result
+
+    def _operations(
+        self,
+        requested: Mapping[str, Mapping[str, int]],
+        provider_desired: Mapping[str, Mapping[str, int]],
+        snapshot: FleetSnapshot,
+        prior: Mapping[str, Any],
+    ) -> tuple[FleetOperation, ...]:
+        now = snapshot.observed_at
+        prior_operations = prior.get("operations", {})
+        operations: list[FleetOperation] = []
+        active_total = sum(1 for seat in snapshot.seats if seat.active)
+        start_budget = max(0, self.host_policy.role_capacity - active_total)
+        if not snapshot.host_capacity_available or snapshot.host_load_ratio >= 0.95:
+            start_budget = 0
+        for board_id in sorted(requested):
+            policy = self.board_policies[board_id]
+            demand = snapshot.demands[board_id]
+            seats = [
+                seat
+                for seat in snapshot.seats
+                if seat.managed
+                and seat.board_id == board_id
+                and seat.template_id in policy.approved_template_ids
+            ]
+            board_start_budget = max(
+                0,
+                policy.board_maximum - sum(1 for seat in seats if seat.active),
+            )
+            selected: set[str] = set()
+            provider_started = {
+                provider: 0 for provider in provider_desired[board_id]
+            }
+            for role in FLEET_ROLES:
+                target = requested[board_id][role]
+                role_seats = [seat for seat in seats if seat.role == role]
+                active = [seat for seat in role_seats if seat.active]
+                # Live holders and busy seats are stable first choices, then
+                # healthy low-latency providers.
+                keep = sorted(
+                    active,
+                    key=lambda seat: (
+                        not seat.live_lease,
+                        not seat.busy,
+                        demand.provider_latency_ms.get(seat.provider, 10**9),
+                        seat.seat_id,
+                    ),
+                )[:target]
+                selected.update(seat.seat_id for seat in keep)
+                for seat in keep:
+                    provider_started[seat.provider] = provider_started.get(seat.provider, 0) + 1
+                needed = max(0, target - len(active))
+                candidates = sorted(
+                    (
+                        seat
+                        for seat in role_seats
+                        if not seat.active
+                        and _healthy_provider(demand, policy, seat.provider)
+                    ),
+                    key=lambda seat: (
+                        demand.provider_latency_ms.get(seat.provider, 10**9),
+                        seat.seat_id,
+                    ),
+                )
+                for seat in candidates:
+                    if needed <= 0 or start_budget <= 0 or board_start_budget <= 0:
+                        break
+                    if provider_started.get(seat.provider, 0) >= provider_desired[board_id].get(
+                        seat.provider, 0
+                    ):
+                        continue
+                    operations.append(self._operation(seat, "start"))
+                    provider_started[seat.provider] = provider_started.get(seat.provider, 0) + 1
+                    selected.add(seat.seat_id)
+                    needed -= 1
+                    start_budget -= 1
+                    board_start_budget -= 1
+                excess = [
+                    seat
+                    for seat in active
+                    if seat.seat_id not in selected
+                    and not seat.live_lease
+                    and not seat.busy
+                ]
+                for seat in sorted(excess, key=lambda item: item.seat_id):
+                    idle_for = (now - seat.transition_at).total_seconds()
+                    if idle_for < policy.idle_grace_s:
+                        continue
+                    action = "stop" if seat.lifecycle == "draining" else "drain"
+                    operations.append(self._operation(seat, action))
+        # Stable ids make retries and crash recovery safe. Suppress terminal
+        # successes; replay unknown/in-flight operations with the exact same id.
+        filtered: list[FleetOperation] = []
+        for operation in operations:
+            prior_row = (
+                prior_operations.get(operation.operation_id, {})
+                if isinstance(prior_operations, Mapping)
+                else {}
+            )
+            if isinstance(prior_row, Mapping) and prior_row.get("outcome") == "succeeded":
+                continue
+            attempts = int(prior_row.get("attempts", 0) or 0) if isinstance(prior_row, Mapping) else 0
+            last_attempt = (
+                parse_time(prior_row.get("last_attempt_at"))
+                if isinstance(prior_row, Mapping)
+                else None
+            )
+            backoff_active = (
+                last_attempt is not None
+                and (
+                    snapshot.observed_at - last_attempt
+                ).total_seconds()
+                < self.board_policies[operation.board_id].failure_backoff_s
+            )
+            if attempts < self.max_operation_attempts and not backoff_active:
+                filtered.append(operation)
+        return tuple(filtered)
+
+    def _operation(self, seat: FleetSeat, action: str) -> FleetOperation:
+        return FleetOperation(
+            operation_id=_fleet_operation_id(
+                config_revision=self.config_revision,
+                authorization_fingerprint_sha256=self.authorization_fingerprint_sha256,
+                seat=seat,
+                action=action,
+            ),
+            board_id=seat.board_id,
+            action=action,
+            seat_id=seat.seat_id,
+            template_id=seat.template_id,
+            template_digest_sha256=seat.template_digest_sha256,
+            expected_seat_generation=seat.generation,
+            authorization_fingerprint_sha256=self.authorization_fingerprint_sha256,
+        )
+
+    def plan(self, snapshot: FleetSnapshot, prior: Mapping[str, Any]) -> FleetPlan:
+        if set(snapshot.demands) != set(self.board_policies):
+            raise ValueError("snapshot does not cover the configured registry")
+        desired, explanations = self._requested_counts(snapshot, prior)
+        self._apply_host_cap(desired, snapshot)
+        provider_desired = self._provider_desired(desired, snapshot)
+        operations = self._operations(
+            desired, provider_desired, snapshot, prior
+        )
+        explanations.append(
+            {
+                "scope": "host",
+                "role_capacity": self.host_policy.role_capacity,
+                "host_load_ratio": snapshot.host_load_ratio,
+                "capacity_available": snapshot.host_capacity_available,
+                "desired_total": sum(sum(row.values()) for row in desired.values()),
+                "reason": "deterministic_hard_cap",
+            }
+        )
+        return FleetPlan(desired, provider_desired, operations, tuple(explanations))
+
+    def _persisted_plan(
+        self,
+        plan: FleetPlan,
+        snapshot: FleetSnapshot,
+        prior: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        now = snapshot.observed_at
+        prior_boards = prior.get("boards", {})
+        boards: dict[str, Any] = {}
+        for board_id, desired in plan.desired.items():
+            demand = snapshot.demands[board_id]
+            previous = (
+                prior_boards.get(board_id, {})
+                if isinstance(prior_boards, Mapping)
+                else {}
+            )
+            previous_desired = previous.get("desired", {}) if isinstance(previous, Mapping) else {}
+            old_total = sum(int(previous_desired.get(role, 0) or 0) for role in FLEET_ROLES)
+            new_total = sum(desired.values())
+            boards[board_id] = {
+                "desired": dict(desired),
+                "provider_desired": dict(plan.provider_desired[board_id]),
+                "idle_since": (
+                    previous.get("idle_since")
+                    if not demand.has_work and previous.get("idle_since")
+                    else now.isoformat()
+                    if not demand.has_work
+                    else None
+                ),
+                "last_scale_up_at": (
+                    now.isoformat() if new_total > old_total else previous.get("last_scale_up_at")
+                ),
+                "last_scale_down_at": (
+                    now.isoformat() if new_total < old_total else previous.get("last_scale_down_at")
+                ),
+            }
+        operations = copy.deepcopy(dict(prior.get("operations", {})))
+        for operation in plan.operations:
+            row = dict(operations.get(operation.operation_id, {}))
+            row.update(
+                {
+                    "operation_id": operation.operation_id,
+                    "board_id": operation.board_id,
+                    "action": operation.action,
+                    "seat_id": operation.seat_id,
+                    "status": "pending",
+                    "attempts": int(row.get("attempts", 0) or 0),
+                }
+            )
+            operations[operation.operation_id] = row
+        if len(operations) > MAX_FLEET_OPERATION_HISTORY:
+            ranked = sorted(
+                operations.items(),
+                key=lambda item: (
+                    item[1].get("status") in {"pending", "unknown"},
+                    str(item[1].get("last_attempt_at", "")),
+                    item[0],
+                ),
+                reverse=True,
+            )
+            operations = dict(ranked[:MAX_FLEET_OPERATION_HISTORY])
+        return {
+            "schema": "pursers_fleet_reconciler_state_v1",
+            "config_revision": self.config_revision,
+            "observed_at": now.isoformat(),
+            "boards": boards,
+            "operations": operations,
+            "explanations": [
+                dict(item) for item in plan.explanations[:MAX_FLEET_EXPLANATIONS]
+            ],
+        }
+
+    def reconcile(
+        self,
+        snapshot: FleetSnapshot,
+        store: FleetStateStore,
+        executor: FleetExecutorClient,
+    ) -> Mapping[str, Any]:
+        if not snapshot.executor_healthy:
+            raise RuntimeError("fleet executor is unavailable")
+        for _ in range(self.max_cas_retries):
+            revision, prior = store.load()
+            if prior and int(prior.get("config_revision", self.config_revision)) != self.config_revision:
+                raise RuntimeError("fleet config revision changed")
+            plan = self.plan(snapshot, prior)
+            persisted = self._persisted_plan(plan, snapshot, prior)
+            if store.compare_and_swap(revision, persisted):
+                break
+        else:
+            raise RuntimeError("fleet state CAS retry exhausted")
+        receipts: list[dict[str, Any]] = []
+        for operation in plan.operations:
+            try:
+                receipt = dict(executor.execute(operation))
+                if (
+                    receipt.get("operation_id") != operation.operation_id
+                    or receipt.get("outcome")
+                    not in {"succeeded", "rejected", "failed", "cancelled", "unknown"}
+                    or not isinstance(receipt.get("committed"), bool)
+                ):
+                    raise RuntimeError("executor receipt contract mismatch")
+            except Exception as exc:
+                receipt = {
+                    "operation_id": operation.operation_id,
+                    "outcome": "unknown",
+                    "committed": False,
+                    "reason_code": type(exc).__name__.casefold(),
+                }
+            receipts.append(receipt)
+        # A result-CAS failure is safe: operation ids are deterministic and the
+        # executor rejects changed payloads, so the next cycle replays safely.
+        result_revision, current = store.load()
+        updated = copy.deepcopy(dict(current))
+        operation_state = updated.setdefault("operations", {})
+        for operation, receipt in zip(plan.operations, receipts, strict=True):
+            row = dict(operation_state.get(operation.operation_id, {}))
+            row["attempts"] = int(row.get("attempts", 0) or 0) + 1
+            row["last_attempt_at"] = snapshot.observed_at.isoformat()
+            row["status"] = "terminal" if receipt.get("outcome") in {"succeeded", "rejected", "failed", "cancelled"} else "unknown"
+            row["outcome"] = str(receipt.get("outcome", "unknown"))
+            row["committed"] = receipt.get("committed") is True
+            if isinstance(receipt.get("reason_code"), str):
+                row["reason_code"] = receipt["reason_code"]
+            operation_state[operation.operation_id] = row
+        store.compare_and_swap(result_revision, updated)
+        return {
+            "desired": copy.deepcopy(dict(plan.desired)),
+            "operations": [operation.operation_id for operation in plan.operations],
+            "receipts": receipts,
+            "explanations": [dict(item) for item in plan.explanations],
+        }
+
+    def desired_state_document(
+        self, board_id: str, snapshot: FleetSnapshot, plan: FleetPlan
+    ) -> dict[str, Any]:
+        """Render the landed autonomous_butler_state_v1 product contract."""
+        now = snapshot.observed_at
+        seats = [
+            seat
+            for seat in snapshot.seats
+            if seat.managed and seat.board_id == board_id
+        ]
+        capacity: dict[str, Any] = {}
+        for role in FLEET_ROLES:
+            role_seats = [seat for seat in seats if seat.role == role]
+            capacity[role] = {
+                "desired": plan.desired[board_id][role],
+                "ready": sum(1 for seat in role_seats if seat.lifecycle == "ready"),
+                "busy": sum(1 for seat in role_seats if seat.lifecycle == "busy"),
+                "starting": sum(1 for seat in role_seats if seat.lifecycle == "starting"),
+                "draining": sum(1 for seat in role_seats if seat.lifecycle == "draining"),
+                "unhealthy": sum(1 for seat in role_seats if seat.lifecycle == "unhealthy"),
+                "stopped": sum(1 for seat in role_seats if seat.lifecycle == "stopped"),
+                "seat_ids": [seat.seat_id for seat in sorted(role_seats, key=lambda item: item.seat_id)],
+                "template_ids": [seat.template_id for seat in sorted(role_seats, key=lambda item: item.seat_id)],
+            }
+        demand = snapshot.demands[board_id]
+        connectors = [
+            {
+                "connector_id": provider,
+                "status": demand.provider_health[provider],
+                "observed_at": now.isoformat(),
+            }
+            for provider in sorted(demand.provider_health)
+        ]
+        return {
+            "schema": "autonomous_butler_state_v1",
+            "schema_version": 1,
+            "board_id": board_id,
+            "config_revision": self.config_revision,
+            "effective_state": "autonomous" if snapshot.executor_healthy else "degraded",
+            "reason_code": "desired_state_reconciled" if snapshot.executor_healthy else "executor_unavailable",
+            "observed_at": now.isoformat(),
+            "stale_after": (now + timedelta(seconds=120)).isoformat(),
+            "capacity": capacity,
+            "host_processes": {
+                "role_agents": sum(1 for seat in snapshot.seats if seat.active),
+                "control_plane": self.host_policy.control_plane_processes,
+                "agent_process_ceiling": self.host_policy.agent_process_ceiling,
+                "total_process_ceiling": self.host_policy.total_process_ceiling,
+                "observed_at": now.isoformat(),
+            },
+            "executor": {
+                "status": "healthy" if snapshot.executor_healthy else "unavailable",
+                "observed_at": now.isoformat(),
+            },
+            "connectors": connectors,
+            "kill_latched": False,
+        }
 
 
 @dataclass(frozen=True)
