@@ -295,9 +295,17 @@ GLOBAL_EXACT_PATHS = frozenset(
     {
         ".github/workflows/ci.yml",
         "tools/ci_manifest.py",
+        "tools/generate_reference_docs.py",
         "tools/release_versions.toml",
         "tools/aionui-extension/INTEGRATION_FILES.sha256",
         "packages/personal/src/pursers_personal/resources/component-lock.json",
+    }
+)
+GENERATED_REFERENCE_OUTPUTS = frozenset(
+    {
+        "docs/reference/cli.md",
+        "docs/reference/environment.md",
+        "docs/reference/mcp-tools.md",
     }
 )
 
@@ -428,16 +436,19 @@ def covering_suites(
         path = raw_path.strip().strip("/")
         if not path or path.startswith("../"):
             raise ValueError(f"invalid repository path in coverage query: {raw_path!r}")
-        names = tuple(
-            suite.name
-            for suite in suites
-            if any(
-                path == prefix.strip("/")
-                or path.startswith(prefix.strip("/") + "/")
-                for prefix in suite.covers
-                if prefix.strip("/")
+        if path in GENERATED_REFERENCE_OUTPUTS:
+            names = tuple(suite.name for suite in suites if suite.name == "release-tools")
+        else:
+            names = tuple(
+                suite.name
+                for suite in suites
+                if any(
+                    path == prefix.strip("/")
+                    or path.startswith(prefix.strip("/") + "/")
+                    for prefix in suite.covers
+                    if prefix.strip("/")
+                )
             )
-        )
         result[path] = names
     return result
 
@@ -558,6 +569,9 @@ def select_affected_suites(
     escalation: set[str] = set()
     if high_risk:
         escalation.add("ticket-marked-high-risk")
+    generated_reference_paths = set(paths).intersection(GENERATED_REFERENCE_OUTPUTS)
+    if generated_reference_paths and set(paths) - GENERATED_REFERENCE_OUTPUTS:
+        escalation.add("generated-reference-output-mixed-with-input-or-unknown-path")
     for path in paths:
         if not coverage[path]:
             escalation.add(f"unmapped:{path}")

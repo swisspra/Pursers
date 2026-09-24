@@ -252,6 +252,75 @@ def test_affected_selection_uses_exact_git_diff_and_overlapping_coverage(
 
 
 @pytest.mark.parametrize(
+    "relative",
+    [
+        "docs/reference/cli.md",
+        "docs/reference/environment.md",
+        "docs/reference/mcp-tools.md",
+    ],
+)
+def test_affected_selection_maps_one_generated_reference_to_release_tools(
+    tmp_path: Path, relative: str
+) -> None:
+    root, base = _git_fixture(tmp_path)
+    changed = root / relative
+    changed.parent.mkdir(parents=True)
+    changed.write_text("generated\n", encoding="utf-8")
+    candidate = _commit(root, "generated reference")
+
+    selection = select_affected_suites(root, base, candidate)
+
+    assert selection.selected_suites == ("release-tools",)
+    assert selection.escalation_reasons == ()
+    assert selection.full_gate is False
+
+
+@pytest.mark.parametrize(
+    "extra_path",
+    [
+        "tools/generate_reference_docs.py",
+        "tools/board-butler/board_butler.py",
+        "unmapped/new.file",
+    ],
+)
+def test_affected_selection_escalates_generated_reference_with_other_changes(
+    tmp_path: Path, extra_path: str
+) -> None:
+    root, base = _git_fixture(tmp_path)
+    for relative in ("docs/reference/cli.md", extra_path):
+        changed = root / relative
+        changed.parent.mkdir(parents=True, exist_ok=True)
+        changed.write_text("changed\n", encoding="utf-8")
+    candidate = _commit(root, "generated reference with input")
+
+    selection = select_affected_suites(root, base, candidate)
+
+    assert selection.selected_suites == tuple(suite.name for suite in SUITES)
+    assert (
+        "generated-reference-output-mixed-with-input-or-unknown-path"
+        in selection.escalation_reasons
+    )
+
+
+def test_affected_selection_escalates_unrecognized_reference_output(
+    tmp_path: Path,
+) -> None:
+    root, base = _git_fixture(tmp_path)
+    changed = root / "docs/reference/other-generated.md"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("generated\n", encoding="utf-8")
+    candidate = _commit(root, "unrecognized generated reference")
+
+    selection = select_affected_suites(root, base, candidate)
+
+    assert selection.selected_suites == tuple(suite.name for suite in SUITES)
+    assert (
+        "unmapped:docs/reference/other-generated.md"
+        in selection.escalation_reasons
+    )
+
+
+@pytest.mark.parametrize(
     ("relative", "reason"),
     [
         ("unmapped/new.file", "unmapped:"),
@@ -260,6 +329,7 @@ def test_affected_selection_uses_exact_git_diff_and_overlapping_coverage(
         ("packages/client/src/pursers_client/authentication.py", "policy-sensitive:"),
         ("packages/client/generated.lock", "release-or-generated:"),
         ("tools/ci_manifest.py", "global-or-generated:"),
+        ("tools/generate_reference_docs.py", "global-or-generated:"),
     ],
 )
 def test_affected_selection_escalates_uncertain_and_high_risk_paths(
