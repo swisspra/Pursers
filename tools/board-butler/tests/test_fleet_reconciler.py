@@ -148,12 +148,14 @@ def reconciler(
     policies: Mapping[str, Any] | None = None,
     *,
     host_cap: int = 8,
+    config_revision: int = 7,
+    fingerprint: str = FINGERPRINT,
 ) -> Any:
     return butler.FleetReconciler(
         butler.FleetHostPolicy(host_cap, 2, host_cap + 2),
         dict(policies or {"pursers": board_policy()}),
-        config_revision=7,
-        authorization_fingerprint_sha256=FINGERPRINT,
+        config_revision=config_revision,
+        authorization_fingerprint_sha256=fingerprint,
     )
 
 
@@ -585,6 +587,111 @@ def test_file_state_store_survives_restart_and_enforces_cas(tmp_path: Path) -> N
     assert path.stat().st_mode & 0o777 == 0o600
 
 
+def test_policy_transition_is_atomic_and_does_not_replay_stale_operations(
+    tmp_path: Path,
+) -> None:
+    path = (tmp_path / "state" / "fleet.json").resolve()
+    store = butler.FileFleetStateStore(path)
+    first = reconciler(
+        {"pursers": board_policy(maximum=2, provider_maximums={"direct": 2})},
+        host_cap=2,
+    )
+    old_executor = RecordingExecutor(fail_seat="worker-a")
+    first.reconcile(
+        snapshot(
+            {"pursers": demand(work=2)},
+            [seat("worker-a", "worker"), seat("worker-b", "worker")],
+        ),
+        store,
+        old_executor,
+    )
+    old_unknown_id = old_executor.calls[0].operation_id
+    old_terminal_id = old_executor.calls[1].operation_id
+
+    new_fingerprint = "c" * 64
+    second = reconciler(
+        {
+            "pursers": board_policy(
+                maximum=1,
+                provider_maximums={"direct": 1},
+                idle_grace_s=0,
+            )
+        },
+        host_cap=1,
+        config_revision=8,
+        fingerprint=new_fingerprint,
+    )
+
+    class InspectingExecutor(RecordingExecutor):
+        def execute(self, operation: Any) -> Mapping[str, Any]:
+            _revision, durable = store.load()
+            assert durable["config_revisions"] == {"pursers": 8}
+            assert durable["authorization_fingerprints"] == {
+                "pursers": new_fingerprint
+            }
+            assert durable["boards"]["pursers"]["desired"]["worker"] == 1
+            assert durable["operations"][operation.operation_id]["status"] == "pending"
+            assert old_unknown_id not in durable["operations"]
+            return super().execute(operation)
+
+    new_executor = InspectingExecutor()
+    report = second.reconcile(
+        snapshot(
+            {"pursers": demand(work=1)},
+            [
+                seat("worker-a", "worker", lifecycle="ready"),
+                seat("worker-b", "worker", lifecycle="ready"),
+            ],
+            now=NOW + timedelta(minutes=1),
+        ),
+        butler.FileFleetStateStore(path),
+        new_executor,
+    )
+
+    assert [(item.action, item.seat_id) for item in new_executor.calls] == [
+        ("drain", "worker-b")
+    ]
+    assert new_executor.calls[0].authorization_fingerprint_sha256 == new_fingerprint
+    assert old_unknown_id not in report["operations"]
+    _revision, durable = butler.FileFleetStateStore(path).load()
+    assert old_unknown_id not in durable["operations"]
+    assert durable["operations"][old_terminal_id]["status"] == "terminal"
+    assert durable["policy_transition"]["discarded_nonterminal_operations"] == 1
+    assert durable["policy_transition"]["preserved_terminal_operations"] == 1
+    assert sum(durable["boards"]["pursers"]["desired"].values()) == 1
+
+
+def test_fingerprint_only_transition_discards_unknown_operation() -> None:
+    store = butler.MemoryFleetStateStore()
+    failed = RecordingExecutor(fail_seat="worker-a")
+    reconciler().reconcile(
+        snapshot(
+            {"pursers": demand(work=1)},
+            [seat("worker-a", "worker")],
+        ),
+        store,
+        failed,
+    )
+    stale_id = failed.calls[0].operation_id
+
+    executor = RecordingExecutor()
+    reconciler(fingerprint="d" * 64).reconcile(
+        snapshot(
+            {"pursers": demand()},
+            [],
+            now=NOW + timedelta(minutes=1),
+        ),
+        store,
+        executor,
+    )
+
+    assert executor.calls == []
+    _revision, durable = store.load()
+    assert stale_id not in durable["operations"]
+    assert durable["authorization_fingerprints"] == {"pursers": "d" * 64}
+    assert durable["policy_transition"]["discarded_nonterminal_operations"] == 1
+
+
 def test_count_invariants_hold_across_burst_matrix() -> None:
     policy = board_policy(maximum=5, provider_maximums={"direct": 4})
     engine = reconciler({"pursers": policy}, host_cap=3)
@@ -952,3 +1059,52 @@ def test_production_fleet_cycle_reads_products_executes_and_publishes(
     assert adapter.observation.ready is True
     assert published["pursers"]["schema"] == "autonomous_butler_state_v1"
     assert json.loads(options.fleet_state_file.read_text())["revision"] == 2
+
+    second_now = cycle_now + timedelta(seconds=1)
+    new_fingerprint = "c" * 64
+    config["revision"] = 4
+    config["authorization"]["config_revision"] = 4
+    config["authorization"]["envelope_fingerprint_sha256"] = new_fingerprint
+    config["envelope"]["fingerprint_sha256"] = new_fingerprint
+    config["host_runtime"]["agent_process_ceiling"] = 1
+    config["host_runtime"]["total_process_ceiling"] = 3
+    config["desired"]["host_concurrency"] = 1
+    config["desired"]["board_concurrency"] = 1
+    config["envelope"]["max_host_concurrency"] = 1
+    config["envelope"]["max_board_concurrency"] = 1
+    for role in ("reviewer", "acp_worker"):
+        config["desired"]["capacity"][role] = {"min": 0, "target": 0, "max": 0}
+        config["envelope"]["max_capacity"][role] = 0
+    config["desired"]["capacity"]["worker"]["max"] = 1
+    config["envelope"]["max_capacity"]["worker"] = 1
+    observation = json.loads(observation_path.read_text(encoding="utf-8"))
+    observation["observed_at"] = (
+        second_now - timedelta(milliseconds=100)
+    ).isoformat()
+    observation["stale_after"] = (second_now + timedelta(minutes=1)).isoformat()
+    observation["provider_maximums"]["pursers"]["direct"] = 1
+    observation["executor_seats"][0]["lifecycle"] = "ready"
+    observation["executor_seats"][0]["transition_at"] = cycle_now.isoformat()
+    observation_path.write_text(json.dumps(observation), encoding="utf-8")
+    observation_path.chmod(0o600)
+
+    changed = asyncio.run(
+        backend._reconcile_fleet(
+            ["pursers"], {"pursers": board_snapshot}, second_now
+        )
+    )
+
+    assert changed == {
+        "status": "reconciled",
+        "boards": ["pursers"],
+        "operations": 0,
+        "receipt_outcomes": [],
+    }
+    assert published["pursers"]["config_revision"] == 4
+    assert published["pursers"]["capacity"]["worker"]["desired"] == 1
+    durable = json.loads(options.fleet_state_file.read_text())
+    assert durable["revision"] == 4
+    assert durable["value"]["config_revisions"] == {"pursers": 4}
+    assert durable["value"]["policy_transition"][
+        "discarded_nonterminal_operations"
+    ] == 0

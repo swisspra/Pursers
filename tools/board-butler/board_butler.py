@@ -1354,6 +1354,94 @@ class FleetReconciler:
         self.max_cas_retries = max_cas_retries
         self.max_operation_attempts = max_operation_attempts
 
+    def _policy_matches(self, prior: Mapping[str, Any]) -> bool:
+        revisions = prior.get("config_revisions")
+        fingerprints = prior.get("authorization_fingerprints")
+        return (
+            isinstance(revisions, Mapping)
+            and dict(revisions) == self.config_revisions
+            and isinstance(fingerprints, Mapping)
+            and dict(fingerprints) == self.authorization_fingerprints
+        )
+
+    @staticmethod
+    def _terminal_operation_history(prior: Mapping[str, Any]) -> dict[str, Any]:
+        """Keep only validated, non-replayable audit rows across policy changes."""
+        source = prior.get("operations", {})
+        if not isinstance(source, Mapping):
+            return {}
+        terminal: dict[str, Any] = {}
+        for operation_id, raw in source.items():
+            if (
+                not isinstance(operation_id, str)
+                or not re.fullmatch(r"fleet:[0-9a-f]{64}", operation_id)
+                or not isinstance(raw, Mapping)
+                or raw.get("operation_id") != operation_id
+                or raw.get("status") != "terminal"
+                or raw.get("outcome")
+                not in {"succeeded", "rejected", "failed", "cancelled"}
+                or raw.get("action") not in {"start", "drain", "stop"}
+                or not isinstance(raw.get("board_id"), str)
+                or not isinstance(raw.get("seat_id"), str)
+                or not isinstance(raw.get("attempts"), int)
+                or isinstance(raw.get("attempts"), bool)
+                or raw["attempts"] < 1
+                or not isinstance(raw.get("committed"), bool)
+                or parse_time(raw.get("last_attempt_at")) is None
+            ):
+                continue
+            row = {
+                "operation_id": operation_id,
+                "board_id": raw["board_id"],
+                "action": raw["action"],
+                "seat_id": raw["seat_id"],
+                "status": "terminal",
+                "attempts": raw["attempts"],
+                "last_attempt_at": raw["last_attempt_at"],
+                "outcome": raw["outcome"],
+                "committed": raw["committed"],
+            }
+            if isinstance(raw.get("reason_code"), str):
+                row["reason_code"] = raw["reason_code"]
+            terminal[operation_id] = row
+        return terminal
+
+    def prior_for_current_policy(
+        self, prior: Mapping[str, Any], now: datetime
+    ) -> Mapping[str, Any]:
+        """Create a fail-closed CAS migration view for an authoritative policy."""
+        if not prior or self._policy_matches(prior):
+            return prior
+        operations = prior.get("operations", {})
+        old_operation_count = len(operations) if isinstance(operations, Mapping) else 0
+        terminal = self._terminal_operation_history(prior)
+        return {
+            "operations": terminal,
+            "policy_transition": {
+                "at": now.isoformat(),
+                "from_config_revisions": copy.deepcopy(
+                    dict(prior.get("config_revisions", {}))
+                    if isinstance(prior.get("config_revisions"), Mapping)
+                    else {}
+                ),
+                "to_config_revisions": dict(self.config_revisions),
+                "from_authorization_fingerprints": copy.deepcopy(
+                    dict(prior.get("authorization_fingerprints", {}))
+                    if isinstance(
+                        prior.get("authorization_fingerprints"), Mapping
+                    )
+                    else {}
+                ),
+                "to_authorization_fingerprints": dict(
+                    self.authorization_fingerprints
+                ),
+                "preserved_terminal_operations": len(terminal),
+                "discarded_nonterminal_operations": max(
+                    0, old_operation_count - len(terminal)
+                ),
+            },
+        }
+
     def _requested_counts(
         self, snapshot: FleetSnapshot, prior: Mapping[str, Any]
     ) -> tuple[dict[str, dict[str, int]], list[dict[str, Any]]]:
@@ -1432,7 +1520,10 @@ class FleetReconciler:
                 if requested < previous and last_down is not None:
                     if (now - last_down).total_seconds() < policy.scale_down_cooldown_s:
                         requested = previous
-                counts[role] = max(live, requested)
+                # A live-lease oversubscription is observed, never amplified:
+                # desired state remains within the immutable role maximum while
+                # operation selection separately refuses to stop a live holder.
+                counts[role] = min(role_policy.maximum, max(live, requested))
                 explanations.append(
                     {
                         "board_id": board_id,
@@ -1821,10 +1912,13 @@ class FleetReconciler:
                 reverse=True,
             )
             operations = dict(ranked[:MAX_FLEET_OPERATION_HISTORY])
-        return {
+        persisted = {
             "schema": "pursers_fleet_reconciler_state_v1",
             "config_revision": self.config_revision,
             "config_revisions": dict(self.config_revisions),
+            "authorization_fingerprints": dict(
+                self.authorization_fingerprints
+            ),
             "observed_at": now.isoformat(),
             "boards": boards,
             "operations": operations,
@@ -1832,6 +1926,23 @@ class FleetReconciler:
                 dict(item) for item in plan.explanations[:MAX_FLEET_EXPLANATIONS]
             ],
         }
+        transition = prior.get("policy_transition")
+        if isinstance(transition, Mapping):
+            persisted["policy_transition"] = copy.deepcopy(dict(transition))
+            persisted["explanations"] = [
+                {
+                    "scope": "policy",
+                    "reason": "authoritative_config_changed",
+                    "discarded_nonterminal_operations": int(
+                        transition.get("discarded_nonterminal_operations", 0) or 0
+                    ),
+                    "preserved_terminal_operations": int(
+                        transition.get("preserved_terminal_operations", 0) or 0
+                    ),
+                },
+                *persisted["explanations"],
+            ][:MAX_FLEET_EXPLANATIONS]
+        return persisted
 
     def reconcile(
         self,
@@ -1843,13 +1954,7 @@ class FleetReconciler:
             raise RuntimeError("fleet executor is unavailable")
         for _ in range(self.max_cas_retries):
             revision, prior = store.load()
-            if prior:
-                prior_revisions = prior.get("config_revisions")
-                if isinstance(prior_revisions, Mapping):
-                    if dict(prior_revisions) != self.config_revisions:
-                        raise RuntimeError("fleet config revision changed")
-                elif int(prior.get("config_revision", self.config_revision)) != self.config_revision:
-                    raise RuntimeError("fleet config revision changed")
+            prior = self.prior_for_current_policy(prior, snapshot.observed_at)
             plan = self.plan(snapshot, prior)
             persisted = self._persisted_plan(plan, snapshot, prior)
             if store.compare_and_swap(revision, persisted):
@@ -1896,6 +2001,10 @@ class FleetReconciler:
             "operations": [operation.operation_id for operation in plan.operations],
             "receipts": receipts,
             "explanations": [dict(item) for item in plan.explanations],
+            "state_documents": {
+                board_id: self.desired_state_document(board_id, snapshot, plan)
+                for board_id in sorted(self.board_policies)
+            },
         }
 
     def desired_state_document(
@@ -7196,8 +7305,6 @@ class CentralBackend:
             authorization_fingerprints=fingerprints,
         )
         store = FileFleetStateStore(self.args.fleet_state_file)
-        _revision, prior = store.load()
-        plan = reconciler.plan(snapshot, prior)
         report = reconciler.reconcile(
             snapshot,
             store,
@@ -7210,7 +7317,7 @@ class CentralBackend:
         for board_id in sorted(configs):
             await self._write_fleet_state(
                 board_id,
-                reconciler.desired_state_document(board_id, snapshot, plan),
+                report["state_documents"][board_id],
             )
         return {
             "status": "reconciled",
