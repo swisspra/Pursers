@@ -21,7 +21,6 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
 from pursers_client import BoardClientError, JoinedIdentity  # noqa: E402
-from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 import central  # noqa: E402
 
@@ -436,7 +435,7 @@ class CatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_central_error_message_is_preserved_by_a2a_wait(self) -> None:
+    async def test_central_error_is_structured_without_raw_detail(self) -> None:
         client = BulkClient(count=0)
 
         async def fail(**_arguments: Any) -> dict[str, Any]:
@@ -446,12 +445,17 @@ class CatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(
             request_context=SimpleNamespace(lifespan_context={"client": client})
         )
-        with self.assertRaisesRegex(
-            ToolError, "a2a_wait Central error: synthetic Central detail"
-        ):
-            await wait_server.a2a_wait(
-                context, since_seq=0, timeout_s=1, only_mine=False
-            )
+        result = await wait_server.a2a_wait(
+            context, since_seq=0, timeout_s=1, only_mine=False
+        )
+        self.assertEqual(result["new_seq"], 0)
+        self.assertEqual(result["events"], [])
+        self.assertEqual(result["reason"], "push_unavailable")
+        self.assertEqual(result["error"]["cause_class"], "central")
+        self.assertEqual(
+            result["error"]["exception_classes"], ["BoardClientError"]
+        )
+        self.assertNotIn("synthetic Central detail", repr(result))
 
 
 class RealCentralCatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):

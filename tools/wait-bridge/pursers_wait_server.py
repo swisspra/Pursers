@@ -324,6 +324,7 @@ CONTEXT_READ_TOOLS = frozenset(
 HOST_TIMEOUTS_S = {
     "codex": 620,
     "codex-cli": 620,
+    "zed": 620,
     "goose": 300,
     "claude-code": 21_600,
     "claude-desktop": 240,
@@ -449,7 +450,11 @@ class BridgeStats:
         result: dict[str, Any],
     ) -> None:
         """Record exactly one model-visible a2a_wait result."""
-        outcome = "timeout" if result.get("timed_out") else "cue"
+        outcome = (
+            "error"
+            if isinstance(result.get("error"), dict)
+            else ("timeout" if result.get("timed_out") else "cue")
+        )
         try:
             async with self._lock:
                 self._record_wait_return_sync(
@@ -1013,6 +1018,12 @@ def _host_name() -> str:
     return host if host in HOST_TIMEOUTS_S else DEFAULT_HOST
 
 
+def _agent_platform() -> str | None:
+    """Preserve the native host marker when it is also the agent platform."""
+    host = _host_name()
+    return host if host == "zed" else None
+
+
 def _parse_capability_bool(name: str) -> bool | None:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -1284,6 +1295,7 @@ class _BoardView:
         self,
         *,
         agent_name: str | None = None,
+        agent_platform: str | None = None,
         task_focus: str | None = None,
         capabilities: dict[str, Any] | None = None,
         renewal_source: str | None = None,
@@ -1293,6 +1305,8 @@ class _BoardView:
         arguments: dict[str, Any] = {"agent_name": selected}
         if self.role is not None:
             arguments["role"] = self.role
+        if agent_platform is not None:
+            arguments["agent_platform"] = agent_platform
         if task_focus is not None:
             arguments["task_focus"] = task_focus
         caps = dict(capabilities or {})
@@ -1362,16 +1376,20 @@ async def _join_for_call(
     client: BoardClient, agent_name: str, explicit_name: bool
 ) -> dict[str, Any]:
     capabilities = _seat_capabilities()
+    agent_platform = _agent_platform()
     if explicit_name:
         kwargs: dict[str, Any] = {"agent_name": agent_name}
+        if agent_platform is not None:
+            kwargs["agent_platform"] = agent_platform
         if capabilities is not None:
             kwargs["capabilities"] = capabilities
         return await client.board_join(**kwargs, allow_takeover=True)
+    kwargs = {}
+    if agent_platform is not None:
+        kwargs["agent_platform"] = agent_platform
     if capabilities is not None:
-        return await client.board_join(
-            capabilities=capabilities, allow_takeover=True
-        )
-    return await client.board_join(allow_takeover=True)
+        kwargs["capabilities"] = capabilities
+    return await client.board_join(**kwargs, allow_takeover=True)
 
 
 class BoardJoinFailure(ToolError):
@@ -1593,6 +1611,7 @@ class DeferredBoardConnection:
             BOARD_ID,
             agent_name=AGENT_NAME,
             role=_declared_role(),
+            agent_platform=_agent_platform(),
             meter=self.meter,
             capabilities=startup_caps,
             allow_takeover=not RUNTIME_FROM_DOOR,
@@ -5904,6 +5923,131 @@ def _validate_a2a_wait_arguments(
         )
 
 
+def _wait_error_board_ids(
+    boards: list[str] | str | None,
+    since_seq: int | dict[str, int] | None,
+) -> list[str]:
+    if isinstance(boards, list):
+        return list(dict.fromkeys(board_id.strip() for board_id in boards))
+    if isinstance(since_seq, dict) and since_seq:
+        return list(since_seq)
+    return [BOARD_ID]
+
+
+def _wait_error_cursor(
+    boards: list[str] | str | None,
+    since_seq: int | dict[str, int] | None,
+) -> int | dict[str, int] | None:
+    """Return only caller-owned cursor state; never invent or advance a cursor."""
+    if isinstance(since_seq, dict):
+        return dict(since_seq)
+    if isinstance(boards, list) and isinstance(since_seq, int):
+        board_ids = _wait_error_board_ids(boards, since_seq)
+        return {board_id: since_seq for board_id in board_ids}
+    return since_seq
+
+
+def _wait_failure_class(exc: BaseException) -> tuple[str, list[str]]:
+    nested = _nested_exceptions(exc)
+    classes = sorted({type(item).__name__ for item in nested})
+    join_failure = next(
+        (item for item in nested if isinstance(item, BoardJoinFailure)), None
+    )
+    if join_failure is not None:
+        cause_class = {
+            "auth": "authentication",
+            "denied": "authorization",
+            "configuration": "configuration",
+            "unreachable": "transport",
+            "board": "central",
+        }.get(join_failure.cause_class, "central")
+        return cause_class, classes
+    detail = " ".join(str(item) for item in nested).casefold()
+    if any(
+        name in {
+            "BrokenPipeError",
+            "ConnectError",
+            "ConnectTimeout",
+            "ConnectionError",
+            "NetworkError",
+            "ReadError",
+            "ReadTimeout",
+            "RemoteProtocolError",
+            "TimeoutError",
+        }
+        for name in classes
+    ):
+        return "transport", classes
+    if any(
+        marker in detail
+        for marker in (
+            "401",
+            "403",
+            "authentication",
+            "invalid token",
+            "unauthorized",
+        )
+    ):
+        return "authentication", classes
+    if _is_permanent_denial(detail):
+        return "authorization", classes
+    if "BoardClientError" in classes:
+        return "central", classes
+    return "runtime", classes
+
+
+def _structured_wait_error(
+    *,
+    exc: BaseException,
+    since_seq: int | dict[str, int] | None,
+    boards: list[str] | str | None,
+    started: float,
+) -> dict[str, Any]:
+    """Build a bounded, non-sensitive failure result for stdio hosts."""
+    board_ids = _wait_error_board_ids(boards, since_seq)
+    cursor = _wait_error_cursor(boards, since_seq)
+    cause_class, exception_classes = _wait_failure_class(exc)
+    push = WAIT_MODE == "push"
+    retryable = cause_class not in {
+        "authentication",
+        "authorization",
+        "configuration",
+    }
+    if cursor is None:
+        action = "rearm_with_omitted_cursor"
+    elif retryable:
+        action = "rearm_from_unchanged_cursor"
+    else:
+        action = f"repair_{cause_class}_then_rearm_from_unchanged_cursor"
+    return {
+        "new_seq": cursor,
+        "events": [],
+        "waited_s": round(max(0.0, time.monotonic() - started), 2),
+        "timed_out": False,
+        "mode": "error",
+        "mode_by_board": {board_id: "error" for board_id in board_ids},
+        "reason": "push_unavailable" if push else "wait_unavailable",
+        "resynced": (
+            {board_id: False for board_id in board_ids}
+            if isinstance(cursor, dict)
+            else False
+        ),
+        "skipped_boards": {},
+        "error": {
+            "code": "push_unavailable" if push else "wait_unavailable",
+            "cause_class": cause_class,
+            "exception_classes": exception_classes,
+            "message": (
+                "a2a_wait could not complete; no caller cursor was advanced. "
+                "Check the wait-bridge/Central transport, then re-arm from new_seq."
+            ),
+            "retryable": retryable,
+            "cursor_preserved": True,
+            "action": action,
+        },
+    }
+
+
 @mcp.tool()
 async def a2a_wait(
     ctx: Context,
@@ -5922,7 +6066,39 @@ async def a2a_wait(
         boards=boards,
         wait_for=wait_for,
     )
-    client = await _client_for_tool(ctx)
+    started = time.monotonic()
+    try:
+        client = await _client_for_tool(ctx)
+    except BoardJoinFailure as exc:
+        result = _structured_wait_error(
+            exc=exc,
+            since_seq=since_seq,
+            boards=boards,
+            started=started,
+        )
+        error = result["error"]
+        _log(
+            "WARNING: a2a_wait setup returned a structured failure "
+            f"code={error['code']} cause_class={error['cause_class']} "
+            f"exception_classes={','.join(error['exception_classes'])}"
+        )
+        return result
+    except ToolError:
+        raise
+    except Exception as exc:
+        result = _structured_wait_error(
+            exc=exc,
+            since_seq=since_seq,
+            boards=boards,
+            started=started,
+        )
+        error = result["error"]
+        _log(
+            "WARNING: a2a_wait setup returned a structured failure "
+            f"code={error['code']} cause_class={error['cause_class']} "
+            f"exception_classes={','.join(error['exception_classes'])}"
+        )
+        return result
     meter = getattr(client, "meter", None)
 
     async def progress(elapsed: float, total: float) -> None:
@@ -5953,8 +6129,25 @@ async def a2a_wait(
                 progress,
                 report_push_unavailable,
             )
-        except BoardClientError as exc:
-            raise ToolError(f"a2a_wait Central error: {exc}") from exc
+        except Exception as exc:
+            result = _structured_wait_error(
+                exc=exc,
+                since_seq=since_seq,
+                boards=boards,
+                started=started,
+            )
+            error = result["error"]
+            for board_id in _wait_error_board_ids(boards, since_seq):
+                await report_push_unavailable(
+                    board_id,
+                    f"{error['code']}:{error['cause_class']}",
+                )
+            _log(
+                "WARNING: a2a_wait returned a structured failure "
+                f"code={error['code']} cause_class={error['cause_class']} "
+                f"exception_classes={','.join(error['exception_classes'])}"
+            )
+            return result
     if meter is None:
         return await run()
     async with meter.poll_cycle():
@@ -6169,6 +6362,7 @@ async def _wait_for_work_many(
             view = _BoardView(client, board_id)
             joined = await view.board_join(
                 agent_name=call_agent_name,
+                agent_platform=_agent_platform(),
                 task_focus=task_focus,
                 capabilities=capabilities,
                 allow_takeover=True,

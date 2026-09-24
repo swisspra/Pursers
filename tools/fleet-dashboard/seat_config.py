@@ -75,6 +75,7 @@ class HostProfile:
 HOST_PROFILES: dict[str, HostProfile] = {
     "codex": HostProfile(620, 560, "tool_timeout_sec"),
     "codex-cli": HostProfile(620, 560, "tool_timeout_sec"),
+    "zed": HostProfile(620, 560, "tool_timeout_sec"),
     "goose": HostProfile(300, 270, "timeout"),
     "claude-code": HostProfile(21_600, 21_540, "rotation_s"),
     "claude-desktop": HostProfile(240, 200, "host_deadline_s"),
