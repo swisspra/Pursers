@@ -8808,6 +8808,110 @@ bindSeats = function() {
 
 HTML = apply_warm_guided_home(HTML)
 
+# Timer refreshes keep network truth current while an edited form is held in
+# place.  Non-editing renders snapshot and restore local browser state so the
+# five-second cadence cannot interrupt reading or keyboard navigation.
+HTML = (
+    HTML.replace(
+        "const dirty=!!document.querySelector('form[data-dirty]');",
+        "const dirty=[...document.querySelectorAll('form[data-dirty]')].some(form=>!form.closest('[hidden]'));",
+        1,
+    )
+    .replace(
+        "async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(typeof refreshPaused==='function'&&refreshPaused())return;if(!centralLabels.length)",
+        "async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(!centralLabels.length)",
+        1,
+    )
+    .replace(
+        "async function refreshHubExtras(){if(hubExtrasBusy||!centralLabels.length||refreshPaused())return;",
+        "async function refreshHubExtras(){if(hubExtrasBusy||!centralLabels.length)return;",
+        1,
+    )
+    .replace(
+        "async function refreshAttentionState(){if(refreshPaused())return;",
+        "async function refreshAttentionState(){",
+        1,
+    )
+    .replace(
+        "async function refreshAutonomousButler(){if(!['settings','team','activity'].includes(navKind())||refreshPaused())return;",
+        "async function refreshAutonomousButler(){if(!['settings','team','activity'].includes(navKind()))return;",
+        1,
+    )
+    .replace(
+        "async function refreshButler(){if(navKind()!=='settings'||refreshPaused())return;",
+        "async function refreshButler(){if(navKind()!=='settings')return;",
+        1,
+    )
+    .replace(
+        "async function refreshDetail(){const r=route();if(!r||r.kind!=='board'||refreshPaused())return;const key=`detail:${r.central}:${r.board}`;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}?${apiCentral(r.central)}`);const current=route();if(current?.central!==r.central||current?.board!==r.board||refreshPaused())return;detailData=data;renderDetail(data);refreshIntake(current,true);markConnectionSuccess(key)}",
+        "async function refreshDetail(){const r=route();if(!r||r.kind!=='board')return;const key=`detail:${r.central}:${r.board}`;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}?${apiCentral(r.central)}`);const current=route();if(current?.central!==r.central||current?.board!==r.board)return;detailData=data;markConnectionSuccess(key);if(refreshPaused())return;renderDetail(data);refreshIntake(current,true)}",
+        1,
+    )
+    .replace(
+        "async function refreshOverhead(){const r=route();if(!r||r.kind!=='overhead'||refreshPaused())return;",
+        "async function refreshOverhead(){const r=route();if(!r||r.kind!=='overhead')return;",
+        1,
+    )
+    .replace(
+        "if(route()?.central!==r.central||refreshPaused())return;renderOverhead(data);markConnectionSuccess(key)",
+        "if(route()?.central!==r.central)return;markConnectionSuccess(key);if(refreshPaused())return;renderOverhead(data)",
+        1,
+    )
+    .replace(
+        "async function refreshConfig(){const r=route();if(!r||r.kind!=='config'||refreshPaused())return;",
+        "async function refreshConfig(){const r=route();if(!r||r.kind!=='config')return;",
+        1,
+    )
+    .replace(
+        "if(route()?.central===r.central&&!refreshPaused()){renderConfig(data);markConnectionSuccess(key)}",
+        "if(route()?.central===r.central){markConnectionSuccess(key);if(!refreshPaused())renderConfig(data)}",
+        1,
+    )
+)
+
+HTML = HTML.replace(
+    "</body>",
+    r"""<script>
+function uiStateBaseKey(node,root){
+  if(node===root)return'root';
+  if(node.id)return`id:${node.id}`;
+  for(const name of ['data-state-key','data-ticket','data-pursers-ticket','data-agent-identity','data-pursers-agent','data-board-id','data-pursers-board','data-ask-id','data-attention-key','data-pursers-seat']){
+    const value=node.getAttribute?.(name);if(value)return`${name}:${value}`;
+  }
+  if(node.name)return`control:${node.tagName}:${node.name}`;
+  const parts=[];let current=node;
+  while(current&&current!==root){let index=0,sibling=current;while((sibling=sibling.previousElementSibling))index++;parts.push(`${current.tagName}:${index}`);current=current.parentElement}
+  return`path:${parts.reverse().join('/')}`;
+}
+function uiStateNodes(root){const counts=new Map(),result=new Map();for(const node of [root,...root.querySelectorAll('*')]){const base=uiStateBaseKey(node,root),index=counts.get(base)||0;counts.set(base,index+1);result.set(`${base}#${index}`,node)}return result}
+function captureUiRefreshState(root){
+  const nodes=uiStateNodes(root),state={route:location.hash,windowX:window.scrollX,windowY:window.scrollY,details:new Map(),scroll:new Map(),controls:new Map(),dirty:new Set(),focus:null,focusWithin:null};
+  for(const [key,node] of nodes){
+    if(node.tagName==='DETAILS')state.details.set(key,node.open);
+    if(node.scrollTop||node.scrollLeft)state.scroll.set(key,[node.scrollLeft,node.scrollTop]);
+    if(node.tagName==='FORM'&&node.dataset.dirty)state.dirty.add(key);
+    if(node.matches?.('input,textarea,select')){const type=String(node.type||'').toLowerCase();if(type!=='file')state.controls.set(key,{value:node.value,checked:node.checked,selected:[...node.options||[]].filter(option=>option.selected).map(option=>option.value),selectionStart:node.selectionStart,selectionEnd:node.selectionEnd})}
+    if(node===document.activeElement){state.focus=key;const anchor=node.closest('[data-state-key],[data-ticket],[data-agent-identity],[data-pursers-agent],[data-board-id],[data-pursers-board],[data-ask-id],[data-pursers-seat]');if(anchor){const attribute=['data-state-key','data-ticket','data-agent-identity','data-pursers-agent','data-board-id','data-pursers-board','data-ask-id','data-pursers-seat'].find(name=>anchor.hasAttribute(name)),matches=[...anchor.querySelectorAll(node.tagName)];state.focusWithin={attribute,value:anchor.getAttribute(attribute),tag:node.tagName,index:matches.indexOf(node)}}}
+  }
+  return state;
+}
+function restoreUiRefreshState(root,state){
+  if(!state||state.route!==location.hash)return;
+  const nodes=uiStateNodes(root);
+  for(const [key,open] of state.details){const node=nodes.get(key);if(node?.tagName==='DETAILS')node.open=open}
+  for(const key of state.dirty){const node=nodes.get(key);if(node?.tagName==='FORM')node.dataset.dirty='1'}
+  for(const [key,saved] of state.controls){const node=nodes.get(key);if(!node?.matches?.('input,textarea,select'))continue;if(node.tagName==='SELECT'&&node.multiple){const selected=new Set(saved.selected);for(const option of node.options)option.selected=selected.has(option.value)}else if(!['checkbox','radio'].includes(String(node.type||'').toLowerCase()))node.value=saved.value;if(['checkbox','radio'].includes(String(node.type||'').toLowerCase()))node.checked=saved.checked}
+  for(const [key,[left,top]] of state.scroll){const node=nodes.get(key);if(node)node.scrollTo(left,top)}
+  let focused=state.focus&&nodes.get(state.focus);if(state.focusWithin){const anchor=[...root.querySelectorAll(`[${state.focusWithin.attribute}]`)].find(node=>node.getAttribute(state.focusWithin.attribute)===state.focusWithin.value),candidate=anchor?.querySelectorAll(state.focusWithin.tag)?.[state.focusWithin.index];if(candidate)focused=candidate}if(focused){focused.focus({preventScroll:true});if(typeof focused.setSelectionRange==='function'&&state.controls.has(state.focus)){const saved=state.controls.get(state.focus);if(saved.selectionStart!==null&&saved.selectionEnd!==null)focused.setSelectionRange(saved.selectionStart,saved.selectionEnd)}}
+  window.scrollTo(state.windowX,state.windowY);
+}
+function preserveUiRefreshState(root,render){if(!root)return render();const state=captureUiRefreshState(root);try{return render()}finally{restoreUiRefreshState(root,state)}}
+const statefulRenderHub=renderHub;renderHub=function(...args){const root=document.querySelector('#central-sections');return preserveUiRefreshState(root,()=>statefulRenderHub(...args))};renderFleet=renderHub;
+const statefulRenderDetail=renderDetail;renderDetail=function(...args){const root=document.querySelector('#detail-view');return preserveUiRefreshState(root,()=>statefulRenderDetail(...args))};
+</script></body>""",
+    1,
+)
+
 
 def make_handler(
     cache: DashboardCache,

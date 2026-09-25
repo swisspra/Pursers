@@ -6282,29 +6282,42 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
     # real input events mark the form dirty; programmatic value changes never lock refresh
     assert "t.form.dataset.dirty='1'" in html
     assert "delete e.target.dataset.dirty" in html
+    assert "some(form=>!form.closest('[hidden]'))" in html
     # the search box never pauses refresh
     assert "a.id!=='filter'" in html
+    # Network reads continue while editing so disconnects and cached data stay
+    # truthful; only destructive rendering remains paused until the form resumes.
     for fn in (
-        "async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(typeof refreshPaused==='function'&&refreshPaused())return;",
-        "r.kind!=='board'||refreshPaused()",
-        "r.kind!=='overhead'||refreshPaused()",
-        "r.kind!=='config'||refreshPaused()",
+        "async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(!centralLabels.length)",
+        "async function refreshHubExtras(){if(hubExtrasBusy||!centralLabels.length)return;",
+        "async function refreshAttentionState(){try",
+        "async function refreshAutonomousButler(){if(!['settings','team','activity'].includes(navKind()))return;",
+        "async function refreshButler(){if(navKind()!=='settings')return;",
+        "async function refreshDetail(){const r=route();if(!r||r.kind!=='board')return;",
+        "async function refreshOverhead(){const r=route();if(!r||r.kind!=='overhead')return;",
+        "async function refreshConfig(){const r=route();if(!r||r.kind!=='config')return;",
         "(!force&&refreshPaused())",
-        "!centralLabels.length||refreshPaused()",
-        "async function refreshAttentionState(){if(refreshPaused())return;",
         # in-flight requests that started before editing must not render on completion
         "if(!route()&&!(typeof refreshPaused==='function'&&refreshPaused()))renderFleet()",
         "if(hubKinds.has(route()?.kind)&&!refreshPaused())renderHub()",
         "navKind()==='seats'&&centralLabels.length&&!refreshPaused())await refreshSeats()",
         "includes(navKind())&&!refreshPaused())renderHub()",
         "navKind()==='overview'&&!refreshPaused())renderHub()",
-        "current?.board!==r.board||refreshPaused())return;detailData=data",
-        "route()?.central!==r.central||refreshPaused())return;renderOverhead(data)",
-        "route()?.central===r.central&&!refreshPaused()){renderConfig(data)",
+        "detailData=data;markConnectionSuccess(key);if(refreshPaused())return;renderDetail(data)",
+        "markConnectionSuccess(key);if(refreshPaused())return;renderOverhead(data)",
+        "markConnectionSuccess(key);if(!refreshPaused())renderConfig(data)",
         "if(navKind()==='seats'&&!refreshPaused())renderHub()",
     ):
         assert fn in html, fn
     assert "if(navKind()==='seats')renderHub()" not in html
+    for fn in (
+        "function captureUiRefreshState(root)",
+        "function restoreUiRefreshState(root,state)",
+        "function preserveUiRefreshState(root,render)",
+        "const statefulRenderHub=renderHub",
+        "const statefulRenderDetail=renderDetail",
+    ):
+        assert fn in html, fn
 
 
 def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:

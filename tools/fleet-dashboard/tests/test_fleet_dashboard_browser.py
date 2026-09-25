@@ -465,3 +465,277 @@ console.log(JSON.stringify({{before, after, team}}));
             "Actual revision mismatch (observed 3, config 4)",
         ],
     }
+
+
+def test_refresh_cycles_preserve_reader_state_at_desktop_and_mobile(
+    tmp_path: Path,
+) -> None:
+    """The released innerHTML refresh loses this state after the first cycle."""
+    task_space_id = os.environ.get("PURSERS_EGO_TASK_SPACE_ID")
+    ego_browser = shutil.which("ego-browser")
+    if not task_space_id or not ego_browser:
+        pytest.skip("requires PURSERS_EGO_TASK_SPACE_ID and ego-browser")
+
+    class Cache:
+        def __init__(self) -> None:
+            self.fleet_revision = 0
+            self.detail_revision = 0
+            self.lock = threading.Lock()
+
+        @staticmethod
+        def labels() -> list[str]:
+            return ["fixture"]
+
+        @staticmethod
+        def resolve_central(value: str | None) -> str:
+            if value not in {None, "fixture"}:
+                raise KeyError(value)
+            return "fixture"
+
+        def get(self, central: str | None = None) -> dict:
+            self.resolve_central(central)
+            with self.lock:
+                self.fleet_revision += 1
+                revision = self.fleet_revision
+            agents = []
+            for index in range(35):
+                name = f"browser-seat-{index:02d}"
+                agents.append(
+                    {
+                        "agent_name": name,
+                        "agent_id": f"AI-browser-{index:02d}",
+                        "principal_id": f"PR-browser-{index:02d}",
+                        "pool_status": "available",
+                        "boards": ["pursers"],
+                        "board_scope": ["pursers"],
+                        "duplicate_name": False,
+                        "last_seen": "2030-01-01T00:00:00Z",
+                        "seats": [
+                            {
+                                "board_id": "pursers",
+                                "project": "Fixture",
+                                "role": "worker",
+                                "capabilities": {
+                                    "tier_max": 2,
+                                    "host": "browser",
+                                    "can_work": True,
+                                    "can_review": False,
+                                },
+                            }
+                        ],
+                    }
+                )
+            return {
+                "central": "fixture",
+                "generated_at": f"2030-01-01T00:00:{revision % 60:02d}Z",
+                "boards": [
+                    {
+                        "board_id": "pursers",
+                        "label": "Fixture Board",
+                        "status": "ready",
+                        "counts": {"open": revision},
+                        "tickets": [
+                            {
+                                "id": "TK-live",
+                                "title": f"Live change {revision}",
+                                "status": "open",
+                                "claimed_by": None,
+                                "description": "Refresh state regression fixture",
+                            }
+                        ],
+                    }
+                ],
+                "agents": agents,
+                "inactive_agents": [],
+                "pool_summary": {
+                    "online": 35,
+                    "busy": 0,
+                    "available": 35,
+                    "connected": 0,
+                    "stale": 0,
+                    "unknown_model": 0,
+                },
+            }
+
+        def get_board(self, board_id: str, central: str | None = None) -> dict:
+            self.resolve_central(central)
+            if board_id != "pursers":
+                raise KeyError(board_id)
+            with self.lock:
+                self.detail_revision += 1
+                revision = self.detail_revision
+            result = dashboard.project_board_detail(
+                {
+                    "board_id": "pursers",
+                    "label": "Fixture Board",
+                    "snapshot": {
+                        "tickets": [
+                            {
+                                "ticket_id": "TK-live",
+                                "title": f"Live ticket {revision}",
+                                "description": "Long reader state " * 80,
+                                "status": "open",
+                                "required_fields": ["test_output"],
+                                "updated_at": f"2030-01-01T00:00:{revision % 60:02d}Z",
+                            }
+                        ],
+                        "total_counts": {"tickets": 1},
+                    },
+                    "events": [
+                        {
+                            "seq": revision,
+                            "kind": "ticket_status_changed",
+                            "ticket_id": "TK-live",
+                            "occurred_at": f"2030-01-01T00:00:{revision % 60:02d}Z",
+                        }
+                    ],
+                }
+            )
+            result.update(
+                {
+                    "central": "fixture",
+                    "generated_at": f"2030-01-01T00:00:{revision % 60:02d}Z",
+                }
+            )
+            return result
+
+        @staticmethod
+        def get_config(central: str | None = None) -> dict:
+            Cache.resolve_central(central)
+            return {"config": {}, "expected_sha256": "a" * 64}
+
+        @staticmethod
+        def get_project_registry(central: str | None = None) -> dict:
+            Cache.resolve_central(central)
+            return {
+                "registry": {"schema_version": 1, "projects": {}},
+                "expected_sha256": "b" * 64,
+            }
+
+    cache = Cache()
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(
+            cache,
+            worker_manager=dashboard.WorkerManager(tmp_path / "workers"),
+            butler_manager=dashboard.ButlerSettingsManager(tmp_path / "butler"),
+        ),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/"
+    try:
+        script = f"""
+const task = await taskSpace({int(task_space_id)});
+const page = task.page("p1");
+const results = [];
+for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
+  await page.cdp("Emulation.setDeviceMetricsOverride", {{...viewport,deviceScaleFactor:1,mobile:false}});
+  await page.goto({json.dumps(url)} + "#/home");
+  await page.waitForSelector("#central-sections .page-head", {{state:"visible",timeout:10000}});
+  const home = await page.evaluate(async () => {{
+    const before = document.querySelector("#state").textContent;
+    const action = document.querySelector("#central-sections a.primary-action");
+    action?.focus();
+    for (let index=0;index<3;index+=1) await refreshFleet(2000);
+    return {{route:location.hash,before,after:document.querySelector("#state").textContent,focused:document.activeElement?.getAttribute("href")||null}};
+  }});
+  await page.evaluate(() => {{ location.hash="#/team"; }});
+  await page.waitForFunction(() => document.querySelectorAll(".agent-card").length===35, undefined, {{timeout:10000}});
+  const team = await page.evaluate(async () => {{
+    const disclosure = document.querySelector(".agent-card:nth-of-type(18) details.agent-ops");
+    disclosure.open = true;
+    const summary = disclosure.querySelector("summary");
+    const focusTarget = getComputedStyle(disclosure).display==='none' ? document.querySelector('[data-agent-filter]') : summary;
+    focusTarget.focus();
+    window.scrollTo(0, Math.min(900, document.documentElement.scrollHeight-innerHeight));
+    const beforeY = window.scrollY;
+    const focusTrace = [document.activeElement?.tagName||null];
+    for (let index=0;index<3;index+=1) {{ await refreshFleet(2000); focusTrace.push(document.activeElement?.tagName||null); }}
+    const current = [...document.querySelectorAll("details.agent-ops")].find(node => node.open);
+    return {{route:location.hash,beforeY,afterY:window.scrollY,open:!!current,focused:document.activeElement?.tagName||null,focusExpected:focusTarget.tagName,focusTrace,count:document.querySelectorAll(".agent-card").length}};
+  }});
+  await page.evaluate(() => {{ location.hash="#/settings"; }});
+  await page.waitForSelector("#central-sections .settings-groups", {{state:"visible",timeout:10000}});
+  await page.waitForFunction(() => document.querySelector("#butler-settings-form") || document.querySelector(".butler-settings.error"), undefined, {{timeout:10000}});
+  const settings = await page.evaluate(async () => {{
+    const input = document.querySelector("#butler-settings-form input[name=model]");
+    if (input) {{ input.value="unsaved-browser-model";input.dispatchEvent(new Event("input",{{bubbles:true}}));input.focus(); }}
+    for (let index=0;index<3;index+=1) await refreshFleet(2000);
+    const restored = document.querySelector("#butler-settings-form input[name=model]");
+    return {{route:location.hash,value:restored?.value||null,focused:document.activeElement===restored,dirty:restored?.form?.dataset.dirty||null}};
+  }});
+  await page.evaluate(() => {{ location.hash="#/central/fixture/board/pursers/tickets?ticket=TK-live"; }});
+  await page.waitForFunction(() => document.querySelector('[data-ticket="TK-live"]') || document.querySelector("#detail-view .error"), undefined, {{timeout:10000}});
+  const detailReady = await page.evaluate(() => ({{ready:!!document.querySelector('[data-ticket="TK-live"]'),hash:location.hash,parsed:route(),html:document.querySelector("#detail-view").innerHTML.slice(0,800)}}));
+  if (!detailReady.ready) throw new Error(`detail fixture failed: ${{JSON.stringify(detailReady)}}`);
+  const detail = await page.evaluate(async () => {{
+    let ticket = document.querySelector('[data-ticket="TK-live"]');
+    ticket.open = true;
+    ticket.querySelector("summary").focus();
+    let overflowStyle = document.querySelector("#refresh-overflow-fixture");
+    if (!overflowStyle) {{ overflowStyle=document.createElement("style");overflowStyle.id="refresh-overflow-fixture";overflowStyle.textContent="#detail-view .table-scroll table{{min-width:1100px}}";document.head.appendChild(overflowStyle); }}
+    const scroller = document.querySelector("#detail-view .table-scroll");
+    if (scroller) scroller.scrollLeft = 35;
+    window.scrollTo(0, Math.min(420, document.documentElement.scrollHeight-innerHeight));
+    const beforeY = window.scrollY, beforeX = scroller?.scrollLeft||0;
+    for (let index=0;index<3;index+=1) await refreshDetail();
+    ticket = document.querySelector('[data-ticket="TK-live"]');
+    const reading = {{route:location.hash,open:ticket.open,focused:document.activeElement===ticket.querySelector("summary"),beforeY,afterY:window.scrollY,beforeX,afterX:document.querySelector("#detail-view .table-scroll")?.scrollLeft||0,revision:detailData.generated_at}};
+    const draft = document.querySelector("#intake-form textarea");
+    draft.value = "unsaved form survives three refreshes";
+    draft.dispatchEvent(new Event("input",{{bubbles:true}}));
+    draft.focus();
+    const revisionBefore = detailData.generated_at;
+    for (let index=0;index<3;index+=1) await refreshDetail();
+    const restored = document.querySelector("#intake-form textarea");
+    return {{...reading,draft:restored.value,draftFocused:document.activeElement===restored,dirty:restored.form.dataset.dirty||null,networkAdvanced:detailData.generated_at!==revisionBefore}};
+  }});
+  results.push({{viewport,home,team,settings,detail}});
+}}
+console.log(JSON.stringify(results));
+"""
+        completed = subprocess.run(
+            [ego_browser, "nodejs", "-e", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert completed.returncode == 0, completed.stderr
+    evidence = json.loads(completed.stderr.strip().splitlines()[-1])
+    print(json.dumps(evidence, sort_keys=True))
+    assert [row["viewport"] for row in evidence] == [
+        {"width": 1440, "height": 900},
+        {"width": 390, "height": 844},
+    ]
+    for row in evidence:
+        assert row["home"]["route"] == "#/home"
+        assert row["home"]["after"] != row["home"]["before"]
+        assert row["home"]["focused"] is not None
+        assert row["team"]["route"] == "#/team"
+        assert row["team"]["count"] == 35
+        assert row["team"]["open"] is True
+        assert row["team"]["focused"] == row["team"]["focusExpected"]
+        assert abs(row["team"]["afterY"] - row["team"]["beforeY"]) <= 1
+        assert row["settings"] == {
+            "route": "#/settings",
+            "value": "unsaved-browser-model",
+            "focused": True,
+            "dirty": "1",
+        }
+        assert row["detail"]["route"].endswith("?ticket=TK-live")
+        assert row["detail"]["open"] is True
+        assert row["detail"]["focused"] is True
+        assert abs(row["detail"]["afterY"] - row["detail"]["beforeY"]) <= 1
+        assert row["detail"]["beforeX"] == 35
+        assert row["detail"]["afterX"] == row["detail"]["beforeX"]
+        assert row["detail"]["draft"] == "unsaved form survives three refreshes"
+        assert row["detail"]["draftFocused"] is True
+        assert row["detail"]["dirty"] == "1"
+        assert row["detail"]["networkAdvanced"] is True
