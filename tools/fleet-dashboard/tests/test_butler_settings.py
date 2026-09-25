@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import shlex
 import signal
 import socket
 import stat
@@ -410,7 +411,10 @@ with open(sys.argv[1], "a+", encoding="utf-8") as handle:
 
 @contextlib.contextmanager
 def contract_resident_process(
-    butler_root: Path, state_root: Path, provider_secrets: Path
+    butler_root: Path,
+    state_root: Path,
+    provider_secrets: Path,
+    extra_arguments: tuple[str, ...] = (),
 ) -> Any:
     entrypoint = butler_root / "tools" / "board-butler" / "board_butler.py"
     entrypoint.parent.mkdir(parents=True)
@@ -465,6 +469,7 @@ with open(args.pid_file, "a+", encoding="utf-8") as handle:
             str(kill_path),
             "--provider-secrets-dir",
             str(provider_secrets),
+            *extra_arguments,
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -548,6 +553,86 @@ def test_distinct_roots_share_live_contract_key_and_exact_stop(tmp_path: Path) -
         assert stopped["signal_sent"] is True
         process.wait(timeout=5)
         assert stat.S_IMODE(kill_path.stat().st_mode) == 0o600
+
+
+def test_duplicate_effective_provider_path_is_not_reported_or_signaled(
+    tmp_path: Path,
+) -> None:
+    butler_root = tmp_path / "butler-source"
+    state_root = tmp_path / "private" / "butler-state"
+    provider_secrets = tmp_path / "private" / "provider-secrets"
+    effective_provider_secrets = tmp_path / "private" / "other-provider-secrets"
+    state_root.mkdir(parents=True, mode=0o700)
+    provider_secrets.mkdir(parents=True, mode=0o700)
+    effective_provider_secrets.mkdir(parents=True, mode=0o700)
+
+    with contract_resident_process(
+        butler_root,
+        state_root,
+        provider_secrets,
+        ("--provider-secrets-dir", str(effective_provider_secrets)),
+    ) as (process, entrypoint, pid_path, runtime_path, kill_path):
+        manager = butler_settings.ButlerSettingsManager(
+            provider_secrets,
+            runtime_path=runtime_path,
+            kill_path=kill_path,
+            pid_path=pid_path,
+            expected_process_path=entrypoint,
+            expected_process_arguments={
+                "--pid-file": pid_path,
+                "--runtime-status-file": runtime_path,
+                "--local-kill-file": kill_path,
+                "--provider-secrets-dir": provider_secrets,
+            },
+        )
+
+        runtime = manager.view(configured_payload(), "sandbox")["runtime"]
+        assert runtime["state"] == "configured_not_running"
+        assert runtime["diagnostic"] == "process_contract_mismatch"
+
+        stopped = manager.kill(configured_payload(), "sandbox")
+        assert stopped["signal_sent"] is False
+        assert process.poll() is None
+
+
+@pytest.mark.parametrize(
+    "duplicate_option",
+    (
+        "--pid-file",
+        "--runtime-status-file",
+        "--local-kill-file",
+        "--provider-secrets-dir",
+    ),
+)
+def test_duplicate_process_contract_options_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, duplicate_option: str
+) -> None:
+    entrypoint = tmp_path / "board_butler.py"
+    expected_arguments = {
+        "--pid-file": tmp_path / "board-butler.pid",
+        "--runtime-status-file": tmp_path / "runtime.json",
+        "--local-kill-file": tmp_path / "KILLED",
+        "--provider-secrets-dir": tmp_path / "provider-secrets",
+    }
+    arguments = [sys.executable, str(entrypoint)]
+    for option, value in expected_arguments.items():
+        arguments.extend((option, str(value)))
+    arguments.extend((duplicate_option, str(tmp_path / "effective-other-path")))
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "provider-secrets",
+        expected_process_path=entrypoint,
+        expected_process_arguments=expected_arguments,
+    )
+    monkeypatch.setattr(manager, "_pid_lock_held_by", lambda _pid: True)
+    monkeypatch.setattr(
+        butler_settings.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=f"S {shlex.join(arguments)}\n", stderr=""
+        ),
+    )
+
+    assert manager._verified_butler_process(4321) is False
 
 
 def test_indicator_binds_to_locked_expected_process_and_rejects_zombie(
