@@ -7,18 +7,24 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
-    <string>/PATH/TO/Pursers/tools/fleet-dashboard/launch.sh</string>
+    <string>/PATH/TO/FleetPursers/tools/fleet-dashboard/launch.sh</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PURSERS_FLEET_PYTHON</key>
     <string>/PATH/TO/python3</string>
     <key>PURSERS_FLEET_REPO</key>
-    <string>/PATH/TO/Pursers</string>
+    <string>/PATH/TO/FleetPursers</string>
     <key>PURSERS_FLEET_RUNTIME_DIR</key>
     <string>/PATH/TO/private/fleet-dashboard-runtime</string>
     <key>PURSERS_FLEET_STATE_DIR</key>
     <string>/PATH/TO/private/fleet-dashboard-state</string>
+    <key>PURSERS_BUTLER_STATE_DIR</key>
+    <string>/PATH/TO/private/board-butler-state</string>
+    <key>PURSERS_BUTLER_ENTRYPOINT</key>
+    <string>/PATH/TO/ButlerPursers/tools/board-butler/board_butler.py</string>
+    <key>PURSERS_BUTLER_PROVIDER_SECRETS_DIR</key>
+    <string>/PATH/TO/private/board-butler-provider-secrets</string>
     <key>PURSERS_FLEET_URL</key>
     <string>https://central.example.invalid/mcp</string>
     <key>PURSERS_FLEET_TOKEN_PATH</key>
@@ -26,7 +32,7 @@
     <key>PURSERS_FLEET_HOME_BOARD</key>
     <string>pursers</string>
     <key>PYTHONPATH</key>
-    <string>/PATH/TO/Pursers/packages/client/src</string>
+    <string>/PATH/TO/FleetPursers/packages/client/src</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

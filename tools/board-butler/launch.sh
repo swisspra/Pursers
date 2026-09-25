@@ -7,7 +7,17 @@ set -eu
 : "${PURSERS_BUTLER_URL:?set PURSERS_BUTLER_URL}"
 : "${PURSERS_BUTLER_TOKEN_PATH:?set PURSERS_BUTLER_TOKEN_PATH}"
 : "${PURSERS_BUTLER_STATE_DIR:?set PURSERS_BUTLER_STATE_DIR}"
+: "${PURSERS_BUTLER_PROVIDER_SECRETS_DIR:?set PURSERS_BUTLER_PROVIDER_SECRETS_DIR}"
 : "${PURSERS_BUTLER_HOME_BOARD:?set PURSERS_BUTLER_HOME_BOARD}"
+
+umask 077
+repo=$(cd "$PURSERS_BUTLER_REPO" && pwd -P)
+state=$(mkdir -p "$PURSERS_BUTLER_STATE_DIR" && cd "$PURSERS_BUTLER_STATE_DIR" && pwd -P)
+provider_secrets=$(mkdir -p "$PURSERS_BUTLER_PROVIDER_SECRETS_DIR" && cd "$PURSERS_BUTLER_PROVIDER_SECRETS_DIR" && pwd -P)
+chmod 700 "$state" "$provider_secrets"
+case "$state/" in "$repo/"*) echo "PURSERS_BUTLER_STATE_DIR must be outside the checkout" >&2; exit 64;; esac
+case "$provider_secrets/" in "$repo/"*) echo "PURSERS_BUTLER_PROVIDER_SECRETS_DIR must be outside the checkout" >&2; exit 64;; esac
+test -f "$repo/tools/board-butler/board_butler.py"
 
 runtime_mode=${PURSERS_BUTLER_RUNTIME_MODE:-shadow}
 case "$runtime_mode" in
@@ -27,16 +37,16 @@ case "$runtime_mode" in
     ;;
 esac
 
-exec "$PURSERS_BUTLER_PYTHON" "$PURSERS_BUTLER_REPO/tools/board-butler/board_butler.py" \
+exec "$PURSERS_BUTLER_PYTHON" "$repo/tools/board-butler/board_butler.py" \
   --url "$PURSERS_BUTLER_URL" \
   --token-path "$PURSERS_BUTLER_TOKEN_PATH" \
   --home-board "$PURSERS_BUTLER_HOME_BOARD" \
   --agent-name board-butler-1 \
-  --repo "$PURSERS_BUTLER_REPO" \
-  --pid-file "$PURSERS_BUTLER_STATE_DIR/board-butler.pid" \
-  --cursor-file "$PURSERS_BUTLER_STATE_DIR/board-butler.cursor.json" \
-  --provider-secrets-dir "$PURSERS_BUTLER_STATE_DIR/secrets" \
-  --runtime-status-file "$PURSERS_BUTLER_STATE_DIR/runtime.json" \
-  --local-kill-file "$PURSERS_BUTLER_STATE_DIR/KILLED" \
+  --repo "$repo" \
+  --pid-file "$state/board-butler.pid" \
+  --cursor-file "$state/board-butler.cursor.json" \
+  --provider-secrets-dir "$provider_secrets" \
+  --runtime-status-file "$state/runtime.json" \
+  --local-kill-file "$state/KILLED" \
   --refresh-seconds 60 \
   "$@"

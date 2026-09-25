@@ -20,12 +20,32 @@ def test_launchd_template_is_uninstalled_and_shadow_first() -> None:
     assert document["Label"] == "com.pursers.board-butler"
     assert document["ProgramArguments"] == [
         "/bin/sh",
-        "/PATH/TO/Pursers/tools/board-butler/launch.sh",
+        "/PATH/TO/ButlerPursers/tools/board-butler/launch.sh",
     ]
     assert document["RunAtLoad"] is True
     assert document["KeepAlive"] == {"SuccessfulExit": False}
     assert environment["PURSERS_BUTLER_RUNTIME_MODE"] == "shadow"
     assert environment["PURSERS_BUTLER_TOKEN_PATH"].startswith("/PATH/TO/")
+    assert environment["PURSERS_BUTLER_PROVIDER_SECRETS_DIR"].startswith(
+        "/PATH/TO/private/"
+    )
+    fleet_template = (
+        REPOSITORY_ROOT
+        / "tools"
+        / "fleet-dashboard"
+        / "com.pursers.fleet-dashboard.plist.template"
+    )
+    fleet_environment = plistlib.loads(fleet_template.read_bytes())["EnvironmentVariables"]
+    assert fleet_environment["PURSERS_BUTLER_STATE_DIR"] == environment[
+        "PURSERS_BUTLER_STATE_DIR"
+    ]
+    assert fleet_environment["PURSERS_BUTLER_PROVIDER_SECRETS_DIR"] == environment[
+        "PURSERS_BUTLER_PROVIDER_SECRETS_DIR"
+    ]
+    assert fleet_environment["PURSERS_BUTLER_ENTRYPOINT"] == (
+        environment["PURSERS_BUTLER_REPO"]
+        + "/tools/board-butler/board_butler.py"
+    )
     assert "API_KEY" not in json.dumps(document)
 
 

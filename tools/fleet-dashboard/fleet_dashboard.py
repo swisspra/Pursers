@@ -10215,8 +10215,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--butler-secrets-dir",
-        default=str(_default_butler_secrets_dir()),
+        default=os.environ.get(
+            "PURSERS_BUTLER_PROVIDER_SECRETS_DIR",
+            str(_default_butler_secrets_dir()),
+        ),
         help="Private 0700 directory for write-only Board Butler keys",
+    )
+    parser.add_argument(
+        "--butler-state-dir",
+        default=os.environ.get("PURSERS_BUTLER_STATE_DIR"),
+        help="Private Board Butler state root containing pid, runtime, and kill files",
+    )
+    parser.add_argument(
+        "--butler-entrypoint",
+        default=os.environ.get("PURSERS_BUTLER_ENTRYPOINT"),
+        help="Exact board_butler.py path expected for the resident process",
     )
     parser.add_argument(
         "--seat-state-dir",
@@ -10251,7 +10264,36 @@ def main(argv: list[str] | None = None) -> None:
         [FleetFetcher(config) for config in configs], args.cache_seconds
     )
     worker_manager = WorkerManager(args.workers_dir, worker_script=args.worker_script)
-    butler_manager = ButlerSettingsManager(args.butler_secrets_dir)
+    if args.butler_state_dir and args.butler_entrypoint:
+        butler_state = Path(args.butler_state_dir).expanduser().resolve()
+        butler_entrypoint = Path(args.butler_entrypoint).expanduser().resolve()
+        butler_runtime = butler_state / "runtime.json"
+        butler_pid = butler_state / "board-butler.pid"
+        butler_kill = butler_state / "KILLED"
+        butler_manager = ButlerSettingsManager(
+            args.butler_secrets_dir,
+            runtime_path=butler_runtime,
+            kill_path=butler_kill,
+            pid_path=butler_pid,
+            expected_process_path=butler_entrypoint,
+            expected_process_arguments={
+                "--pid-file": butler_pid,
+                "--runtime-status-file": butler_runtime,
+                "--local-kill-file": butler_kill,
+                "--provider-secrets-dir": args.butler_secrets_dir,
+            },
+        )
+    else:
+        raise SystemExit(
+            "Board Butler deployment mismatch: configure state dir and entrypoint"
+        )
+    startup_runtime = butler_manager._runtime(configured=False)
+    if startup_runtime["diagnostic"]:
+        print(
+            f"Fleet Dashboard: Board Butler {startup_runtime['diagnostic']}",
+            file=sys.stderr,
+            flush=True,
+        )
     seat_state_dir = Path(args.seat_state_dir).expanduser()
     seat_manager = SeatConfigManager(
         seat_state_dir / "seats.json", state_dir=seat_state_dir

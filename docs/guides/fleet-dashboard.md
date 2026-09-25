@@ -37,6 +37,9 @@ export PURSERS_FLEET_PYTHON=/PATH/TO/private/fleet-dashboard-venv/bin/python
 export PURSERS_FLEET_REPO=/PATH/TO/Pursers
 export PURSERS_FLEET_RUNTIME_DIR=/PATH/TO/private/fleet-dashboard-runtime
 export PURSERS_FLEET_STATE_DIR=/PATH/TO/private/fleet-dashboard-state
+export PURSERS_BUTLER_STATE_DIR=/PATH/TO/private/board-butler-state
+export PURSERS_BUTLER_ENTRYPOINT=/PATH/TO/ButlerPursers/tools/board-butler/board_butler.py
+export PURSERS_BUTLER_PROVIDER_SECRETS_DIR=/PATH/TO/private/board-butler-provider-secrets
 export PURSERS_FLEET_URL=http://127.0.0.1:18767/mcp
 export PURSERS_FLEET_TOKEN_PATH=/PATH/TO/private/central/admin.jwt
 export PURSERS_FLEET_HOME_BOARD=example-board
@@ -48,6 +51,9 @@ Open `http://127.0.0.1:18899`. The launcher binds only to loopback, puts its
 temporary files and bytecode outside the clone, and refuses runtime or state
 directories inside the clone. Prefer `PURSERS_FLEET_TOKEN_PATH`; the dashboard
 uses the token file but does not return the token to the browser or log it.
+The three `PURSERS_BUTLER_*` paths are the shared deployment contract with the
+resident. They may name a separate exact-tag Butler checkout and state root;
+the state and provider-secret values must exactly match the Butler service.
 
 To enable the **Doors** panel, add these paths before starting the dashboard,
 and point Central at the same public JWKS file:
@@ -83,7 +89,8 @@ launchctl print "gui/$(id -u)/com.pursers.fleet-dashboard"
 ```
 
 The template's `ProgramArguments` call `tools/fleet-dashboard/launch.sh`; its
-environment names the interpreter, clone, external runtime/state paths,
+environment names the interpreter, clone, external runtime/state paths, the
+exact Butler entrypoint, the shared Butler state and provider-secret paths,
 Central URL, token file, and home board. For multiple Centrals, use a private
 `PURSERS_FLEET_CENTRALS` JSON file and remove the single-Central URL, token, and
 home-board entries.
@@ -491,6 +498,9 @@ python3 /PATH/TO/Pursers/tools/board-butler/board_butler.py \
   --repo /PATH/TO/Pursers \
   --pid-file /PATH/TO/private/board-butler-state/board-butler.pid \
   --cursor-file /PATH/TO/private/board-butler-state/cursor.json \
+  --runtime-status-file /PATH/TO/private/board-butler-state/runtime.json \
+  --local-kill-file /PATH/TO/private/board-butler-state/KILLED \
+  --provider-secrets-dir /PATH/TO/private/board-butler-provider-secrets \
   --refresh-seconds 60 --once --dry-run
 ```
 
@@ -498,7 +508,14 @@ Give Butler a distinct coordinator credential and private state path; never
 reuse a worker or reviewer token. Install its checked-in LaunchAgent template
 the same way as the dashboard template, leave
 `PURSERS_BUTLER_RUNTIME_MODE=shadow`, validate with `plutil -lint`, and bootstrap
-it with `launchctl`. The repository does not install or start it automatically.
+it with `launchctl`. Set `PURSERS_BUTLER_PROVIDER_SECRETS_DIR` to the exact same
+directory configured for Fleet. Fleet verifies the private pidfile lock, the
+non-zombie PID, the exact Butler entrypoint, and every state/provider path in
+the resident command before it reports running or sends `SIGTERM`. A resident
+that publishes a running heartbeat but does not match that contract produces
+the bounded `process_contract_mismatch` startup diagnostic; no private path or
+credential is included. The repository does not install or start it
+automatically.
 
 ### Active mode and its limits
 

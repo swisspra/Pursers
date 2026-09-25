@@ -408,6 +408,148 @@ with open(sys.argv[1], "a+", encoding="utf-8") as handle:
         process.wait(timeout=5)
 
 
+@contextlib.contextmanager
+def contract_resident_process(
+    butler_root: Path, state_root: Path, provider_secrets: Path
+) -> Any:
+    entrypoint = butler_root / "tools" / "board-butler" / "board_butler.py"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text(
+        """import argparse
+import fcntl
+import json
+import os
+import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--pid-file", required=True)
+parser.add_argument("--runtime-status-file", required=True)
+parser.add_argument("--local-kill-file", required=True)
+parser.add_argument("--provider-secrets-dir", required=True)
+args = parser.parse_args()
+os.makedirs(os.path.dirname(args.pid_file), mode=0o700, exist_ok=True)
+with open(args.pid_file, "a+", encoding="utf-8") as handle:
+    os.chmod(args.pid_file, 0o600)
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"{os.getpid()}\\n")
+    handle.flush()
+    with open(args.runtime_status_file, "w", encoding="utf-8") as runtime:
+        json.dump({
+            "schema_version": 1,
+            "pid": os.getpid(),
+            "mode": "active",
+            "running": True,
+            "started_at": "2026-09-25T00:00:00+00:00",
+            "last_activity_at": "2026-09-25T00:01:00+00:00",
+            "last_activity": "registry_refresh",
+        }, runtime)
+    os.chmod(args.runtime_status_file, 0o600)
+    time.sleep(30)
+""",
+        encoding="utf-8",
+    )
+    pid_path = state_root / "board-butler.pid"
+    runtime_path = state_root / "runtime.json"
+    kill_path = state_root / "KILLED"
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            str(entrypoint),
+            "--pid-file",
+            str(pid_path),
+            "--runtime-status-file",
+            str(runtime_path),
+            "--local-kill-file",
+            str(kill_path),
+            "--provider-secrets-dir",
+            str(provider_secrets),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(200):
+            if runtime_path.exists() and pid_path.exists():
+                break
+            if process.poll() is not None:
+                pytest.fail("contract resident exited before publishing runtime state")
+            time.sleep(0.01)
+        else:
+            pytest.fail("contract resident did not publish runtime state")
+        yield process, entrypoint, pid_path, runtime_path, kill_path
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=5)
+
+
+def test_distinct_roots_share_live_contract_key_and_exact_stop(tmp_path: Path) -> None:
+    fleet_root = tmp_path / "fleet-source"
+    butler_root = tmp_path / "butler-source"
+    state_root = tmp_path / "private" / "butler-state"
+    provider_secrets = tmp_path / "private" / "provider-secrets"
+    fleet_root.mkdir()
+    state_root.mkdir(parents=True, mode=0o700)
+    provider_secrets.mkdir(mode=0o700)
+    secret = "fixture-provider-secret-9081"
+
+    with contract_resident_process(
+        butler_root, state_root, provider_secrets
+    ) as (process, entrypoint, pid_path, runtime_path, kill_path):
+        expected_arguments = {
+            "--pid-file": pid_path,
+            "--runtime-status-file": runtime_path,
+            "--local-kill-file": kill_path,
+            "--provider-secrets-dir": provider_secrets,
+        }
+        mismatched = butler_settings.ButlerSettingsManager(
+            provider_secrets,
+            runtime_path=runtime_path,
+            kill_path=kill_path,
+            pid_path=pid_path,
+            expected_process_path=entrypoint,
+            expected_process_arguments={
+                **expected_arguments,
+                "--provider-secrets-dir": tmp_path / "wrong-provider-secrets",
+            },
+        )
+        mismatch_view = mismatched.view(configured_payload(), "sandbox")
+        assert mismatch_view["runtime"]["state"] == "configured_not_running"
+        assert mismatch_view["runtime"]["diagnostic"] == "process_contract_mismatch"
+        assert mismatched.kill(configured_payload(), "sandbox")["signal_sent"] is False
+        assert process.poll() is None
+
+        manager = butler_settings.ButlerSettingsManager(
+            provider_secrets,
+            runtime_path=runtime_path,
+            kill_path=kill_path,
+            pid_path=pid_path,
+            expected_process_path=entrypoint,
+            expected_process_arguments=expected_arguments,
+        )
+        key_path = manager._write_key("sandbox", secret)
+        payload = configured_payload()
+        payload["config"]["board_butler"]["global"]["drafting"]["key_ref"] = (
+            manager._reference(key_path)
+        )
+
+        view = manager.view(payload, "sandbox")
+
+        assert fleet_root != butler_root
+        assert view["runtime"]["state"] == "running_active"
+        assert view["runtime"]["last_activity"] == "registry_refresh"
+        assert view["runtime"]["diagnostic"] is None
+        assert view["key_present"] is True
+        assert secret not in json.dumps(view)
+
+        stopped = manager.kill(payload, "sandbox")
+        assert stopped["signal_sent"] is True
+        process.wait(timeout=5)
+        assert stat.S_IMODE(kill_path.stat().st_mode) == 0o600
+
+
 def test_indicator_binds_to_locked_expected_process_and_rejects_zombie(
     tmp_path: Path,
 ) -> None:
