@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -563,6 +564,132 @@ def test_full_gate_rechecks_live_lease_after_slot_acquisition(tmp_path: Path) ->
     ):
         pass
     assert calls == 2
+
+
+@pytest.mark.anyio
+async def test_fetch_live_authority_uses_one_takeover_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx2
+    import pursers_client
+
+    token_file = tmp_path / "authority.token"
+    token_file.write_text("TOKEN_PLACEHOLDER\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    @asynccontextmanager
+    async def transport_context():
+        yield object()
+
+    class FakeClient:
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            captured.update(kwargs)
+            self.identity = SimpleNamespace(
+                board_id="pursers",
+                agent_id="AI-worker",
+                principal_id="PR-worker",
+                agent_name="worker",
+                role="worker",
+            )
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def ticket_get(self, ticket_id: str, **_kwargs: object) -> dict[str, object]:
+            return {"ticket": {"ticket_id": ticket_id, "status": "claimed"}}
+
+        async def board_status(self) -> dict[str, object]:
+            return {"latest_seq": 42}
+
+    monkeypatch.setattr(httpx2, "AsyncClient", lambda **_kwargs: transport_context())
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeClient)
+
+    state = await ci_manifest._fetch_live_authority(
+        ci_manifest.BoardAuthorityConfig(
+            url="https://central.example/mcp",
+            token_file=token_file,
+            board_id="pursers",
+            agent_name="worker",
+            role="worker",
+            expected_agent_id="AI-worker",
+            expected_principal_id="PR-worker",
+        ),
+        "TK-live",
+    )
+
+    assert captured["allow_takeover"] is True
+    assert "allow_matching_takeover" not in captured
+    assert state["ticket"]["ticket_id"] == "TK-live"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("identity_field", "wrong_value", "message"),
+    (
+        ("agent_id", "AI-other", "authenticated the wrong agent"),
+        ("principal_id", "PR-other", "authenticated the wrong principal"),
+    ),
+)
+async def test_fetch_live_authority_rejects_mismatched_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity_field: str,
+    wrong_value: str,
+    message: str,
+) -> None:
+    import httpx2
+    import pursers_client
+
+    token_file = tmp_path / "authority.token"
+    token_file.write_text("TOKEN_PLACEHOLDER\n", encoding="utf-8")
+
+    @asynccontextmanager
+    async def transport_context():
+        yield object()
+
+    class FakeClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            identity = {
+                "board_id": "pursers",
+                "agent_id": "AI-worker",
+                "principal_id": "PR-worker",
+                "agent_name": "worker",
+                "role": "worker",
+            }
+            identity[identity_field] = wrong_value
+            self.identity = SimpleNamespace(**identity)
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def ticket_get(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            pytest.fail("mismatched authority must fail before reading a ticket")
+
+        async def board_status(self) -> dict[str, object]:
+            pytest.fail("mismatched authority must fail before reading board state")
+
+    monkeypatch.setattr(httpx2, "AsyncClient", lambda **_kwargs: transport_context())
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match=message):
+        await ci_manifest._fetch_live_authority(
+            ci_manifest.BoardAuthorityConfig(
+                url="https://central.example/mcp",
+                token_file=token_file,
+                board_id="pursers",
+                agent_name="worker",
+                role="worker",
+                expected_agent_id="AI-worker",
+                expected_principal_id="PR-worker",
+            ),
+            "TK-live",
+        )
 
 
 def _approval(ticket_id: str, candidate: str, files: list[str]) -> dict[str, object]:
