@@ -480,6 +480,7 @@ def test_refresh_cycles_preserve_reader_state_at_desktop_and_mobile(
         def __init__(self) -> None:
             self.fleet_revision = 0
             self.detail_revision = 0
+            self.config_revision = 0
             self.lock = threading.Lock()
 
         @staticmethod
@@ -599,10 +600,27 @@ def test_refresh_cycles_preserve_reader_state_at_desktop_and_mobile(
             )
             return result
 
-        @staticmethod
-        def get_config(central: str | None = None) -> dict:
-            Cache.resolve_central(central)
-            return {"config": {}, "expected_sha256": "a" * 64}
+        def get_config(self, central: str | None = None) -> dict:
+            self.resolve_central(central)
+            with self.lock:
+                self.config_revision += 1
+                revision = self.config_revision
+            return {
+                "config": {
+                    "board_butler": {
+                        "schema_version": 1,
+                        "global": {
+                            "drafting": {
+                                "endpoint_ref": "https://provider.example.invalid/v1",
+                                "model": f"server-model-{revision}",
+                            }
+                        },
+                        "projects": {},
+                        "boards": {},
+                    }
+                },
+                "expected_sha256": "a" * 64,
+            }
 
         @staticmethod
         def get_project_registry(central: str | None = None) -> dict:
@@ -659,12 +677,17 @@ for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
   await page.waitForSelector("#central-sections .settings-groups", {{state:"visible",timeout:10000}});
   await page.waitForFunction(() => document.querySelector("#butler-settings-form") || document.querySelector(".butler-settings.error"), undefined, {{timeout:10000}});
   const settings = await page.evaluate(async () => {{
-    const input = document.querySelector("#butler-settings-form input[name=model]");
+    let input = document.querySelector("#butler-settings-form input[name=model]");
+    const cleanBefore = input?.value||null;
+    for (let index=0;index<3;index+=1) {{ await refreshFleet(2000); await refreshHubExtras(); }}
+    input = document.querySelector("#butler-settings-form input[name=model]");
+    const cleanAfter = input?.value||null, cleanServer = butlerData?.model||null, cleanDirty = input?.form?.dataset.dirty||null;
     if (input) {{ input.value="unsaved-browser-model";input.dispatchEvent(new Event("input",{{bubbles:true}}));input.focus(); }}
-    for (let index=0;index<3;index+=1) await refreshFleet(2000);
+    for (let index=0;index<3;index+=1) {{ await refreshFleet(2000); await refreshHubExtras(); }}
     const restored = document.querySelector("#butler-settings-form input[name=model]");
-    return {{route:location.hash,value:restored?.value||null,focused:document.activeElement===restored,dirty:restored?.form?.dataset.dirty||null}};
+    return {{route:location.hash,cleanBefore,cleanAfter,cleanServer,cleanDirty,value:restored?.value||null,latestServer:butlerData?.model||null,focused:document.activeElement===restored,dirty:restored?.form?.dataset.dirty||null}};
   }});
+  if (settings.cleanAfter===settings.cleanBefore || settings.cleanAfter!==settings.cleanServer) throw new Error(`clean Butler control masked server refresh: ${{JSON.stringify(settings)}}`);
   await page.evaluate(() => {{ location.hash="#/central/fixture/board/pursers/tickets?ticket=TK-live"; }});
   await page.waitForFunction(() => document.querySelector('[data-ticket="TK-live"]') || document.querySelector("#detail-view .error"), undefined, {{timeout:10000}});
   const detailReady = await page.evaluate(() => ({{ready:!!document.querySelector('[data-ticket="TK-live"]'),hash:location.hash,parsed:route(),html:document.querySelector("#detail-view").innerHTML.slice(0,800)}}));
@@ -723,12 +746,16 @@ console.log(JSON.stringify(results));
         assert row["team"]["open"] is True
         assert row["team"]["focused"] == row["team"]["focusExpected"]
         assert abs(row["team"]["afterY"] - row["team"]["beforeY"]) <= 1
-        assert row["settings"] == {
-            "route": "#/settings",
-            "value": "unsaved-browser-model",
-            "focused": True,
-            "dirty": "1",
-        }
+        assert row["settings"]["route"] == "#/settings"
+        assert row["settings"]["cleanBefore"].startswith("server-model-")
+        assert row["settings"]["cleanAfter"].startswith("server-model-")
+        assert row["settings"]["cleanAfter"] != row["settings"]["cleanBefore"]
+        assert row["settings"]["cleanAfter"] == row["settings"]["cleanServer"]
+        assert row["settings"]["cleanDirty"] is None
+        assert row["settings"]["value"] == "unsaved-browser-model"
+        assert row["settings"]["latestServer"] != row["settings"]["value"]
+        assert row["settings"]["focused"] is True
+        assert row["settings"]["dirty"] == "1"
         assert row["detail"]["route"].endswith("?ticket=TK-live")
         assert row["detail"]["open"] is True
         assert row["detail"]["focused"] is True

@@ -8890,7 +8890,7 @@ function captureUiRefreshState(root){
     if(node.tagName==='DETAILS')state.details.set(key,node.open);
     if(node.scrollTop||node.scrollLeft)state.scroll.set(key,[node.scrollLeft,node.scrollTop]);
     if(node.tagName==='FORM'&&node.dataset.dirty)state.dirty.add(key);
-    if(node.matches?.('input,textarea,select')){const type=String(node.type||'').toLowerCase();if(type!=='file')state.controls.set(key,{value:node.value,checked:node.checked,selected:[...node.options||[]].filter(option=>option.selected).map(option=>option.value),selectionStart:node.selectionStart,selectionEnd:node.selectionEnd})}
+    if(node.matches?.('input,textarea,select')&&node.form?.dataset.dirty){const type=String(node.type||'').toLowerCase();if(type!=='file')state.controls.set(key,{value:node.value,checked:node.checked,selected:[...node.options||[]].filter(option=>option.selected).map(option=>option.value),selectionStart:node.selectionStart,selectionEnd:node.selectionEnd})}
     if(node===document.activeElement){state.focus=key;const anchor=node.closest('[data-state-key],[data-ticket],[data-agent-identity],[data-pursers-agent],[data-board-id],[data-pursers-board],[data-ask-id],[data-pursers-seat]');if(anchor){const attribute=['data-state-key','data-ticket','data-agent-identity','data-pursers-agent','data-board-id','data-pursers-board','data-ask-id','data-pursers-seat'].find(name=>anchor.hasAttribute(name)),matches=[...anchor.querySelectorAll(node.tagName)];state.focusWithin={attribute,value:anchor.getAttribute(attribute),tag:node.tagName,index:matches.indexOf(node)}}}
   }
   return state;

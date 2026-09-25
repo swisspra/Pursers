@@ -6318,6 +6318,8 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
         "const statefulRenderDetail=renderDetail",
     ):
         assert fn in html, fn
+    assert "node.matches?.('input,textarea,select')&&node.form?.dataset.dirty" in html
+    assert "node.matches?.('input,textarea,select')){const type=" not in html
 
 
 def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
