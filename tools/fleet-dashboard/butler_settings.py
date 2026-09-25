@@ -31,6 +31,7 @@ from urllib.request import (
     Request,
     build_opener,
 )
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 MAX_KEY_BYTES = 8_192
@@ -62,6 +63,32 @@ AUTONOMOUS_RUNNERS = frozenset({"direct_api", "acp"})
 AUTONOMOUS_COMMANDS = frozenset(
     {"reconcile_now", "enable_connector", "disable_connector", "kill", "resume"}
 )
+ANSWERING_MODES = frozenset({"off", "assist", "autonomous"})
+AUTO_CANDIDATE_CLASSES = frozenset(
+    {
+        "ancestry",
+        "ticket_status",
+        "seat_capability",
+        "waiver_applicability",
+        "corpus_lookup",
+        "coverage_check",
+    }
+)
+NEVER_AUTO_CLASSES = frozenset(
+    {"scope_change", "gate_waiver", "release", "membership", "registry"}
+)
+ANSWER_CLASSES = AUTO_CANDIDATE_CLASSES | NEVER_AUTO_CLASSES
+CITABLE_EVIDENCE_KINDS = frozenset(
+    {
+        "git_ancestry",
+        "ticket_status",
+        "annotation",
+        "seat_capability",
+        "manifest_coverage",
+        "corpus",
+    }
+)
+WEEKDAYS = frozenset({"mon", "tue", "wed", "thu", "fri", "sat", "sun"})
 
 
 class ButlerSettingsError(ValueError):
@@ -870,6 +897,7 @@ def validate_request(value: Any) -> dict[str, Any]:
         "validation_path",
         "draft_path",
         "draft_protocol",
+        "answering_mode",
         "expected_sha256",
     }
     if not isinstance(value, Mapping) or set(value) != expected:
@@ -900,6 +928,11 @@ def validate_request(value: Any) -> dict[str, Any]:
         raise ButlerSettingsError("draft_path must be a relative URL path")
     if value["draft_protocol"] not in DRAFT_PROTOCOLS:
         raise ButlerSettingsError("draft_protocol is invalid")
+    if (
+        not isinstance(value["answering_mode"], str)
+        or value["answering_mode"] not in ANSWERING_MODES
+    ):
+        raise ButlerSettingsError("answering_mode is invalid")
     api_key = value["api_key"]
     if not isinstance(api_key, str) or len(api_key.encode("utf-8")) > MAX_KEY_BYTES:
         raise ButlerSettingsError("api_key is invalid")
@@ -928,6 +961,7 @@ def validate_request(value: Any) -> dict[str, Any]:
         "validation_path": validation_path,
         "draft_path": draft_path,
         "draft_protocol": value["draft_protocol"],
+        "answering_mode": value["answering_mode"],
         "expected_sha256": expected_sha256,
     }
 
@@ -970,6 +1004,7 @@ def validate_board_butler_document(value: Any) -> dict[str, Any]:
         raise ButlerSettingsError("board_butler.schema_version must be 1")
     setting_keys = {
         "mode",
+        "answering_mode",
         "answer_scope",
         "required_evidence_kinds",
         "ceilings",
@@ -1024,26 +1059,117 @@ def validate_board_butler_document(value: Any) -> dict[str, Any]:
     def settings(candidate: Any, path: str) -> None:
         if not isinstance(candidate, Mapping) or not set(candidate) <= setting_keys:
             raise ButlerSettingsError(f"{path} fields are invalid")
-        if "mode" in candidate and candidate["mode"] not in {"shadow", "active"}:
-            raise ButlerSettingsError(f"{path}.mode is invalid")
-        for name in ("answer_scope", "ceilings", "auto_demote"):
-            if name in candidate and not isinstance(candidate[name], Mapping):
-                raise ButlerSettingsError(f"{path}.{name} must be an object")
-        if "required_evidence_kinds" in candidate and not isinstance(
-            candidate["required_evidence_kinds"], list
+        if "mode" in candidate and (
+            not isinstance(candidate["mode"], str)
+            or candidate["mode"] not in {"shadow", "active"}
         ):
-            raise ButlerSettingsError(f"{path}.required_evidence_kinds must be a list")
+            raise ButlerSettingsError(f"{path}.mode is invalid")
+        if (
+            "answering_mode" in candidate
+            and (
+                not isinstance(candidate["answering_mode"], str)
+                or candidate["answering_mode"] not in ANSWERING_MODES
+            )
+        ):
+            raise ButlerSettingsError(f"{path}.answering_mode is invalid")
+        if "answer_scope" in candidate:
+            scope = candidate["answer_scope"]
+            if not isinstance(scope, Mapping) or not set(scope) <= ANSWER_CLASSES:
+                raise ButlerSettingsError(f"{path}.answer_scope is invalid")
+            for name, disposition in scope.items():
+                if (
+                    not isinstance(disposition, str)
+                    or disposition not in {"auto", "escalate"}
+                ):
+                    raise ButlerSettingsError(
+                        f"{path}.answer_scope.{name} is invalid"
+                    )
+                if name in NEVER_AUTO_CLASSES and disposition == "auto":
+                    raise ButlerSettingsError(
+                        f"{path}.answer_scope.{name} can never be auto"
+                    )
+        if "required_evidence_kinds" in candidate:
+            kinds = candidate["required_evidence_kinds"]
+            if (
+                not isinstance(kinds, list)
+                or not kinds
+                or len(kinds) != len(set(kinds))
+                or any(
+                    not isinstance(kind, str) or kind not in CITABLE_EVIDENCE_KINDS
+                    for kind in kinds
+                )
+            ):
+                raise ButlerSettingsError(
+                    f"{path}.required_evidence_kinds is invalid"
+                )
+        if "ceilings" in candidate:
+            ceilings = candidate["ceilings"]
+            limits = {"per_hour": 100, "per_ticket": 20, "per_board": 500}
+            if not isinstance(ceilings, Mapping) or not set(ceilings) <= set(limits):
+                raise ButlerSettingsError(f"{path}.ceilings is invalid")
+            for name, selected in ceilings.items():
+                _bounded_integer(selected, f"{path}.ceilings.{name}", 1, limits[name])
         if "hold_before_post_s" in candidate and (
             type(candidate["hold_before_post_s"]) is not int
             or not 0 <= candidate["hold_before_post_s"] <= 604_800
         ):
             raise ButlerSettingsError(f"{path}.hold_before_post_s is invalid")
-        if "active_windows" in candidate and not isinstance(
-            candidate["active_windows"], list
-        ):
-            raise ButlerSettingsError(f"{path}.active_windows must be a list")
+        if "active_windows" in candidate:
+            windows = candidate["active_windows"]
+            if not isinstance(windows, list):
+                raise ButlerSettingsError(f"{path}.active_windows must be a list")
+            clock = re.compile(r"^(?:[01][0-9]|2[0-3]):[0-5][0-9]$")
+            for index, window in enumerate(windows):
+                window_path = f"{path}.active_windows[{index}]"
+                if not isinstance(window, Mapping) or set(window) != {
+                    "days",
+                    "start",
+                    "end",
+                    "timezone",
+                }:
+                    raise ButlerSettingsError(f"{window_path} is invalid")
+                days = window["days"]
+                if (
+                    not isinstance(days, list)
+                    or not days
+                    or len(days) != len(set(days))
+                    or any(
+                        not isinstance(day, str) or day not in WEEKDAYS for day in days
+                    )
+                ):
+                    raise ButlerSettingsError(f"{window_path}.days is invalid")
+                if (
+                    not isinstance(window["start"], str)
+                    or not clock.fullmatch(window["start"])
+                    or not isinstance(window["end"], str)
+                    or not clock.fullmatch(window["end"])
+                    or window["start"] == window["end"]
+                ):
+                    raise ButlerSettingsError(f"{window_path} time is invalid")
+                zone = window["timezone"]
+                if not isinstance(zone, str) or not zone:
+                    raise ButlerSettingsError(f"{window_path}.timezone is invalid")
+                try:
+                    ZoneInfo(zone)
+                except ZoneInfoNotFoundError as exc:
+                    raise ButlerSettingsError(
+                        f"{window_path}.timezone is invalid"
+                    ) from exc
         if "kill_switch" in candidate and type(candidate["kill_switch"]) is not bool:
             raise ButlerSettingsError(f"{path}.kill_switch must be boolean")
+        if "auto_demote" in candidate:
+            demote = candidate["auto_demote"]
+            limits = {
+                "veto_count": (1, 100),
+                "failure_count": (1, 100),
+                "window_s": (60, 2_592_000),
+            }
+            if not isinstance(demote, Mapping) or not set(demote) <= set(limits):
+                raise ButlerSettingsError(f"{path}.auto_demote is invalid")
+            for name, selected in demote.items():
+                _bounded_integer(
+                    selected, f"{path}.auto_demote.{name}", *limits[name]
+                )
         for task in ("classification", "drafting"):
             if task in candidate:
                 provider(candidate[task], f"{path}.{task}")
@@ -1060,6 +1186,51 @@ def validate_board_butler_document(value: Any) -> dict[str, Any]:
                 )
             settings(candidate, f"board_butler.{collection_name}.{name}")
     return copy.deepcopy(dict(value))
+
+
+def _require_guarded_active_answering(settings: Mapping[str, Any]) -> None:
+    """Require explicit bounded safeguards before Fleet enables answering."""
+    scope = settings.get("answer_scope")
+    ceilings = settings.get("ceilings")
+    windows = settings.get("active_windows")
+    demote = settings.get("auto_demote")
+    evidence = settings.get("required_evidence_kinds")
+    if (
+        not isinstance(scope, Mapping)
+        or not any(
+            name in AUTO_CANDIDATE_CLASSES and disposition == "auto"
+            for name, disposition in scope.items()
+        )
+    ):
+        raise ButlerSettingsError(
+            "Active answering requires at least one safe auto answer scope"
+        )
+    if not isinstance(windows, list) or not windows:
+        raise ButlerSettingsError("Active answering requires bounded active windows")
+    if not isinstance(ceilings, Mapping) or set(ceilings) != {
+        "per_hour",
+        "per_ticket",
+        "per_board",
+    }:
+        raise ButlerSettingsError("Active answering requires complete ceilings")
+    if not isinstance(demote, Mapping) or set(demote) != {
+        "veto_count",
+        "failure_count",
+        "window_s",
+    }:
+        raise ButlerSettingsError("Active answering requires complete auto-demote limits")
+    if not isinstance(evidence, list) or not evidence:
+        raise ButlerSettingsError("Active answering requires cited evidence kinds")
+    candidate = {
+        "schema_version": 1,
+        "global": {
+            **copy.deepcopy(dict(settings)),
+            "mode": "active",
+            "answering_mode": "autonomous",
+            "kill_switch": False,
+        },
+    }
+    validate_board_butler_document(candidate)
 
 
 def _model_ids(document: Any) -> set[str]:
@@ -1412,11 +1583,15 @@ class ButlerSettingsManager:
         key_ref = provider.get("key_ref")
         key_path = self._managed_reference(key_ref)
         mode = "off" if global_settings.get("kill_switch", True) else "shadow"
+        answering_mode = global_settings.get("answering_mode", "assist")
+        if answering_mode not in ANSWERING_MODES:
+            answering_mode = "off"
         configured = bool(provider.get("endpoint_ref") and provider.get("model"))
         return {
             "schema_version": 1,
             "central": central,
             "mode": mode,
+            "answering_mode": answering_mode,
             "endpoint": provider.get("endpoint_ref") or "",
             "model": provider.get("model") or "",
             "extra_headers": (
@@ -1523,6 +1698,9 @@ class ButlerSettingsManager:
         for credential in (clean["api_key"], stored_key):
             reject_readable_credential(clean, credential)
         same_endpoint = clean["endpoint"] == current.get("endpoint")
+        global_settings = self._global(config)
+        if clean["answering_mode"] == "autonomous":
+            _require_guarded_active_answering(global_settings)
         api_key = clean["api_key"] or (stored_key if same_endpoint else "")
         validation = validate_provider(clean, api_key, opener=self.opener)
         if validation.outcome != "reachable":
@@ -1560,6 +1738,12 @@ class ButlerSettingsManager:
                 if new_key_path is not None:
                     new_key_path.unlink(missing_ok=True)
                 raise ButlerSettingsError("board_butler.global is malformed")
+            global_settings["answering_mode"] = clean["answering_mode"]
+            global_settings["mode"] = (
+                "active" if clean["answering_mode"] == "autonomous" else "shadow"
+            )
+            if clean["answering_mode"] == "autonomous":
+                global_settings["kill_switch"] = False
             provider = {
                 "model": clean["model"],
                 "endpoint_ref": clean["endpoint"],
@@ -1588,6 +1772,7 @@ class ButlerSettingsManager:
                 "schema_version": 1,
                 "central": central,
                 "mode": "off" if global_settings.get("kill_switch", True) else "shadow",
+                "answering_mode": clean["answering_mode"],
                 "endpoint": clean["endpoint"],
                 "model": clean["model"],
                 "extra_headers": clean["extra_headers"],

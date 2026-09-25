@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import contextlib
 import importlib.util
 import json
@@ -72,6 +73,7 @@ def provider_request(**overrides: Any) -> dict[str, Any]:
         "validation_path": "models",
         "draft_path": "draft",
         "draft_protocol": "pursers_json_v1",
+        "answering_mode": "assist",
         "expected_sha256": "a" * 64,
     }
     request.update(overrides)
@@ -589,6 +591,241 @@ def test_openai_chat_protocol_requires_explicit_selection_and_preserves_legacy_d
         butler_settings.validate_request(
             provider_request(draft_protocol="implicit-or-unknown")
         )
+
+
+@pytest.mark.parametrize("answering_mode", ["off", "assist", "autonomous"])
+def test_dashboard_config_accepts_exact_runtime_answering_modes(
+    answering_mode: str,
+) -> None:
+    document = {
+        "schema_version": 1,
+        "global": {"answering_mode": answering_mode},
+    }
+
+    assert butler_settings.validate_board_butler_document(document) == document
+
+
+@pytest.mark.parametrize(
+    "answering_mode", ["", "active", "AUTO", None, True, 1, [], {}]
+)
+def test_dashboard_config_rejects_invalid_answering_modes_fail_closed(
+    answering_mode: Any,
+) -> None:
+    with pytest.raises(
+        butler_settings.ButlerSettingsError,
+        match="board_butler.global.answering_mode is invalid",
+    ):
+        butler_settings.validate_board_butler_document(
+            {
+                "schema_version": 1,
+                "global": {"answering_mode": answering_mode},
+            }
+        )
+
+
+def guarded_answering_settings() -> dict[str, Any]:
+    return {
+        "answer_scope": {
+            "ticket_status": "auto",
+            "scope_change": "escalate",
+            "gate_waiver": "escalate",
+            "release": "escalate",
+            "membership": "escalate",
+            "registry": "escalate",
+        },
+        "required_evidence_kinds": ["ticket_status"],
+        "ceilings": {"per_hour": 5, "per_ticket": 2, "per_board": 20},
+        "active_windows": [
+            {
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                "start": "00:00",
+                "end": "23:59",
+                "timezone": "UTC",
+            }
+        ],
+        "auto_demote": {"veto_count": 3, "failure_count": 3, "window_s": 3600},
+    }
+
+
+def test_config_http_reproduces_invalid_400_and_round_trips_answering_mode() -> None:
+    class Cache:
+        def __init__(self) -> None:
+            self.config = coordinator_config()
+            self.digest = "a" * 64
+
+        def resolve_central(self, value: str | None) -> str:
+            if value not in {None, "default"}:
+                raise KeyError(value)
+            return "default"
+
+        def get_config(self, _central: str | None = None) -> dict[str, Any]:
+            return {
+                "config": self.config,
+                "expected_sha256": self.digest,
+                "central": "default",
+            }
+
+        def save_config(
+            self, value: dict[str, Any], expected: str | None, _central: str | None = None
+        ) -> dict[str, Any]:
+            if expected != self.digest:
+                raise ValueError("configuration changed; reload before saving")
+            clean = copy.deepcopy(value)
+            if "board_butler" in clean:
+                clean["board_butler"] = butler_settings.validate_board_butler_document(
+                    clean["board_butler"]
+                )
+            self.config = clean
+            self.digest = "b" * 64
+            return self.get_config()
+
+    cache = Cache()
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post_config(config: dict[str, Any], expected: str) -> dict[str, Any]:
+        request = urllib.request.Request(
+            base + "/api/config?central=default",
+            data=json.dumps(
+                {"config": config, "expected_sha256": expected}
+            ).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", "Origin": base},
+        )
+        with urllib.request.urlopen(request) as response:
+            return json.loads(response.read())
+
+    invalid = coordinator_config()
+    invalid["board_butler"] = {
+        "schema_version": 1,
+        "global": {"answering_mode": "active"},
+    }
+    try:
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            post_config(invalid, "a" * 64)
+        assert caught.value.code == 400
+        assert json.loads(caught.value.read())["error"] == (
+            "board_butler.global.answering_mode is invalid"
+        )
+
+        valid = coordinator_config()
+        valid["board_butler"] = {
+            "schema_version": 1,
+            "global": {
+                **guarded_answering_settings(),
+                "mode": "active",
+                "answering_mode": "autonomous",
+                "kill_switch": False,
+            },
+            "projects": {},
+            "boards": {},
+        }
+        saved = post_config(valid, "a" * 64)
+        loaded = json.loads(
+            urllib.request.urlopen(base + "/api/config?central=default").read()
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert saved["expected_sha256"] == "b" * 64
+    assert loaded["config"]["board_butler"]["global"]["answering_mode"] == (
+        "autonomous"
+    )
+
+
+def test_active_answering_round_trips_and_projects_on_next_cycle(tmp_path: Path) -> None:
+    config = coordinator_config()
+    config["board_butler"] = {
+        "schema_version": 1,
+        "global": guarded_answering_settings(),
+        "projects": {},
+        "boards": {},
+    }
+    saved: dict[str, Any] = {}
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "private-keys",
+        opener=lambda *_args, **_kwargs: Response(
+            {"data": [{"id": "Model/Exact-1"}]}
+        ),
+    )
+
+    result = manager.save(
+        {"config": config, "expected_sha256": "a" * 64},
+        provider_request(answering_mode="autonomous"),
+        "sandbox",
+        lambda value, expected: saved.update(config=value, expected=expected)
+        or {"config": value, "expected_sha256": "b" * 64},
+    )
+
+    global_settings = saved["config"]["board_butler"]["global"]
+    assert saved["expected"] == "a" * 64
+    assert result["answering_mode"] == "autonomous"
+    assert result["reload"] == "next_cycle"
+    assert global_settings["mode"] == "active"
+    assert global_settings["answering_mode"] == "autonomous"
+    assert global_settings["kill_switch"] is False
+    assert all(
+        global_settings["answer_scope"][name] == "escalate"
+        for name in ("scope_change", "gate_waiver", "release", "membership", "registry")
+    )
+
+    effective = board_butler.resolve_config(
+        saved["config"],
+        SimpleNamespace(
+            drafts_per_hour=5,
+            drafts_per_ticket=2,
+            drafts_per_board=20,
+            home_board="sandbox",
+            project=None,
+            runtime_mode="active",
+            act_on_board=["sandbox"],
+        ),
+        {},
+        datetime(2026, 9, 21, 12, tzinfo=timezone.utc),
+    )
+    assert effective.answering_mode == "autonomous"
+    assert effective.effective_answering_mode == "autonomous"
+    assert effective.future_active_state == "eligible"
+
+
+def test_active_answering_rejects_missing_guards_before_provider_or_save(
+    tmp_path: Path,
+) -> None:
+    opener_calls = 0
+    save_calls = 0
+
+    def opener(*_args: object, **_kwargs: object) -> Response:
+        nonlocal opener_calls
+        opener_calls += 1
+        return Response({"data": [{"id": "Model/Exact-1"}]})
+
+    def save_config(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        nonlocal save_calls
+        save_calls += 1
+        return {}
+
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "private-keys", opener=opener
+    )
+    with pytest.raises(
+        butler_settings.ButlerSettingsError,
+        match="Active answering requires at least one safe auto answer scope",
+    ):
+        manager.save(
+            {"config": coordinator_config(), "expected_sha256": "a" * 64},
+            provider_request(answering_mode="autonomous"),
+            "sandbox",
+            save_config,
+        )
+
+    assert opener_calls == 0
+    assert save_calls == 0
 
 
 def test_save_persists_openai_chat_protocol_for_next_resident_cycle(
@@ -1626,6 +1863,10 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
     assert 'data-pursers-action="save-butler"' in html
     assert 'data-pursers-field="draft-path"' in html
     assert 'data-pursers-field="draft-protocol"' in html
+    assert 'data-pursers-field="answering-mode"' in html
+    assert 'value="autonomous"' in html
+    assert "Active · guarded autonomous answers" in html
+    assert "safe scopes, evidence, ceilings, bounded active windows" in html
     assert '<select name="draft_protocol"' in html
     assert 'value="openai_chat_completions_v1"' in html
     assert "body.saved===false" in html
