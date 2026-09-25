@@ -812,11 +812,10 @@ class ReleaseOpsManager:
             "staged_wheel_sha256": None,
             "status": "unknown",
         }
-        healthz_url = self.central_url.rstrip("/")
-        if healthz_url.endswith("/mcp"):
-            healthz_url = healthz_url[:-4] + "/healthz"
-        else:
-            healthz_url += "/healthz"
+        configured = urllib.parse.urlsplit(self.central_url)
+        healthz_url = urllib.parse.urlunsplit(
+            (configured.scheme, configured.netloc, "/healthz", "", "")
+        )
         try:
             status, body = self.http_get(healthz_url, 3.0)
             if status == 200:

@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
+import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Self
 from unittest.mock import MagicMock
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 MODULE_DIR = Path(__file__).resolve().parents[1]
 if str(MODULE_DIR) not in sys.path:
@@ -22,9 +32,46 @@ if str(MODULE_DIR) not in sys.path:
 from release_ops import (
     ReleaseOpsManager,
     _clean_text,
+    default_http_get,
     is_loopback_url,
     parse_elapsed_seconds,
 )
+
+
+def _tls_fixture(root: Path) -> tuple[Path, Path]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.now(timezone.utc)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(minutes=10))
+        .add_extension(
+            x509.SubjectAlternativeName(
+                [
+                    x509.DNSName("localhost"),
+                    x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                ]
+            ),
+            critical=False,
+        )
+        .sign(private_key, hashes.SHA256())
+    )
+    cert_path = root / "test-cert.pem"
+    key_path = root / "test-key.pem"
+    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return cert_path, key_path
 
 
 def test_clean_text_redacts_tokens_and_jwts() -> None:
@@ -47,6 +94,89 @@ def test_is_loopback_url() -> None:
     assert is_loopback_url("https://localhost:8899/api") is True
     assert is_loopback_url("https://pypi.org/pypi/pursers/json") is False
     assert is_loopback_url("https://api.github.com/repos") is False
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_configured_loopback_transport_reaches_origin_healthz(
+    tmp_path: Path, scheme: str
+) -> None:
+    requests: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests.append(self.path)
+            body = json.dumps(
+                {
+                    "status": "ok",
+                    "version": "0.1.3",
+                    "build": {"wheel_sha256": "live-digest"},
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    if scheme == "https":
+        cert_path, key_path = _tls_fixture(tmp_path)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert_path, key_path)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        ops = ReleaseOpsManager(
+            root=tmp_path,
+            state_dir=tmp_path,
+            central_url=f"{scheme}://127.0.0.1:{server.server_port}/mcp?ignored=yes",
+        )
+        result = ops.get_central_version_info()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert requests == ["/healthz"]
+    assert result["live_version"] == "0.1.3"
+    assert result["live_wheel_sha256"] == "live-digest"
+    assert result["status"] == "live_only"
+
+
+def test_default_http_get_keeps_strict_verification_for_non_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"{}"
+
+    def fake_urlopen(
+        request: object, *, timeout: float, context: ssl.SSLContext
+    ) -> Response:
+        observed.update(request=request, timeout=timeout, context=context)
+        return Response()
+
+    monkeypatch.setattr("release_ops.urllib.request.urlopen", fake_urlopen)
+
+    assert default_http_get("https://central.example/healthz") == (200, b"{}")
+    context = observed["context"]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.check_hostname is True
+    assert context.verify_mode == ssl.CERT_REQUIRED
 
 
 def test_parse_elapsed_seconds() -> None:

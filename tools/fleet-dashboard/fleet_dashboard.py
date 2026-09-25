@@ -6305,6 +6305,7 @@ class SeatConfigManager:
         doctor_factory: Callable[[], Doctor] = Doctor,
         latest_version: Callable[[], str | None] | None = None,
         release_ops_manager: ReleaseOpsManager | None = None,
+        central_url: str | None = None,
         git_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         discovered_configs: list[tuple[str, str | Path]] | None = None,
     ) -> None:
@@ -6337,6 +6338,7 @@ class SeatConfigManager:
             state_dir=self.state_dir,
             bridge_installer=self.bridge_installer,
             inventory=self.inventory,
+            central_url=central_url,
         )
         self._plans: dict[str, tuple[DesiredSeat, list[Any]]] = {}
         self._ops_plans: dict[str, dict[str, Any]] = {}
@@ -10247,6 +10249,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     configs = load_central_configs(args)
+    # The first --centrals entry is the dashboard default and the release card's
+    # primary Central. Single-Central mode has exactly one entry.
+    primary_config = configs[0]
     cache = DashboardCache(
         [FleetFetcher(config) for config in configs], args.cache_seconds
     )
@@ -10254,7 +10259,9 @@ def main(argv: list[str] | None = None) -> None:
     butler_manager = ButlerSettingsManager(args.butler_secrets_dir)
     seat_state_dir = Path(args.seat_state_dir).expanduser()
     seat_manager = SeatConfigManager(
-        seat_state_dir / "seats.json", state_dir=seat_state_dir
+        seat_state_dir / "seats.json",
+        state_dir=seat_state_dir,
+        central_url=primary_config.url,
     )
     try:
         trace = (

@@ -5101,6 +5101,63 @@ def test_centrals_file_and_tokens_require_0600(tmp_path: Path) -> None:
         dashboard.load_central_configs(args)
 
 
+def test_main_uses_first_central_as_release_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configs = [
+        SimpleNamespace(url="https://127.0.0.1:8766/mcp"),
+        SimpleNamespace(url="https://secondary.example/mcp"),
+    ]
+    captured: dict[str, object] = {}
+
+    class Cache:
+        def close(self) -> None:
+            captured["cache_closed"] = True
+
+    class Server:
+        def __init__(self, address: tuple[str, int], handler: object) -> None:
+            captured.update(address=address, handler=handler)
+
+        def serve_forever(self) -> None:
+            raise KeyboardInterrupt
+
+        def server_close(self) -> None:
+            captured["server_closed"] = True
+
+    def seat_manager(*_args: object, **kwargs: object) -> object:
+        captured["central_url"] = kwargs.get("central_url")
+        return object()
+
+    args = SimpleNamespace(
+        cache_seconds=5.0,
+        workers_dir=str(tmp_path / "workers"),
+        worker_script=str(tmp_path / "worker.py"),
+        butler_secrets_dir=str(tmp_path / "butler"),
+        seat_state_dir=str(tmp_path / "seats"),
+        evidence_trace_config=None,
+        host="127.0.0.1",
+        port=8899,
+    )
+    monkeypatch.setattr(dashboard, "parse_args", lambda _argv: args)
+    monkeypatch.setattr(dashboard, "load_central_configs", lambda _args: configs)
+    monkeypatch.setattr(dashboard, "FleetFetcher", lambda config: config)
+    monkeypatch.setattr(dashboard, "DashboardCache", lambda *_args: Cache())
+    monkeypatch.setattr(dashboard, "WorkerManager", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        dashboard, "ButlerSettingsManager", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(dashboard, "SeatConfigManager", seat_manager)
+    monkeypatch.setattr(dashboard, "bridge_stats_path", lambda: None)
+    monkeypatch.setattr(dashboard, "make_handler", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(dashboard, "ThreadingHTTPServer", Server)
+
+    dashboard.main([])
+
+    assert captured["central_url"] == configs[0].url
+    assert captured["cache_closed"] is True
+    assert captured["server_closed"] is True
+
+
 @pytest.mark.parametrize(
     ("section", "field", "bad_value"),
     [
