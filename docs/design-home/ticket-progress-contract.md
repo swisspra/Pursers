@@ -267,10 +267,13 @@ minimum cell size `k = 5`:
 2. The denominator `N` is **all** tickets in that frozen cohort, including
    tickets with unknown, absent, invalid, or stale progress. If `N < 5`, omit
    the entire progress object.
-3. Assign each ticket to exactly one of four cells. A record fresh at the frozen
-   instant uses its range midpoint: `early` 0–24, `middle` 25–74, or `late`
-   75–99. Every other ticket goes to `unassessed`, including unknown/absent
-   records and records whose `fresh_until` is at or before the snapshot time.
+3. Assign each ticket to exactly one of four cells. For a record fresh at the
+   frozen instant, let the exact midpoint be `m = (low_percent + high_percent) /
+   2`: assign `early` when `m < 25`, `middle` when `25 <= m < 75`, and `late`
+   when `75 <= m <= 99`. Implementations can avoid floating-point behavior by
+   comparing the integer sum of the bounds with 50 and 150. Every other ticket
+   goes to `unassessed`, including unknown/absent records and records whose
+   `fresh_until` is at or before the snapshot time.
 4. A zero-count cell is safe and does not trigger suppression. If **any
    positive** cell has count 1–4, omit the entire object. There is no partial or
    complementary-cell publication: suppressing one share would expose it from
@@ -294,6 +297,9 @@ extra unit to `early`. `(5,9,6,0)` publish `many` and `(25%,50%,25%,0%)`.
 tickets stay in the denominator. `(5,4,0,0)` is wholly suppressed because a
 positive cell is below `k`. Cohort sizes 4, 5, 19, and 20 respectively produce
 suppressed, `several`, `several`, and `many`, subject to the positive-cell rule.
+The valid ranges `(low_percent, high_percent) = (0,49)` and `(50,99)` have
+half-integer midpoints 24.5 and 74.5 and deterministically enter `early` and
+`middle`, respectively; `(51,99)` has midpoint 75 and enters `late`.
 
 Do not publish confidence: small combinations of band and confidence increase
 re-identification risk. The public response uses anonymous project aliases only
@@ -355,7 +361,11 @@ metadata.
     whole object; sizes 4/5 and 19/20 cross the publication and cohort-label
     boundaries; joint 25% rounding totals exactly 100%; delay and alias-only
     output; no evidence, assessor, ticket ID, timestamps, counts, or confidence.
-12. **Property tests:** arbitrary valid update sequences preserve range bounds,
+12. **Midpoint coverage:** exhaust every integer pair `0 <= low_percent <=
+    high_percent <= 99` and prove exactly one band matches; include normative
+    assertions that midpoints 24.5 and 74.5 map to `early` and `middle`, while
+    the boundary midpoint 75 maps to `late`.
+13. **Property tests:** arbitrary valid update sequences preserve range bounds,
     strictly increasing revisions per attempt, no cross-attempt current record,
     bounded history, and zero progress mutations from lease-only operations.
 
