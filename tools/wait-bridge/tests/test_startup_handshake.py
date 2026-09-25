@@ -20,7 +20,11 @@ os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
 from mcp import Client  # noqa: E402
 from mcp.client.stdio import StdioServerParameters  # noqa: E402
-from pursers_client import BoardClientError, JoinedIdentity  # noqa: E402
+from pursers_client import (  # noqa: E402
+    BoardClientError,
+    CentralInstanceMismatchError,
+    JoinedIdentity,
+)
 import pursers_wait_server as wait_server  # noqa: E402
 
 TEST_TIMEOUT_S = float(os.environ.get("PURSERS_TEST_TIMEOUT_S", "30"))
@@ -289,6 +293,18 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(failure.cause_class, "board")
         self.assertIn("board join failed (board)", str(failure))
+
+    async def test_instance_mismatch_preserves_safe_typed_detail(self) -> None:
+        detail = (
+            "Central instance mismatch: selected profile does not match "
+            "the connected Central"
+        )
+        failure = wait_server._classify_board_join_failure(
+            CentralInstanceMismatchError(detail)
+        )
+
+        self.assertEqual(failure.cause_class, "instance_mismatch")
+        self.assertEqual(str(failure), detail)
 
     async def test_permanent_denials_have_denied_cause_class(self) -> None:
         for message in (

@@ -161,9 +161,25 @@ def test_publish_workflow_serializes_new_version_check_and_upload() -> None:
         Path(__file__).resolve().parents[2] / ".github/workflows/publish-pypi.yml"
     ).read_text(encoding="utf-8")
 
-    concurrency = "concurrency:\n  group: publish-pypi\n  cancel-in-progress: false"
+    concurrency = (
+        "concurrency:\n"
+        "  group: publish-pypi-${{ inputs.release_tag }}\n"
+        "  cancel-in-progress: false"
+    )
     assert workflow.count(concurrency) == 1
     assert workflow.index(concurrency) < workflow.index("jobs:")
+
+
+def test_publish_workflow_is_bound_to_exact_stable_tag() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[2] / ".github/workflows/publish-pypi.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "release_tag:" in workflow
+    assert "required: true" in workflow
+    assert workflow.count("ref: refs/tags/${{ inputs.release_tag }}") == 2
+    assert workflow.count('test "$TAG" = "v5.0.5"') == 2
+    assert workflow.count('python tools/release_publish.py "$TAG" verify-checkout') == 2
 
 
 def test_serialized_later_run_rejects_artifact_published_by_first_run(

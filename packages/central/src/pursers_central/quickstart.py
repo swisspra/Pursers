@@ -16,6 +16,7 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jwt.algorithms import RSAAlgorithm
+from pursers_client import ensure_central_instance_identity
 
 
 PROFILE_NAME = "profile.env"
@@ -536,6 +537,7 @@ def init_instance(
         raise QuickstartError("data directory must not be a symlink")
     data_dir.mkdir(mode=0o700, exist_ok=True)
     os.chmod(data_dir, 0o700)
+    ensure_central_instance_identity(data_dir)
 
     paths = {name: root / name for name in MANAGED_FILES}
     existing = [path for path in paths.values() if os.path.lexists(path)]

@@ -55,6 +55,7 @@ from pursers_client import (
     COORDINATOR_QUESTION_ANSWERED,
     COORDINATOR_MESSAGE_EVENT_KINDS,
     coordinator_host_binding,
+    ensure_central_instance_identity,
     DEPRECATION_EVENT_KINDS,
     DISPATCH_EVENT_KINDS,
     HUMAN_INPUT_REQUESTED,
@@ -435,6 +436,10 @@ COORDINATOR_EVENT_FIELDS = frozenset(
 )
 GENERATION_META_KEY = "io.onboard/expected-generation"
 GENERATION_ARGUMENT = "expected_generation"
+INSTANCE_META_KEY = "io.onboard/expected-instance"
+INSTANCE_SUBSCRIPTION_RE = re.compile(
+    r"^pursers-instance://binding/(?P<instance_id>CI-[0-9a-f]{64})$"
+)
 GENERATION_TOKEN_MAX_CHARS = 256
 GENERATION_REJOIN_ERROR = (
     "stale or missing board generation; rejoin with board_join or board_onboard "
@@ -1366,6 +1371,7 @@ class CentralBoard:
         if self.backend != "sqlite":
             raise ValueError("Personal Central requires SQLite storage")
         self.store = TransactionalSQLiteStore(root)
+        self.instance_id = ensure_central_instance_identity(self.store.root)
         self.admission = os.environ.get("CENTRAL_ADMISSION", "invite").strip().lower()
         if self.admission != "invite":
             raise ValueError("Personal Central requires invite admission")
@@ -2862,6 +2868,11 @@ class SubscriptionAuthorization:
                 tool_name = raw.get("name") if isinstance(raw, Mapping) else None
                 arguments = raw.get("arguments", {}) if isinstance(raw, Mapping) else {}
                 raw_meta: Any = ctx.meta
+                expected_instance = (
+                    raw_meta.get(INSTANCE_META_KEY)
+                    if isinstance(raw_meta, Mapping)
+                    else None
+                )
                 metadata_generation = (
                     raw_meta.get(GENERATION_META_KEY)
                     if isinstance(raw_meta, Mapping)
@@ -2884,6 +2895,28 @@ class SubscriptionAuthorization:
                     expected_generation
                 )
                 try:
+                    if expected_instance is not None and (
+                        not isinstance(expected_instance, str)
+                        or not hmac.compare_digest(
+                            expected_instance, self.service.instance_id
+                        )
+                    ):
+                        mismatch = PermissionError(
+                            "Central instance mismatch: selected profile does not "
+                            "match the connected Central"
+                        )
+                        log_runtime_error(
+                            self.service.diagnostics,
+                            "tool_error",
+                            mismatch,
+                            include_traceback=False,
+                            tool=str(tool_name or "unknown"),
+                        )
+                        return {
+                            "content": [{"type": "text", "text": str(mismatch)}],
+                            "isError": True,
+                            "resultType": "complete",
+                        }
                     if generation_error is not None:
                         log_runtime_error(
                             self.service.diagnostics,
@@ -2986,6 +3019,33 @@ class SubscriptionAuthorization:
                 raw = raw.model_dump(by_alias=True, exclude_none=True)
             notifications = raw.get("notifications", {}) if isinstance(raw, Mapping) else {}
             uris = notifications.get("resourceSubscriptions") or notifications.get("resource_subscriptions") or []
+            instance_uris = [
+                str(uri)
+                for uri in uris
+                if str(uri).startswith("pursers-instance:")
+            ]
+            instance_matches = [
+                INSTANCE_SUBSCRIPTION_RE.fullmatch(uri) for uri in instance_uris
+            ]
+            if instance_uris and (
+                len(instance_uris) != 1 or instance_matches[0] is None
+            ):
+                raise MCPError(
+                    INVALID_REQUEST,
+                    "Central instance subscription binding is invalid",
+                )
+            if instance_matches and not hmac.compare_digest(
+                instance_matches[0].group("instance_id"),
+                self.service.instance_id,
+            ):
+                raise MCPError(
+                    INVALID_REQUEST,
+                    "Central instance mismatch: selected profile does not "
+                    "match the connected Central",
+                )
+            board_uris = [
+                uri for uri in uris if not str(uri).startswith("pursers-instance:")
+            ]
             principal = current_principal()
             require_scope(principal, "board:read")
             if not self.service.register_principal_stream(principal.principal_id):
@@ -3004,7 +3064,7 @@ class SubscriptionAuthorization:
                 )
             registered_agents: list[tuple[str, str]] = []
             try:
-                for uri in uris:
+                for uri in board_uris:
                     if not self.service.subscription_allowed(str(uri), principal):
                         raise MCPError(
                             INVALID_REQUEST,
@@ -5914,8 +5974,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         seq = int(document.setdefault("next_ticket_seq", 1))
         while True:
             digest = hashlib.sha256(
-                f"{document['board_id']}:{seq}".encode("utf-8")
-            ).hexdigest()[:12]
+                f"{service.instance_id}:{document['board_id']}:{seq}".encode("utf-8")
+            ).hexdigest()[:20]
             candidate = f"TK-{digest}"
             seq += 1
             if (

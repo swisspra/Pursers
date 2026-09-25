@@ -1,15 +1,15 @@
 schema_version = 1
-product = "5.0.4"
+product = "5.0.5"
 source_date_epoch = "315532800"
 
 [packages]
-pursers = "5.0.4"
-central = "0.1.2"
-client = "0.1.3"
-personal = "5.0.4"
+pursers = "5.0.5"
+central = "0.1.3"
+client = "0.1.4"
+personal = "5.0.5"
 import = "5.0.0"
-wait_bridge = "0.1.1"
-acp = "0.1.2"
+wait_bridge = "0.1.2"
+acp = "0.1.3"
 
 [build_toolchain]
 build = "1.3.0"

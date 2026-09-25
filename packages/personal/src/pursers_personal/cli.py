@@ -335,12 +335,28 @@ def _authenticated_status(
                 )
                 status = client_module.BoardClient._decode(
                     await client.call_tool(
-                        "board_status", {"board_id": context.board_id}
+                        "board_status",
+                        {"board_id": context.board_id},
+                        meta=(
+                            {client_module.INSTANCE_META_KEY: expected_instance_id}
+                            if (
+                                expected_instance_id := getattr(
+                                    context, "central_instance_id", None
+                                )
+                            )
+                            else None
+                        ),
                     )
                 )
                 snapshot = client_module.BoardClient._decode(
                     await client.call_tool(
-                        "board_snapshot", {"board_id": context.board_id}
+                        "board_snapshot",
+                        {"board_id": context.board_id},
+                        meta=(
+                            {client_module.INSTANCE_META_KEY: expected_instance_id}
+                            if expected_instance_id
+                            else None
+                        ),
                     )
                 )
                 agents = snapshot.get("agents", [])
@@ -407,13 +423,21 @@ def _initialize_personal_board(
                 await asyncio.sleep(delay)
             try:
                 async with asyncio.timeout(12):
+                    expected_instance_id = getattr(
+                        context, "central_instance_id", None
+                    )
+                    client_kwargs: dict[str, Any] = {
+                        "agent_name": context.agent_name,
+                        "capabilities": {"can_work": False, "can_review": False},
+                    }
+                    if expected_instance_id is not None:
+                        client_kwargs["expected_instance_id"] = expected_instance_id
                     try:
                         client_cm = client_module.BoardClient(
                             context.central_url,
                             context.capability_token,
                             context.board_id,
-                            agent_name=context.agent_name,
-                            capabilities={"can_work": False, "can_review": False},
+                            **client_kwargs,
                         )
                     except TypeError:
                         client_cm = client_module.BoardClient(

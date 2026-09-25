@@ -25,6 +25,7 @@ from mcp.client.streamable_http import streamable_http_client
 from pursers_client import (
     BoardClient,
     BoardClientError,
+    INSTANCE_META_KEY,
     PersonalProfileError,
     coordinator_host_binding,
     parse_project_registry,
@@ -38,7 +39,7 @@ from pursers_client.personal_profile import (
 
 JSON = dict[str, Any]
 ACP_VERSION = 1
-IMPLEMENTATION_VERSION = "0.1.2"
+IMPLEMENTATION_VERSION = "0.1.3"
 MAX_MESSAGE_BYTES = 1_048_576
 MAX_TEXT_CHARS = 8_000
 MAX_ROWS = 20
@@ -303,6 +304,7 @@ class PersonalBoardSurface:
         self.profile = profile
         self.board_id = profile.board_id
         self.principal_id = profile.principal_id
+        self.central_instance_id = getattr(profile, "central_instance_id", None)
         self.agent_name = ""
         self.agent_id = ""
         self._coordinator_binding = ""
@@ -386,8 +388,15 @@ class PersonalBoardSurface:
     async def _call(self, method: str, params: JSON) -> JSON:
         if self._client is None:
             raise RuntimeError("board transport is closed")
-        result = await self._client.call_tool(
-            method, {"board_id": self.board_id, **params}
+        arguments = {"board_id": self.board_id, **params}
+        result = (
+            await self._client.call_tool(
+                method,
+                arguments,
+                meta={INSTANCE_META_KEY: self.central_instance_id},
+            )
+            if self.central_instance_id is not None
+            else await self._client.call_tool(method, arguments)
         )
         return BoardClient._decode(result)
 
@@ -2281,6 +2290,9 @@ def _wait_bridge_environment(
         "PURSERS_CAN_REVIEW": str(bool(capabilities.get("can_review", False))).lower(),
         "PURSERS_HOST": "ide-acp",
     }
+    central_instance_id = getattr(profile, "central_instance_id", None)
+    if isinstance(central_instance_id, str) and central_instance_id:
+        environment["ONBOARD_CENTRAL_INSTANCE_ID"] = central_instance_id
     tier = capabilities.get("tier_max")
     if isinstance(tier, int) and not isinstance(tier, bool) and tier in {1, 2, 3}:
         environment["PURSERS_TIER_MAX"] = str(tier)

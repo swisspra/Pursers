@@ -28,6 +28,7 @@ Unset means the component applies its documented default or requires an explicit
 | `ONBOARD_CENTRAL_ALLOWED_HOSTS` | Central | unset | Comma-separated extra accepted bare HTTP Host names. |
 | `ONBOARD_CENTRAL_DATA_DIR` | Central | unset; required unless supplied by CLI | Private Central SQLite data directory. |
 | `ONBOARD_CENTRAL_HOST` | Central | `127.0.0.1` | Loopback address used by the packaged Central runtime. |
+| `ONBOARD_CENTRAL_INSTANCE_ID` | Wait bridge | unset | Expected non-secret Central deployment identity used to bind subscriptions. |
 | `ONBOARD_CENTRAL_LOG_LEVEL` | Central | `info` | Uvicorn log level. |
 | `ONBOARD_CENTRAL_PORT` | Central | `8766` | Loopback port used by Central. |
 | `ONBOARD_CENTRAL_SSL_CERTFILE` | Central | unset | Legacy alias for the TLS certificate path. |

@@ -1,28 +1,80 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
+import socket
+import shutil
 import sys
+import threading
+import time
 from argparse import Namespace
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import jwt
 import pytest
+import uvicorn
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt.algorithms import RSAAlgorithm
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pursers_client import BoardClient
+from pursers_client import (
+    BoardClient,
+    CentralInstanceMismatchError,
+    fork_central_instance_identity,
+)
 import pursers_acp.agent as agent_module
 from pursers_acp.agent import ACP_VERSION, AuthRequired, PursersACPAgent
 from pursers_acp.agent import PersonalBoardSurface, StdioWaitBridge
 from pursers_central import central
+from pursers_central.runtime_health import create_streamable_http_app
 
 JSON = dict[str, Any]
 TEST_TIMEOUT_S = float(os.environ.get("PURSERS_TEST_TIMEOUT_S", "30"))
+INSTANCE_TEST_ISSUER = "https://instance-test.example"
+
+
+def _instance_test_principal_id(name: str) -> str:
+    canonical = json.dumps(
+        [name, INSTANCE_TEST_ISSUER, name], separators=(",", ":")
+    )
+    return "PR-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _instance_test_token_fixture(root: Path, audience: str):
+    private_key = rsa.generate_private_key(public_exponent=65_537, key_size=2_048)
+    public = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
+    public.update({"kid": "acp-instance", "alg": "RS256", "use": "sig"})
+    jwks = root / "jwks.json"
+    jwks.write_text(json.dumps({"keys": [public]}), encoding="utf-8")
+
+    def issue(name: str, scopes: str) -> str:
+        now = datetime.now(timezone.utc)
+        return jwt.encode(
+            {
+                "iss": INSTANCE_TEST_ISSUER,
+                "sub": name,
+                "aud": audience,
+                "resource": audience,
+                "scope": scopes,
+                "client_id": name,
+                "iat": now,
+                "nbf": now - timedelta(seconds=5),
+                "exp": now + timedelta(minutes=10),
+            },
+            private_key,
+            algorithm="RS256",
+            headers={"kid": "acp-instance"},
+        )
+
+    return jwks, issue
 
 
 class FakeBoard:
@@ -2010,6 +2062,7 @@ class InProcessPersonalBoard(PersonalBoardSurface):
         agent_name: str = "human-personal",
         agent_id: str = "",
         coordinator_binding: str = "",
+        central_instance_id: str | None = None,
     ) -> None:
         self.profile = None
         self.board_id = "acp-e2e"
@@ -2017,6 +2070,7 @@ class InProcessPersonalBoard(PersonalBoardSurface):
         self.agent_name = agent_name
         self.agent_id = agent_id
         self._coordinator_binding = coordinator_binding
+        self.central_instance_id = central_instance_id
         self._wait_bridge_factory = None
         self._client = raw
         self._readiness_enabled = True
@@ -2042,7 +2096,7 @@ async def _end_to_end_create_against_in_process_central(
     monkeypatch.setenv("CENTRAL_JWKS_PATH", str(jwks))
     monkeypatch.setenv("CENTRAL_ADMISSION", "invite")
     monkeypatch.setenv("STORE_BACKEND", "sqlite")
-    mcp, _service = central.build_server("localhost", 8765, tmp_path / "central")
+    mcp, service = central.build_server("localhost", 8765, tmp_path / "central")
     principal = central.Principal(
         "PR-acp-human",
         "acp-human",
@@ -2062,7 +2116,11 @@ async def _end_to_end_create_against_in_process_central(
             )
         )
         assert joined["principal_id"] == principal.principal_id
-        board = InProcessPersonalBoard(raw, principal.principal_id)
+        board = InProcessPersonalBoard(
+            raw,
+            principal.principal_id,
+            central_instance_id=service.instance_id,
+        )
         client = FakeACPClient(PursersACPAgent(lambda: board))
         try:
             await client.initialize()
@@ -2360,6 +2418,406 @@ async def _real_acp_reviewer_turn_uses_review_scope_and_controls_offers(
             await client.close()
 
 
+def test_personal_board_surface_rejects_wrong_cloned_central_before_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asyncio.run(
+        _personal_board_surface_rejects_wrong_cloned_central_before_operations(
+            tmp_path, monkeypatch
+        )
+    )
+
+
+async def _personal_board_surface_rejects_wrong_cloned_central_before_operations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jwks = tmp_path / "instance-jwks.json"
+    jwks.write_text('{"keys": []}', encoding="utf-8")
+    monkeypatch.setenv("CENTRAL_AUTH_MODE", "jwt")
+    monkeypatch.setenv("CENTRAL_JWT_ISSUER", "https://issuer.invalid")
+    monkeypatch.setenv("CENTRAL_JWT_AUDIENCE", "http://localhost:8765/mcp")
+    monkeypatch.setenv("CENTRAL_JWKS_PATH", str(jwks))
+    monkeypatch.setenv("CENTRAL_ADMISSION", "invite")
+    monkeypatch.setenv("STORE_BACKEND", "sqlite")
+    source_root = tmp_path / "instance-source"
+    source_mcp, source_service = central.build_server(
+        "localhost", 8765, source_root
+    )
+    principal = central.Principal(
+        "PR-acp-instance",
+        "acp-instance",
+        frozenset({"board:read", "board:write", "board:review"}),
+    )
+    monkeypatch.setattr(central, "current_principal", lambda: principal)
+    async with Client(source_mcp, mode="2026-07-28", cache=None) as source:
+        joined = BoardClient._decode(
+            await source.call_tool(
+                "board_join",
+                {
+                    "board_id": "acp-e2e",
+                    "agent_name": "human-personal",
+                    "role": "worker",
+                    "capabilities": {"can_work": False, "can_review": False},
+                },
+            )
+        )
+        assert joined["principal_id"] == principal.principal_id
+        created = BoardClient._decode(
+            await source.call_tool(
+                "ticket_create",
+                {
+                    "board_id": "acp-e2e",
+                    "ticket_id": "TK-collision",
+                    "agent_name": "human-personal",
+                    "title": "Cloned ticket",
+                    "description": "Must not be addressed through the source profile",
+                    "scope": "interactive-no-send",
+                    "required_fields": ["observations"],
+                    "unassigned": True,
+                },
+            )
+        )
+        assert created["ticket"]["ticket_id"] == "TK-collision"
+
+    clone_root = tmp_path / "instance-clone"
+    shutil.copytree(source_root, clone_root)
+    original_instance, clone_instance = fork_central_instance_identity(clone_root)
+    assert original_instance == source_service.instance_id
+    assert clone_instance != original_instance
+    clone_mcp, clone_service = central.build_server(
+        "localhost", 8765, clone_root
+    )
+    before_board = clone_service.load("acp-e2e")
+    before_journal = clone_service.journal.read_after("acp-e2e", 0, 100)
+
+    async with Client(clone_mcp, mode="2026-07-28", cache=None) as wrong_raw:
+        wrong = InProcessPersonalBoard(
+            wrong_raw,
+            principal.principal_id,
+            central_instance_id=source_service.instance_id,
+        )
+        calls = (
+            ("board_status", {}),
+            ("ticket_get", {"ticket_id": "TK-collision"}),
+            (
+                "ticket_create",
+                {
+                    "agent_name": "human-personal",
+                    "title": "Wrong instance create",
+                    "description": "Must fail before mutation",
+                    "scope": "interactive-no-send",
+                    "required_fields": ["observations"],
+                    "unassigned": True,
+                },
+            ),
+            (
+                "ticket_annotate",
+                {
+                    "agent_name": "human-personal",
+                    "ticket_id": "TK-collision",
+                    "text": "must not be written",
+                    "kind": "note",
+                },
+            ),
+            (
+                "ticket_human_resolve",
+                {
+                    "agent_name": "human-personal",
+                    "ticket_id": "TK-collision",
+                    "request_id": "HR-wrong-instance",
+                    "action": "accept",
+                    "content": {"answer": "must not be written"},
+                    "disposition": "reopen",
+                },
+            ),
+            (
+                "ticket_question_answer",
+                {
+                    "agent_name": "human-personal",
+                    "ticket_id": "TK-collision",
+                    "question_id": "CQ-wrong-instance",
+                    "host_binding": "wrong-instance-binding",
+                    "action": "answer",
+                    "message": "must not be written",
+                },
+            ),
+        )
+        for method, arguments in calls:
+            with pytest.raises(
+                CentralInstanceMismatchError, match="Central instance mismatch"
+            ):
+                await wrong._call(method, arguments)
+
+    assert clone_service.load("acp-e2e") == before_board
+    assert clone_service.journal.read_after("acp-e2e", 0, 100) == before_journal
+
+
+def test_personal_watch_binds_real_wait_bridge_before_wrong_clone_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    asyncio.run(
+        _personal_watch_binds_real_wait_bridge_before_wrong_clone_side_effects(
+            tmp_path, monkeypatch
+        )
+    )
+
+
+async def _personal_watch_binds_real_wait_bridge_before_wrong_clone_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    port = int(listener.getsockname()[1])
+    url = f"http://127.0.0.1:{port}/mcp"
+    jwks, issue = _instance_test_token_fixture(tmp_path, url)
+    identity_name = "acp-watch-personal"
+    principal_id = _instance_test_principal_id(identity_name)
+    token = issue(identity_name, "board:read board:write")
+    monkeypatch.setenv("CENTRAL_AUTH_MODE", "jwt")
+    monkeypatch.setenv("CENTRAL_JWT_ISSUER", INSTANCE_TEST_ISSUER)
+    monkeypatch.setenv("CENTRAL_JWT_AUDIENCE", url)
+    monkeypatch.setenv("CENTRAL_JWKS_PATH", str(jwks))
+    monkeypatch.setenv("CENTRAL_ADMISSION", "invite")
+    monkeypatch.setenv("STORE_BACKEND", "sqlite")
+    principal = central.Principal(
+        principal_id,
+        identity_name,
+        frozenset({"board:read", "board:write"}),
+    )
+    monkeypatch.setattr(central, "current_principal", lambda: principal)
+
+    board_id = "acp-watch-instance"
+    source_root = tmp_path / "watch-source"
+    source_mcp, source_service = central.build_server("127.0.0.1", port, source_root)
+    server: uvicorn.Server | None = None
+    thread: threading.Thread | None = None
+    async with Client(source_mcp, mode="2026-07-28", cache=None) as source:
+        joined = BoardClient._decode(
+            await source.call_tool(
+                "board_join",
+                {
+                    "board_id": board_id,
+                    "agent_name": identity_name,
+                    "role": "worker",
+                    "capabilities": {"can_work": False, "can_review": False},
+                },
+                meta={agent_module.INSTANCE_META_KEY: source_service.instance_id},
+            )
+        )
+        BoardClient._decode(
+            await source.call_tool(
+                "ticket_create",
+                {
+                    "board_id": board_id,
+                    "ticket_id": "TK-watch-source",
+                    "agent_name": identity_name,
+                    "title": "Source watch ticket",
+                    "description": "The clone must not expose this through ACP watch",
+                    "scope": "interactive-no-send",
+                    "required_fields": ["observations"],
+                    "unassigned": True,
+                },
+                meta={agent_module.INSTANCE_META_KEY: source_service.instance_id},
+            )
+        )
+
+        clone_root = tmp_path / "watch-clone"
+        shutil.copytree(source_root, clone_root)
+        original_instance, clone_instance = fork_central_instance_identity(clone_root)
+        assert original_instance == source_service.instance_id
+        clone_mcp, clone_service = central.build_server("127.0.0.1", port, clone_root)
+        app = create_streamable_http_app(
+            clone_mcp, clone_service, host="127.0.0.1"
+        )
+        server = uvicorn.Server(
+            uvicorn.Config(
+                app,
+                host="127.0.0.1",
+                port=port,
+                log_level="error",
+                access_log=False,
+            )
+        )
+        thread = threading.Thread(
+            target=server.run,
+            kwargs={"sockets": [listener]},
+            daemon=True,
+        )
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not server.started and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        assert server.started
+
+        repository = Path(__file__).resolve().parents[3]
+        wait_bridge_root = repository / "tools" / "wait-bridge"
+        client_src = repository / "packages" / "client" / "src"
+
+        def bridge_environment(expected_instance: str) -> dict[str, str]:
+            profile = SimpleNamespace(
+                central_url=url,
+                board_id=board_id,
+                principal_id=principal_id,
+                central_instance_id=expected_instance,
+            )
+            environment = agent_module._wait_bridge_environment(
+                profile, token, joined
+            )
+            environment.update(
+                {
+                    "PURSERS_BOARDS": "home",
+                    "PURSERS_WAIT_MODE": "push",
+                    "PURSERS_BRIDGE_STATE_DIR": str(
+                        tmp_path / f"bridge-state-{expected_instance}"
+                    ),
+                    "PURSERS_BRIDGE_STATS": str(
+                        tmp_path / f"bridge-stats-{expected_instance}.json"
+                    ),
+                    "PYTHONPATH": os.pathsep.join(
+                        (str(client_src), str(wait_bridge_root))
+                    ),
+                }
+            )
+            return environment
+
+        async def bridge_factory(expected_instance: str) -> StdioWaitBridge:
+            return await StdioWaitBridge.connect(
+                sys.executable,
+                [str(wait_bridge_root / "pursers_wait_server.py")],
+                bridge_environment(expected_instance),
+            )
+
+        original_load = clone_service.load
+        original_read_after = clone_service.journal.read_after
+        before_board = copy.deepcopy(original_load(board_id))
+        before_journal = copy.deepcopy(original_read_after(board_id, 0, 100))
+        before_cursor = clone_service.cursors.get(
+            principal_id, identity_name, board_id
+        )
+        calls = {
+            "load": 0,
+            "journal": 0,
+            "subscription_allowed": 0,
+            "register_listener": 0,
+            "record_agent_activity": 0,
+        }
+
+        def tracked_load(selected_board: str) -> JSON:
+            calls["load"] += 1
+            return original_load(selected_board)
+
+        def tracked_read_after(*args: Any, **kwargs: Any) -> Any:
+            calls["journal"] += 1
+            return original_read_after(*args, **kwargs)
+
+        def wrap_method(name: str):
+            original = getattr(clone_service, name)
+
+            def tracked(*args: Any, **kwargs: Any) -> Any:
+                calls[name] += 1
+                return original(*args, **kwargs)
+
+            return tracked
+
+        monkeypatch.setattr(clone_service, "load", tracked_load)
+        monkeypatch.setattr(clone_service.journal, "read_after", tracked_read_after)
+        for method in (
+            "subscription_allowed",
+            "register_listener",
+            "record_agent_activity",
+        ):
+            monkeypatch.setattr(clone_service, method, wrap_method(method))
+
+        wrong_profile = SimpleNamespace(
+            board_id=board_id,
+            principal_id=principal_id,
+            central_instance_id=source_service.instance_id,
+        )
+        wrong = PersonalBoardSurface(wrong_profile)
+        wrong.agent_name = identity_name
+        wrong._client = source  # type: ignore[assignment]
+        wrong._wait_bridge_factory = lambda: bridge_factory(source_service.instance_id)
+        wrong_watch = wrong.watch(None, asyncio.Event())
+        snapshot_cursor, snapshot = await anext(wrong_watch)
+        assert snapshot_cursor > 0
+        assert snapshot["kind"] == "watch_snapshot"
+        with pytest.raises(
+            CentralInstanceMismatchError, match="Central instance mismatch"
+        ) as mismatch:
+            async with asyncio.timeout(TEST_TIMEOUT_S):
+                await anext(wrong_watch)
+        await wrong_watch.aclose()
+        mismatch_detail = str(mismatch.value)
+        assert token not in mismatch_detail
+        assert str(tmp_path) not in mismatch_detail
+        assert source_service.instance_id not in mismatch_detail
+        assert clone_instance not in mismatch_detail
+
+        assert calls == {
+            "load": 0,
+            "journal": 0,
+            "subscription_allowed": 0,
+            "register_listener": 0,
+            "record_agent_activity": 0,
+        }
+        assert clone_service.active_stream_count == 0
+        assert not clone_service.active_listeners.get(board_id)
+        assert clone_service.last_seen_activity == {}
+        assert original_load(board_id) == before_board
+        assert original_read_after(board_id, 0, 100) == before_journal
+        assert (
+            clone_service.cursors.get(principal_id, identity_name, board_id)
+            == before_cursor
+        )
+
+        async with Client(clone_mcp, mode="2026-07-28", cache=None) as clone:
+            same_profile = SimpleNamespace(
+                board_id=board_id,
+                principal_id=principal_id,
+                central_instance_id=clone_instance,
+            )
+            same = PersonalBoardSurface(same_profile)
+            same.agent_name = identity_name
+            same._client = clone  # type: ignore[assignment]
+            same._wait_bridge_factory = lambda: bridge_factory(clone_instance)
+            same_watch = same.watch(None, asyncio.Event())
+            _same_cursor, same_snapshot = await anext(same_watch)
+            assert same_snapshot["kind"] == "watch_snapshot"
+            BoardClient._decode(
+                await clone.call_tool(
+                    "ticket_create",
+                    {
+                        "board_id": board_id,
+                        "ticket_id": "TK-watch-same-instance",
+                        "agent_name": identity_name,
+                        "title": "Same instance watch ticket",
+                        "description": "Prove the bound watch remains functional",
+                        "scope": "interactive-no-send",
+                        "required_fields": ["observations"],
+                        "unassigned": True,
+                    },
+                    meta={agent_module.INSTANCE_META_KEY: clone_instance},
+                )
+            )
+            try:
+                async with asyncio.timeout(TEST_TIMEOUT_S):
+                    while True:
+                        same_event = await anext(same_watch)
+                        if same_event[1].get("ticket_id") == "TK-watch-same-instance":
+                            break
+                assert same_event[1]["kind"] == "ticket_status_changed"
+            finally:
+                await same_watch.aclose()
+
+    if server is not None:
+        server.should_exit = True
+    if thread is not None:
+        await asyncio.to_thread(thread.join, 5)
+    listener.close()
+
+
 def test_end_to_end_two_seat_questions_answer_and_refuse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2501,6 +2959,7 @@ async def _end_to_end_two_seat_questions_answer_and_refuse(
             agent_name="coord",
             agent_id=agent_ids["coord"],
             coordinator_binding=coordinator_binding,
+            central_instance_id=service.instance_id,
         )
         client = FakeACPClient(
             PursersACPAgent(lambda: board),
@@ -2645,7 +3104,11 @@ async def _end_to_end_two_seat_questions_answer_and_refuse(
 
 
 def _bridge_profile() -> SimpleNamespace:
-    return SimpleNamespace(central_url="https://127.0.0.1:1/mcp", board_id="pursers")
+    return SimpleNamespace(
+        central_url="https://127.0.0.1:1/mcp",
+        board_id="pursers",
+        central_instance_id="CI-" + "a" * 64,
+    )
 
 
 def test_wait_bridge_environment_forwards_model_and_provider_from_identity(
@@ -2664,6 +3127,7 @@ def test_wait_bridge_environment_forwards_model_and_provider_from_identity(
 
     assert environment["PURSERS_MODEL"] == "joined-model"
     assert environment["PURSERS_PROVIDER"] == "joined-provider"
+    assert environment["ONBOARD_CENTRAL_INSTANCE_ID"] == "CI-" + "a" * 64
 
 
 def test_wait_bridge_environment_falls_back_to_agent_environment(

@@ -18,6 +18,7 @@ from pursers_client import (
     load_personal_profile,
     profile_path_for_project,
     read_capability,
+    rotate_personal_capability,
 )
 
 
@@ -112,6 +113,28 @@ def test_concurrent_retry_converges_after_validated_partial_creation(
 
     assert len(set(results)) == 1
     assert load_personal_profile(profile_path).board_id == results[0][1]
+
+
+def test_profile_binds_instance_and_legacy_profile_migrates_once(tmp_path: Path) -> None:
+    parent = private_parent(tmp_path)
+    project_root = project(parent, "instance-binding")
+    profile = ensure_personal_profile(
+        project_root, profiles_root=parent / "profiles"
+    )
+    document = json.loads(profile.profile_path.read_text(encoding="utf-8"))
+    assert document["central"]["instance_id"] == profile.central_instance_id
+
+    del document["central"]["instance_id"]
+    profile.profile_path.write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    migrated = load_personal_profile(profile.profile_path)
+    persisted = json.loads(profile.profile_path.read_text(encoding="utf-8"))
+    assert migrated.central_instance_id == profile.central_instance_id
+    assert persisted["central"]["instance_id"] == profile.central_instance_id
+
+    rotated = rotate_personal_capability(profile.profile_path)
+    assert rotated.central_instance_id == profile.central_instance_id
 
 
 def test_recovery_preserves_owned_integration_lock(tmp_path: Path) -> None:

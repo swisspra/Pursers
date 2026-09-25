@@ -24,6 +24,7 @@ from .quickstart import (
     rotate_key,
 )
 from .runtime_health import create_streamable_http_app
+from pursers_client import fork_central_instance_identity
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -314,6 +315,24 @@ def _run(argv: Sequence[str]) -> None:
     _serve(remaining)
 
 
+def _fork_instance(argv: Sequence[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="pursers-central fork-instance",
+        description=(
+            "Assign a new identity to an offline cloned Central data directory; "
+            "do not use for backup restoration"
+        ),
+    )
+    parser.add_argument("data_directory", type=Path)
+    args = parser.parse_args(argv)
+    lock = _acquire_data_lock(parser, args.data_directory)
+    try:
+        _old, new = fork_central_instance_identity(args.data_directory)
+    finally:
+        lock.__exit__(*sys.exc_info())
+    print(json.dumps({"ok": True, "instance_id": new}, sort_keys=True))
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == "init":
@@ -327,6 +346,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
     if arguments and arguments[0] == "retire-key":
         _retire_key(arguments[1:])
+        return
+    if arguments and arguments[0] == "fork-instance":
+        _fork_instance(arguments[1:])
         return
     _serve(arguments)
 

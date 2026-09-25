@@ -7,6 +7,80 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.5] - 2026-09-25
+
+This release includes `pursers-central==0.1.3`,
+`pursers-client==0.1.4`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.0.5`, `pursers==5.0.5`,
+`pursers-wait-bridge==0.1.2`, and
+`pursers-acp==0.1.3`.
+
+### Added
+
+- Board Butler can now run a policy-gated autonomous loop. Versioned command,
+  configuration, audit, executor, state, and model contracts connect bounded
+  board observations to least-privilege MCP connectors, typed host actions,
+  pluggable model runners, durable replay protection, and explicit operator
+  holds and vetoes.
+- Fleet Dashboard adds accessible Autonomous Butler controls and actual-state
+  reporting. Desired state is reconciled across the active WORK registry, and
+  displayed state remains tied to the configuration revision that produced it.
+- Fleet execution now has a typed, fail-closed host boundary with policy
+  generation fences, cumulative approved-batch scope, registry-wide seat
+  discovery, and separate worker and reviewer readiness checks.
+- CI adds an affected-suite selector and a single repository batch gate. Normal
+  changes run focused tests plus the affected manifest, while high-risk and
+  release-train work still runs the complete 14-suite manifest.
+
+### Changed
+
+- Board Butler's active path now supports guarded coordinator-question answers,
+  OpenAI chat-compatible providers, sandboxed ACP model processes, bounded
+  execution time, and validated persisted results without granting model
+  clients board or host tools.
+- Registry routing carries the exact project board through questions, offers,
+  ACP dispatch, and fleet reconciliation. Worker and reviewer availability is
+  explicit, incomplete seat inventories are retried, and live board authority
+  is required before CI-backed fleet actions proceed.
+- Clients bind authenticated sessions to a stable Central instance identity so
+  cached cursors, watches, and credentials fail closed instead of crossing a
+  replaced service instance.
+- Seat and systemd diagnostics now distinguish configuration, manager,
+  resource, status, and execution failures; verify the effective executable;
+  accept canonical unit paths; and keep unsupported host tests from masquerading
+  as product failures.
+- Generated CLI and MCP references, integration manifests, delivery metadata,
+  and operator guidance now describe the autonomous controls, readiness model,
+  validation policy, and recovery paths shipped in this cohort.
+
+### Fixed
+
+- Wait Bridge no longer loses registry-home routing, structured deferred-wait
+  failures, or connection accounting across multi-board subscriptions. It also
+  keeps claimable work and complete seat inventories reconciled without opening
+  duplicate journal connections.
+- Board Butler survives subscription authorization races and a full findings
+  buffer, preserves the originating board for questions, routes multi-board
+  tickets correctly, migrates state across policy changes, and rejects stale
+  policy revisions, replayed commands, and mismatched configuration state.
+- Fleet and seat administration now preserve human access to escalated
+  questions, authorize reviewer readiness correctly, report real systemd
+  failures precisely, quote unit paths safely, and reuse registry clients
+  sequentially without leaking prior connection state.
+- Zed ACP reports deferred wait failures as structured errors, while Fleet
+  selectors, autonomous controls, and state projections retain their contract
+  and accessibility behavior during live refreshes.
+
+### Security
+
+- Code submissions carry repository-bound proof through the authenticated
+  client, preventing a valid-looking but unreachable, stale, wrong-branch, or
+  local-only commit from being accepted as reviewable source.
+- MCP connectors reject encoded responses, mutable argument snapshots, and
+  non-boolean policy decisions. Model-provider references and subscription
+  diagnostics are scrubbed so credentials and URI user information cannot
+  enter results or logs.
+
 ## [5.0.4] - 2026-09-22
 
 This release includes `pursers-central==0.1.2`,

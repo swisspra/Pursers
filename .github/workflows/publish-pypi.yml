@@ -14,6 +14,11 @@ name: publish-pypi
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing stable tag to publish (must be v5.0.5)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -22,7 +27,7 @@ permissions:
 # second manual run must not observe a new version before the first run uploads
 # different bytes for that same version.
 concurrency:
-  group: publish-pypi
+  group: publish-pypi-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 jobs:
@@ -33,6 +38,17 @@ jobs:
       id-token: write   # required for Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Verify exact stable tag checkout
+        env:
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          test "$TAG" = "v5.0.5"
+          python tools/release_publish.py "$TAG" verify-checkout
 
       - uses: actions/setup-python@v7
         with:
@@ -116,6 +132,17 @@ jobs:
       id-token: write   # required for Trusted Publishing (OIDC)
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Verify exact stable tag checkout
+        env:
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          test "$TAG" = "v5.0.5"
+          python tools/release_publish.py "$TAG" verify-checkout
 
       - uses: actions/setup-python@v7
         with:

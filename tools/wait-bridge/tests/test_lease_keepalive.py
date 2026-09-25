@@ -162,6 +162,37 @@ class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(len(joins), 1)
 
+    async def test_agent_subscription_is_bound_to_expected_instance(self) -> None:
+        observed: list[str] = []
+
+        class ListenRaw:
+            def listen(self, *, resource_subscriptions):
+                observed.extend(str(uri) for uri in resource_subscriptions)
+                return SimpleNamespace()
+
+        client = SimpleNamespace(
+            expected_instance_id="CI-" + "c" * 64,
+            _raw_client=ListenRaw(),
+        )
+
+        result = wait_server.LeaseKeepalive._open_listen(
+            client,
+            [
+                "board://pursers/journal",
+                "board://pursers/agent/AI-worker",
+            ],
+        )
+
+        self.assertIsInstance(result, SimpleNamespace)
+        self.assertEqual(
+            observed,
+            [
+                "pursers-instance://binding/CI-" + "c" * 64,
+                "board://pursers/journal",
+                "board://pursers/agent/AI-worker",
+            ],
+        )
+
     async def test_work_projection_preserves_holder_for_renewal_failure(self) -> None:
         full_agent_id = "AI-" + "a" * 64
         full_principal_id = "PR-" + "b" * 64

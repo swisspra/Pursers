@@ -20,19 +20,23 @@ the narrative; that page is the manual.
 
 Zed 1.20.2 or later, and a network connection.
 
-You also need [uv](https://docs.astral.sh/uv/) on your `PATH`. A running
-Central is enough to connect Zed and create a ticket. Finishing that ticket
-also requires at least one onboarded, online worker advertising
-`can_work=true` and one online reviewer advertising `can_review=true`. The
-reviewer must authenticate as a different principal from the worker, or strict
-review cannot approve the ticket.
+A running Central is enough to connect Zed and create a ticket. If no Central
+is running, `/setup` can create and start one after showing the exact plan and
+receiving Zed's confirmation. A system [uv](https://docs.astral.sh/uv/) install
+is optional: the extension otherwise downloads the matching release asset,
+verifies its published SHA-256 checksum, and caches it in its private data
+directory. Finishing a ticket also requires at least one onboarded, online
+worker advertising `can_work=true` and one online reviewer advertising
+`can_review=true`. The reviewer must authenticate as a different principal
+from the worker, or strict review cannot approve the ticket.
 
 If you are starting from nothing and want to reach `ready to merge`, follow
 [Run a multi-agent fleet](running-a-fleet.md) first. It creates the board,
 credentials, memberships, and seat identities, and starts the worker and
-reviewer push loops. If you want to see the Zed boundary for yourself, a bare
-Central created with these two commands is enough to connect and create the
-open ticket, but it cannot finish that ticket by itself:
+reviewer push loops. If you want to see the Zed boundary for yourself, let
+`/setup` provision its default local Central or create a bare Central with these
+two commands. Either path is enough to connect and create the open ticket, but
+it cannot finish that ticket by itself:
 
 ```sh
 uvx --from pursers-central pursers-central init ./pursers-local
@@ -42,16 +46,17 @@ uvx --from pursers-central pursers-central run ./pursers-local
 `init` writes `./pursers-local/worker.jwt`. That file is a credential. You will
 give Zed the **path** to it and never the contents.
 
-Leave `run` going in its own terminal. Both uv and first-chat Central setup are
-prerequisites we are removing; until that work lands, set them up before opening
-Zed.
+When using the manual path, leave `run` going in its own terminal. When using
+`/setup`, Pursers owns the local process and reports its log path without
+showing a credential value.
 
 ### Where self-service ends
 
-The Zed extension uses an existing board credential. It does not issue the two
-different-principal seat credentials, ask for a model provider, or start worker
-and reviewer processes. Creating a ticket on a bare Central therefore succeeds,
-but `/watch` has no worker claim to report and the ticket remains `open`.
+The Zed extension can create its local Central and onboard the Zed caller, but
+it does not issue the two different-principal fleet credentials, ask for a
+model provider, or start worker and reviewer processes. Creating a ticket on a
+bare Central therefore succeeds, but `/watch` has no worker claim to report and
+the ticket remains `open`.
 
 If you want the ticket to finish, an operator must first follow [Run a
 multi-agent fleet](running-a-fleet.md). The provider is selected when the
@@ -158,10 +163,11 @@ native Zed Agent for this extension, or use the
 [shipped Pursers ACP agent](zed.md#optional-use-a-pursers-acp-thread) for a
 supported external-agent workflow.
 
-In the Zed Agent thread, type `/`. Five Pursers commands appear:
+In the Zed Agent thread, type `/`. Six Pursers commands appear:
 
 | Command | What it does |
 | --- | --- |
+| `/setup` | Create or repair the local Central and board after confirmation |
 | `/board` | Board summary and everything waiting on you |
 | `/create` | Create one ticket from a plain summary |
 | `/watch` | Watch the board until something matters |
@@ -277,7 +283,7 @@ operated fleet supplied the claimed lease, real commits, literal test output,
 and independent review. Without that fleet, the accurate result is the same
 tracked ticket waiting in `open`.
 
-When both seat loops are running, you type five commands and answer one
+When both seat loops are running, you type six commands and answer one
 question. The fleet does the rest, and every step leaves evidence you can read.
 
 ## When it goes wrong
@@ -303,7 +309,7 @@ produces a usable demo. Suggested shots:
 
 1. Extensions page, install, the Pursers row appearing.
 2. The Configure dialog, filled in, saved, green dot.
-3. `/` in the Agent Panel showing five commands.
+3. `/` in the Agent Panel showing six commands.
 4. `/board` on an empty board — zeroes.
 5. `/create`, the permission prompt, the ticket ID.
 6. `/watch` catching the claim, with the seat's name visible.

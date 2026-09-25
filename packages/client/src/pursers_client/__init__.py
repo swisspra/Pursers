@@ -3,11 +3,14 @@
 from .client import (
     DEFAULT_EVENT_KINDS,
     GENERATION_META_KEY,
+    INSTANCE_META_KEY,
     BoardClient,
     BoardClientError,
+    CentralInstanceMismatchError,
     JoinedIdentity,
     ScrubRejectedError,
     SubscriptionAuthorizationError,
+    bind_instance_subscriptions,
 )
 from .events import (
     ADMISSION_EVENT_KINDS,
@@ -60,6 +63,11 @@ from .events import (
     WORKER_WAIT_KINDS,
 )
 from .human_input import SENSITIVE_FORM_FALLBACK, human_form_safety
+from .instance_identity import (
+    CentralInstanceIdentityError,
+    ensure_central_instance_identity,
+    fork_central_instance_identity,
+)
 from .personal_profile import (
     PERSONAL_REVIEW_POLICY,
     PROFILE_ENV,
@@ -104,6 +112,8 @@ __all__ = [
     "BUTLER_EVENT_KINDS",
     "BoardClient",
     "BoardClientError",
+    "CentralInstanceIdentityError",
+    "CentralInstanceMismatchError",
     "CENTRAL_EVENT_KINDS",
     "CLAIM_TTL_EVENT_KINDS",
     "CLAIM_GATE_EVENT_KINDS",
@@ -115,6 +125,7 @@ __all__ = [
     "DISPATCH_UNASSIGNABLE",
     "HELD_TICKET_KINDS",
     "GENERATION_META_KEY",
+    "INSTANCE_META_KEY",
     "HUMAN_INPUT_REQUESTED",
     "HUMAN_INPUT_RESOLVED",
     "COORDINATOR_QUESTION_ASKED",
@@ -163,10 +174,13 @@ __all__ = [
     "WORKER_WAIT_KINDS",
     "active_registry_boards",
     "bootstrap_personal_review_policy",
+    "bind_instance_subscriptions",
     "central_environment",
     "default_profiles_root",
     "doctor_identity_summary",
     "ensure_personal_profile",
+    "ensure_central_instance_identity",
+    "fork_central_instance_identity",
     "human_form_safety",
     "load_or_create_request_state_keys",
     "load_personal_profile",

@@ -1,4 +1,4 @@
-# Pursers Personal 5.0.4
+# Pursers Personal 5.0.5
 
 Pursers Personal is a local board for one owner and multiple explicitly named
 agent clients. MCP Apps is the primary read-only UI; agent chat retains ticket,

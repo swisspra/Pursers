@@ -173,6 +173,7 @@ def _health_counts(service: Any) -> dict[str, Any]:
         journals = service.store.iter_documents("journals")
         heads = [max(0, int(row.get("next_seq", 1)) - 1) for row in journals]
     counts: dict[str, Any] = {
+        "instance_id": service.instance_id,
         "board_count": len(board_sizes),
         "journal_head": max(heads, default=0),
         "active_subscription_streams": int(

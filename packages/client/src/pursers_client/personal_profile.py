@@ -27,6 +27,8 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from .instance_identity import INSTANCE_IDENTITY_NAME, ensure_central_instance_identity
+
 
 PROFILE_SCHEMA_VERSION = 1
 PROFILE_MODE = "personal"
@@ -83,6 +85,7 @@ class PersonalProfile:
     central_port: int
     central_url: str
     central_data_dir: Path
+    central_instance_id: str
     issuer: str
     audience: str
     subject: str
@@ -101,6 +104,7 @@ class PersonalContext:
     project_root: Path
     central_url: str
     central_data_dir: Path
+    central_instance_id: str
     board_id: str
     authenticated_principal_id: str
     agent_name: str
@@ -113,6 +117,7 @@ class PersonalContext:
             "project_root": str(self.project_root),
             "central_url": self.central_url,
             "central_data_dir": str(self.central_data_dir),
+            "central_instance_id": self.central_instance_id,
             "board_id": self.board_id,
             "authenticated_principal_id": self.authenticated_principal_id,
             "agent_name": self.agent_name,
@@ -374,9 +379,19 @@ def _recover_incomplete_profile_directory(directory: Path) -> None:
                         dir_fd=directory_fd,
                     )
                     _validate_directory_stat(os.fstat(child_fd), str(directory / name))
-                    if os.listdir(child_fd):
+                    child_names = set(os.listdir(child_fd))
+                    if not child_names.issubset(
+                        {INSTANCE_IDENTITY_NAME, ".central-instance.lock"}
+                    ):
                         raise ProfileSecurityError(
                             "incomplete profile contains Central data; refusing recovery"
+                        )
+                    for child_name in child_names:
+                        child_value = os.stat(
+                            child_name, dir_fd=child_fd, follow_symlinks=False
+                        )
+                        _validate_file_stat(
+                            child_value, str(directory / name / child_name)
                         )
                 except OSError as exc:
                     raise ProfileSecurityError(
@@ -444,7 +459,10 @@ def _ensure_empty_central_data_directory(directory: Path) -> None:
             dir_fd=directory_fd,
         )
         _validate_directory_stat(os.fstat(child_fd), str(directory / "central-data"))
-        if os.listdir(child_fd):
+        child_names = set(os.listdir(child_fd))
+        if not child_names.issubset(
+            {INSTANCE_IDENTITY_NAME, ".central-instance.lock"}
+        ):
             raise ProfileSecurityError(
                 "new Personal profile Central data directory must be empty"
             )
@@ -588,7 +606,9 @@ def _issue_token(
     )
 
 
-def _profile_document(project_root: Path, port: int) -> tuple[dict[str, Any], rsa.RSAPrivateKey]:
+def _profile_document(
+    project_root: Path, port: int, instance_id: str
+) -> tuple[dict[str, Any], rsa.RSAPrivateKey]:
     if not 1 <= port <= 65_535:
         raise ValueError("port must be between 1 and 65535")
     profile_id = secrets.token_hex(16)
@@ -616,6 +636,7 @@ def _profile_document(project_root: Path, port: int) -> tuple[dict[str, Any], rs
             "auth_mode": "jwt",
             "admission": "invite",
             "data_dir": "central-data",
+            "instance_id": instance_id,
         },
         "issuer": issuer,
         "audience": central_url,
@@ -667,8 +688,11 @@ def ensure_personal_profile(
             finally:
                 os.close(root_fd)
 
-        document, private_key = _profile_document(project, port)
         _ensure_empty_central_data_directory(profile_path.parent)
+        instance_id = ensure_central_instance_identity(
+            profile_path.parent / "central-data"
+        )
+        document, private_key = _profile_document(project, port, instance_id)
         private_pem = private_key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
@@ -882,6 +906,27 @@ def _load_personal_profile(
     if any(central.get(key) != value for key, value in expected_central.items()):
         raise ProfileSecurityError("personal Central settings are not the strict local profile")
 
+    central_data_dir = path.parent / _safe_leaf(_required_text(central, "data_dir"))
+    central_data_fd = _open_directory(central_data_dir)
+    os.close(central_data_fd)
+    actual_instance_id = ensure_central_instance_identity(central_data_dir)
+    expected_instance_id = central.get("instance_id")
+    if expected_instance_id is None:
+        # Existing profile/store migration. The data directory is authoritative;
+        # commit the additive binding before any network connection can be made.
+        central["instance_id"] = actual_instance_id
+        _atomic_write_private(
+            path.parent,
+            path.name,
+            (json.dumps(document, indent=2, sort_keys=True) + "\n").encode(),
+            replace=True,
+        )
+        expected_instance_id = actual_instance_id
+    if expected_instance_id != actual_instance_id:
+        raise ProfileSecurityError(
+            "personal profile Central instance_id does not match its data directory"
+        )
+
     issuer = _required_text(document, "issuer")
     audience = _required_text(document, "audience")
     if audience != central_url or issuer != (
@@ -910,9 +955,6 @@ def _load_personal_profile(
         document,
         {private_key_path.name, jwks_path.name, token_path.name},
     )
-    central_data_dir = path.parent / _safe_leaf(_required_text(central, "data_dir"))
-    central_data_fd = _open_directory(central_data_dir)
-    os.close(central_data_fd)
     generation = document.get("credential_generation")
     if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
         raise PersonalProfileError("profile credential_generation is invalid")
@@ -944,6 +986,7 @@ def _load_personal_profile(
         central_port=port,
         central_url=central_url,
         central_data_dir=central_data_dir,
+        central_instance_id=actual_instance_id,
         issuer=issuer,
         audience=audience,
         subject=subject,
@@ -1093,6 +1136,7 @@ def resolve_personal_context(
         project_root=profile.project_root,
         central_url=profile.central_url,
         central_data_dir=profile.central_data_dir,
+        central_instance_id=profile.central_instance_id,
         board_id=profile.board_id,
         authenticated_principal_id=profile.principal_id,
         agent_name=agent_name,
@@ -1129,6 +1173,7 @@ def central_environment(profile: PersonalProfile) -> dict[str, str]:
         "ONBOARD_CENTRAL_HOST": "127.0.0.1",
         "ONBOARD_CENTRAL_PORT": str(profile.central_port),
         "ONBOARD_CENTRAL_DATA_DIR": str(profile.central_data_dir),
+        "ONBOARD_CENTRAL_INSTANCE_ID": profile.central_instance_id,
         "ONBOARD_CENTRAL_STORE_BACKEND": "sqlite",
         "ONBOARD_CENTRAL_AUTH_MODE": "jwt",
         "ONBOARD_CENTRAL_ADMISSION": "invite",
@@ -1201,6 +1246,7 @@ def _safe_profile_summary(profile: PersonalProfile) -> dict[str, Any]:
         "review_policy": profile.review_policy,
         "central_url": profile.central_url,
         "central_data_dir": str(profile.central_data_dir),
+        "central_instance_id": profile.central_instance_id,
         "authenticated_principal_id": profile.principal_id,
         "mode": PROFILE_MODE,
     }

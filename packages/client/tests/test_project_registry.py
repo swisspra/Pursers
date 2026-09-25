@@ -312,6 +312,7 @@ def test_registry_wait_bounds_backlog_and_round_trips_cursor(monkeypatch) -> Non
         for seq in range(1, 25)
     ]
     catchup_calls = 0
+    listen_resources: list[list[str]] = []
 
     def result(value: dict) -> SimpleNamespace:
         return SimpleNamespace(
@@ -344,7 +345,8 @@ def test_registry_wait_bounds_backlog_and_round_trips_cursor(monkeypatch) -> Non
             })
 
         @asynccontextmanager
-        async def listen(self, **_kwargs):
+        async def listen(self, **kwargs):
+            listen_resources.append(list(kwargs["resource_subscriptions"]))
             async def empty():
                 if False:
                     yield None
@@ -364,6 +366,7 @@ def test_registry_wait_bounds_backlog_and_round_trips_cursor(monkeypatch) -> Non
         _client=raw,
         _http=http,
         url="http://central.invalid/mcp",
+        expected_instance_id="CI-" + "b" * 64,
     )
     monkeypatch.setattr(registry_module, "streamable_http_client", lambda *_a, **_k: object())
     monkeypatch.setattr(registry_module, "Client", lambda *_a, **_k: raw)
@@ -406,6 +409,11 @@ def test_registry_wait_bounds_backlog_and_round_trips_cursor(monkeypatch) -> Non
 
     assert seen == [21, 22, 23, 24]
     assert max(serialized_sizes) < 1_000
+    assert listen_resources
+    assert all(
+        resources[0] == "pursers-instance://binding/CI-" + "b" * 64
+        for resources in listen_resources
+    )
 
 
 @pytest.mark.parametrize(

@@ -111,6 +111,10 @@ class ScrubRejectedError(BoardClientError):
         super().__init__(f"write rejected by scrub policy: {', '.join(self.rules)}")
 
 
+class CentralInstanceMismatchError(BoardClientError):
+    """The selected profile is connected to a different Central instance."""
+
+
 DEFAULT_EVENT_KINDS = frozenset(
     {
         "ticket_created",
@@ -119,6 +123,11 @@ DEFAULT_EVENT_KINDS = frozenset(
     }
 ) | REVIEW_LEASE_KINDS | DISPATCH_KINDS | CLAIM_GATE_EVENT_KINDS | PARK_EVENT_KINDS | BUTLER_EVENT_KINDS
 GENERATION_META_KEY = "io.onboard/expected-generation"
+INSTANCE_META_KEY = "io.onboard/expected-instance"
+INSTANCE_SUBSCRIPTION_PREFIX = "pursers-instance://binding/"
+INSTANCE_MISMATCH_DETAIL = (
+    "Central instance mismatch: selected profile does not match the connected Central"
+)
 # Cleanup is best-effort after this bound so a broken transport cannot wedge a
 # host shutdown or mask the original __aenter__ failure indefinitely.
 TRANSPORT_CLOSE_TIMEOUT_S = 2.0
@@ -146,6 +155,22 @@ SUBMIT_BRANCH_COMMIT_RE = re.compile(
     r"\s*@\s*([0-9a-fA-F]{40})\s*$"
 )
 SUBMIT_BRANCH_LABEL_RE = re.compile(r"(?im)^\s*branch_and_commit\s*:")
+
+
+def bind_instance_subscriptions(
+    resources: Iterable[str], expected_instance_id: str | None
+) -> list[str]:
+    """Add one non-notifying instance binding to a listen request."""
+    selected = [
+        str(resource)
+        for resource in resources
+        if not str(resource).startswith(INSTANCE_SUBSCRIPTION_PREFIX)
+    ]
+    if expected_instance_id is None:
+        return selected
+    if not re.fullmatch(r"CI-[0-9a-f]{64}", expected_instance_id):
+        raise ValueError("expected_instance_id is invalid")
+    return [f"{INSTANCE_SUBSCRIPTION_PREFIX}{expected_instance_id}", *selected]
 
 
 def verify_remote_submission(repo: Path, notes: str) -> dict[str, str]:
@@ -326,6 +351,14 @@ def _subscription_denied_resource(exc: BaseException) -> str | None:
     return match.group(1) if match else None
 
 
+def _instance_mismatch(exc: BaseException) -> bool:
+    if INSTANCE_MISMATCH_DETAIL in str(exc):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_instance_mismatch(nested) for nested in exc.exceptions)
+    return False
+
+
 def _retryable_connection_error(exc: BaseException) -> bool:
     if _subscription_loss(exc):
         return True
@@ -403,6 +436,7 @@ class BoardClient:
         task_focus: str | None = None,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         http_client: httpx2.AsyncClient | None = None,
+        expected_instance_id: str | None = None,
     ):
         self.url = url
         self.token = token
@@ -430,6 +464,11 @@ class BoardClient:
         ):
             raise ValueError("max_connections must be a positive integer")
         self.max_connections = max_connections
+        if expected_instance_id is not None and not re.fullmatch(
+            r"CI-[0-9a-f]{64}", expected_instance_id
+        ):
+            raise ValueError("expected_instance_id is invalid")
+        self.expected_instance_id = expected_instance_id
         self.identity: JoinedIdentity | None = None
         self.generation_token: str | None = None
         self._stack: AsyncExitStack | None = None
@@ -439,6 +478,10 @@ class BoardClient:
         self._local_events: list[dict[str, Any]] = []
         self._watched_uris: set[str] = set()
         self._registry_wait_sessions: dict[str, dict[str, Any]] = {}
+
+    def bound_resource_subscriptions(self, resources: Iterable[str]) -> list[str]:
+        """Bind subscriptions to this client's expected Central instance."""
+        return bind_instance_subscriptions(resources, self.expected_instance_id)
 
     def _http(self) -> httpx2.AsyncClient:
         return httpx2.AsyncClient(
@@ -517,7 +560,10 @@ class BoardClient:
                 _, separator, detail = message.partition(": ")
                 if separator:
                     message = detail
-            raise BoardClientError(message or str(result.content))
+            detail = message or str(result.content)
+            if detail.startswith("Central instance mismatch"):
+                raise CentralInstanceMismatchError(INSTANCE_MISMATCH_DETAIL)
+            raise BoardClientError(detail)
         if result.structured_content:
             value = result.structured_content.get("result", result.structured_content)
         else:
@@ -549,14 +595,15 @@ class BoardClient:
 
     async def _call_with(self, client: Client, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         payload = {"board_id": self.board_id, **arguments}
-        if self.generation_token is None:
+        meta: dict[str, str] = {}
+        if self.expected_instance_id is not None:
+            meta[INSTANCE_META_KEY] = self.expected_instance_id
+        if self.generation_token is not None:
+            meta[GENERATION_META_KEY] = self.generation_token
+        if not meta:
             result = await client.call_tool(name, payload)
         else:
-            result = await client.call_tool(
-                name,
-                payload,
-                meta={GENERATION_META_KEY: self.generation_token},
-            )
+            result = await client.call_tool(name, payload, meta=meta)
         return self._decode(result)
 
     async def _call_refresh(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -564,7 +611,17 @@ class BoardClient:
         if self._client is None:
             raise RuntimeError("BoardClient is not entered")
         payload = {"board_id": self.board_id, **arguments}
-        result = self._decode(await self._client.call_tool(name, payload))
+        meta = (
+            {INSTANCE_META_KEY: self.expected_instance_id}
+            if self.expected_instance_id is not None
+            else None
+        )
+        raw = (
+            await self._client.call_tool(name, payload, meta=meta)
+            if meta is not None
+            else await self._client.call_tool(name, payload)
+        )
+        result = self._decode(raw)
         self._refresh_generation(result)
         return result
 
@@ -575,12 +632,32 @@ class BoardClient:
         if self._client is None:
             raise RuntimeError("BoardClient is not entered")
         payload = {"board_id": self.board_id, **arguments}
-        return self._decode(await self._client.call_tool(name, payload))
+        meta = (
+            {INSTANCE_META_KEY: self.expected_instance_id}
+            if self.expected_instance_id is not None
+            else None
+        )
+        raw = (
+            await self._client.call_tool(name, payload, meta=meta)
+            if meta is not None
+            else await self._client.call_tool(name, payload)
+        )
+        return self._decode(raw)
 
     async def _call_unscoped(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._client is None:
             raise RuntimeError("BoardClient is not entered")
-        return self._decode(await self._client.call_tool(name, arguments))
+        meta = (
+            {INSTANCE_META_KEY: self.expected_instance_id}
+            if self.expected_instance_id is not None
+            else None
+        )
+        raw = (
+            await self._client.call_tool(name, arguments, meta=meta)
+            if meta is not None
+            else await self._client.call_tool(name, arguments)
+        )
+        return self._decode(raw)
 
     async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._client is None:
@@ -1894,6 +1971,7 @@ class BoardClient:
                             raise BoardClientError(
                                 "events() requires a known ticket/memory URI"
                             )
+                        uris = self.bound_resource_subscriptions(uris)
                         async with event_client.listen(
                             resource_subscriptions=uris
                         ) as subscription:
@@ -1956,6 +2034,16 @@ class BoardClient:
                 except asyncio.CancelledError:
                     raise
                 except BaseException as exc:
+                    if _instance_mismatch(exc):
+                        await queue.put(
+                            (
+                                "error",
+                                CentralInstanceMismatchError(
+                                    INSTANCE_MISMATCH_DETAIL
+                                ),
+                            )
+                        )
+                        return
                     if _subscription_authorization_denied(exc):
                         await queue.put(
                             (

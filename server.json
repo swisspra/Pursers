@@ -7,12 +7,12 @@
     "url": "https://github.com/swisspra/Pursers",
     "source": "github"
   },
-  "version": "5.0.4",
+  "version": "5.0.5",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "pursers-central",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "runtimeHint": "uvx",
       "packageArguments": [
         {
@@ -161,13 +161,13 @@
     {
       "registryType": "pypi",
       "identifier": "pursers-client",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "runtimeHint": "uvx",
       "runtimeArguments": [
         {
           "type": "named",
           "name": "--from",
-          "value": "pursers-client==0.1.3",
+          "value": "pursers-client==0.1.4",
           "description": "Install the release-manifest-pinned client package before running pursers-mcp"
         }
       ],

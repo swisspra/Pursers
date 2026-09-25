@@ -25,7 +25,7 @@ def test_registry_entry_matches_pinned_format_and_runtime_contract() -> None:
 
     assert PINNED_FORMAT.endswith("/FORMAT.md")
     assert entry["distribution"] == {
-        "uvx": {"package": "pursers-acp==0.1.2", "args": []}
+        "uvx": {"package": "pursers-acp==0.1.3", "args": []}
     }
     assert entry["license"] == "Apache-2.0"
     assert entry["license_url"].endswith("/LICENSE")

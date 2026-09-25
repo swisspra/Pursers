@@ -12,8 +12,10 @@ from typing import Any
 import pytest
 
 from pursers_client import (
+    INSTANCE_META_KEY,
     BoardClient,
     BoardClientError,
+    CentralInstanceMismatchError,
     JoinedIdentity,
     SubscriptionAuthorizationError,
 )
@@ -38,6 +40,59 @@ def client() -> BoardClient:
         "board-multi-name",
         agent_name="env-default",
     )
+
+
+@pytest.mark.anyio
+async def test_expected_instance_metadata_is_sent_on_refresh_and_regular_calls() -> None:
+    instance_id = "CI-" + "a" * 64
+    board = BoardClient(
+        "https://central.example/mcp",
+        "TOKEN_PLACEHOLDER",
+        "board-multi-name",
+        expected_instance_id=instance_id,
+    )
+    calls: list[tuple[str, dict[str, Any] | None]] = []
+
+    class Client:
+        async def call_tool(self, name, _arguments, *, meta=None):
+            calls.append((name, meta))
+            return SimpleNamespace(
+                is_error=False,
+                structured_content={
+                    "board_id": "board-multi-name",
+                    "agent_id": "AI-test",
+                    "principal_id": "PR-test",
+                    "agent_name": "pursers-client",
+                    "role": "worker",
+                },
+                content=[],
+            )
+
+    board._client = Client()
+    await board._call_refresh("board_join", {"agent_name": "pursers-client"})
+    await board._call("board_status", {})
+
+    assert calls == [
+        ("board_join", {INSTANCE_META_KEY: instance_id}),
+        ("board_status", {INSTANCE_META_KEY: instance_id}),
+    ]
+
+
+def test_instance_mismatch_has_specific_client_error() -> None:
+    result = SimpleNamespace(
+        is_error=True,
+        structured_content=None,
+        content=[
+            SimpleNamespace(
+                text=(
+                    "Error executing tool ticket_get: Central instance mismatch: "
+                    "selected profile does not match the connected Central"
+                )
+            )
+        ],
+    )
+    with pytest.raises(CentralInstanceMismatchError, match="Central instance mismatch"):
+        BoardClient._decode(result)
 
 
 def joined_event_client() -> BoardClient:
@@ -860,6 +915,51 @@ async def test_events_fail_fast_before_board_join() -> None:
         await anext(events)
 
     assert board._watched_uris == set()
+
+
+@pytest.mark.anyio
+async def test_events_binds_listen_to_expected_instance(monkeypatch) -> None:
+    import pursers_client.client as client_module
+
+    instance_id = "CI-" + "a" * 64
+    board = joined_event_client()
+    board.expected_instance_id = instance_id
+    journal_uri = "board://board-multi-name/journal"
+    observed: list[str] = []
+
+    @asynccontextmanager
+    async def context(value):
+        yield value
+
+    class Session:
+        @asynccontextmanager
+        async def listen(self, *, resource_subscriptions):
+            observed.extend(str(uri) for uri in resource_subscriptions)
+            raise CentralInstanceMismatchError(
+                "Central instance mismatch: selected profile does not match "
+                "the connected Central"
+            )
+            yield  # pragma: no cover
+
+    monkeypatch.setattr(board, "_http", lambda: context(object()))
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        client_module, "Client", lambda *_args, **_kwargs: context(Session())
+    )
+
+    events = board.events(
+        resource_subscriptions=(journal_uri,), reconnect=False
+    )
+    with pytest.raises(CentralInstanceMismatchError, match="instance mismatch"):
+        await anext(events)
+    await events.aclose()
+
+    assert observed == [
+        f"pursers-instance://binding/{instance_id}",
+        journal_uri,
+    ]
 
 
 @pytest.mark.anyio

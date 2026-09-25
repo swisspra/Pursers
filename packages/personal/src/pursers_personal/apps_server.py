@@ -34,7 +34,7 @@ from mcp.server.mcpserver import MCPServer
 from . import PRODUCT_VERSION
 from .artifacts import import_verified_component, verify_component_artifacts
 
-PINNED_CLIENT_VERSION = "0.1.3"
+PINNED_CLIENT_VERSION = "0.1.4"
 MAX_EVENTS = 200
 MAX_TICKETS = 500
 MAX_TICKET_ANNOTATIONS = 8
@@ -185,6 +185,7 @@ class PersonalAppsContext(Protocol):
     capability_token: str
     board_id: str
     agent_name: str
+    central_instance_id: str
 
 
 PostJoinHook = Callable[[Any], Awaitable[Any]]
@@ -323,6 +324,7 @@ class DashboardConfig:
     token: str = field(repr=False)
     board_id: str
     agent_name: str
+    expected_instance_id: str | None = None
     reconnect_min_s: float = 0.25
     reconnect_max_s: float = 5.0
     request_timeout_s: float = 10.0
@@ -334,6 +336,10 @@ class DashboardConfig:
             raise ValueError("token must not be empty")
         if not self.board_id or not self.agent_name:
             raise ValueError("board_id and agent_name must not be empty")
+        if self.expected_instance_id is not None and not re.fullmatch(
+            r"CI-[0-9a-f]{64}", self.expected_instance_id
+        ):
+            raise ValueError("expected_instance_id is invalid")
         if not 0 < self.reconnect_min_s <= self.reconnect_max_s:
             raise ValueError("reconnect delays must be positive and ordered")
         if self.request_timeout_s <= 0:
@@ -347,6 +353,7 @@ def config_from_personal_context(context: PersonalAppsContext) -> DashboardConfi
         token=context.capability_token,
         board_id=context.board_id,
         agent_name=context.agent_name,
+        expected_instance_id=getattr(context, "central_instance_id", None),
     )
 
 
@@ -431,9 +438,17 @@ class RawBoardReader:
             "memory_links",
         }:
             raise RuntimeError("raw board reader rejected a non-pure tool")
-        result = await self._client.call_tool(
-            name, {"board_id": self.config.board_id, **arguments}
-        )
+        payload = {"board_id": self.config.board_id, **arguments}
+        if self.config.expected_instance_id is None:
+            result = await self._client.call_tool(name, payload)
+        else:
+            result = await self._client.call_tool(
+                name,
+                payload,
+                meta={
+                    "io.onboard/expected-instance": self.config.expected_instance_id
+                },
+            )
         return self._decode(result)
 
     async def board_snapshot(
@@ -479,11 +494,14 @@ class RawBoardReader:
         cursor_callback: Callable[[int], None],
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream journal cues through the verified public client API."""
+        client_kwargs = {"agent_name": self.config.agent_name}
+        if self.config.expected_instance_id is not None:
+            client_kwargs["expected_instance_id"] = self.config.expected_instance_id
         client = self._board_client_class(
             self.config.central_url,
             self.config.token,
             self.config.board_id,
-            agent_name=self.config.agent_name,
+            **client_kwargs,
         )
         # Journal-only reads need a non-null identity for client filtering but
         # deliberately do not join or create a dashboard board member.
@@ -1091,13 +1109,23 @@ class LiveDashboard:
                 try:
                     await self._probe_central()
                     try:
+                        client_kwargs: dict[str, Any] = {
+                            "agent_name": self.config.agent_name,
+                            "reconnect_delay_s": self.config.reconnect_min_s,
+                            "capabilities": {
+                                "can_work": False,
+                                "can_review": False,
+                            },
+                        }
+                        if self.config.expected_instance_id is not None:
+                            client_kwargs["expected_instance_id"] = (
+                                self.config.expected_instance_id
+                            )
                         connection = self._client_class(
                             self.config.central_url,
                             self.config.token,
                             self.config.board_id,
-                            agent_name=self.config.agent_name,
-                            reconnect_delay_s=self.config.reconnect_min_s,
-                            capabilities={"can_work": False, "can_review": False},
+                            **client_kwargs,
                         )
                     except TypeError:
                         connection = self._client_class(

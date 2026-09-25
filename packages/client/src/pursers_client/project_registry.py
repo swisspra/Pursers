@@ -13,7 +13,12 @@ from urllib.parse import urlsplit
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
-from .client import GENERATION_META_KEY, BoardClient, BoardClientError
+from .client import (
+    GENERATION_META_KEY,
+    BoardClient,
+    BoardClientError,
+    bind_instance_subscriptions,
+)
 from .events import (
     HELD_TICKET_KINDS,
     OFFER_EXPIRED,
@@ -840,14 +845,14 @@ async def wait_for_boards(
             await asyncio.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
         return response([])
 
-    resources = [
+    resources = bind_instance_subscriptions([
         uri
         for board in active
         for uri in (
             f"board://{board}/journal",
             f"board://{board}/agent/{identities[board]}",
         )
-    ]
+    ], getattr(client, "expected_instance_id", None))
     events: list[dict[str, Any]] = []
     try:
         async with asyncio.timeout(timeout_s):

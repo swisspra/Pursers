@@ -69,10 +69,10 @@ add `--login` only when you want the existing Personal setup flow to create and
 activate one:
 
 ```sh
-python -m pip install "pursers-acp==0.1.2"
+python -m pip install "pursers-acp==0.1.3"
 pursers-acp --project /PATH/TO/PROJECT
 
-uvx --from "pursers-acp==0.1.2" pursers-acp --project /PATH/TO/PROJECT
+uvx --from "pursers-acp==0.1.3" pursers-acp --project /PATH/TO/PROJECT
 ```
 
 For current Zed development builds, the custom agent configuration is:

@@ -1659,6 +1659,7 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
 
 
 def test_autonomous_view_redacts_references_and_projects_truthful_state() -> None:
+    fixture_time = datetime(2026, 9, 24, 1, tzinfo=timezone.utc)
     config = autonomous_config()
     payload = {
         "board_id": "pursers",
@@ -1691,7 +1692,9 @@ def test_autonomous_view_redacts_references_and_projects_truthful_state() -> Non
     actual["private_path"] = "/private/secret/path"
     actual["executor"]["secret_ref"] = "executor-secret"
 
-    view = butler_settings.autonomous_butler_view(payload, commands, actual)
+    view = butler_settings.autonomous_butler_view(
+        payload, commands, actual, now=fixture_time
+    )
 
     connector = view["config"]["desired"]["connectors"][0]
     assert connector["secret_configured"] is True
@@ -1709,7 +1712,9 @@ def test_autonomous_view_redacts_references_and_projects_truthful_state() -> Non
 
     malformed = autonomous_state()
     malformed["executor"]["status"] = "secret-value"
-    rejected = butler_settings.autonomous_butler_view(payload, commands, malformed)
+    rejected = butler_settings.autonomous_butler_view(
+        payload, commands, malformed, now=fixture_time
+    )
     assert rejected["actual_state"] is None
     assert rejected["actual_state_available"] is False
     assert "secret-value" not in json.dumps(rejected)

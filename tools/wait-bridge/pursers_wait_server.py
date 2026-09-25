@@ -91,11 +91,13 @@ from pursers_client import (
     GENERATION_META_KEY,
     BoardClient,
     BoardClientError,
+    CentralInstanceMismatchError,
     JoinedIdentity,
     SENSITIVE_FORM_FALLBACK,
     SUBMITTED_RELEVANT_KINDS,
     WORKER_WAIT_KINDS,
     human_form_safety,
+    bind_instance_subscriptions,
     REQUEST_STATE_TTL_S,
     load_or_create_request_state_keys,
     permanent_registry_claim_refusal,
@@ -136,7 +138,7 @@ from backlog import (
     ticket_is_relevant,
 )
 
-SOURCE_VERSION = "0.1.1"
+SOURCE_VERSION = "0.1.2"
 
 
 def _source_version() -> str:
@@ -194,6 +196,7 @@ except ValueError as exc:
 CENTRAL_URL = _RUNTIME_CONFIG["url"]
 BOARD_ID = _RUNTIME_CONFIG["board"]
 CENTRAL_TOKEN = _RUNTIME_CONFIG["token"]
+CENTRAL_INSTANCE_ID = os.environ.get("ONBOARD_CENTRAL_INSTANCE_ID", "").strip() or None
 RUNTIME_ROLE = _RUNTIME_CONFIG["role"]
 RUNTIME_FROM_DOOR = bool(CENTRAL_TOKEN) and not (
     os.environ.get("ONBOARD_CENTRAL_TOKEN", "").strip()
@@ -1405,7 +1408,11 @@ class BoardJoinFailure(ToolError):
 
     def __init__(self, cause_class: str, detail: str) -> None:
         self.cause_class = cause_class
-        super().__init__(f"board join failed ({cause_class}): {detail}")
+        super().__init__(
+            detail
+            if cause_class == "instance_mismatch"
+            else f"board join failed ({cause_class}): {detail}"
+        )
 
 
 def _split_identity_failure() -> BoardJoinFailure | None:
@@ -1539,6 +1546,16 @@ def _classify_board_join_failure(exc: BaseException) -> BoardJoinFailure:
     nested = _nested_exceptions(exc)
     names = {type(item).__name__ for item in nested}
     text = " ".join(str(item) for item in nested).casefold()
+    instance_mismatch = next(
+        (
+            item
+            for item in nested
+            if isinstance(item, CentralInstanceMismatchError)
+        ),
+        None,
+    )
+    if instance_mismatch is not None:
+        return BoardJoinFailure("instance_mismatch", str(instance_mismatch))
     unreachable_names = {
         "ConnectError",
         "ConnectTimeout",
@@ -1623,6 +1640,7 @@ class DeferredBoardConnection:
             meter=self.meter,
             capabilities=startup_caps,
             allow_takeover=not RUNTIME_FROM_DOOR,
+            expected_instance_id=CENTRAL_INSTANCE_ID,
         )
         entered = False
         try:
@@ -2140,6 +2158,9 @@ class LeaseKeepalive:
 
     @staticmethod
     def _open_listen(client: BoardClient, resources: list[str]) -> Any:
+        resources = bind_instance_subscriptions(
+            resources, getattr(client, "expected_instance_id", None)
+        )
         raw = getattr(client, "_raw_client", None)
         if raw is not None and hasattr(raw, "listen"):
             return raw.listen(resource_subscriptions=resources)
@@ -2583,6 +2604,9 @@ class OrchestratorEngine:
             await self.start_subscriber()
 
     def _open_listen(self, client: Any, resources: list[str]) -> Any:
+        resources = bind_instance_subscriptions(
+            resources, getattr(client, "expected_instance_id", None)
+        )
         custom = getattr(client, "listen_across_boards", None)
         if callable(custom):
             return custom(resources)
@@ -6236,6 +6260,7 @@ async def _event_stream(
                 parent, "max_connections", DEFAULT_CENTRAL_CONNECTION_CAP
             ),
             http_client=getattr(parent, "_http_client", None),
+            expected_instance_id=getattr(parent, "expected_instance_id", None),
         )
         event_client.identity = identity
         event_client.generation_token = generation_token
@@ -7459,10 +7484,10 @@ async def _probe_join_push(client: BoardClient, board: str, agent_id: str) -> bo
     raw_client = getattr(client, "_client", None)
     if raw_client is None:
         return False
-    subscriptions = [
+    subscriptions = client.bound_resource_subscriptions([
         f"board://{board}/journal",
         f"board://{board}/agent/{agent_id}",
-    ]
+    ])
     try:
         async with asyncio.timeout(3):
             async with raw_client.listen(resource_subscriptions=subscriptions) as stream:
@@ -7494,6 +7519,7 @@ async def _door_join(args: argparse.Namespace) -> None:
         role=entry["r"],
         capabilities=_seat_capabilities(entry["r"]),
         allow_takeover=False,
+        expected_instance_id=CENTRAL_INSTANCE_ID,
     )
     async with client:
         if client.identity is None:

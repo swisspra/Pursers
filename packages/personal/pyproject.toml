@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pursers-personal"
-version = "5.0.4"
+version = "5.0.5"
 description = "Pursers Personal: one owner, multiple local agents, and an MCP Apps dashboard"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/*"]
 dependencies = [
-  "pursers-central==0.1.2",
-  "pursers-client==0.1.3",
+  "pursers-central==0.1.3",
+  "pursers-client==0.1.4",
   "mcp[cli]==2.2.0",
   "PyJWT[crypto]>=2.10,<3",
   "cryptography>=44,<51",
