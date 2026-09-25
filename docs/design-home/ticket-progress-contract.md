@@ -256,20 +256,48 @@ bar. Sort/filter must not interpret unknown as zero.
 ## Public projection
 
 Public mode never returns a ticket-level progress value, evidence, confidence,
-assessor, attempt, revision, or timestamp. If an operator explicitly enables
-aggregate progress, include only active, **fresh** records in a project cohort
-that passes this contract's fixed minimum cohort (`k = 5`).
+assessor, attempt, revision, or timestamp. Aggregate progress is separately
+operator-enabled and uses this exact, all-or-nothing algorithm with fixed
+minimum cell size `k = 5`:
 
-Map each range midpoint to `early` (0–24), `middle` (25–74), or `late` (75–99).
-Publish only bucketed cohort shares rounded to the nearest 25%, after one
-configured publication interval that is never shorter than 15 minutes. Apply
-complementary suppression whenever any bucket or the unknown/stale remainder
-would reveal fewer than `k` tickets. Otherwise omit the entire progress object.
-A publishable object is limited to `cohort` (`several|many`), `early_share`,
-`middle_share`, and `late_share` (`0%|25%|50%|75%|100%`), plus freshness
-`delayed`; no counts are present. Do not publish confidence: small combinations
-of band and confidence increase re-identification risk. The public response
-uses anonymous project aliases only and cannot be joined to private ticket rows.
+1. At the end of each UTC-aligned publication window (at least 15 minutes),
+   freeze the project cohort as every ticket in an active claimed state at that
+   instant. Use only that completed snapshot after the next window ends, so the
+   public data is delayed by at least one full window.
+2. The denominator `N` is **all** tickets in that frozen cohort, including
+   tickets with unknown, absent, invalid, or stale progress. If `N < 5`, omit
+   the entire progress object.
+3. Assign each ticket to exactly one of four cells. A record fresh at the frozen
+   instant uses its range midpoint: `early` 0–24, `middle` 25–74, or `late`
+   75–99. Every other ticket goes to `unassessed`, including unknown/absent
+   records and records whose `fresh_until` is at or before the snapshot time.
+4. A zero-count cell is safe and does not trigger suppression. If **any
+   positive** cell has count 1–4, omit the entire object. There is no partial or
+   complementary-cell publication: suppressing one share would expose it from
+   the other shares' 100% complement.
+5. Jointly round the four shares with largest remainder. For cells ordered
+   `early`, `middle`, `late`, `unassessed`, compute quota units
+   `q[i] = 4 * count[i] / N`, assign `floor(q[i])`, then give the remaining
+   `4 - sum(floor(q))` units to the largest fractional remainders. Break exact
+   ties by that fixed cell order. Multiply units by 25%. The four published
+   shares always total exactly 100%; zero cells remain 0%.
+6. Set `cohort` to `several` for `5 <= N <= 19`, or `many` for `N >= 20`.
+   Publish only `cohort`, `early_share`, `middle_share`, `late_share`,
+   `unassessed_share` (`0%|25%|50%|75%|100%`), and `freshness: "delayed"`.
+   Publish no counts or window timestamp.
+
+Examples are normative. Counts `(early,middle,late,unassessed) = (10,0,0,0)`
+publish `several` and `(100%,0%,0%,0%)`: zero cells are safe. `(5,5,5,0)`
+publish `several` and `(50%,25%,25%,0%)`; equal one-third remainders award the
+extra unit to `early`. `(5,9,6,0)` publish `many` and `(25%,50%,25%,0%)`.
+`(5,0,0,5)` publish `several` and `(50%,0%,0%,50%)`, proving stale/unknown
+tickets stay in the denominator. `(5,4,0,0)` is wholly suppressed because a
+positive cell is below `k`. Cohort sizes 4, 5, 19, and 20 respectively produce
+suppressed, `several`, `several`, and `many`, subject to the positive-cell rule.
+
+Do not publish confidence: small combinations of band and confidence increase
+re-identification risk. The public response uses anonymous project aliases only
+and cannot be joined to private ticket rows.
 
 ## Compatibility and rollout
 
@@ -322,9 +350,11 @@ metadata.
 10. **Private UI:** product-produced states render unknown without `0%`, fresh
     point/range, stale, rework unknown, and workflow completion. Lease-only
     updates never move or animate the estimate.
-11. **Public privacy:** cohorts 0, 1, 4, 5, 6, 9, and 10; unknown and stale
-    remainder; complementary suppression; rounding; delay; alias-only output;
-    absence of evidence, assessor, ticket ID, timestamps, and confidence.
+11. **Public privacy:** safe zero cells; 5/5/5 fixed-order tie; unequal 5/9/6
+    cells; unknown/stale 5/5 remainder; a positive cell below `k` suppresses the
+    whole object; sizes 4/5 and 19/20 cross the publication and cohort-label
+    boundaries; joint 25% rounding totals exactly 100%; delay and alias-only
+    output; no evidence, assessor, ticket ID, timestamps, counts, or confidence.
 12. **Property tests:** arbitrary valid update sequences preserve range bounds,
     strictly increasing revisions per attempt, no cross-attempt current record,
     bounded history, and zero progress mutations from lease-only operations.
