@@ -94,6 +94,7 @@ The handler exposes the following routes in the private trust domain
 | GET | `/api/butler`, `/api/butler/autonomous`, `/api/intake`, `/api/attention` | provider/runtime settings, autonomous policy, drafts/intake, local acknowledgement state | 404 |
 | POST | `/api/config/plan`, `/api/config/suggestions`, `/api/config/apply`, `/api/config/prompt`, `/api/config/doctor`, `/api/config/import`, `/api/config/bridge/install`, `/api/config/bridge/upgrade-all`, `/api/config/ops/plan`, `/api/config/ops`, `/api/config/registry/clone`, `/api/config` | local configuration, upgrades and operator actions | Method not allowed; route not registered |
 | POST | `/api/butler`, `/api/butler/autonomous`, `/api/butler/autonomous/command`, `/api/butler/kill`, `/api/butler/mark` | provider configuration and Butler control/evaluation | Method not allowed; route not registered |
+| POST | `/api/intake` | create a new intake ask from `board_id` and text, or approve/decline an existing ask using its ID, action and expected-state digest | Method not allowed; route not registered; neither intake save nor decision is reachable |
 | POST | `/api/dispatch`, `/api/agents/retire`, `/api/agents/retire-inert`, `/api/attention`, `/api/human/resolve` | policy, lifecycle, local state and human decisions | Method not allowed; route not registered |
 | POST | `/api/doors/copy`, `/api/doors/rotate`, `/api/projects/add` | credential return/rotation and project creation | Method not allowed; route not registered |
 | POST | `/api/workers`, `/api/workers/<name>/<action>` | provider worker save/test/start/stop/restart | Method not allowed; route not registered |
@@ -117,7 +118,7 @@ and non-HEAD methods return 405 before parsing a body.
   "health": "operational",
   "projects": [
     {
-      "alias": "project-amber",
+      "alias": "project-mfrggzdfmztwq2lk",
       "health": "active",
       "workload": "several",
       "work": {"queued": "several", "active": "few", "review": "few"}
@@ -325,7 +326,10 @@ Expected-value fabrication is insufficient.
 3. **Route/method matrix:** for every private endpoint in the inventory, send
    GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS to the public listener. Only
    documented public GET/HEAD routes succeed; private paths have the constant
-   404 and mutation methods the constant 405. Assert no side effects.
+   404 and mutation methods the constant 405. For POST `/api/intake`, exercise
+   both recognized private payload shapes (new ask and approve/decline) and a
+   malformed body; assert the public listener rejects all three before parsing
+   and invokes neither intake save nor decision. Assert no side effects.
 4. **Authorization:** missing, expired, wrong-audience, wrong-scope and
    wrong-project viewer credentials fail before alias lookup with indistinguishable
    bodies. Verify the public process credential cannot call any Central write.
