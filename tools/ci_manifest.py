@@ -982,17 +982,26 @@ async def _fetch_live_authority(
             role=config.role,
             capabilities=capabilities,
             allow_takeover=True,
-            allow_matching_takeover=True,
             http_client=transport,
         )
         async with client:
+            identity = client.identity
+            if identity is None:
+                raise RuntimeError("Central did not establish an authenticated identity")
+            if identity.board_id != config.board_id:
+                raise RuntimeError("Central authenticated the wrong board")
+            if identity.agent_name != config.agent_name:
+                raise RuntimeError("Central authenticated the wrong agent name")
+            if identity.role != config.role:
+                raise RuntimeError("Central authenticated the wrong role")
+            if identity.agent_id != config.expected_agent_id:
+                raise RuntimeError("Central authenticated the wrong agent")
+            if identity.principal_id != config.expected_principal_id:
+                raise RuntimeError("Central authenticated the wrong principal")
             response = await client.ticket_get(
                 ticket_id, view="full", include_dispatch_history=True
             )
             status = await client.board_status()
-            identity = client.identity
-            if identity is None:
-                raise RuntimeError("Central did not establish an authenticated identity")
             ticket = response.get("ticket")
             if not isinstance(ticket, dict):
                 raise RuntimeError(f"Central returned no ticket for {ticket_id}")
