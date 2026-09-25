@@ -427,7 +427,13 @@ class FileRegistryReadinessProvider:
                     return RegistryReadinessObservation(
                         True, reason_code="registry_identity_mismatch"
                     )
-                if seat.get("capabilities") != expected_capabilities:
+                capabilities = seat.get("capabilities")
+                if not isinstance(capabilities, dict) or any(
+                    field not in capabilities
+                    or type(capabilities[field]) is not type(expected)
+                    or capabilities[field] != expected
+                    for field, expected in expected_capabilities.items()
+                ):
                     return RegistryReadinessObservation(
                         True, reason_code="registry_capabilities_mismatch"
                     )

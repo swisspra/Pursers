@@ -502,7 +502,9 @@ def test_file_lease_provider_rejects_untrusted_file_metadata(tmp_path: Path) -> 
     assert provider.observe("pursers", "worker-a") == executor.LeaseObservation(False)
 
 
-def test_registry_readiness_checks_every_selected_active_board(tmp_path: Path) -> None:
+def test_registry_readiness_allows_metadata_and_checks_every_selected_board(
+    tmp_path: Path,
+) -> None:
     repository = tmp_path / "repository"
     seat_root = tmp_path / "seat"
     repository.mkdir()
@@ -515,7 +517,13 @@ def test_registry_readiness_checks_every_selected_active_board(tmp_path: Path) -
         "role": template.role,
         "membership_role": "member",
         "lifecycle_status": "active",
-        "capabilities": dict(template.capabilities),
+        "capabilities": {
+            **template.capabilities,
+            "host": "goose",
+            "model": "example-model",
+            "provider": "example-provider",
+            "skills": ["python", "docs"],
+        },
     }
     snapshot = {
         "schema": "pursers_registry_readiness_v1",
@@ -541,13 +549,38 @@ def test_registry_readiness_checks_every_selected_active_board(tmp_path: Path) -
     assert missing.known and not missing.ready
     assert missing.reason_code == "registry_membership_missing"
 
+    for field, value in (
+        ("can_work", False),
+        ("can_review", True),
+        ("tier_max", 1),
+        ("max_parallel", 2),
+        ("tier_max", True),
+    ):
+        snapshot["boards"]["project-b"]["seats"]["worker-a"] = {
+            **seat,
+            "capabilities": {**seat["capabilities"], field: value},
+        }
+        path.write_text(json.dumps(snapshot), encoding="utf-8")
+        mismatched = provider.observe("pursers", "worker-a", template)
+        assert mismatched.reason_code == "registry_capabilities_mismatch"
+
+    missing_capabilities = dict(seat["capabilities"])
+    missing_capabilities.pop("tier_max")
     snapshot["boards"]["project-b"]["seats"]["worker-a"] = {
         **seat,
-        "capabilities": {**seat["capabilities"], "can_work": False},
+        "capabilities": missing_capabilities,
     }
     path.write_text(json.dumps(snapshot), encoding="utf-8")
-    mismatched = provider.observe("pursers", "worker-a", template)
-    assert mismatched.reason_code == "registry_capabilities_mismatch"
+    missing_capability = provider.observe("pursers", "worker-a", template)
+    assert missing_capability.reason_code == "registry_capabilities_mismatch"
+
+    snapshot["boards"]["project-b"]["seats"]["worker-a"] = {
+        **seat,
+        "principal_id": "PR-worker-b",
+    }
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+    identity_mismatch = provider.observe("pursers", "worker-a", template)
+    assert identity_mismatch.reason_code == "registry_identity_mismatch"
 
 
 def test_registry_readiness_fails_closed_on_stale_or_untrusted_snapshot(
