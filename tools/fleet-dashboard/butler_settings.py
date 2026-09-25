@@ -1292,15 +1292,25 @@ class ButlerSettingsManager:
         matches_contract = matches_entrypoint
         for option, expected_value in self.expected_process_arguments.items():
             # Board Butler's argparse options use the last occurrence. Reject
-            # duplicates instead of validating an earlier value while a later
-            # one controls the resident's effective path.
-            if arguments.count(option) != 1:
+            # duplicates across both argparse spellings instead of validating
+            # an earlier value while a later one controls the resident's
+            # effective path.
+            option_prefix = f"{option}="
+            values: list[str] = []
+            for index, argument in enumerate(arguments):
+                if argument == option:
+                    if index + 1 >= len(arguments):
+                        values = []
+                        break
+                    values.append(arguments[index + 1])
+                elif argument.startswith(option_prefix):
+                    values.append(argument[len(option_prefix) :])
+            if len(values) != 1 or not values[0]:
                 matches_contract = False
                 break
             try:
-                index = arguments.index(option)
-                actual_value = str(Path(arguments[index + 1]).expanduser().resolve())
-            except (ValueError, IndexError, OSError, RuntimeError):
+                actual_value = str(Path(values[0]).expanduser().resolve())
+            except (OSError, RuntimeError):
                 matches_contract = False
                 break
             if actual_value != expected_value:

@@ -414,6 +414,7 @@ def contract_resident_process(
     butler_root: Path,
     state_root: Path,
     provider_secrets: Path,
+    prefix_arguments: tuple[str, ...] = (),
     extra_arguments: tuple[str, ...] = (),
 ) -> Any:
     entrypoint = butler_root / "tools" / "board-butler" / "board_butler.py"
@@ -461,6 +462,7 @@ with open(args.pid_file, "a+", encoding="utf-8") as handle:
         [
             sys.executable,
             str(entrypoint),
+            *prefix_arguments,
             "--pid-file",
             str(pid_path),
             "--runtime-status-file",
@@ -570,7 +572,9 @@ def test_duplicate_effective_provider_path_is_not_reported_or_signaled(
         butler_root,
         state_root,
         provider_secrets,
-        ("--provider-secrets-dir", str(effective_provider_secrets)),
+        extra_arguments=(
+            f"--provider-secrets-dir={effective_provider_secrets}",
+        ),
     ) as (process, entrypoint, pid_path, runtime_path, kill_path):
         manager = butler_settings.ButlerSettingsManager(
             provider_secrets,
@@ -633,6 +637,53 @@ def test_duplicate_process_contract_options_fail_closed(
     )
 
     assert manager._verified_butler_process(4321) is False
+
+
+@pytest.mark.parametrize(
+    "duplicate_option",
+    (
+        "--pid-file",
+        "--runtime-status-file",
+        "--local-kill-file",
+        "--provider-secrets-dir",
+    ),
+)
+def test_live_equals_form_process_contract_duplicates_are_not_reported_or_signaled(
+    tmp_path: Path, duplicate_option: str
+) -> None:
+    butler_root = tmp_path / "butler-source"
+    state_root = tmp_path / "private" / "butler-state"
+    provider_secrets = tmp_path / "private" / "provider-secrets"
+    state_root.mkdir(parents=True, mode=0o700)
+    provider_secrets.mkdir(parents=True, mode=0o700)
+
+    with contract_resident_process(
+        butler_root,
+        state_root,
+        provider_secrets,
+        prefix_arguments=(f"{duplicate_option}={tmp_path / 'other-path'}",),
+    ) as (process, entrypoint, pid_path, runtime_path, kill_path):
+        manager = butler_settings.ButlerSettingsManager(
+            provider_secrets,
+            runtime_path=runtime_path,
+            kill_path=kill_path,
+            pid_path=pid_path,
+            expected_process_path=entrypoint,
+            expected_process_arguments={
+                "--pid-file": pid_path,
+                "--runtime-status-file": runtime_path,
+                "--local-kill-file": kill_path,
+                "--provider-secrets-dir": provider_secrets,
+            },
+        )
+
+        runtime = manager.view(configured_payload(), "sandbox")["runtime"]
+        assert runtime["state"] == "configured_not_running"
+        assert runtime["diagnostic"] == "process_contract_mismatch"
+
+        stopped = manager.kill(configured_payload(), "sandbox")
+        assert stopped["signal_sent"] is False
+        assert process.poll() is None
 
 
 def test_indicator_binds_to_locked_expected_process_and_rejects_zombie(
