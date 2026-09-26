@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 import threading
@@ -34,7 +35,34 @@ def test_route_css_assets_are_existing_allowlisted_views(tmp_path: Path) -> None
     }
 
 
-def test_absent_allowlisted_route_css_keeps_404() -> None:
+def test_all_allowlisted_route_css_assets_are_served_and_unknown_css_keeps_404(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ui_root = tmp_path / "ui"
+    views = ui_root / "views"
+    views.mkdir(parents=True)
+    expected_bodies = {
+        name: f".{name}{{}}".encode()
+        for name in dashboard.PRIMARY_VIEW_NAMES
+    }
+    for name, body in expected_bodies.items():
+        (views / f"{name}.css").write_bytes(body)
+
+    route_assets = {
+        route: (
+            content_type,
+            body := path.read_bytes(),
+            f'"{hashlib.sha256(body).hexdigest()}"',
+        )
+        for route, (content_type, path) in dashboard._route_css_asset_paths(
+            ui_root
+        ).items()
+    }
+    assert set(route_assets) == {
+        f"/ui/views/{name}.css" for name in dashboard.PRIMARY_VIEW_NAMES
+    }
+    monkeypatch.setattr(dashboard, "UI_ASSETS", route_assets)
+
     class Cache:
         @staticmethod
         def labels() -> list[str]:
@@ -52,9 +80,17 @@ def test_absent_allowlisted_route_css_keeps_404() -> None:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
+        for name, expected_body in expected_bodies.items():
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/ui/views/{name}.css"
+            ) as response:
+                assert response.status == 200
+                assert response.headers.get_content_type() == "text/css"
+                assert response.read() == expected_body
+
         with pytest.raises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(
-                f"http://127.0.0.1:{server.server_port}/ui/views/home.css"
+                f"http://127.0.0.1:{server.server_port}/ui/views/not-a-route.css"
             )
         assert caught.value.code == 404
     finally:
