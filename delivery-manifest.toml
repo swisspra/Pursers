@@ -207,6 +207,15 @@ evidence = ["tools/fleet-dashboard/README.md", "tools/fleet-dashboard/launch.sh"
 evidence_contains = ["GET /api/version", "launchctl kickstart", "com.pursers.fleet-dashboard"]
 
 [[artifacts]]
+id = "web-surface:tools/fleet-dashboard/ui/index.html"
+kind = "web-surface"
+source = "tools/fleet-dashboard/ui/index.html"
+state = "delivered"
+channel = "repository-owned Fleet dashboard packaged UI shell"
+evidence = ["tools/fleet-dashboard/ui/README.md", "tools/fleet-dashboard/fleet_dashboard.py"]
+evidence_contains = ["index.html", "HTML_SHELL"]
+
+[[artifacts]]
 id = "release-artifact:aionui-extension-zip"
 kind = "release-artifact"
 source = "tools/aionui-extension/build.py"
