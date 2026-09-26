@@ -26,6 +26,10 @@ def test_launchd_template_is_uninstalled_and_shadow_first() -> None:
     assert document["KeepAlive"] == {"SuccessfulExit": False}
     assert environment["PURSERS_BUTLER_RUNTIME_MODE"] == "shadow"
     assert environment["PURSERS_BUTLER_TOKEN_PATH"].startswith("/PATH/TO/")
+    assert environment["PURSERS_BUTLER_FLEET_EXECUTOR_SOCKET"].startswith("/PATH/TO/")
+    assert environment["PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY"].startswith(
+        "/PATH/TO/"
+    )
     assert "API_KEY" not in json.dumps(document)
 
 
@@ -37,6 +41,11 @@ def test_repo_fleet_entry_cannot_activate_from_config_alone() -> None:
     assert "PURSERS_BUTLER_ACTIVE_AUTHORIZATION_FILE" in launcher
     assert "--active-authorization-file" in launcher
     assert "--act-on-board" in launcher
+    assert "--fleet-observation-file" in launcher
+    assert "--fleet-state-file" in launcher
+    assert "--fleet-executor-socket" in launcher
+    assert "--fleet-executor-key-id" in launcher
+    assert "--fleet-executor-private-key" in launcher
 
 
 def test_authorize_active_requires_literal_confirmation_and_writes_0600(
