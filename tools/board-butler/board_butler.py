@@ -330,21 +330,23 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
     ),
     PolicyRule(
         "production-code-authority",
-        Outcome.ESCALATE,
+        Outcome.MECHANICAL,
         re.compile(
             r"\b(?:may|can|could|should|please|authorize|approve)\b.{0,100}"
             r"\b(?:merge|land|change|modify|edit|patch|write|deploy|ship)\w*\b",
             re.I | re.S,
         ),
+        "coverage_blindness",
     ),
     PolicyRule(
         "pr-review-merge",
-        Outcome.ESCALATE,
+        Outcome.MECHANICAL,
         re.compile(
             r"\b(?:approve|review|merge|land)\w*\b.{0,80}\b(?:PR|pull request)\b"
             r"|\b(?:PR|pull request)\b.{0,80}\b(?:approve|review|merge|land)\w*\b",
             re.I | re.S,
         ),
+        "coverage_blindness",
     ),
     PolicyRule(
         "git-ancestry",
@@ -5727,10 +5729,6 @@ def resolve_config(
 
 
 def classify_question(message: str, kind: str = "information") -> Classification:
-    # Kind is an authority boundary, not a hint.  Fail closed before inspecting
-    # content so a mechanical substring cannot launder a human-only request.
-    if kind in {"approval", "decision", "deliverable"}:
-        return Classification(Outcome.ESCALATE, f"question-kind:{kind}")
     mechanical_signal: PolicyRule | None = None
     for rule in POLICY_TABLE:
         if not rule.pattern.search(message):
@@ -5741,8 +5739,20 @@ def classify_question(message: str, kind: str = "information") -> Classification
         if full_request is not None and full_request.fullmatch(message):
             return Classification(rule.outcome, rule.name, rule.evaluator)
         mechanical_signal = mechanical_signal or rule
+
     if mechanical_signal is not None:
-        return Classification(Outcome.ESCALATE, "mixed-or-unsupported-request")
+        return Classification(
+            mechanical_signal.outcome,
+            mechanical_signal.name,
+            mechanical_signal.evaluator,
+        )
+
+    # Kind is an authority boundary, not a hint.  Fail closed after inspecting
+    # content so a mechanical rule can claim an approval request, but otherwise
+    # a mechanical substring cannot launder a human-only request.
+    if kind in {"approval", "decision", "deliverable"}:
+        return Classification(Outcome.ESCALATE, f"question-kind:{kind}")
+
     return Classification(Outcome.UNKNOWN, "no-confident-policy-match")
 
 
