@@ -107,6 +107,105 @@ def test_primary_route_modules_own_renderers_and_receive_shared_context() -> Non
     assert "FleetViewModules.render(kind,fleetViewContext())" in app
 
 
+def test_approvals_route_orders_decisions_without_adding_authority() -> None:
+    source = dashboard.UI_ASSETS["/ui/views/approvals.js"][1].decode("utf-8")
+    program = f"""
+const source = {json.dumps(source)};
+const links = [];
+globalThis.document = {{
+  querySelector(selector) {{
+    return links.find(node => selector.includes(node.dataset?.fleetViewStyle)) || null;
+  }},
+  createElement() {{ return {{dataset: {{}}}}; }},
+  head: {{append(node) {{ links.push(node); }}}},
+}};
+globalThis.FleetViewModules = {{register: value => {{ globalThis.view = value; }}}};
+eval(source);
+const esc = value => String(value)
+  .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;');
+const board = {{
+  board_id: 'board-one', label: 'Board <One>',
+  snapshot_truncation: {{returned: 1, total: 3}},
+}};
+const context = {{
+  esc,
+  fmt: value => `formatted ${{value}}`,
+  pageHead: (kicker, title, copy) => `<header><b>${{esc(kicker)}}</b><h2>${{esc(title)}}</h2><p>${{esc(copy)}}</p></header>`,
+  warmTruthStrip: () => '<div class="truth-strip">Bounded data</div>',
+  warmTickets: () => [{{
+    central: 'central-one', board,
+    ticket: {{
+      id: 'TK-review', title: '<unsafe title>', status: 'submitted',
+      status_label: 'submitted', updated_at: '2030-01-01T00:00:00Z',
+      review_label: 'independent-principal-review', rejection_count: 1,
+    }},
+  }}],
+  warmBoards: () => [{{central: 'central-one', board}}],
+  ticketHref: (central, boardId, ticket) => `#/central/${{central}}/board/${{boardId}}?ticket=${{ticket}}`,
+  boardHref: (central, boardId) => `#/central/${{central}}/board/${{boardId}}`,
+  renderWaitingForYou: () => '<div class="section-title"><h3>Waiting for you</h3></div><section class="attention-card"><form class="human-form"><select data-human-disposition><option value="reopen">reopen</option></select><button data-human-action="accept">Accept</button><button data-human-action="decline">Decline</button></form></section><div class="section-title"><h3>Butler agreement by question kind</h3></div><section class="attention-card"><p class="empty">No human marks yet.</p></section>',
+}};
+const html = globalThis.view.render(context);
+const emptyHtml = globalThis.view.render({{
+  ...context,
+  warmTickets: () => [],
+  warmBoards: () => [],
+  renderWaitingForYou: () => '<div class="section-title"><h3>Waiting for you</h3></div><section class="attention-card"><p class="empty">No tickets are waiting for a human answer.</p></section>',
+}});
+console.log(JSON.stringify({{
+  id: globalThis.view.id,
+  styles: links.map(node => [node.rel, node.href, node.dataset.fleetViewStyle]),
+  order: [
+    html.indexOf('data-human-action="accept"'),
+    html.indexOf('data-approval-review'),
+    html.indexOf('data-approval-intake'),
+    html.indexOf('Recorded agreement signals'),
+  ],
+  disposition: html.includes('data-human-disposition'),
+  accept: html.includes('data-human-action="accept"'),
+  decline: html.includes('data-human-action="decline"'),
+  reviewLink: html.includes('Inspect evidence'),
+  intakeLink: html.includes('Open guarded intake'),
+  boundary: html.includes('without adding approval or review authority'),
+  consequence: html.includes('Approval closes the recorded result; rejection returns the ticket for rework.'),
+  escaped: html.includes('&lt;unsafe title&gt;') && html.includes('Board &lt;One&gt;'),
+  inventedAction: html.includes('data-approval-action'),
+  empty: emptyHtml.includes('No submitted work is waiting for review.') && emptyHtml.includes('No project intake queues are connected.') && emptyHtml.includes('No tickets are waiting for a human answer.'),
+}}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    )
+    evidence = json.loads(completed.stdout)
+
+    assert evidence == {
+        "id": "approvals",
+        "styles": [["stylesheet", "/ui/views/approvals.css", "approvals"]],
+        "order": sorted(evidence["order"]),
+        "disposition": True,
+        "accept": True,
+        "decline": True,
+        "reviewLink": True,
+        "intakeLink": True,
+        "boundary": True,
+        "consequence": True,
+        "escaped": True,
+        "inventedAction": False,
+        "empty": True,
+    }
+
+
+def test_approvals_route_css_covers_mobile_density_and_reduced_motion() -> None:
+    css = dashboard.UI_ASSETS["/ui/views/approvals.css"][1].decode("utf-8")
+
+    assert '.attention-card:not(:first-of-type):has(>.empty:only-child)' in css
+    assert ':root[data-density="compact"]' in css
+    assert "@media(max-width:430px)" in css
+    assert "@media(prefers-reduced-motion:reduce)" in css
+    assert "min-height:44px" in css
+
+
 def test_ui_assets_are_packaged_with_etag_revalidation() -> None:
     class Cache:
         pass
