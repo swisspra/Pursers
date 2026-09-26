@@ -54,6 +54,10 @@
   margin: 12px 0;
 }
 
+.team-roster details > summary {
+  min-height: 44px;
+}
+
 .team-roster-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
