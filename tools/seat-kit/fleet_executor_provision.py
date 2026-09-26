@@ -62,7 +62,11 @@ def _absolute(value: Any, field: str, *, allow_symlink: bool = False) -> Path:
     if not isinstance(value, str):
         raise ProvisionError(f"{field}_invalid")
     path = Path(value).expanduser()
-    if not path.is_absolute() or (path.is_symlink() and not allow_symlink):
+    if not path.is_absolute():
+        raise ProvisionError(f"{field}_invalid")
+    if not allow_symlink and any(
+        candidate.is_symlink() for candidate in (path, *path.parents)
+    ):
         raise ProvisionError(f"{field}_invalid")
     return path.resolve(strict=False)
 
@@ -234,6 +238,34 @@ def _atomic_private(path: Path, data: bytes) -> None:
         os.close(descriptor)
 
 
+def _ensure_owner_only_directory(path: Path, field: str) -> None:
+    for candidate in (path, *path.parents):
+        if candidate.is_symlink():
+            raise ProvisionError(f"{field}_symlink")
+    missing: list[Path] = []
+    candidate = path
+    while not candidate.exists():
+        if candidate.is_symlink():
+            raise ProvisionError(f"{field}_symlink")
+        missing.append(candidate)
+        parent = candidate.parent
+        if parent == candidate:
+            raise ProvisionError(f"{field}_untrusted")
+        candidate = parent
+    for candidate in reversed(missing):
+        candidate.mkdir(mode=0o700)
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise ProvisionError(f"{field}_untrusted") from exc
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+    ):
+        raise ProvisionError(f"{field}_untrusted")
+
+
 def confirm_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
     plan = _read_json(plan_path)
     if set(plan) != {"schema", "digest", "confirmation", "actions", "launchctl_actions", "spec"}:
@@ -284,6 +316,15 @@ def confirm_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
             raise ProvisionError(f"target_exists:{target.name}")
     if backup.exists() or backup.is_symlink() or temporary.exists() or temporary.is_symlink():
         raise ProvisionError("board_butler_staging_exists")
+    protected_directories = {
+        "executor_state_dir": state_dir,
+        "executor_socket_parent": socket_path.parent,
+        "executor_config_parent": config_path.parent,
+        "caller_private_key_parent": private_key_path.parent,
+        "executor_log_parent": state_dir,
+    }
+    for field, directory in protected_directories.items():
+        _ensure_owner_only_directory(directory, field)
 
     private = Ed25519PrivateKey.generate()
     raw_private = private.private_bytes(
@@ -305,7 +346,6 @@ def confirm_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
         "board_caps": policy["board_caps"],
         "host_cap": policy["host_cap"],
     }
-    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     _atomic_private(private_key_path, raw_private)
     _atomic_private(config_path, executor.canonical_json(config) + b"\n")
     _atomic_private(lease_path, b'{"boards":{}}\n')

@@ -137,3 +137,74 @@ def test_plan_rejects_host_ceiling_above_twelve(tmp_path: Path) -> None:
     spec_path.write_text(json.dumps(specification), encoding="utf-8")
     with pytest.raises(provision.ProvisionError, match="host_cap_invalid"):
         provision.create_plan(spec_path, tmp_path / "plan.json")
+
+
+def test_confirm_rejects_preexisting_non_private_state_directory(
+    tmp_path: Path,
+) -> None:
+    specification = provision_spec(tmp_path)
+    spec_path = tmp_path / "spec.json"
+    plan_path = tmp_path / "plan.json"
+    spec_path.write_text(json.dumps(specification), encoding="utf-8")
+    plan = provision.create_plan(spec_path, plan_path)
+    state = Path(specification["executor"]["state_dir"])
+    state.mkdir(mode=0o700)
+    state.chmod(0o755)
+
+    with pytest.raises(provision.ProvisionError, match="executor_state_dir_untrusted"):
+        provision.confirm_plan(plan_path, plan["confirmation"])
+
+    assert not Path(specification["caller"]["private_key_path"]).exists()
+    assert not Path(specification["executor"]["config_path"]).exists()
+
+
+def test_private_directory_guard_rejects_symlink_and_wrong_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(provision.ProvisionError, match="test_dir_symlink"):
+        provision._ensure_owner_only_directory(link, "test_dir")
+
+    monkeypatch.setattr(provision.os, "getuid", lambda: target.stat().st_uid + 1)
+    with pytest.raises(provision.ProvisionError, match="test_dir_untrusted"):
+        provision._ensure_owner_only_directory(target, "test_dir")
+
+
+def test_plan_rejects_symlinked_private_parent(tmp_path: Path) -> None:
+    specification = provision_spec(tmp_path)
+    real = tmp_path / "real-state"
+    real.mkdir(mode=0o700)
+    alias = tmp_path / "state-alias"
+    alias.symlink_to(real, target_is_directory=True)
+    specification["executor"]["state_dir"] = str(alias)
+    specification["executor"]["config_path"] = str(alias / "executor.json")
+    specification["executor"]["socket_path"] = str(alias / "executor.sock")
+    specification["caller"]["private_key_path"] = str(alias / "caller.key")
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(specification), encoding="utf-8")
+
+    with pytest.raises(
+        provision.ProvisionError,
+        match="executor_(config_path|state_dir)_invalid",
+    ):
+        provision.create_plan(spec_path, tmp_path / "plan.json")
+
+
+def test_confirm_rejects_non_private_config_parent(tmp_path: Path) -> None:
+    specification = provision_spec(tmp_path)
+    config_parent = tmp_path / "public-config"
+    config_parent.mkdir(mode=0o700)
+    config_parent.chmod(0o755)
+    specification["executor"]["config_path"] = str(config_parent / "executor.json")
+    spec_path = tmp_path / "spec.json"
+    plan_path = tmp_path / "plan.json"
+    spec_path.write_text(json.dumps(specification), encoding="utf-8")
+    plan = provision.create_plan(spec_path, plan_path)
+
+    with pytest.raises(provision.ProvisionError, match="executor_config_parent_untrusted"):
+        provision.confirm_plan(plan_path, plan["confirmation"])
+
+    assert not Path(specification["caller"]["private_key_path"]).exists()

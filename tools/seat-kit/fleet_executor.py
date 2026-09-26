@@ -961,11 +961,25 @@ class LaunchdUserAdapter:
         path = self._plist_path(seat_id)
         if path.is_symlink():
             raise RuntimeError("launchd_plist_symlink")
+        expected = self._plist(seat_id, template)
+        staged = path.is_file()
+        if staged:
+            try:
+                if path.read_bytes() != expected:
+                    raise RuntimeError("launchd_plist_identity_mismatch")
+            except OSError as exc:
+                raise RuntimeError("launchd_plist_unavailable") from exc
+            loaded = self._run("print", self._target(seat_id))
+            if loaded.returncode == 0:
+                fields = self._print_fields(loaded.stdout)
+                if fields.get("program") != str(self.helper_path):
+                    raise RuntimeError("launchd_loaded_identity_mismatch")
+                return
         descriptor, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
         temporary = Path(raw)
         try:
             with os.fdopen(descriptor, "wb") as handle:
-                handle.write(self._plist(seat_id, template))
+                handle.write(expected)
                 handle.flush()
                 os.fsync(handle.fileno())
             temporary.chmod(0o600)
