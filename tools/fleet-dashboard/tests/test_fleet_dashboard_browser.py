@@ -190,6 +190,90 @@ console.log(JSON.stringify(evidence));
     }
 
 
+def test_projects_route_loads_owned_css_in_real_browser() -> None:
+    task_space_id = os.environ.get("PURSERS_EGO_TASK_SPACE_ID")
+    ego_browser = shutil.which("ego-browser")
+    if not task_space_id or not ego_browser:
+        pytest.skip("requires PURSERS_EGO_TASK_SPACE_ID and ego-browser")
+
+    class Cache:
+        @staticmethod
+        def labels() -> list[str]:
+            return ["fixture"]
+
+        @staticmethod
+        def resolve_central(value: str | None) -> str:
+            if value not in {None, "fixture"}:
+                raise KeyError(value)
+            return "fixture"
+
+        @staticmethod
+        def get(_central: str | None = None) -> dict:
+            return {
+                "generated_at": "2030-01-01T00:00:00Z",
+                "boards": [
+                    {
+                        "board_id": "sample-board",
+                        "label": "Sample project",
+                        "status": "ready",
+                        "counts": {"open": 2, "in_progress": 1},
+                        "tickets": [],
+                    }
+                ],
+                "agents": [],
+                "pool_summary": {},
+            }
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/#/projects"
+    try:
+        script = f"""
+const task = await taskSpace({int(task_space_id)});
+const page = task.page("p1");
+await page.goto({json.dumps(url)});
+await page.waitForFunction(
+  () => document.querySelectorAll("[data-projects-card]").length === 1 &&
+    document.styleSheets.length > 1,
+  undefined,
+  {{timeout: 10000}},
+);
+const evidence = await page.evaluate(() => {{
+  const card = document.querySelector("[data-projects-card]");
+  const style = document.querySelector('link[data-fleet-view-style="projects"]');
+  return {{
+    className: card.className,
+    board: card.getAttribute("data-board-id"),
+    display: getComputedStyle(card).display,
+    stylePath: new URL(style.href).pathname,
+  }};
+}});
+console.log(JSON.stringify(evidence));
+"""
+        completed = subprocess.run(
+            [ego_browser, "nodejs", "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    evidence = json.loads(completed.stderr.strip().splitlines()[-1])
+    assert evidence == {
+        "className": "board-card",
+        "board": "sample-board",
+        "display": "grid",
+        "stylePath": "/ui/views/projects.css",
+    }
+
+
 def test_autonomous_butler_browser_accessibility_and_conflict(
     tmp_path: Path,
 ) -> None:
