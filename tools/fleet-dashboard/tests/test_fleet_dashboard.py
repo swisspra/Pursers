@@ -69,7 +69,7 @@ def test_ui_shell_loads_packaged_assets_and_route_modules() -> None:
     assert {
         path.removeprefix("/ui/views/").removesuffix(".js")
         for path in dashboard.UI_ASSETS
-        if path.startswith("/ui/views/")
+        if path.startswith("/ui/views/") and path.endswith(".js")
     } == expected_routes
     for route in expected_routes:
         assert f'<script src="/ui/views/{route}.js"></script>' in dashboard.HTML_SHELL
@@ -105,6 +105,72 @@ def test_primary_route_modules_own_renderers_and_receive_shared_context() -> Non
 
     assert "view.render(context)" in registry
     assert "FleetViewModules.render(kind,fleetViewContext())" in app
+
+
+def test_projects_route_groups_centrals_and_preserves_board_actions_and_states() -> None:
+    registry = dashboard.UI_ASSETS["/ui/view-registry.js"][1].decode("utf-8")
+    projects = dashboard.UI_ASSETS["/ui/views/projects.js"][1].decode("utf-8")
+    program = f"""
+eval({json.dumps(registry)});
+eval({json.dumps(projects)});
+const esc = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;');
+const boards = [
+  {{central:'central-a',board:{{board_id:'alpha',label:'Alpha',status:'ready',counts:{{open:2,claimed:1,in_progress:2,submitted:1,closed:4}}}}}},
+  {{central:'central-a',board:{{board_id:'beta',label:'Beta',status:'error',error:'offline <retry>',counts:{{reviewing:2}}}}}},
+  {{central:'central-b',board:{{board_id:'gamma',label:'Gamma',status:'ready',counts:{{}}}}}},
+];
+const context = {{
+  esc,
+  pageHead:(kicker,title,copy,action='')=>`<header><b>${{esc(kicker)}}</b><h2>${{esc(title)}}</h2><p>${{esc(copy)}}</p>${{action}}</header>`,
+  warmTruthStrip:()=>'<div class="truth-strip"></div>',
+  warmBoards:()=>boards,
+  numberCount:value=>Number(String(value??0).replace('>=',''))||0,
+  boardHref:(central,board,tab='summary')=>`#/${{central}}/${{board}}/${{tab}}`,
+}};
+const html = globalThis.FleetViewModules.render('projects', context);
+boards.length = 0;
+const empty = globalThis.FleetViewModules.render('projects', context);
+console.log(JSON.stringify({{html,empty}}));
+"""
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+    html = result["html"]
+
+    assert "3 projects" in html
+    assert "2 coordinators" in html
+    assert html.count("Coordinator") == 2
+    assert "In progress</dt><dd>3" in html
+    assert "Review ready</dt><dd>3" in html
+    for state in ("open", "claimed", "in progress", "submitted", "closed", "reviewing"):
+        assert f"<span>{state}</span>" in html
+    assert 'href="#/central-a/alpha/summary">Open project</a>' in html
+    assert 'href="#/central-a/alpha/routes">View routes</a>' in html
+    assert 'class="board-card" data-board-id="alpha" data-projects-card' in html
+    assert "needs attention" in html
+    assert "offline &lt;retry>" in html
+    assert 'href="#/seats">+ Add project</a>' in html
+    assert 'href="#/seats">Add project</a>' in result["empty"]
+    assert "existing guarded Connections flow" in result["empty"]
+
+
+def test_projects_route_styles_cover_responsive_and_density_modes() -> None:
+    source = dashboard.UI_ASSETS["/ui/views/projects.js"][1].decode("utf-8")
+    css = dashboard.UI_ASSETS["/ui/views/projects.css"][1].decode("utf-8")
+
+    for contract in (
+        ".projects-summary{display:flex",
+        "[data-projects-card]{display:grid",
+        ".projects-health[data-tone=\"ready\"]",
+        ':root[data-density="compact"] [data-projects-card]',
+        "@media(max-width:640px){.projects-summary{display:grid",
+        "@media(max-width:430px){.projects-add{width:100%}",
+    ):
+        assert contract in css
+    assert "const STYLE_URL = '/ui/views/projects.css'" in source
+    assert 'link.dataset.fleetViewStyle = \'projects\'' in source
 
 
 def test_ui_assets_are_packaged_with_etag_revalidation() -> None:
