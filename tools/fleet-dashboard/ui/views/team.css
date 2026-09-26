@@ -147,6 +147,7 @@
 }
 
 .team-roster-card .agent-actions button,
+.team-roster .agent-count-strip button,
 .team-roster .agent-filters select,
 .team-roster .agent-filters button {
   min-height: 44px;
