@@ -16,11 +16,13 @@ import hashlib
 import hmac
 import json
 import os
+import plistlib
 import re
 import shlex
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -855,6 +857,179 @@ class SystemdUserAdapter:
             raise RuntimeError("systemd_stop_failed")
 
 
+class LaunchdUserAdapter:
+    """Narrow per-user ``launchctl`` adapter with no shell command surface."""
+
+    def __init__(
+        self,
+        agent_dir: Path,
+        drain_dir: Path,
+        credential_paths: Mapping[str, Path],
+        *,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        uid: int | None = None,
+        helper_path: Path | None = None,
+    ) -> None:
+        self.agent_dir = agent_dir
+        self.drain_dir = drain_dir
+        self.credential_paths = credential_paths
+        self.runner = runner
+        self.uid = os.getuid() if uid is None else uid
+        self.helper_path = (
+            Path(__file__).with_name("launchd_env_exec.py")
+            if helper_path is None
+            else helper_path
+        ).resolve()
+
+    @staticmethod
+    def _label(seat_id: str) -> str:
+        slug = re.sub(r"[^A-Za-z0-9.-]", "-", seat_id)[:80]
+        suffix = hashlib.sha256(seat_id.encode()).hexdigest()[:12]
+        return f"com.pursers.seat.{slug}.{suffix}"
+
+    def _target(self, seat_id: str) -> str:
+        return f"gui/{self.uid}/{self._label(seat_id)}"
+
+    def _plist_path(self, seat_id: str) -> Path:
+        return self.agent_dir / f"{self._label(seat_id)}.plist"
+
+    def _arguments(self, template: SeatTemplate) -> list[str]:
+        credential_path = self.credential_paths.get(template.credential_ref)
+        if credential_path is None:
+            raise RuntimeError("credential_reference_unknown")
+        return [str(self.helper_path), str(credential_path), *template.command]
+
+    def _plist(self, seat_id: str, template: SeatTemplate) -> bytes:
+        return plistlib.dumps(
+            {
+                "Label": self._label(seat_id),
+                "ProgramArguments": self._arguments(template),
+                "WorkingDirectory": str(template.repository_root),
+                "ProcessType": "Background",
+                "RunAtLoad": False,
+                "KeepAlive": False,
+            },
+            fmt=plistlib.FMT_XML,
+            sort_keys=True,
+        )
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return self.runner(
+            ["launchctl", *args], check=False, text=True, capture_output=True
+        )
+
+    @staticmethod
+    def _print_fields(output: str) -> dict[str, str]:
+        fields: dict[str, str] = {}
+        for line in output.splitlines():
+            match = re.fullmatch(r"\s*(state|pid|program)\s*=\s*(.*?)\s*", line)
+            if match is not None and match.group(1) not in fields:
+                fields[match.group(1)] = match.group(2)
+        return fields
+
+    def inspect(self, seat_id: str, template: SeatTemplate) -> ServiceObservation:
+        path = self._plist_path(seat_id)
+        expected = self._plist(seat_id, template)
+        exists = path.is_file() and not path.is_symlink()
+        identity = False
+        try:
+            identity = (
+                path.resolve(strict=True).parent == self.agent_dir.resolve(strict=True)
+                and path.read_bytes() == expected
+            )
+        except OSError:
+            pass
+        result = self._run("print", self._target(seat_id))
+        if result.returncode != 0:
+            return ServiceObservation(exists, False, False, identity)
+        fields = self._print_fields(result.stdout)
+        state = fields.get("state")
+        pid = fields.get("pid")
+        program = fields.get("program")
+        running = state == "running"
+        identity = identity and program == str(self.helper_path)
+        ready = running and pid is not None and pid.isdigit() and int(pid) > 0 and identity
+        process_ref = (
+            f"launchd:{self._label(seat_id)}:{pid}" if ready and pid is not None else None
+        )
+        return ServiceObservation(True, running, ready, identity, process_ref)
+
+    def instantiate(self, seat_id: str, template: SeatTemplate) -> None:
+        if not self.helper_path.is_file() or self.helper_path.is_symlink():
+            raise RuntimeError("launchd_helper_unavailable")
+        self.agent_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = self._plist_path(seat_id)
+        if path.is_symlink():
+            raise RuntimeError("launchd_plist_symlink")
+        descriptor, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary = Path(raw)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(self._plist(seat_id, template))
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.chmod(0o600)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        result = self._run("bootstrap", f"gui/{self.uid}", str(path))
+        if result.returncode != 0:
+            raise RuntimeError("launchd_bootstrap_failed")
+
+    def start(self, seat_id: str, template: SeatTemplate) -> None:
+        result = self._run("kickstart", "-k", self._target(seat_id))
+        if result.returncode != 0:
+            raise RuntimeError("launchd_start_failed")
+
+    def drain(self, seat_id: str, template: SeatTemplate) -> None:
+        self.drain_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = self.drain_dir / f"{seat_id}.json"
+        if path.is_symlink():
+            raise RuntimeError("drain_path_symlink")
+        payload = canonical_json({"schema": "pursers_seat_drain_v1", "seat_id": seat_id})
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def stop(self, seat_id: str, template: SeatTemplate) -> None:
+        result = self._run("kill", "SIGTERM", self._target(seat_id))
+        if result.returncode != 0:
+            raise RuntimeError("launchd_stop_failed")
+
+
+def service_adapter(
+    policy: ExecutorPolicy,
+    state: Path,
+    *,
+    manager: str = "auto",
+    platform: str = sys.platform,
+) -> ServiceAdapter:
+    """Select only an explicitly supported user-service manager."""
+    selected = manager
+    if selected == "auto":
+        selected = "launchd" if platform == "darwin" else "systemd" if platform == "linux" else ""
+    if selected == "launchd":
+        if platform != "darwin":
+            raise PolicyError("launchd_platform_invalid")
+        return LaunchdUserAdapter(
+            Path.home() / "Library/LaunchAgents",
+            state / "drain",
+            policy.credential_paths,
+        )
+    if selected == "systemd":
+        if platform != "linux":
+            raise PolicyError("systemd_platform_invalid")
+        return SystemdUserAdapter(
+            Path.home() / ".config/systemd/user",
+            state / "drain",
+            policy.credential_paths,
+        )
+    raise PolicyError("service_manager_unsupported")
+
+
 class FleetExecutor:
     def __init__(
         self,
@@ -1266,6 +1441,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--socket", type=Path, required=True)
+    parser.add_argument(
+        "--service-manager",
+        choices=("auto", "launchd", "systemd"),
+        default="auto",
+    )
     return parser
 
 
@@ -1276,9 +1456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     executor = FleetExecutor(
         policy,
         ExecutorStore(state / "executor.sqlite3"),
-        SystemdUserAdapter(
-            Path.home() / ".config/systemd/user", state / "drain", policy.credential_paths
-        ),
+        service_adapter(policy, state, manager=args.service_manager),
         FileLeaseProvider(state / "leases.json"),
         FileRegistryReadinessProvider(state / "registry-readiness.json"),
         JsonlReceiptPublisher(state / "receipts.jsonl"),

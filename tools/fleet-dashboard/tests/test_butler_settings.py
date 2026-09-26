@@ -1781,6 +1781,37 @@ def test_autonomous_view_quarantines_prior_revision_observation() -> None:
     assert view["actual_state"]["config_revision"] == 3
 
 
+def test_autonomous_view_never_labels_unobserved_config_active() -> None:
+    payload = {
+        "board_id": "pursers",
+        "revision": 3,
+        "effective_mode": "autonomous",
+        "config": autonomous_config(),
+    }
+
+    missing = butler_settings.autonomous_butler_view(
+        payload,
+        {"commands": []},
+        None,
+        now=datetime(2026, 9, 24, 1, tzinfo=timezone.utc),
+    )
+    assert missing["actual_state_status"] == "unavailable"
+    assert missing["actual_state_available"] is False
+    assert missing["effective_state"] == "pending"
+
+    stale_state = autonomous_state()
+    stale_state["stale_after"] = "2026-09-24T00:00:00+00:00"
+    stale = butler_settings.autonomous_butler_view(
+        payload,
+        {"commands": []},
+        stale_state,
+        now=datetime(2026, 9, 24, 1, tzinfo=timezone.utc),
+    )
+    assert stale["actual_state_status"] == "stale"
+    assert stale["actual_state_available"] is False
+    assert stale["effective_state"] == "degraded"
+
+
 def test_prepare_autonomous_config_is_shadow_only_cas_and_preserves_envelope() -> None:
     config = autonomous_config()
     request = {

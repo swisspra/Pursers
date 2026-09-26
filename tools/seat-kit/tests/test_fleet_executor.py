@@ -5,6 +5,7 @@ import base64
 import importlib.util
 import json
 import os
+import plistlib
 import re
 import secrets
 import shlex
@@ -692,6 +693,99 @@ def test_systemd_unit_names_do_not_alias_colon_and_dash_seat_ids() -> None:
     dash = executor.SystemdUserAdapter._unit_name("worker-a")
     assert colon != dash
     assert len(colon) < 160
+
+
+def test_launchd_adapter_uses_vectors_and_detects_plist_drift(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    helper = tmp_path / "launchd_env_exec.py"
+    helper.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    credential = tmp_path / "worker-a.env"
+    credential.write_text("TOKEN=private\n", encoding="utf-8")
+    credential.chmod(0o600)
+    repository = tmp_path / "repository"
+    seat = tmp_path / "seat"
+    repository.mkdir()
+    seat.mkdir()
+    template = executor.SeatTemplate.from_record(
+        "worker-standard", template_record(repository, seat)
+    )
+
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[1] == "print":
+            output = f"state = running\npid = 321\nprogram = {helper}\n"
+            return subprocess.CompletedProcess(command, 0, output, "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    adapter = executor.LaunchdUserAdapter(
+        tmp_path / "LaunchAgents",
+        tmp_path / "drain",
+        {"credential.worker-a": credential},
+        runner=runner,
+        uid=501,
+        helper_path=helper,
+    )
+    adapter.instantiate("worker-a", template)
+    adapter.start("worker-a", template)
+    observation = adapter.inspect("worker-a", template)
+
+    label = adapter._label("worker-a")
+    plist_path = tmp_path / "LaunchAgents" / f"{label}.plist"
+    document = plistlib.loads(plist_path.read_bytes())
+    assert document["ProgramArguments"] == [
+        str(helper.resolve()),
+        str(credential),
+        *template.command,
+    ]
+    assert document["RunAtLoad"] is False
+    assert calls[:2] == [
+        ["launchctl", "bootstrap", "gui/501", str(plist_path)],
+        ["launchctl", "kickstart", "-k", f"gui/501/{label}"],
+    ]
+    assert observation.ready and observation.identity_verified
+    assert observation.process_ref == f"launchd:{label}:321"
+
+    plist_path.write_bytes(plist_path.read_bytes() + b"\n")
+    drifted = adapter.inspect("worker-a", template)
+    assert drifted.running
+    assert not drifted.ready
+    assert not drifted.identity_verified
+
+
+def test_launchd_adapter_fail_closed_and_platform_selection(
+    runtime: dict[str, Any], tmp_path: Path
+) -> None:
+    policy = runtime["service"].policy
+    assert isinstance(
+        executor.service_adapter(policy, tmp_path, manager="auto", platform="linux"),
+        executor.SystemdUserAdapter,
+    )
+    assert isinstance(
+        executor.service_adapter(policy, tmp_path, manager="auto", platform="darwin"),
+        executor.LaunchdUserAdapter,
+    )
+    with pytest.raises(executor.PolicyError, match="launchd_platform_invalid"):
+        executor.service_adapter(policy, tmp_path, manager="launchd", platform="linux")
+    with pytest.raises(executor.PolicyError, match="service_manager_unsupported"):
+        executor.service_adapter(policy, tmp_path, manager="auto", platform="win32")
+
+
+def test_launchd_credential_helper_requires_owner_only_file(tmp_path: Path) -> None:
+    helper_path = MODULE_PATH.with_name("launchd_env_exec.py")
+    helper_spec = importlib.util.spec_from_file_location("launchd_env_exec", helper_path)
+    assert helper_spec and helper_spec.loader
+    helper = importlib.util.module_from_spec(helper_spec)
+    helper_spec.loader.exec_module(helper)
+    credential = tmp_path / "seat.env"
+    credential.write_text('TOKEN="value with spaces"\nEMPTY=\n', encoding="utf-8")
+    credential.chmod(0o600)
+    assert helper.load_environment(credential) == {
+        "TOKEN": "value with spaces",
+        "EMPTY": "",
+    }
+    credential.chmod(0o644)
+    with pytest.raises(RuntimeError, match="credential_environment_untrusted"):
+        helper.load_environment(credential)
 
 
 def test_receipt_queue_is_idempotent_and_rejects_digest_change(tmp_path: Path) -> None:

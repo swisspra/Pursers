@@ -339,6 +339,96 @@ def test_product_snapshot_selector_rejects_truncated_ticket_input() -> None:
         )
 
 
+def test_tier_two_submission_starts_reviewer_observes_offer_and_scales_down() -> None:
+    executor_seat = {
+        "seat_id": "reviewer-a",
+        "board_id": "pursers",
+        "role": "reviewer",
+        "provider": "direct",
+        "template_id": "template:reviewer:direct",
+        "template_digest_sha256": DIGEST,
+        "generation": 1,
+        "lifecycle": "stopped",
+        "transition_at": (NOW - timedelta(minutes=10)).isoformat(),
+        "managed": True,
+    }
+    products = {
+        "pursers": {
+            "truncated": False,
+            "tickets": [
+                {
+                    "ticket_id": "TK-tier-two",
+                    "status": "submitted",
+                    "tier": 2,
+                    "tags": [],
+                    "review_state": {"state": "offered", "agent_name": "reviewer-a"},
+                }
+            ],
+            "agents": [],
+        }
+    }
+    providers = {"pursers": {"direct": {"status": "healthy", "latency_ms": 5}}}
+    host = {
+        "load_ratio": 0.1,
+        "capacity_available": True,
+        "executor_status": "healthy",
+    }
+    engine = reconciler({"pursers": board_policy(idle_grace_s=60)})
+    initial = butler.fleet_snapshot_from_products(
+        products, [executor_seat], providers, host, NOW
+    )
+    started = engine.plan(initial, {})
+    assert initial.demands["pursers"].review_backlog == 1
+    assert started.desired["pursers"]["reviewer"] == 1
+    assert [(item.action, item.seat_id) for item in started.operations] == [
+        ("start", "reviewer-a")
+    ]
+
+    executor_seat["lifecycle"] = "busy"
+    products["pursers"]["agents"] = [
+        {
+            "agent_id": "AI-reviewer-a",
+            "agent_name": "reviewer-a",
+            "lifecycle_status": "active",
+            "status": "busy",
+            "lease_expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+        }
+    ]
+    offered = butler.fleet_snapshot_from_products(
+        products, [executor_seat], providers, host, NOW
+    )
+    assert offered.seats[0].live_lease is True
+    assert engine.plan(offered, {}).operations == ()
+
+    products["pursers"]["tickets"] = []
+    products["pursers"]["agents"] = []
+    executor_seat["lifecycle"] = "ready"
+    idle = butler.fleet_snapshot_from_products(
+        products, [executor_seat], providers, host, NOW
+    )
+    prior = {
+        "config_revision": 7,
+        "boards": {
+            "pursers": {
+                "desired": {"worker": 0, "reviewer": 1, "acp_worker": 0},
+                "idle_since": (NOW - timedelta(seconds=120)).isoformat(),
+            }
+        },
+    }
+    draining = engine.plan(idle, prior)
+    assert [(item.action, item.seat_id) for item in draining.operations] == [
+        ("drain", "reviewer-a")
+    ]
+    executor_seat["lifecycle"] = "draining"
+    drained = butler.fleet_snapshot_from_products(
+        products, [executor_seat], providers, host, NOW
+    )
+    stopped = engine.plan(drained, prior)
+    assert [(item.action, item.seat_id) for item in stopped.operations] == [
+        ("stop", "reviewer-a")
+    ]
+
+
 def test_registry_host_cap_prioritizes_independent_review_across_boards() -> None:
     policies = {
         "alpha": board_policy("alpha", maximum=6),

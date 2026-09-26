@@ -589,6 +589,24 @@ evidence = [".github/workflows/ci.yml", "tools/ci_manifest.py", "tools/seat-kit/
 evidence_contains = ["tools/ci_manifest.py run", "tools/seat-kit/tests", "fleet_executor.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/seat-kit/fleet_executor_provision.py"
+kind = "operator-tool"
+source = "tools/seat-kit/fleet_executor_provision.py"
+state = "delivered"
+channel = "mandatory CI seat-kit suite"
+evidence = [".github/workflows/ci.yml", "tools/ci_manifest.py", "tools/seat-kit/tests/test_fleet_executor_provision.py"]
+evidence_contains = ["tools/ci_manifest.py run", "tools/seat-kit/tests", "fleet_executor_provision.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/seat-kit/launchd_env_exec.py"
+kind = "operator-tool"
+source = "tools/seat-kit/launchd_env_exec.py"
+state = "delivered"
+channel = "mandatory CI seat-kit suite"
+evidence = [".github/workflows/ci.yml", "tools/ci_manifest.py", "tools/seat-kit/tests/test_fleet_executor.py"]
+evidence_contains = ["tools/ci_manifest.py run", "tools/seat-kit/tests", "launchd_env_exec.py"]
+
+[[artifacts]]
 id = "operator-tool:tools/seat-kit/seat_new.py"
 kind = "operator-tool"
 source = "tools/seat-kit/seat_new.py"
