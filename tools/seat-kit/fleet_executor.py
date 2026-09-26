@@ -922,10 +922,46 @@ class LaunchdUserAdapter:
     def _print_fields(output: str) -> dict[str, str]:
         fields: dict[str, str] = {}
         for line in output.splitlines():
-            match = re.fullmatch(r"\s*(state|pid|program)\s*=\s*(.*?)\s*", line)
+            match = re.fullmatch(
+                r"\s*(state|pid|program|working directory)\s*=\s*(.*?)\s*",
+                line,
+            )
             if match is not None and match.group(1) not in fields:
                 fields[match.group(1)] = match.group(2)
         return fields
+
+    @staticmethod
+    def _print_arguments(output: str) -> tuple[str, ...] | None:
+        """Parse the effective argv block emitted by ``launchctl print``."""
+        arguments: tuple[str, ...] | None = None
+        lines = output.splitlines()
+        for index, line in enumerate(lines):
+            if re.fullmatch(r"\s*arguments\s*=\s*\{\s*", line) is None:
+                continue
+            if arguments is not None:
+                return None
+            values: list[str] = []
+            for value_line in lines[index + 1 :]:
+                if re.fullmatch(r"\s*}\s*", value_line) is not None:
+                    arguments = tuple(values)
+                    break
+                value = value_line.strip()
+                if not value:
+                    return None
+                values.append(value)
+            else:
+                return None
+        return arguments
+
+    def _loaded_identity_matches(
+        self, output: str, template: SeatTemplate
+    ) -> bool:
+        fields = self._print_fields(output)
+        return (
+            fields.get("program") == str(self.helper_path)
+            and self._print_arguments(output) == tuple(self._arguments(template))
+            and fields.get("working directory") == str(template.repository_root)
+        )
 
     def inspect(self, seat_id: str, template: SeatTemplate) -> ServiceObservation:
         path = self._plist_path(seat_id)
@@ -945,9 +981,8 @@ class LaunchdUserAdapter:
         fields = self._print_fields(result.stdout)
         state = fields.get("state")
         pid = fields.get("pid")
-        program = fields.get("program")
         running = state == "running"
-        identity = identity and program == str(self.helper_path)
+        identity = identity and self._loaded_identity_matches(result.stdout, template)
         ready = running and pid is not None and pid.isdigit() and int(pid) > 0 and identity
         process_ref = (
             f"launchd:{self._label(seat_id)}:{pid}" if ready and pid is not None else None
@@ -971,8 +1006,7 @@ class LaunchdUserAdapter:
                 raise RuntimeError("launchd_plist_unavailable") from exc
             loaded = self._run("print", self._target(seat_id))
             if loaded.returncode == 0:
-                fields = self._print_fields(loaded.stdout)
-                if fields.get("program") != str(self.helper_path):
+                if not self._loaded_identity_matches(loaded.stdout, template):
                     raise RuntimeError("launchd_loaded_identity_mismatch")
                 return
         descriptor, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)

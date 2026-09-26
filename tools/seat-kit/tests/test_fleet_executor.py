@@ -713,7 +713,14 @@ def test_launchd_adapter_uses_vectors_and_detects_plist_drift(tmp_path: Path) ->
     def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         if command[1] == "print":
-            output = f"state = running\npid = 321\nprogram = {helper}\n"
+            arguments = "\n".join(
+                f"\t\t{value}" for value in adapter._arguments(template)
+            )
+            output = (
+                f"state = running\npid = 321\nprogram = {helper.resolve()}\n"
+                f"arguments = {{\n{arguments}\n}}\n"
+                f"working directory = {repository}\n"
+            )
             return subprocess.CompletedProcess(command, 0, output, "")
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -778,7 +785,14 @@ def test_launchd_adapter_start_stop_start_reuses_loaded_job(tmp_path: Path) -> N
                 return subprocess.CompletedProcess(command, 113, "", "not found")
             state = "running" if running else "stopped"
             pid = "pid = 321\n" if running else ""
-            output = f"state = {state}\n{pid}program = {helper.resolve()}\n"
+            arguments = "\n".join(
+                f"\t\t{value}" for value in adapter._arguments(template)
+            )
+            output = (
+                f"state = {state}\n{pid}program = {helper.resolve()}\n"
+                f"arguments = {{\n{arguments}\n}}\n"
+                f"working directory = {repository}\n"
+            )
             return subprocess.CompletedProcess(command, 0, output, "")
         if operation == "bootstrap":
             if loaded:
@@ -813,6 +827,62 @@ def test_launchd_adapter_start_stop_start_reuses_loaded_job(tmp_path: Path) -> N
     assert stopped == executor.ServiceObservation(True, False, False, True)
     assert second.ready and second.identity_verified
     assert sum(command[1] == "bootstrap" for command in calls) == 1
+
+
+@pytest.mark.parametrize("drift", ["credential", "command", "working-directory"])
+def test_launchd_adapter_rejects_loaded_template_drift(
+    tmp_path: Path, drift: str
+) -> None:
+    helper = tmp_path / "launchd_env_exec.py"
+    helper.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    credential = tmp_path / "worker-a.env"
+    credential.write_text("TOKEN=private\n", encoding="utf-8")
+    credential.chmod(0o600)
+    repository = tmp_path / "repository"
+    seat = tmp_path / "seat"
+    repository.mkdir()
+    seat.mkdir()
+    template = executor.SeatTemplate.from_record(
+        "worker-standard", template_record(repository, seat)
+    )
+    adapter = executor.LaunchdUserAdapter(
+        tmp_path / "LaunchAgents",
+        tmp_path / "drain",
+        {"credential.worker-a": credential},
+        uid=501,
+        helper_path=helper,
+    )
+    expected_arguments = adapter._arguments(template)
+    loaded_arguments = list(expected_arguments)
+    loaded_working_directory = repository
+    if drift == "credential":
+        loaded_arguments[1] = str(tmp_path / "attacker.env")
+    elif drift == "command":
+        loaded_arguments[2:] = ["/bin/sh", "-c", "malicious-command"]
+    else:
+        loaded_working_directory = tmp_path / "attacker-repository"
+    arguments = "\n".join(f"\t\t{value}" for value in loaded_arguments)
+    output = (
+        f"state = running\npid = 321\nprogram = {helper.resolve()}\n"
+        f"arguments = {{\n{arguments}\n}}\n"
+        f"working directory = {loaded_working_directory}\n"
+    )
+
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        if command[1] == "print":
+            return subprocess.CompletedProcess(command, 0, output, "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    adapter.runner = runner
+    adapter.instantiate("worker-a", template)
+    observation = adapter.inspect("worker-a", template)
+
+    assert observation.running
+    assert not observation.ready
+    assert not observation.identity_verified
+    assert observation.process_ref is None
+    with pytest.raises(RuntimeError, match="launchd_loaded_identity_mismatch"):
+        adapter.instantiate("worker-a", template)
 
 
 def test_launchd_adapter_fail_closed_and_platform_selection(
