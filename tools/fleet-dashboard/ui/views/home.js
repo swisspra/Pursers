@@ -54,7 +54,8 @@
     .home-severity.critical{background:var(--bad)}
     .home-human-queue{margin-top:28px}
     .home-human-queue>.section-title:first-child{margin-top:0}
-    .home-human-queue .attention-actions button,.home-human-queue .button,.home-human-queue select{min-height:44px}
+    .home-human-queue .attention-actions button,.home-human-queue .button,.home-human-queue select,.home-human-queue .finding-row>a{min-height:44px}
+    .home-human-queue .finding-row>a{display:inline-flex;align-items:center}
     .home-loading{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(260px,.8fr);gap:18px}
     .home-loading .skeleton{min-height:210px}
     :root[data-density="compact"] .home-command{min-height:230px;padding:24px}
