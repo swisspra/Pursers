@@ -5568,8 +5568,7 @@ def resolve_config(
         # drafts remain visible, but no answer is sent without explicit opt-in.
         "answering_mode": "assist",
         "answer_scope": {
-            name: "auto" if name == "approved_merge" else "escalate"
-            for name in ANSWER_CLASSES
+            name: "escalate" for name in ANSWER_CLASSES
         },
         "required_evidence_kinds": list(CITABLE_EVIDENCE_KINDS),
         "ceilings": {
@@ -7432,17 +7431,6 @@ def decorate_finding(
     configured_action = config.answer_scope.get(answer_class, "escalate")
     evidence_kind = str(result.get("evidence_kind", ""))
     evidence_allowed = evidence_kind in config.required_evidence_kinds
-    approved_merge = bool(
-        answer_class == "approved_merge"
-        and evidence_kind == "manifest_coverage"
-        and result.get("verdict") == Outcome.MECHANICAL.value
-        and config.runtime_authorized
-    )
-    if approved_merge:
-        # Active runtime authority plus exact, independently reviewed product
-        # evidence is the complete bounded grant.  It does not authorize a
-        # different SHA, an unreviewed resubmission, or any release action.
-        evidence_allowed = True
     result["configured_action"] = configured_action
     result["auto_eligible"] = bool(
         result.get("verdict") == Outcome.MECHANICAL.value

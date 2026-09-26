@@ -108,8 +108,14 @@ class AutonomousBackend(Source):
                     "mode": "active",
                     "answering_mode": "autonomous",
                     "kill_switch": False,
-                    "answer_scope": {"ticket_status": "auto"},
-                    "required_evidence_kinds": ["ticket_status"],
+                    "answer_scope": {
+                        "ticket_status": "auto",
+                        "approved_merge": "auto",
+                    },
+                    "required_evidence_kinds": [
+                        "ticket_status",
+                        "manifest_coverage",
+                    ],
                     "ceilings": {"per_hour": 20, "per_ticket": 10, "per_board": 50},
                     "hold_before_post_s": self.hold_seconds,
                     "active_windows": [
@@ -1105,6 +1111,43 @@ def test_active_butler_answers_for_exact_independently_approved_sha(
         f"{candidate} is independently approved on TK-approved; "
         "active merge may proceed. Required affected-suite evidence is complete."
     )
+
+
+def test_existing_active_config_cannot_inherit_approved_merge_authority(
+    tmp_path: Path,
+) -> None:
+    class ExistingConfigBackend(AutonomousBackend):
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            document = dict(await super().coordinator_config())
+            board_butler = dict(document["board_butler"])
+            global_settings = dict(board_butler["global"])
+            global_settings["answer_scope"] = {"ticket_status": "auto"}
+            global_settings["required_evidence_kinds"] = ["ticket_status"]
+            board_butler["global"] = global_settings
+            document["board_butler"] = board_butler
+            return document
+
+    options = args(tmp_path)
+    candidate = commit_fixture(options.repo)
+    options.runtime_mode = "active"
+    options.act_on_board = ["pursers"]
+    backend = ExistingConfigBackend()
+    backend.tickets["TK-approved"] = approved_merge_ticket(candidate)
+    item = question(f"Please merge {candidate} from TK-approved.", kind="approval")
+    backend.questions[item["question_id"]] = {
+        **item,
+        "state": "open",
+        "accepted_by": None,
+    }
+
+    finding = asyncio.run(butler.process_question(backend, item, options, NOW))
+
+    assert finding["verdict"] == "MECHANICAL"
+    assert finding["answer_class"] == "approved_merge"
+    assert finding["evidence_kind"] == "manifest_coverage"
+    assert finding["configured_action"] == "escalate"
+    assert finding["auto_eligible"] is False
+    assert backend.answer_calls == 0
 
 
 @pytest.mark.parametrize("kind", ["approval", "decision"])
