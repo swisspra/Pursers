@@ -168,6 +168,7 @@ AUTO_CANDIDATE_CLASSES = (
     "waiver_applicability",
     "corpus_lookup",
     "coverage_check",
+    "approved_merge",
 )
 NEVER_AUTO_CLASSES = (
     "scope_change",
@@ -191,7 +192,8 @@ POLICY_CLASS = {
     "release-decision": "release",
     "membership-or-registry": "registry",
     "coverage-blindness": "coverage_check",
-    "production-code-authority": "scope_change",
+    "production-code-authority": "approved_merge",
+    "pr-review-merge": "approved_merge",
     "git-ancestry": "ancestry",
     "ticket-status": "ticket_status",
     "annotation-coverage": "waiver_applicability",
@@ -336,6 +338,7 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
             r"\b(?:merge|land|change|modify|edit|patch|write|deploy|ship)\w*\b",
             re.I | re.S,
         ),
+        "coverage_blindness",
     ),
     PolicyRule(
         "pr-review-merge",
@@ -345,6 +348,7 @@ POLICY_TABLE: tuple[PolicyRule, ...] = (
             r"|\b(?:PR|pull request)\b.{0,80}\b(?:approve|review|merge|land)\w*\b",
             re.I | re.S,
         ),
+        "coverage_blindness",
     ),
     PolicyRule(
         "git-ancestry",
@@ -5563,7 +5567,10 @@ def resolve_config(
         # Preserve the pre-answering behavior for existing configurations:
         # drafts remain visible, but no answer is sent without explicit opt-in.
         "answering_mode": "assist",
-        "answer_scope": {name: "escalate" for name in ANSWER_CLASSES},
+        "answer_scope": {
+            name: "auto" if name == "approved_merge" else "escalate"
+            for name in ANSWER_CLASSES
+        },
         "required_evidence_kinds": list(CITABLE_EVIDENCE_KINDS),
         "ceilings": {
             "per_hour": default_hour,
@@ -5727,20 +5734,31 @@ def resolve_config(
 
 
 def classify_question(message: str, kind: str = "information") -> Classification:
-    # Kind is an authority boundary, not a hint.  Fail closed before inspecting
-    # content so a mechanical substring cannot launder a human-only request.
-    if kind in {"approval", "decision", "deliverable"}:
-        return Classification(Outcome.ESCALATE, f"question-kind:{kind}")
+    human_only_kind = kind in {"approval", "decision", "deliverable"}
+    active_authority_kind = kind in {"approval", "decision"}
     mechanical_signal: PolicyRule | None = None
     for rule in POLICY_TABLE:
         if not rule.pattern.search(message):
             continue
         if rule.outcome is Outcome.ESCALATE:
+            if human_only_kind and not (
+                active_authority_kind
+                and rule.name in {"production-code-authority", "pr-review-merge"}
+            ):
+                return Classification(Outcome.ESCALATE, f"question-kind:{kind}")
             return Classification(rule.outcome, rule.name, rule.evaluator)
+        if human_only_kind:
+            mechanical_signal = mechanical_signal or rule
+            continue
         full_request = MECHANICAL_REQUEST_PATTERNS.get(rule.name)
         if full_request is not None and full_request.fullmatch(message):
             return Classification(rule.outcome, rule.name, rule.evaluator)
         mechanical_signal = mechanical_signal or rule
+    # Production and PR merge authority rules above remain escalation-first but
+    # carry a fail-closed evaluator.  Every other human-only request stops here,
+    # even if it contained an otherwise mechanical lookup.
+    if human_only_kind:
+        return Classification(Outcome.ESCALATE, f"question-kind:{kind}")
     if mechanical_signal is not None:
         return Classification(Outcome.ESCALATE, "mixed-or-unsupported-request")
     return Classification(Outcome.UNKNOWN, "no-confident-policy-match")
@@ -6071,6 +6089,144 @@ def _submission_evidence(ticket: Mapping[str, Any]) -> tuple[list[str], str]:
     return changed, outputs
 
 
+def _latest_ticket_record(ticket: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    direct = ticket.get(f"latest_{'submission' if name == 'submission_history' else 'verdict'}")
+    if isinstance(direct, Mapping):
+        return direct
+    history = ticket.get(name, [])
+    if isinstance(history, list) and history and isinstance(history[-1], Mapping):
+        return history[-1]
+    return {}
+
+
+def _approved_submission_sha(ticket: Mapping[str, Any]) -> tuple[str | None, str]:
+    submission = _latest_ticket_record(ticket, "submission_history")
+    candidates = {
+        str(submission.get(name, "")).lower()
+        for name in ("candidate_sha", "commit_sha", "sha")
+        if re.fullmatch(r"[0-9a-fA-F]{40}", str(submission.get(name, "")))
+    }
+    notes = submission.get("notes", ticket.get("notes", ""))
+    if isinstance(notes, str):
+        candidates.update(
+            match.lower()
+            for match in re.findall(
+                r"(?m)^branch_and_commit:\s*[^\s@]+@([0-9a-fA-F]{40})\s*$",
+                notes,
+            )
+        )
+    if len(candidates) != 1:
+        return None, "submission_candidate_missing_or_ambiguous"
+    return next(iter(candidates)), "approved_submission"
+
+
+async def _approved_merge(
+    question: Mapping[str, Any], source: EvidenceSource, repo: Path
+) -> Evidence:
+    message = str(question.get("message", ""))
+    prefix = r"\s*(?:(?:may|can|could|should)\s+(?:I|we|the butler)\s+|please\s+)?"
+    suffix = (
+        r"(?:\s+(?:from|for|on)\s+(?P<ticket>TK-[0-9A-Za-z-]+))?"
+        r"(?:\s+(?:now|into\s+(?:main|origin/main)))?\s*[?.]?\s*"
+    )
+    request = re.fullmatch(
+        prefix
+        + r"(?:merge|land)\s+(?:(?:the\s+)?approved\s+)?"
+        + r"(?:(?:commit|sha)\s+)?(?P<sha>[0-9a-fA-F]{40})"
+        + suffix,
+        message,
+        re.I,
+    )
+    if request is None:
+        request = re.fullmatch(
+            prefix
+            + r"(?:approve|review|merge|land)\s+(?:PR|pull\s+request)\s+#?[0-9]+\s+"
+            r"(?:at\s+)?(?:(?:the\s+)?approved\s+)?(?:(?:commit|sha)\s+)?"
+            r"(?P<sha>[0-9a-fA-F]{40})"
+            + suffix,
+            message,
+            re.I,
+        )
+    target = (
+        str(request.group("ticket"))
+        if request is not None and request.group("ticket")
+        else str(question.get("ticket_id", ""))
+    )
+    if request is None or not target:
+        return Evidence(
+            kind="policy",
+            source="policy_table:production-code-authority",
+            detail="reason=exact_ticket_and_full_sha_required",
+            answer="Would escalate: merge authority requires one exact ticket and full SHA.",
+            outcome=Outcome.ESCALATE,
+        )
+    requested_sha = str(request.group("sha")).lower()
+    payload = await source.ticket_get(
+        target, board_id=_authoritative_question_board_id(question)
+    )
+    ticket = payload.get("ticket", payload)
+    if not isinstance(ticket, Mapping):
+        raise ValueError(f"ticket {target} is unreadable")
+    approved_sha, reason = _approved_submission_sha(ticket)
+    submission = _latest_ticket_record(ticket, "submission_history")
+    review = _latest_ticket_record(ticket, "review_history")
+    verdict = str(review.get("verdict", ticket.get("review_verdict", ""))).lower()
+    review_status = str(review.get("status_to", "")).lower()
+    submission_submitter = str(submission.get("submitted_by_principal_id", ""))
+    review_submitter = str(review.get("submitted_by_principal_id", ""))
+    reviewer = str(
+        review.get(
+            "reviewed_by_principal_id", ticket.get("reviewed_by_principal_id", "")
+        )
+    )
+    independent = bool(
+        submission_submitter
+        and review_submitter == submission_submitter
+        and reviewer
+        and submission_submitter != reviewer
+    )
+    approved = bool(
+        ticket.get("status") == "closed"
+        and verdict == "approve"
+        and review_status == "closed"
+        and independent
+        and approved_sha == requested_sha
+    )
+    detail = {
+        "ticket_id": target,
+        "status": ticket.get("status"),
+        "verdict": verdict or None,
+        "review_status": review_status or None,
+        "requested_sha": requested_sha,
+        "approved_sha": approved_sha,
+        "independent_review": independent,
+        "reason": "approved" if approved else reason,
+    }
+    if not approved:
+        return Evidence(
+            kind="approved_submission",
+            source=f"Central ticket_get({target}).latest_submission + latest_verdict",
+            detail=json.dumps(detail, sort_keys=True, separators=(",", ":")),
+            answer="Would escalate: the exact SHA lacks a current independent approval.",
+            outcome=Outcome.ESCALATE,
+        )
+    resolved = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", f"{requested_sha}^{{commit}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if resolved.returncode != 0 or resolved.stdout.strip().lower() != requested_sha:
+        raise ValueError("the approved commit is unavailable in the configured repository")
+    return Evidence(
+        kind="approved_submission",
+        source=f"Central ticket_get({target}).latest_submission + latest_verdict",
+        detail=json.dumps(detail, sort_keys=True, separators=(",", ":")),
+        answer=f"{requested_sha} is independently approved on {target}; active merge may proceed.",
+        outcome=Outcome.MECHANICAL,
+    )
+
+
 def _manifest_coverage(repo: Path, changed: Sequence[str]) -> dict[str, tuple[str, ...]]:
     manifest_path = repo / "tools" / "ci_manifest.py"
     if not manifest_path.is_file():
@@ -6194,7 +6350,33 @@ async def evaluate_mechanical(
     ticket_id = str(question.get("ticket_id", ""))
     board_id = _authoritative_question_board_id(question)
     if classification.evaluator == "coverage_blindness":
-        return await _coverage_blindness(question, source, repo)
+        if classification.rule not in {
+            "production-code-authority",
+            "pr-review-merge",
+        }:
+            return await _coverage_blindness(question, source, repo)
+        authority = await _approved_merge(question, source, repo)
+        if authority.outcome is not Outcome.MECHANICAL:
+            return authority
+        coverage = await _coverage_blindness(question, source, repo)
+        if coverage.outcome is not Outcome.MECHANICAL:
+            return coverage
+        return Evidence(
+            kind="manifest_coverage",
+            source=f"{authority.source}; {coverage.source}",
+            detail=json.dumps(
+                {
+                    "approval": authority.detail,
+                    "coverage": coverage.detail,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            answer=(
+                f"{authority.answer} Required affected-suite evidence is complete."
+            ),
+            outcome=Outcome.MECHANICAL,
+        )
     if classification.evaluator == "git_ancestry":
         sha = _identifier(r"(?<![0-9a-f])[0-9a-f]{7,40}(?![0-9a-f])", message)
         if sha is None:
@@ -7250,6 +7432,17 @@ def decorate_finding(
     configured_action = config.answer_scope.get(answer_class, "escalate")
     evidence_kind = str(result.get("evidence_kind", ""))
     evidence_allowed = evidence_kind in config.required_evidence_kinds
+    approved_merge = bool(
+        answer_class == "approved_merge"
+        and evidence_kind == "manifest_coverage"
+        and result.get("verdict") == Outcome.MECHANICAL.value
+        and config.runtime_authorized
+    )
+    if approved_merge:
+        # Active runtime authority plus exact, independently reviewed product
+        # evidence is the complete bounded grant.  It does not authorize a
+        # different SHA, an unreviewed resubmission, or any release action.
+        evidence_allowed = True
     result["configured_action"] = configured_action
     result["auto_eligible"] = bool(
         result.get("verdict") == Outcome.MECHANICAL.value

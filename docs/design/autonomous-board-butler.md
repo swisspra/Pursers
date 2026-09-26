@@ -262,7 +262,8 @@ other boards.
 | Start/stop approved seat process | request | request | never | typed request only | never | command only |
 | Retire idle Butler-managed seat | authorize | request | never | stop only | never | command only |
 | Answer eligible information question | yes | policy-authorized | draft only | never | data only | observe/veto |
-| Work/review/approve/PR/merge/tag/publish/release | separate authorized roles | never | never | never | never | never |
+| Answer exact-SHA merge authorization | yes | active mode + independent exact-SHA approval | never | never | evidence only | observe/veto |
+| Execute work/review/approve/PR/merge/tag/publish/release | separate authorized roles | never | never | never | never | never |
 | Invoke connector tool/resource | configure | exact allowlist | propose only | never | serve only | configure/observe |
 | Engage kill switch | yes | policy breach only | never | obey | never | command |
 | Clear kill or auto-demotion | yes | never | never | never | never | command with human authority |
@@ -282,9 +283,14 @@ other boards inherit no such authority.
 
 Question answering is opt-in by question kind. Only `information` questions
 covered by a deterministic rule and complete cited evidence can be answered.
-Decision, deliverable, approval, waiver, scope, version, release, merge,
-membership, registry, secret, and ambiguous questions always escalate. Butler
-cannot answer a question it asked or one concerning approval of its own work.
+Deliverable, waiver, scope, version, release, membership, registry, secret, and
+ambiguous questions always escalate. A bounded merge-authority request is the
+sole approval/decision exception: active autonomous mode may answer only when
+the complete request names one full SHA, that SHA matches the latest submission
+on a closed ticket with a current independent approval, the commit exists in the
+configured checkout, and every suite covering the submitted paths has passing
+evidence. Butler never runs the merge itself. It cannot answer a question it
+asked or one concerning approval of its own work.
 
 The direct API and ACP adapters implement the same strict
 `autonomous_butler_model_v1` request/result envelope. A request binds its ID,
@@ -325,8 +331,13 @@ binding internally and is the ownership boundary. The binding, bearer token,
 provider key, and private paths never enter the model packet or durable audit.
 Mechanical admission requires one allowlisted grammar to consume the complete
 request. A recognized lookup plus any residual clause escalates, as do all
-human-only credential, authority, budget, membership, registry, review, merge,
-publish, and release categories.
+human-only credential, authority, budget, membership, registry, review,
+publish, and release categories. Merge requests—including approval and decision
+questions—also escalate unless one allowlisted complete grammar names a full SHA
+whose latest ticket submission is closed with an independent approval, the
+commit exists locally, every covering suite has passing evidence, and the Butler
+is in authorized active autonomous mode. Butler answers that bounded authority
+check; it never executes Git.
 On restart the bounded refresh replays open or accepted questions. A question
 accepted by the same Butler identity is first returned to `open` through
 Central's authenticated, accepting-owner-only, idempotent `release` action.

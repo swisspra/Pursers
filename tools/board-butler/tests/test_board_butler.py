@@ -207,6 +207,59 @@ def question(message: str, *, kind: str = "information") -> dict[str, str]:
     }
 
 
+def approved_merge_ticket(candidate: str) -> dict[str, Any]:
+    return {
+        "ticket_id": "TK-approved",
+        "status": "closed",
+        "submission_history": [
+            {
+                "files_changed": ["tools/board-butler/board_butler.py"],
+                "submitted_by_principal_id": "PR-worker",
+                "notes": (
+                    "branch_and_commit: codex/TK-approved@"
+                    f"{candidate}\n"
+                    "test-output: board-butler 252 passed; "
+                    "release-tools 443 passed\n"
+                )
+            }
+        ],
+        "review_history": [
+            {
+                "verdict": "approve",
+                "status_to": "closed",
+                "submitted_by_principal_id": "PR-worker",
+                "reviewed_by_principal_id": "PR-reviewer",
+            }
+        ],
+    }
+
+
+def commit_fixture(repo: Path, content: str = "approved\n") -> str:
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    tools = repo / "tools"
+    tools.mkdir(exist_ok=True)
+    (tools / "ci_manifest.py").symlink_to(
+        REPOSITORY_ROOT / "tools" / "ci_manifest.py"
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test"], check=True
+    )
+    tracked = repo / "tracked.txt"
+    tracked.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], check=True)
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
     token = tmp_path / "token.jwt"
     token.write_text("opaque", encoding="utf-8")
@@ -621,13 +674,13 @@ def test_openai_chat_adapter_refuses_cross_origin_redirect() -> None:
             "Is abcdef1 merged into main, and may I merge it now?",
             "decision",
             "ESCALATE",
-            "question-kind:decision",
+            "production-code-authority",
         ),
         (
             "Is abcdef1 contained in origin/main, and should I change production code to land it?",
             "decision",
             "ESCALATE",
-            "question-kind:decision",
+            "production-code-authority",
         ),
         ("What is the status of TK-123?", "information", "MECHANICAL", "ticket-status"),
         (
@@ -1014,9 +1067,256 @@ def test_authority_bearing_decision_short_circuits_ancestry_evaluator(
     )
 
     assert finding["verdict"] == "ESCALATE"
-    assert finding["policy_rule"] == "question-kind:decision"
-    assert finding["evidence"].startswith("source=policy_table:question-kind:decision")
+    assert finding["policy_rule"] == "production-code-authority"
+    assert finding["evidence"].startswith(
+        "source=policy_table:production-code-authority"
+    )
     assert "git merge-base" not in finding["evidence"]
+
+
+@pytest.mark.parametrize("kind", ["information", "approval", "decision"])
+def test_active_butler_answers_for_exact_independently_approved_sha(
+    tmp_path: Path, kind: str
+) -> None:
+    options = args(tmp_path)
+    candidate = commit_fixture(options.repo)
+    options.runtime_mode = "active"
+    options.act_on_board = ["pursers"]
+    backend = AutonomousBackend()
+    backend.tickets["TK-approved"] = approved_merge_ticket(candidate)
+    item = question(f"Please merge {candidate} from TK-approved.", kind=kind)
+    backend.questions[item["question_id"]] = {
+        **item,
+        "state": "open",
+        "accepted_by": None,
+    }
+
+    finding = asyncio.run(butler.process_question(backend, item, options, NOW))
+
+    assert finding["verdict"] == "MECHANICAL"
+    assert finding["policy_rule"] == "production-code-authority"
+    assert finding["answer_class"] == "approved_merge"
+    assert finding["evidence_kind"] == "manifest_coverage"
+    assert finding["configured_action"] == "auto"
+    assert finding["auto_eligible"] is True
+    assert finding["answer_status"] == "answered"
+    assert backend.answer_calls == 1
+    assert backend.questions[item["question_id"]]["answer"] == (
+        f"{candidate} is independently approved on TK-approved; "
+        "active merge may proceed. Required affected-suite evidence is complete."
+    )
+
+
+@pytest.mark.parametrize("kind", ["approval", "decision"])
+def test_active_butler_answers_pr_merge_question_with_same_evidence_floor(
+    tmp_path: Path, kind: str
+) -> None:
+    options = args(tmp_path)
+    candidate = commit_fixture(options.repo)
+    options.runtime_mode = "active"
+    options.act_on_board = ["pursers"]
+    backend = AutonomousBackend()
+    backend.tickets["TK-approved"] = approved_merge_ticket(candidate)
+    item = question(
+        f"Merge PR #41 at {candidate} from TK-approved.", kind=kind
+    )
+    backend.questions[item["question_id"]] = {
+        **item,
+        "state": "open",
+        "accepted_by": None,
+    }
+
+    finding = asyncio.run(butler.process_question(backend, item, options, NOW))
+
+    assert finding["verdict"] == "MECHANICAL"
+    assert finding["policy_rule"] == "pr-review-merge"
+    assert finding["answer_class"] == "approved_merge"
+    assert finding["evidence_kind"] == "manifest_coverage"
+    assert finding["auto_eligible"] is True
+    assert finding["answer_status"] == "answered"
+    assert backend.answer_calls == 1
+
+
+def test_approved_merge_remains_non_autonomous_without_active_runtime(
+    tmp_path: Path,
+) -> None:
+    options = args(tmp_path)
+    candidate = commit_fixture(options.repo)
+    backend = AutonomousBackend()
+    backend.tickets["TK-approved"] = approved_merge_ticket(candidate)
+    item = question(f"Please land {candidate} from TK-approved.")
+    backend.questions[item["question_id"]] = {
+        **item,
+        "state": "open",
+        "accepted_by": None,
+    }
+
+    finding = asyncio.run(butler.process_question(backend, item, options, NOW))
+
+    assert finding["verdict"] == "MECHANICAL"
+    assert finding["configured_action"] == "auto"
+    assert finding["auto_eligible"] is False
+    assert backend.answer_calls == 0
+
+
+def test_active_config_can_keep_approved_merge_escalation_only(
+    tmp_path: Path,
+) -> None:
+    class EscalatingBackend(AutonomousBackend):
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            document = dict(await super().coordinator_config())
+            board_butler = dict(document["board_butler"])
+            global_settings = dict(board_butler["global"])
+            global_settings["answer_scope"] = {"approved_merge": "escalate"}
+            board_butler["global"] = global_settings
+            document["board_butler"] = board_butler
+            return document
+
+    options = args(tmp_path)
+    candidate = commit_fixture(options.repo)
+    options.runtime_mode = "active"
+    options.act_on_board = ["pursers"]
+    backend = EscalatingBackend()
+    backend.tickets["TK-approved"] = approved_merge_ticket(candidate)
+    item = question(f"Please merge {candidate} from TK-approved.")
+    backend.questions[item["question_id"]] = {
+        **item,
+        "state": "open",
+        "accepted_by": None,
+    }
+
+    finding = asyncio.run(butler.process_question(backend, item, options, NOW))
+
+    assert finding["configured_action"] == "escalate"
+    assert finding["auto_eligible"] is False
+    assert backend.answer_calls == 0
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda ticket, _candidate: ticket.update(status="submitted"),
+        lambda ticket, _candidate: ticket["review_history"][-1].update(
+            verdict="reject"
+        ),
+        lambda ticket, _candidate: ticket["review_history"][-1].update(
+            reviewed_by_principal_id="PR-worker"
+        ),
+        lambda ticket, _candidate: ticket["review_history"][-1].update(
+            submitted_by_principal_id="PR-stale-worker"
+        ),
+        lambda ticket, _candidate: ticket["review_history"][-1].update(
+            status_to="submitted"
+        ),
+        lambda ticket, _candidate: ticket["submission_history"][-1].update(
+            notes="branch_and_commit: codex/TK-approved@" + "b" * 40
+        ),
+    ],
+)
+def test_unreviewed_or_mismatched_merge_authority_fails_closed(
+    tmp_path: Path, mutate: Any
+) -> None:
+    options = args(tmp_path)
+    candidate = commit_fixture(options.repo)
+    ticket = approved_merge_ticket(candidate)
+    mutate(ticket, candidate)
+    source = Source()
+    source.tickets["TK-approved"] = ticket
+
+    finding = asyncio.run(
+        butler.make_finding(
+            question(f"Please merge {candidate} from TK-approved."),
+            source,
+            options.repo,
+            "origin/main",
+            NOW,
+        )
+    )
+
+    assert finding["verdict"] == "ESCALATE"
+    assert finding["policy_rule"] == "production-code-authority"
+    assert "lacks a current independent approval" in finding["message"]
+
+
+def test_approved_sha_with_incomplete_covering_suite_still_escalates(
+    tmp_path: Path,
+) -> None:
+    options = args(tmp_path)
+    candidate = commit_fixture(options.repo)
+    options.runtime_mode = "active"
+    options.act_on_board = ["pursers"]
+    backend = AutonomousBackend()
+    ticket = approved_merge_ticket(candidate)
+    submission = ticket["submission_history"][-1]
+    submission["notes"] = str(submission["notes"]).replace(
+        "release-tools 443 passed", "release-tools 1 failed"
+    )
+    backend.tickets["TK-approved"] = ticket
+    item = question(
+        f"Please merge {candidate} from TK-approved.", kind="approval"
+    )
+    backend.questions[item["question_id"]] = {
+        **item,
+        "state": "open",
+        "accepted_by": None,
+    }
+
+    finding = asyncio.run(butler.process_question(backend, item, options, NOW))
+
+    assert finding["verdict"] == "ESCALATE"
+    assert finding["policy_rule"] == "production-code-authority"
+    assert "covering suite evidence is incomplete" in finding["message"]
+    assert "tools/board-butler/board_butler.py -> release-tools" in finding["message"]
+    assert finding["auto_eligible"] is False
+    assert backend.answer_calls == 0
+
+
+def test_merge_authority_requires_full_sha_clean_request_and_supported_kind(
+    tmp_path: Path,
+) -> None:
+    options = args(tmp_path)
+    candidate = commit_fixture(options.repo)
+    source = Source()
+    source.tickets["TK-approved"] = approved_merge_ticket(candidate)
+
+    abbreviated = asyncio.run(
+        butler.make_finding(
+            question(f"Please merge {candidate[:12]} from TK-approved."),
+            source,
+            options.repo,
+            "origin/main",
+            NOW,
+        )
+    )
+    deliverable = asyncio.run(
+        butler.make_finding(
+            question(
+                f"Please merge {candidate} from TK-approved.", kind="deliverable"
+            ),
+            source,
+            options.repo,
+            "origin/main",
+            NOW,
+        )
+    )
+    residual = asyncio.run(
+        butler.make_finding(
+            question(
+                f"Please merge {candidate} from TK-approved and deploy it."
+            ),
+            source,
+            options.repo,
+            "origin/main",
+            NOW,
+        )
+    )
+
+    assert abbreviated["verdict"] == "ESCALATE"
+    assert abbreviated["policy_rule"] == "production-code-authority"
+    assert deliverable["verdict"] == "ESCALATE"
+    assert deliverable["policy_rule"] == "question-kind:deliverable"
+    assert residual["verdict"] == "ESCALATE"
+    assert residual["policy_rule"] == "production-code-authority"
 
 
 def test_real_tk_1ec_submission_escalates_when_covering_aionui_suite_failed() -> None:
