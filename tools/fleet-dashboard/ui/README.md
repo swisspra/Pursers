@@ -18,6 +18,10 @@ route through `FleetViewModules` and declares the UI surfaces it owns:
 - `activity.js`: recent and autonomous-butler activity
 - `settings.js`: seat, dispatch, release, project, and door controls
 
-Route modules may call shared renderers from `app.js`; cross-route state and API logic
-stay in `app.js`. Assets use fixed same-origin URLs with strong ETags and mandatory
-revalidation, so source checkouts cannot serve stale UI bytes after an update.
+Route modules own their renderer and route-private markup. `app.js` passes an explicit,
+read-only render context containing shared state snapshots and bounded utilities;
+cross-route state, API/refresh machinery, and event binding stay in `app.js`. A route
+module must not delegate to a route renderer on `globalThis` or in `app.js`.
+
+Assets use fixed same-origin URLs with strong ETags and mandatory revalidation, so
+source checkouts cannot serve stale UI bytes after an update.

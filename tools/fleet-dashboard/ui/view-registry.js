@@ -11,10 +11,13 @@
       views.set(view.id, Object.freeze({...view, owns: Object.freeze([...(view.owns || [])])}));
     },
     has(id) { return views.has(id); },
-    render(id) {
+    render(id, context) {
       const view = views.get(id);
       if (!view) throw new Error(`unknown Fleet view module: ${id}`);
-      return view.render();
+      if (!context || typeof context !== 'object') {
+        throw new TypeError('Fleet view modules require a shared context');
+      }
+      return view.render(context);
     },
     describe() { return [...views.values()].map(({id, owns}) => ({id, owns})); }
   });

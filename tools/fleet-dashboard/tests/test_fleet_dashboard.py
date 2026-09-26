@@ -75,6 +75,38 @@ def test_ui_shell_loads_packaged_assets_and_route_modules() -> None:
         assert f'<script src="/ui/views/{route}.js"></script>' in dashboard.HTML_SHELL
 
 
+def test_primary_route_modules_own_renderers_and_receive_shared_context() -> None:
+    app = dashboard.UI_ASSETS["/ui/assets/app.js"][1].decode("utf-8")
+    registry = dashboard.UI_ASSETS["/ui/view-registry.js"][1].decode("utf-8")
+    owned_renderers = {
+        "home": ("function renderWarmHome()",),
+        "projects": ("function renderWarmProjects()",),
+        "work": ("function renderWarmWork()",),
+        "team": ("function renderAgentsHub()", "function renderAutonomousTeam()"),
+        "approvals": ("function renderWarmApprovals()",),
+        "activity": (
+            "function renderWarmActivity()",
+            "function renderAutonomousActivity()",
+        ),
+        "settings": (
+            "function renderWarmSettings()",
+            "function renderButlerSettings()",
+            "function renderAutonomousSettings()",
+        ),
+    }
+
+    for route, renderers in owned_renderers.items():
+        source = dashboard.UI_ASSETS[f"/ui/views/{route}.js"][1].decode("utf-8")
+        assert "render(context)" in source
+        assert "globalThis.render" not in source
+        for renderer in renderers:
+            assert renderer in source
+            assert renderer not in app
+
+    assert "view.render(context)" in registry
+    assert "FleetViewModules.render(kind,fleetViewContext())" in app
+
+
 def test_ui_assets_are_packaged_with_etag_revalidation() -> None:
     class Cache:
         pass
@@ -10135,6 +10167,7 @@ def test_agents_hub_keeps_duplicate_names_distinct_and_exposes_inactive_drawer()
             source("function liveAgentCard("),
             source("function renderGuide("),
             source("function inactiveAgentDrawer("),
+            source("function agentPoolScope("),
             source("function renderAgentsHub("),
             "const managedControls=()=>'';",
             "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
@@ -10223,6 +10256,7 @@ def test_agents_hub_keeps_same_principal_seats_distinct_and_filters_only_stale()
             source("function agentCapabilitySummary("),
             source("function liveAgentCard("),
             source("function inactiveAgentDrawer("),
+            source("function agentPoolScope("),
             source("function renderAgentsHub("),
             "const renderGuide=()=>'';",
             "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
@@ -10306,6 +10340,7 @@ def test_agents_hub_does_not_attach_unidentified_worker_to_duplicate_live_names(
             source("function agentCapabilitySummary("),
             source("function liveAgentCard("),
             source("function inactiveAgentDrawer("),
+            source("function agentPoolScope("),
             source("function renderAgentsHub("),
             "const renderGuide=()=>'';",
             "const managedControls=()=>'<span>AMBIGUOUS-CONTROLS</span>';",
@@ -10375,6 +10410,7 @@ def test_agents_hub_includes_unrepresented_managed_worker_as_offline() -> None:
             source("function agentCapabilitySummary("),
             source("function liveAgentCard("),
             source("function inactiveAgentDrawer("),
+            source("function agentPoolScope("),
             source("function renderAgentsHub("),
             "const renderGuide=()=>'';",
             "const managedControls=()=>'<span>MANAGED-CONTROLS</span>';",
