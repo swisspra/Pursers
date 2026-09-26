@@ -752,6 +752,69 @@ def test_launchd_adapter_uses_vectors_and_detects_plist_drift(tmp_path: Path) ->
     assert not drifted.identity_verified
 
 
+def test_launchd_adapter_start_stop_start_reuses_loaded_job(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    loaded = False
+    running = False
+    helper = tmp_path / "launchd_env_exec.py"
+    helper.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    credential = tmp_path / "worker-a.env"
+    credential.write_text("TOKEN=private\n", encoding="utf-8")
+    credential.chmod(0o600)
+    repository = tmp_path / "repository"
+    seat = tmp_path / "seat"
+    repository.mkdir()
+    seat.mkdir()
+    template = executor.SeatTemplate.from_record(
+        "worker-standard", template_record(repository, seat)
+    )
+
+    def runner(command: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal loaded, running
+        calls.append(command)
+        operation = command[1]
+        if operation == "print":
+            if not loaded:
+                return subprocess.CompletedProcess(command, 113, "", "not found")
+            state = "running" if running else "stopped"
+            pid = "pid = 321\n" if running else ""
+            output = f"state = {state}\n{pid}program = {helper.resolve()}\n"
+            return subprocess.CompletedProcess(command, 0, output, "")
+        if operation == "bootstrap":
+            if loaded:
+                return subprocess.CompletedProcess(command, 37, "", "already loaded")
+            loaded = True
+        elif operation == "kickstart":
+            if not loaded:
+                return subprocess.CompletedProcess(command, 113, "", "not loaded")
+            running = True
+        elif operation == "kill":
+            running = False
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    adapter = executor.LaunchdUserAdapter(
+        tmp_path / "LaunchAgents",
+        tmp_path / "drain",
+        {"credential.worker-a": credential},
+        runner=runner,
+        uid=501,
+        helper_path=helper,
+    )
+    adapter.instantiate("worker-a", template)
+    adapter.start("worker-a", template)
+    first = adapter.inspect("worker-a", template)
+    adapter.stop("worker-a", template)
+    stopped = adapter.inspect("worker-a", template)
+    adapter.instantiate("worker-a", template)
+    adapter.start("worker-a", template)
+    second = adapter.inspect("worker-a", template)
+
+    assert first.ready and first.identity_verified
+    assert stopped == executor.ServiceObservation(True, False, False, True)
+    assert second.ready and second.identity_verified
+    assert sum(command[1] == "bootstrap" for command in calls) == 1
+
+
 def test_launchd_adapter_fail_closed_and_platform_selection(
     runtime: dict[str, Any], tmp_path: Path
 ) -> None:
