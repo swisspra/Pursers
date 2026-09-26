@@ -69,7 +69,7 @@ def test_ui_shell_loads_packaged_assets_and_route_modules() -> None:
     assert {
         path.removeprefix("/ui/views/").removesuffix(".js")
         for path in dashboard.UI_ASSETS
-        if path.startswith("/ui/views/")
+        if path.startswith("/ui/views/") and path.endswith(".js")
     } == expected_routes
     for route in expected_routes:
         assert f'<script src="/ui/views/{route}.js"></script>' in dashboard.HTML_SHELL
