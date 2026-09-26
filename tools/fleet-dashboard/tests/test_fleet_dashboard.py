@@ -51,6 +51,73 @@ sys.path.insert(0, str(CENTRAL_SRC))
 import central  # noqa: E402
 
 
+def test_ui_shell_loads_packaged_assets_and_route_modules() -> None:
+    assert "<style>" not in dashboard.HTML_SHELL
+    assert "<script>" not in dashboard.HTML_SHELL
+    assert '<link rel="stylesheet" href="/ui/assets/fleet.css">' in dashboard.HTML_SHELL
+    assert '<script src="/ui/assets/app.js"></script>' in dashboard.HTML_SHELL
+
+    expected_routes = {
+        "home",
+        "projects",
+        "work",
+        "team",
+        "approvals",
+        "activity",
+        "settings",
+    }
+    assert {
+        path.removeprefix("/ui/views/").removesuffix(".js")
+        for path in dashboard.UI_ASSETS
+        if path.startswith("/ui/views/")
+    } == expected_routes
+    for route in expected_routes:
+        assert f'<script src="/ui/views/{route}.js"></script>' in dashboard.HTML_SHELL
+
+
+def test_ui_assets_are_packaged_with_etag_revalidation() -> None:
+    class Cache:
+        pass
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    root = f"http://127.0.0.1:{server.server_port}"
+    try:
+        for route, (content_type, expected_body, expected_etag) in dashboard.UI_ASSETS.items():
+            with urllib.request.urlopen(root + route) as response:
+                assert response.status == 200
+                assert response.headers["Content-Type"] == content_type
+                assert response.headers["Cache-Control"] == (
+                    "public, max-age=0, must-revalidate"
+                )
+                assert response.headers["ETag"] == expected_etag
+                assert response.read() == expected_body
+
+            request = urllib.request.Request(
+                root + route, headers={"If-None-Match": expected_etag}
+            )
+            with pytest.raises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(request)
+            assert caught.value.code == 304
+            assert caught.value.headers["ETag"] == expected_etag
+            assert caught.value.read() == b""
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_ui_asset_bytes_match_packaged_files() -> None:
+    for route, (_content_type, body, etag) in dashboard.UI_ASSETS.items():
+        _declared_type, path = dashboard.UI_ASSET_PATHS[route]
+        assert path.is_file()
+        assert body == path.read_bytes()
+        assert etag == f'"{hashlib.sha256(body).hexdigest()}"'
+
+
 def registry(projects: dict) -> dict:
     return {"state": {"value": json.dumps({"schema_version": 1, "projects": projects})}}
 
@@ -11031,7 +11098,9 @@ def test_deployment_runbook_actual_verify_pipeline_and_substitution_fail_closed(
 
 
 def test_ticket_rows_expose_semantic_status_and_active_marker() -> None:
-    source = MODULE_PATH.read_text(encoding="utf-8")
+    source = (MODULE_PATH.parent / "ui" / "assets" / "app.js").read_text(
+        encoding="utf-8"
+    )
     assert 'data-ticket-status="${esc(t.status)}"' in source
     assert 'data-active-ticket-row="${[' in source
     assert "'open','claimed','in_progress','creating_report','submitted','reviewing','in_review'" in source

@@ -475,6 +475,10 @@ def test_refresh_cycles_preserve_reader_state_at_desktop_and_mobile(
     ego_browser = shutil.which("ego-browser")
     if not task_space_id or not ego_browser:
         pytest.skip("requires PURSERS_EGO_TASK_SPACE_ID and ego-browser")
+    evidence_dir = Path(
+        os.environ.get("PURSERS_BROWSER_EVIDENCE_DIR", str(tmp_path / "screenshots"))
+    )
+    evidence_dir.mkdir(parents=True, exist_ok=True)
 
     class Cache:
         def __init__(self) -> None:
@@ -658,6 +662,9 @@ for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
     for (let index=0;index<3;index+=1) await refreshFleet(2000);
     return {{route:location.hash,before,after:document.querySelector("#state").textContent,focused:document.activeElement?.getAttribute("href")||null}};
   }});
+  home.screenshot = await page.screenshot({{
+    path: {json.dumps(str(evidence_dir))} + `/fleet-home-${{viewport.width}}x${{viewport.height}}.png`
+  }});
   await page.evaluate(() => {{ location.hash="#/team"; }});
   await page.waitForFunction(() => document.querySelectorAll(".agent-card").length===35, undefined, {{timeout:10000}});
   const team = await page.evaluate(async () => {{
@@ -741,6 +748,9 @@ console.log(JSON.stringify(results));
         assert row["home"]["route"] == "#/home"
         assert row["home"]["after"] != row["home"]["before"]
         assert row["home"]["focused"] is not None
+        screenshot = Path(row["home"]["screenshot"])
+        assert screenshot.parent == evidence_dir
+        assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         assert row["team"]["route"] == "#/team"
         assert row["team"]["count"] == 35
         assert row["team"]["open"] is True
