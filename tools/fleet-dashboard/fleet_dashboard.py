@@ -8059,6 +8059,30 @@ class DashboardCache:
 
 
 UI_ROOT = Path(__file__).resolve().with_name("ui")
+PRIMARY_VIEW_NAMES = (
+    "home",
+    "projects",
+    "work",
+    "team",
+    "approvals",
+    "activity",
+    "settings",
+)
+
+
+def _route_css_asset_paths(
+    ui_root: Path = UI_ROOT,
+) -> dict[str, tuple[str, Path]]:
+    return {
+        f"/ui/views/{name}.css": (
+            "text/css; charset=utf-8",
+            ui_root / "views" / f"{name}.css",
+        )
+        for name in PRIMARY_VIEW_NAMES
+        if (ui_root / "views" / f"{name}.css").is_file()
+    }
+
+
 UI_ASSET_PATHS = {
     "/ui/assets/fleet.css": ("text/css; charset=utf-8", UI_ROOT / "assets" / "fleet.css"),
     "/ui/assets/app.js": ("text/javascript; charset=utf-8", UI_ROOT / "assets" / "app.js"),
@@ -8068,8 +8092,9 @@ UI_ASSET_PATHS = {
             "text/javascript; charset=utf-8",
             UI_ROOT / "views" / f"{name}.js",
         )
-        for name in ("home", "projects", "work", "team", "approvals", "activity", "settings")
+        for name in PRIMARY_VIEW_NAMES
     },
+    **_route_css_asset_paths(),
 }
 
 
