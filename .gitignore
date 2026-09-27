@@ -28,3 +28,4 @@ tools/wait-bridge/bridge-stats.json
 integrations/zed/pursers-mcp/target/
 CLAUDE.md
 AGENTS.md
+.zed/
