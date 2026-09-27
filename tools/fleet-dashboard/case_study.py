@@ -335,6 +335,12 @@ def _aggregate_run(
     ticket_rows = []
     ownership_intervals: list[tuple[datetime, datetime]] = []
     missing: list[str] = []
+    if released is None:
+        missing.append(f"{run_id}: required arm_released event was not observed")
+    if finished is None:
+        missing.append(f"{run_id}: required arm_finished event was not observed")
+    elif released is not None and finished < released:
+        missing.append(f"{run_id}: arm lifecycle event order is invalid")
     for ref in refs:
         key = (ref["board_id"], ref["ticket_id"])
         ticket = tickets.get(key, {})
@@ -369,6 +375,25 @@ def _aggregate_run(
             phases["submitted"],
             phases["closed"],
         )
+        required_phases = (
+            "eligible",
+            "started",
+            "submitted",
+            "review_started",
+            "closed",
+        )
+        for phase in required_phases:
+            if phases[phase] is None:
+                missing.append(
+                    f"{ref['board_id']}/{ref['ticket_id']}: "
+                    f"required {phase} lifecycle event was not observed"
+                )
+        observed_required = [phases[phase] for phase in required_phases]
+        if all(observed_required) and observed_required != sorted(observed_required):
+            missing.append(
+                f"{ref['board_id']}/{ref['ticket_id']}: "
+                "required lifecycle event order is invalid"
+            )
         if started and submitted:
             ownership_intervals.append((started, submitted))
         ticket_rows.append(
@@ -432,11 +457,19 @@ def _aggregate_run(
 
 
 def _compare(pair_id: str, runs: list[dict[str, Any]]) -> dict[str, Any]:
-    sequential = next((item for item in runs if item["arm"] == "sequential"), None)
-    parallel = next((item for item in runs if item["arm"] == "parallel"), None)
+    sequential_runs = [item for item in runs if item["arm"] == "sequential"]
+    parallel_runs = [item for item in runs if item["arm"] == "parallel"]
+    sequential = sequential_runs[0] if len(sequential_runs) == 1 else None
+    parallel = parallel_runs[0] if len(parallel_runs) == 1 else None
     reasons = []
-    if sequential is None or parallel is None:
-        reasons.append("Both sequential and parallel arms are required.")
+    if len(sequential_runs) != 1:
+        reasons.append(
+            f"Pair requires exactly one sequential arm; found {len(sequential_runs)}."
+        )
+    if len(parallel_runs) != 1:
+        reasons.append(
+            f"Pair requires exactly one parallel arm; found {len(parallel_runs)}."
+        )
     if sequential and parallel:
         if sequential["match_digest"] != parallel["match_digest"]:
             reasons.append("Arm match digests differ.")
@@ -444,8 +477,12 @@ def _compare(pair_id: str, runs: list[dict[str, Any]]) -> dict[str, Any]:
             item["template_digest"] for item in parallel["tickets"]
         ]:
             reasons.append("Ticket templates or ordering differ.")
-        if not sequential["complete"] or not parallel["complete"]:
-            reasons.append("Both arms must be complete with untruncated evidence.")
+        for label, run in (("Sequential", sequential), ("Parallel", parallel)):
+            if not run["complete"]:
+                missing = "; ".join(run["missing"]) or "unknown evidence gap"
+                reasons.append(
+                    f"{label} arm is incomplete; required evidence missing: {missing}."
+                )
     seq_seconds = sequential and sequential["wall_time"].get("seconds")
     par_seconds = parallel and parallel["wall_time"].get("seconds")
     if (

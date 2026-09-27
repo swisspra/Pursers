@@ -168,8 +168,8 @@ def test_aggregates_actual_concurrency_queue_lifecycle_and_matched_speedup() -> 
     assert all(run["cost"]["status"] == "unavailable" for run in result["runs"])
 
 
-def test_missing_review_start_and_truncated_events_disable_claims() -> None:
-    rows = _rows(truncate_parallel=True)
+def test_missing_review_start_alone_disables_speedup() -> None:
+    rows = _rows()
     rows[0]["events"] = [
         event for event in rows[0]["events"] if event["kind"] != "review_started"
     ]
@@ -180,8 +180,43 @@ def test_missing_review_start_and_truncated_events_disable_claims() -> None:
         result["runs"][0]["tickets"][0]["metrics"]["review_queue_time"]["status"]
         == "unavailable"
     )
-    assert "private-board-p: incomplete journal window" in result["runs"][1]["missing"]
+    missing = result["runs"][0]["missing"]
+    assert any("required review_started lifecycle event" in item for item in missing)
+    assert any(
+        "Sequential arm is incomplete" in item
+        for item in result["comparisons"][0]["reasons"]
+    )
     assert result["comparisons"][0]["speedup"]["status"] == "unavailable"
+
+
+def test_missing_eligibility_alone_disables_speedup() -> None:
+    manifest = _manifest()
+    manifest["runs"][0]["events"] = [
+        event
+        for event in manifest["runs"][0]["events"]
+        if event["kind"] != "ticket_eligible"
+    ]
+
+    result = case_study.aggregate_case_study(_rows(), manifest)
+
+    assert result["status"] == "incomparable"
+    missing = result["runs"][0]["missing"]
+    assert any("required eligible lifecycle event" in item for item in missing)
+    assert result["comparisons"][0]["speedup"]["status"] == "unavailable"
+
+
+def test_duplicate_arm_makes_pair_incomparable() -> None:
+    manifest = _manifest()
+    duplicate = dict(manifest["runs"][0])
+    duplicate["run_id"] = "private-sequential-run-duplicate"
+    manifest["runs"].append(duplicate)
+
+    result = case_study.aggregate_case_study(_rows(), manifest)
+
+    comparison = result["comparisons"][0]
+    assert comparison["status"] == "incomparable"
+    assert "Pair requires exactly one sequential arm; found 2." in comparison["reasons"]
+    assert comparison["speedup"]["status"] == "unavailable"
 
 
 def test_mismatched_sequential_run_never_emits_speedup() -> None:
