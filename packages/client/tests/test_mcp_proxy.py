@@ -1471,6 +1471,51 @@ async def _relay_calls_read_only_tool_on_throwaway_central(tmp_path: Path) -> No
         await relay.aclose()
 
 
+def test_relay_preserves_central_structured_error_contract(tmp_path: Path) -> None:
+    asyncio.run(_relay_preserves_central_structured_error_contract(tmp_path))
+
+
+async def _relay_preserves_central_structured_error_contract(
+    tmp_path: Path,
+) -> None:
+    central = central_module.PursersMCPServer("Typed error Central")
+
+    @central.tool(description="Read the typed board.")
+    async def board_status(board_id: str) -> dict[str, Any]:
+        return {"ok": True, "board_id": board_id}
+
+    @central.tool(description="Read one missing ticket.")
+    async def ticket_get(board_id: str, ticket_id: str) -> dict[str, Any]:
+        del board_id, ticket_id
+        raise ToolError("ticket not found")
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        async with Client(central, mode="2026-07-28", cache=None) as client:
+            yield client
+
+    token_file = tmp_path / "credential.jwt"
+    token_file.write_text("throwaway-credential", encoding="utf-8")
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="typed-board",
+        token_file=token_file,
+        connection_factory=connect,
+    )
+    try:
+        await relay.list_tools()
+        result = await relay.call_tool("ticket_get", {"ticket_id": "TK-missing"})
+    finally:
+        await relay.aclose()
+
+    assert result.is_error
+    assert result.structured_content == {
+        "schema": "pursers_tool_error_v1",
+        "code": "not_found",
+        "detail": "ticket not found",
+    }
+
+
 def test_board_prompt_matches_board_wide_counts_to_a_bounded_subset(
     tmp_path: Path,
 ) -> None:
