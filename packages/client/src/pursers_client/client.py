@@ -320,13 +320,21 @@ def expand_response_id_map(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _subscription_loss(exc: BaseException) -> SubscriptionLost | None:
-    if isinstance(exc, SubscriptionLost):
-        return exc
-    if isinstance(exc, BaseExceptionGroup):
-        for nested in exc.exceptions:
-            found = _subscription_loss(nested)
-            if found:
-                return found
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, SubscriptionLost):
+            return current
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        elif current.__context__ is not None:
+            pending.append(current.__context__)
     return None
 
 
@@ -362,16 +370,32 @@ def _instance_mismatch(exc: BaseException) -> bool:
 def _retryable_connection_error(exc: BaseException) -> bool:
     if _subscription_loss(exc):
         return True
-    if isinstance(exc, BaseExceptionGroup):
-        return any(_retryable_connection_error(item) for item in exc.exceptions)
-    module = type(exc).__module__
-    text = str(exc).lower()
+    pending = [exc]
+    seen: set[int] = set()
     transport_words = ("connection", "stream ended", "disconnected", "refused")
-    return (
-        module.startswith(("httpx2", "httpcore2"))
-        or (module.startswith("mcp") and any(word in text for word in transport_words))
-        or "connection closed" in text
-    )
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        module = type(current).__module__
+        text = str(current).lower()
+        if (
+            module.startswith(("httpx2", "httpcore2"))
+            or (
+                module.startswith("mcp")
+                and any(word in text for word in transport_words)
+            )
+            or "connection closed" in text
+        ):
+            return True
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        elif current.__context__ is not None:
+            pending.append(current.__context__)
+    return False
 
 
 def _truncate_ticket_submit_notes(

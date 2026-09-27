@@ -1339,6 +1339,91 @@ async def test_fifty_reconnects_reuse_one_http_pool_and_close_each_transport(
 
 
 @pytest.mark.anyio
+async def test_events_reconnect_when_mcp_error_wraps_transport_failure(
+    monkeypatch,
+) -> None:
+    import pursers_client.client as client_module
+
+    board = joined_event_client()
+    board.reconnect_delay_s = 0
+    journal_uri = "board://board-multi-name/journal"
+    second_handshake = asyncio.Event()
+    hold = asyncio.Event()
+    session_count = 0
+
+    class SyntheticDisconnect(RuntimeError):
+        pass
+
+    SyntheticDisconnect.__module__ = "httpx2"
+
+    class WrappedMCPError(RuntimeError):
+        pass
+
+    WrappedMCPError.__module__ = "mcp.shared.exceptions"
+
+    @asynccontextmanager
+    async def context(value):
+        yield value
+
+    class Subscription:
+        honored = SimpleNamespace(resource_subscriptions=[journal_uri])
+
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.index == 1:
+                try:
+                    raise SyntheticDisconnect("all connection attempts failed")
+                except SyntheticDisconnect:
+                    raise WrappedMCPError("server returned an error response")
+            second_handshake.set()
+            await hold.wait()
+            raise StopAsyncIteration
+
+    class Session:
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+        def listen(self, **_arguments):
+            return context(Subscription(self.index))
+
+    def session_context(*_args, **_kwargs):
+        nonlocal session_count
+        session_count += 1
+        return context(Session(session_count))
+
+    async def drain(*_args, **_kwargs):
+        if False:
+            yield {}
+
+    monkeypatch.setattr(board, "_http", lambda: context(object()))
+    monkeypatch.setattr(board, "_drain", drain)
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(client_module, "Client", session_context)
+
+    events = board.events(
+        from_cursor=0,
+        only_mine=False,
+        resource_subscriptions=(journal_uri,),
+        acknowledge=False,
+        touch=False,
+    )
+    pending = asyncio.create_task(anext(events))
+    await asyncio.wait_for(second_handshake.wait(), timeout=1)
+    assert session_count == 2
+    assert not pending.done()
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await events.aclose()
+
+
+@pytest.mark.anyio
 async def test_events_drops_unknown_kinds_and_keeps_subscription(monkeypatch) -> None:
     import pursers_client.client as client_module
 
