@@ -29,6 +29,16 @@
     <string>/PATH/TO/private/board-butler-state/active-authorized.json</string>
     <key>PURSERS_BUTLER_ACTIVE_BOARD</key>
     <string>pursers</string>
+    <key>PURSERS_BUTLER_FLEET_OBSERVATION_FILE</key>
+    <string>/PATH/TO/private/board-butler-state/fleet-observation.json</string>
+    <key>PURSERS_BUTLER_FLEET_STATE_FILE</key>
+    <string>/PATH/TO/private/board-butler-state/fleet-state.json</string>
+    <key>PURSERS_BUTLER_FLEET_EXECUTOR_SOCKET</key>
+    <string>/PATH/TO/private/fleet-executor/executor.sock</string>
+    <key>PURSERS_BUTLER_FLEET_EXECUTOR_KEY_ID</key>
+    <string>board-butler-local</string>
+    <key>PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY</key>
+    <string>/PATH/TO/private/fleet-executor/board-butler-local.key</string>
     <key>PYTHONPATH</key>
     <string>/PATH/TO/Pursers/packages/client/src</string>
   </dict>

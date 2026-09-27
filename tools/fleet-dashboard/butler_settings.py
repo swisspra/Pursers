@@ -345,6 +345,10 @@ def autonomous_butler_view(
     effective = config_payload.get("effective_mode", "shadow")
     if state_current and state.get("effective_state") in AUTONOMOUS_STATES:
         effective = state["effective_state"]
+    elif effective == "autonomous":
+        # A desired/authorized mode is not an actual running observation.  Keep
+        # the UI truthful until a fresh, matching product-owned state arrives.
+        effective = "degraded" if state_stale else "pending"
     state_status = (
         "unavailable"
         if state is None
