@@ -88,6 +88,12 @@ from butler_settings import (
     validate_board_butler_document,
     validate_autonomous_command_request,
 )
+from public_projection import (
+    load_or_create_alias_key,
+    make_public_handler,
+    project_public_snapshot,
+    projection_digest,
+)
 
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -9597,6 +9603,12 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the loopback fleet dashboard")
+    parser.add_argument(
+        "--mode",
+        choices=("private", "public"),
+        default="private",
+        help="Select the private operator or read-only public projection",
+    )
     parser.add_argument("--host", default="127.0.0.1", help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, default=8899)
     parser.add_argument(
@@ -9656,6 +9668,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Private 0600 preregistered case-study manifest; repeat for multiple studies"
         ),
     )
+    parser.add_argument(
+        "--public-input",
+        help="Private 0600 Fleet snapshot used only by public mode",
+    )
+    parser.add_argument(
+        "--public-alias-key",
+        help="Private 0600 alias-key file used only by public mode",
+    )
+    parser.add_argument(
+        "--public-release",
+        default="5.0",
+        help="Non-unique major.minor release label for public mode",
+    )
+    parser.add_argument(
+        "--public-check",
+        action="store_true",
+        help="Validate the public projection, print its digest, and exit",
+    )
     args = parser.parse_args(argv)
     if args.host != "127.0.0.1":
         parser.error("--host must be 127.0.0.1; non-loopback binding is refused")
@@ -9667,11 +9697,51 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(
             "--agent-name must use the reserved fleet-dashboard-session-* namespace"
         )
+    if args.mode == "public":
+        if not args.public_input or not args.public_alias_key:
+            parser.error("public mode requires --public-input and --public-alias-key")
+        if args.centrals or args.token_file or os.environ.get("ONBOARD_CENTRAL_TOKEN"):
+            parser.error("public mode refuses Central credentials")
+    elif args.public_check or args.public_input or args.public_alias_key:
+        parser.error("public options require --mode public")
     return args
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    if args.mode == "public":
+        raw = _read_mode_0600(Path(args.public_input).expanduser(), "public input")
+        try:
+            source = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SystemExit("public input is not valid JSON") from exc
+        try:
+            projection = project_public_snapshot(
+                source,
+                load_or_create_alias_key(args.public_alias_key),
+                release=args.public_release,
+            )
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"public projection validation failed: {exc}") from exc
+        digest = projection_digest(projection)
+        if args.public_check:
+            print(f"Fleet public projection: {digest}", flush=True)
+            return
+        server = ThreadingHTTPServer(
+            (args.host, args.port), make_public_handler(projection)
+        )
+        print(
+            f"Fleet public preview: http://{args.host}:{server.server_port}/public "
+            f"digest={digest}",
+            flush=True,
+        )
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+        return
     configs = load_central_configs(args)
     cache = DashboardCache(
         [FleetFetcher(config) for config in configs], args.cache_seconds
