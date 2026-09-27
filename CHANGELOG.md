@@ -7,6 +7,60 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Fleet Dashboard has a new visual shell with self-hosted typography, shared
+  design tokens, a clearer page frame, and navigation that shows the active
+  route, data freshness, and connection state at a glance. Legacy hash links,
+  theme and density controls, shortcuts, and focus order are unchanged.
+- Every primary Fleet route is redesigned around the question an operator is
+  asking. Home leads with team health, human attention, and the next action.
+  Work reads as a ledger with ticket detail, timeline, and review handoff.
+  Team cards show status, role, model, tier, and current work. Approvals puts
+  pending human decisions and review status first and states the consequence
+  before each action. Activity is a source-backed timeline with provenance.
+  Projects clarifies health and ownership. Settings groups existing controls
+  by task and risk.
+- Fleet route modules own their renderers and may load allowlisted
+  route-owned stylesheets through a single safe asset loader.
+- Board Butler can merge an approved submission in autonomous mode when the
+  active configuration explicitly authorizes it. The merge is bound to the
+  exact approved commit, which must be reachable in the configured
+  repository. Configurations created before this authority existed cannot
+  inherit it.
+- macOS fleet execution provisions per-seat launchd services through a narrow
+  per-user adapter with no shell command surface.
+- Design contracts for Fleet public display, ticket progress checkpoints,
+  seat and project lifecycle, and a controlled sequential-versus-parallel case
+  study, plus a documented 5.0.5 visual baseline.
+
+### Changed
+
+- Fleet UI assets are packaged as files instead of inline HTML, and the
+  integration manifest tracks the new route assets.
+- The Fleet autonomous view no longer labels a desired or authorized
+  configuration as active until a fresh, matching runtime state is observed.
+
+### Fixed
+
+- The five-second Fleet refresh no longer resets scroll position, focus,
+  disclosures, or in-progress reading. Network reads continue while a form is
+  being edited, and clean Butler controls accept refreshed server data.
+- Wait Bridge and client event subscriptions reconnect when an MCP error wraps
+  a transport failure. Previously the subscription could stay disconnected and
+  report push as unavailable.
+- The CI manifest's live-authority check uses one takeover mode and rejects a
+  Central session authenticated as the wrong board, agent, role, or principal.
+
+### Security
+
+- launchd provisioning and restarts fail closed on plist identity mismatches,
+  loaded-template drift, unavailable plists, symlinked or non-owner-only
+  directories, and invalid fields.
+- Approved-merge automation fails closed when the ticket is unreadable, the
+  approved commit is unavailable, or the configuration does not grant merge
+  authority. Production and pull-request merge rules remain escalation-first.
+
 ## [5.0.5] - 2026-09-25
 
 This release includes `pursers-central==0.1.3`,
