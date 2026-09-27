@@ -1291,6 +1291,33 @@ class BoardClient:
         self._remember_event(result)
         return result
 
+    async def ticket_progress_update(
+        self,
+        ticket_id: str,
+        *,
+        low_percent: int,
+        high_percent: int,
+        confidence: str,
+        evidence: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        """Persist one explicit worker assessment without renewing its lease."""
+        self._watched_uris.add(f"board://{self.board_id}/ticket/{ticket_id}")
+        result = await self._call(
+            "ticket_progress_update",
+            {
+                "agent_name": self.agent_name,
+                "ticket_id": ticket_id,
+                "low_percent": low_percent,
+                "high_percent": high_percent,
+                "confidence": confidence,
+                "evidence": evidence,
+                "expected_revision": expected_revision,
+            },
+        )
+        self._remember_event(result)
+        return result
+
     async def ticket_annotate(
         self,
         ticket_id: str,

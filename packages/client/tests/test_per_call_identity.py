@@ -561,6 +561,45 @@ async def test_ticket_update_forwards_parked(monkeypatch) -> None:
     }
 
 
+@pytest.mark.anyio
+async def test_ticket_progress_update_forwards_explicit_checkpoint(monkeypatch) -> None:
+    board = client()
+    calls: list[tuple[str, dict[str, Any]]] = []
+    remembered: list[dict[str, Any]] = []
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return {"ok": True, "event": {"seq": 19}}
+
+    monkeypatch.setattr(board, "_call", call)
+    monkeypatch.setattr(board, "_remember_event", remembered.append)
+
+    result = await board.ticket_progress_update(
+        "TK-progress",
+        low_percent=35,
+        high_percent=55,
+        confidence="medium",
+        evidence="Parser is complete; integration tests remain.",
+        expected_revision=2,
+    )
+
+    assert calls == [
+        (
+            "ticket_progress_update",
+            {
+                "agent_name": "env-default",
+                "ticket_id": "TK-progress",
+                "low_percent": 35,
+                "high_percent": 55,
+                "confidence": "medium",
+                "evidence": "Parser is complete; integration tests remain.",
+                "expected_revision": 2,
+            },
+        )
+    ]
+    assert remembered == [result]
+
+
 def test_tool_error_text_is_preserved_verbatim() -> None:
     message = "ticket is not offered to this seat; wait for your offer"
     result = SimpleNamespace(

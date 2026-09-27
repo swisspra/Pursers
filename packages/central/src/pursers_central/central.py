@@ -35,7 +35,7 @@ from mcp.server.subscriptions import InMemorySubscriptionBus
 from mcp.shared.exceptions import MCPError
 from mcp import types
 from mcp_types import INTERNAL_ERROR, INVALID_REQUEST
-from pydantic import AnyHttpUrl
+from pydantic import AnyHttpUrl, StrictInt
 from pydantic.fields import FieldInfo
 
 types.ToolAnnotations.model_fields["deprecated"] = FieldInfo(
@@ -63,6 +63,7 @@ from pursers_client import (
     OFFER_EXPIRED,
     OFFER_REVOKED,
     PARK_EVENT_KINDS,
+    PROGRESS_EVENT_KINDS,
     REVIEW_CLAIM_REFUSED,
     REVIEW_OFFERED,
     REVIEW_LEASE_EXPIRED,
@@ -75,6 +76,8 @@ from pursers_client import (
     TICKET_CLAIM_REFUSED,
     TICKET_PARKED,
     TICKET_UNPARKED,
+    TICKET_PROGRESS_RESET,
+    TICKET_PROGRESS_UPDATED,
     REQUEST_STATE_TTL_S,
     load_or_create_request_state_keys,
     BUTLER_COMMAND_CREATED,
@@ -172,6 +175,7 @@ BOUNDED_HISTORY_FIELDS = (
     "dispatch_history",
     "submission_history",
     "review_history",
+    "progress_history",
 )
 ARCHIVE_EVENT_FIELDS = frozenset(
     {
@@ -281,9 +285,35 @@ COMPACT_WRITE_TOOLS = frozenset(
         "ticket_annotate",
         "ticket_claim",
         "ticket_unclaim",
+        "ticket_progress_update",
         "lease_renew",
         "memory_write",
         "memory_checkpoint",
+    }
+)
+PROGRESS_CONFIDENCE = frozenset({"low", "medium", "high"})
+PROGRESS_ASSESSMENT_SOURCE = "model_checkpoint"
+MIN_PROGRESS_FRESHNESS_S = 900
+MAX_PROGRESS_FRESHNESS_S = 10_800
+PROGRESS_EVENT_FIELDS = frozenset(
+    {
+        "ticket_id",
+        "schema_version",
+        "attempt",
+        "revision",
+        "previous_revision",
+        "low_percent",
+        "high_percent",
+        "confidence",
+        "assessed_at",
+        "fresh_until",
+        "assessed_by_agent_id",
+        "assessed_by_principal_id",
+        "progress_ref",
+        "reset_reason",
+        "progress_reset_at",
+        "fixture_provenance",
+        "recipient_identities",
     }
 )
 SCRUB_EVENT_FIELDS = frozenset(
@@ -626,6 +656,17 @@ def compact_write_response(
             "lease_expires_at": result.get("lease_expires_at"),
             "at": at,
         }
+    if tool_name == "ticket_progress_update":
+        progress = ticket.get("progress")
+        progress = progress if isinstance(progress, Mapping) else {}
+        return {
+            "ok": bool(result.get("ok", True)),
+            "ticket_id": ticket_id_value,
+            "attempt": progress.get("attempt"),
+            "revision": progress.get("revision"),
+            "fresh_until": progress.get("fresh_until"),
+            "at": progress.get("assessed_at"),
+        }
 
     projected: dict[str, Any] = {
         "ok": bool(result.get("ok", True)),
@@ -730,6 +771,21 @@ def _ticket_assignment(ticket: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _progress_freshness(progress: Any, now: float) -> str:
+    if not isinstance(progress, Mapping):
+        return "unknown"
+    fresh_until = progress.get("fresh_until")
+    if not isinstance(fresh_until, str):
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(fresh_until.replace("Z", "+00:00"))
+    except ValueError:
+        return "unknown"
+    if parsed.tzinfo is None:
+        return "unknown"
+    return "fresh" if parsed.timestamp() > now else "stale"
+
+
 def project_ticket_read(
     ticket: Mapping[str, Any],
     *,
@@ -756,6 +812,21 @@ def project_ticket_read(
         },
         "dispatch_summary": _dispatch_summary(dispatch_history),
     }
+    summary["progress_freshness"] = ticket.get(
+        "progress_freshness", "unknown"
+    )
+    progress = ticket.get("progress")
+    if isinstance(progress, Mapping):
+        summary["progress"] = {
+            key: copy.deepcopy(progress[key])
+            for key in (
+                "low_percent",
+                "high_percent",
+                "confidence",
+                "assessed_at",
+            )
+            if key in progress
+        }
     if ticket.get("archived") is True:
         summary["archived"] = True
     if view == "summary":
@@ -810,6 +881,7 @@ def project_ticket_read(
         "review_verdict", "review_notes", "fix_instructions",
         "reviewed_by", "reviewed_by_agent_id", "reviewed_by_agent_name",
         "reviewed_by_principal_id", "rejection_count", "abandoned_count",
+        "work_attempt", "progress", "progress_freshness", "progress_updated_at",
     ):
         if key in ticket:
             work[key] = copy.deepcopy(ticket[key])
@@ -1137,7 +1209,11 @@ class CentralJournal(Journal):
 
     def append(self, board_id: str, event: dict[str, Any]) -> dict[str, Any]:
         kind = _require_text("kind", event.get("kind"))
-        custom_core_fields = REVIEW_CORE_OVERRIDE_FIELDS | INTAKE_CORE_OVERRIDE_FIELDS
+        custom_core_fields = (
+            REVIEW_CORE_OVERRIDE_FIELDS
+            | INTAKE_CORE_OVERRIDE_FIELDS
+            | PROGRESS_EVENT_FIELDS
+        )
         if kind in CORE_JOURNAL_KINDS and not custom_core_fields.intersection(event):
             return super().append(board_id, event)
         if kind not in (
@@ -1152,6 +1228,7 @@ class CentralJournal(Journal):
             | CLAIM_GATE_EVENT_KINDS
             | PARK_EVENT_KINDS
             | ARCHIVE_EVENT_KINDS
+            | PROGRESS_EVENT_KINDS
             | SEAT_IDENTITY_EVENT_KINDS
             | COORDINATOR_MESSAGE_EVENT_KINDS
             | BUTLER_EVENT_KINDS
@@ -1173,6 +1250,7 @@ class CentralJournal(Journal):
             | CLAIM_GATE_EVENT_FIELDS
             | PARK_EVENT_FIELDS
             | ARCHIVE_EVENT_FIELDS
+            | PROGRESS_EVENT_FIELDS
             | SEAT_IDENTITY_EVENT_FIELDS
         )
         semantic = {
@@ -1230,6 +1308,7 @@ class CentralJournal(Journal):
             | CLAIM_GATE_EVENT_KINDS
             | PARK_EVENT_KINDS
             | ARCHIVE_EVENT_KINDS
+            | PROGRESS_EVENT_KINDS
             | SEAT_IDENTITY_EVENT_KINDS
             | COORDINATOR_MESSAGE_EVENT_KINDS
         ):
@@ -1252,6 +1331,7 @@ class CentralJournal(Journal):
             | CLAIM_GATE_EVENT_FIELDS
             | PARK_EVENT_FIELDS
             | ARCHIVE_EVENT_FIELDS
+            | PROGRESS_EVENT_FIELDS
             | SEAT_IDENTITY_EVENT_FIELDS
         )
         semantic = {
@@ -1606,6 +1686,7 @@ class CentralBoard:
                 "scrub_profile": "strict",
                 "review_policy": "strict",
                 "response_view": DEFAULT_RESPONSE_VIEW,
+                "ticket_progress_v1": False,
                 "dispatch_policy": {
                     "offer_ttl_s": DEFAULT_OFFER_TTL_S,
                     "broadcast_reoffer_s": DEFAULT_BROADCAST_REOFFER_S,
@@ -1698,6 +1779,9 @@ class CentralBoard:
         response_view = config.setdefault("response_view", DEFAULT_RESPONSE_VIEW)
         if response_view not in RESPONSE_VIEWS:
             raise ValueError("board response view is invalid")
+        ticket_progress_v1 = config.setdefault("ticket_progress_v1", False)
+        if not isinstance(ticket_progress_v1, bool):
+            raise ValueError("board ticket_progress_v1 capability is invalid")
         dispatch_policy = config.setdefault(
             "dispatch_policy",
             {
@@ -3708,6 +3792,39 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             document["board_id"], str(ticket.get("ticket_id", "")), field, overflow
         )
 
+    def ticket_progress_enabled(document: Mapping[str, Any]) -> bool:
+        return document.get("config", {}).get("ticket_progress_v1") is True
+
+    def reset_ticket_progress(
+        document: dict[str, Any],
+        ticket: dict[str, Any],
+        now: float,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """Archive and clear one attempt's assessment without touching its lease."""
+        if not ticket_progress_enabled(document) and not any(
+            key in ticket for key in ("progress", "work_attempt")
+        ):
+            return None
+        current = ticket.pop("progress", None)
+        previous_revision = None
+        if isinstance(current, Mapping):
+            archived = copy.deepcopy(dict(current))
+            previous_revision = archived.get("revision")
+            archived["ended_at"] = iso_at(now)
+            archived["end_reason"] = reason
+            append_bounded_history(document, ticket, "progress_history", archived)
+        ticket.pop("progress_updated_at", None)
+        return {
+            "kind": TICKET_PROGRESS_RESET,
+            "ticket_id": ticket["ticket_id"],
+            "attempt": ticket.get("work_attempt"),
+            "previous_revision": previous_revision,
+            "reset_reason": reason,
+            "progress_reset_at": iso_at(now),
+            "recipients": service.admitted_agent_ids(document),
+        }
+
     def set_broadcast_state(
         document: dict[str, Any],
         ticket: dict[str, Any],
@@ -4669,6 +4786,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket["last_claimed_at"] = ticket.get("claimed_at")
             ticket["last_abandoned_at"] = abandoned_at
             ticket["last_release_reason"] = "lease expired"
+            progress_reset = reset_ticket_progress(
+                document, ticket, now, "lease_expired"
+            )
+            if progress_reset is not None:
+                released.append(progress_reset)
             for key in (
                 "claimed_by_agent_id",
                 "claimed_by_principal_id",
@@ -4746,6 +4868,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         events: list[dict[str, Any]] = []
         reaper = {"agent_id": f"board-reaper:{principal.principal_id}"}
         for item in released:
+            if item.get("kind") == TICKET_PROGRESS_RESET:
+                events.append(
+                    await append_and_publish(
+                        board_id,
+                        reaper,
+                        TICKET_PROGRESS_RESET,
+                        resource_uri(board_id, "ticket", item["ticket_id"]),
+                        item.get("recipients", []),
+                        ctx,
+                        ticket_id=item["ticket_id"],
+                        attempt=item.get("attempt"),
+                        previous_revision=item.get("previous_revision"),
+                        reset_reason=item["reset_reason"],
+                        progress_reset_at=item["progress_reset_at"],
+                    )
+                )
+                continue
             if item.get("kind") == "agent_lifecycle":
                 events.append(
                     await append_and_publish(
@@ -5008,6 +5147,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             else:
                 projected.pop("coordinator_questions", None)
         now = time.time()
+        projected["progress_freshness"] = _progress_freshness(
+            projected.get("progress"), now
+        )
 
         def elapsed_seconds(value: Any) -> int | None:
             if not isinstance(value, str):
@@ -7011,6 +7153,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "response_view": str(
                     document["config"].get("response_view", DEFAULT_RESPONSE_VIEW)
                 ),
+                "ticket_progress_v1": bool(
+                    document["config"].get("ticket_progress_v1", False)
+                ),
                 "dispatch_enabled": dispatch_enabled(document),
                 "dispatch_policy": dispatch_policy(document),
                 "scrub_allow_counts": copy.deepcopy(
@@ -7057,6 +7202,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         snapshot = snapshot_payload(
             document, principal, include_retired=include_retired
         )
+        principal_agent_ids = {
+            str(member.get("agent_id"))
+            for member in document.get("members", {}).values()
+            if member.get("principal_id") == principal.principal_id
+            and member.get("agent_id")
+        }
         scrub_items = sorted(snapshot["board"]["scrub_allow_counts"].items())
         collections: dict[str, Any] = {
             "agents": snapshot["agents"][:limit],
@@ -7110,6 +7261,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             candidates: list[tuple[int, str, Any]] = []
             for name in ("agents", "tickets"):
                 for index, item in enumerate(result[name]):
+                    if name == "agents" and item.get("agent_id") in principal_agent_ids:
+                        remaining_owned = sum(
+                            row.get("agent_id") in principal_agent_ids
+                            for row in result["agents"]
+                        )
+                        if remaining_owned == 1:
+                            continue
                     candidates.append((serialized_size(item), name, index))
             for name, values in (
                 ("state", result["state"]),
@@ -7792,6 +7950,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         document["config"].get(
                             "response_view", DEFAULT_RESPONSE_VIEW
                         )
+                    ),
+                    "ticket_progress_v1": bool(
+                        document["config"].get("ticket_progress_v1", False)
                     ),
                     "member_count": len(document["members"]),
                     "principal_member_count": len(document["principal_memberships"]),
@@ -9790,6 +9951,227 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     @tool()
+    async def ticket_progress_update(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        low_percent: StrictInt,
+        high_percent: StrictInt,
+        confidence: str,
+        evidence: str,
+        expected_revision: StrictInt,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist one explicit worker assessment without renewing its lease."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        ticket_id = require_id("ticket_id", ticket_id)
+        for field, value in (
+            ("low_percent", low_percent),
+            ("high_percent", high_percent),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 99:
+                raise ValueError(f"{field} must be an integer between 0 and 99")
+        if low_percent > high_percent:
+            raise ValueError("low_percent must not exceed high_percent")
+        if confidence not in PROGRESS_CONFIDENCE:
+            raise ValueError("confidence must be low, medium, or high")
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise ValueError("expected_revision must be a non-negative integer")
+        principal = current_principal()
+        require_scope(principal, "board:write")
+        now = time.time()
+
+        def update_progress(document: dict[str, Any]) -> dict[str, Any]:
+            released = reap_expired(document, now)
+            actor = resolve_active_actor(document, principal, agent_name)
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                return {
+                    "error": "ticket not found",
+                    "error_kind": "value",
+                    "released": released,
+                }
+            if not ticket_progress_enabled(document):
+                return {
+                    "error": "ticket progress v1 is disabled on this board",
+                    "error_kind": "value",
+                    "released": released,
+                }
+            if ticket.get("status") not in PRE_SUBMISSION_STATES:
+                return {
+                    "error": f"ticket is {ticket.get('status')}",
+                    "error_kind": "value",
+                    "released": released,
+                }
+            if (
+                ticket.get("claimed_by_agent_id") != actor["agent_id"]
+                or ticket.get("claimed_by_principal_id") != principal.principal_id
+            ):
+                return {
+                    "error": "progress update requires the exact current work holder",
+                    "error_kind": "permission",
+                    "released": released,
+                }
+            expires = ticket.get("lease_expires_at_epoch")
+            if expires is None or float(expires) <= now:
+                return {
+                    "error": "progress update requires a live work lease",
+                    "error_kind": "permission",
+                    "released": released,
+                }
+            current = ticket.get("progress")
+            current_revision = (
+                current.get("revision", 0)
+                if isinstance(current, Mapping)
+                else 0
+            )
+            if (
+                isinstance(current_revision, bool)
+                or not isinstance(current_revision, int)
+                or current_revision < 0
+            ):
+                current_revision = 0
+            if expected_revision != current_revision:
+                return {
+                    "conflict": True,
+                    "current_revision": current_revision,
+                    "released": released,
+                }
+            allow_counts: dict[str, int] = {}
+            safe_evidence = clean_text(
+                "evidence",
+                evidence,
+                required=True,
+                max_length=280,
+                scrub_profile=board_scrub_profile(document),
+                allow_counts=allow_counts,
+            )
+            semantic = (
+                low_percent,
+                high_percent,
+                confidence,
+                safe_evidence,
+                PROGRESS_ASSESSMENT_SOURCE,
+            )
+            if isinstance(current, Mapping) and semantic == (
+                current.get("low_percent"),
+                current.get("high_percent"),
+                current.get("confidence"),
+                current.get("evidence"),
+                current.get("assessment_source"),
+            ):
+                return {
+                    "error": "progress update is a semantic duplicate",
+                    "error_kind": "value",
+                    "released": released,
+                }
+            attempt = ticket.get("work_attempt", 1)
+            if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+                attempt = 1
+                ticket["work_attempt"] = attempt
+            if isinstance(current, Mapping):
+                archived = copy.deepcopy(dict(current))
+                archived["ended_at"] = iso_at(now)
+                archived["end_reason"] = "superseded"
+                append_bounded_history(
+                    document, ticket, "progress_history", archived
+                )
+            assessed_at = iso_at(now)
+            freshness_s = min(
+                MAX_PROGRESS_FRESHNESS_S,
+                max(MIN_PROGRESS_FRESHNESS_S, 3 * claim_ttl(document)),
+            )
+            progress = {
+                "schema_version": 1,
+                "attempt": attempt,
+                "revision": current_revision + 1,
+                "low_percent": low_percent,
+                "high_percent": high_percent,
+                "confidence": confidence,
+                "evidence": safe_evidence,
+                "assessment_source": PROGRESS_ASSESSMENT_SOURCE,
+                "assessed_at": assessed_at,
+                "fresh_until": iso_at(now + freshness_s),
+                "assessed_by": {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                },
+            }
+            ticket["progress"] = progress
+            ticket["progress_updated_at"] = assessed_at
+            scrub_audit = record_scrub_allows(
+                document, actor, now, allow_counts
+            )
+            return {
+                "actor": copy.deepcopy(actor),
+                "ticket": copy.deepcopy(ticket),
+                "progress": copy.deepcopy(progress),
+                "recipients": ticket_recipients(document, actor),
+                "released": released,
+                "scrub_audit": scrub_audit,
+            }
+
+        changed = service.mutate(board_id, update_progress)
+        release_events = await publish_releases(
+            board_id, changed.get("released", []), principal, ctx
+        )
+        if "error" in changed:
+            if changed.get("error_kind") == "permission":
+                raise PermissionError(changed["error"])
+            raise ValueError(changed["error"])
+        if changed.get("conflict"):
+            return {
+                "ok": False,
+                "error": "progress_revision_conflict",
+                "ticket_id": ticket_id,
+                "current_revision": changed["current_revision"],
+                "release_events": release_events,
+            }
+        progress = changed["progress"]
+        uri = resource_uri(board_id, "ticket", ticket_id)
+        event = await append_and_publish(
+            board_id,
+            changed["actor"],
+            TICKET_PROGRESS_UPDATED,
+            uri,
+            changed["recipients"],
+            ctx,
+            ticket_id=ticket_id,
+            schema_version=progress["schema_version"],
+            attempt=progress["attempt"],
+            revision=progress["revision"],
+            low_percent=progress["low_percent"],
+            high_percent=progress["high_percent"],
+            confidence=progress["confidence"],
+            assessed_at=progress["assessed_at"],
+            fresh_until=progress["fresh_until"],
+            assessed_by_agent_id=progress["assessed_by"]["agent_id"],
+            assessed_by_principal_id=progress["assessed_by"]["principal_id"],
+            progress_ref=(
+                f"{uri}#progress-{progress['attempt']}-{progress['revision']}"
+            ),
+        )
+        return {
+            "ok": True,
+            "ticket_id": ticket_id,
+            "ticket": changed["ticket"],
+            "attempt": progress["attempt"],
+            "revision": progress["revision"],
+            "fresh_until": progress["fresh_until"],
+            "at": progress["assessed_at"],
+            "event": event,
+            "release_events": release_events,
+            "scrub_audit": changed["scrub_audit"],
+        }
+
+    @tool()
     async def ticket_claim(
         board_id: str,
         agent_name: str,
@@ -9964,6 +10346,21 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 }
             if not coordinate_only:
                 renewed = touch_actor(document, actor, now)
+            if ticket_progress_enabled(document):
+                if isinstance(ticket.get("progress"), Mapping):
+                    reset = reset_ticket_progress(
+                        document, ticket, now, "unclaimed"
+                    )
+                    if reset is not None:
+                        released.append(reset)
+                previous_attempt = ticket.get("work_attempt", 0)
+                if (
+                    isinstance(previous_attempt, bool)
+                    or not isinstance(previous_attempt, int)
+                    or previous_attempt < 0
+                ):
+                    previous_attempt = 0
+                ticket["work_attempt"] = previous_attempt + 1
             ticket["status"] = "claimed"
             ticket["claimed_by_agent_id"] = actor["agent_id"]
             ticket["claimed_by_principal_id"] = principal.principal_id
@@ -10070,6 +10467,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket["last_release_reason"] = "explicit unclaim"
             ticket["status"] = "open"
             ticket["updated_at"] = iso_at(now)
+            progress_reset = reset_ticket_progress(
+                document, ticket, now, "unclaimed"
+            )
+            if progress_reset is not None:
+                released.append(progress_reset)
             for key in (
                 "claimed_by_agent_id",
                 "claimed_by_principal_id",
@@ -10199,6 +10601,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 raise ValueError("ticket already has a pending human request")
             old_status = str(ticket["status"])
             if ticket.get("status") in PRE_SUBMISSION_STATES:
+                progress_reset = reset_ticket_progress(
+                    document, ticket, now, "unclaimed"
+                )
+                if progress_reset is not None:
+                    released.append(progress_reset)
                 clear_work_lease(ticket, now, actor)
             offer = ticket.pop("work_offer", None)
             if isinstance(offer, Mapping):
@@ -11323,6 +11730,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket["submitted_by_agent_id"] = actor["agent_id"]
             ticket["submitted_by_principal_id"] = principal.principal_id
             ticket["updated_at"] = iso_at(now)
+            progress_reset = reset_ticket_progress(
+                document, ticket, now, "submitted"
+            )
+            if progress_reset is not None:
+                released.append(progress_reset)
             ticket["last_lease_expires_at"] = ticket.pop("lease_expires_at", None)
             for key in (
                 "lease_expires_at_epoch",
@@ -11798,6 +12210,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket["status"] = new_status
             if verdict == "reject":
                 ticket["rejection_count"] = int(ticket.get("rejection_count", 0)) + 1
+                progress_reset = reset_ticket_progress(
+                    document, ticket, now, "review_rejected"
+                )
+                if progress_reset is not None:
+                    released.append(progress_reset)
             ticket["reviewed_by_agent_id"] = actor["agent_id"]
             ticket["reviewed_by_principal_id"] = principal.principal_id
             ticket["reviewed_at"] = iso_at(now)
@@ -12029,6 +12446,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket["cancel_permission"] = basis
             ticket["canceled_at"] = iso_at(now)
             ticket["updated_at"] = iso_at(now)
+            progress_reset = reset_ticket_progress(
+                document, ticket, now, "canceled"
+            )
+            if progress_reset is not None:
+                released.append(progress_reset)
             if safe_reason:
                 ticket["cancel_reason"] = safe_reason
             for kind in ("work", "review"):

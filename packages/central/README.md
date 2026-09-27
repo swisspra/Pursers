@@ -95,9 +95,10 @@ issuer need its CA file.
 
 Central keeps complete tickets, memories, and journal events in its SQLite
 ledger, but its default model-facing response view is `compact`. Successful
-calls to `ticket_update`, `ticket_annotate`, `ticket_claim`, `ticket_unclaim`,
-`lease_renew`, `memory_write`, and `memory_checkpoint` return a small mutation
-receipt instead of repeating the complete affected record and its histories.
+calls to `ticket_update`, `ticket_progress_update`, `ticket_annotate`,
+`ticket_claim`, `ticket_unclaim`, `lease_renew`, `memory_write`, and
+`memory_checkpoint` return a small mutation receipt instead of repeating the
+complete affected record and its histories.
 Use the corresponding read tool, such as `ticket_get` or `memory_read`, when the
 complete current state is needed.
 
@@ -106,9 +107,10 @@ Ticket mutation receipts contain `ok`, `ticket_id`, current `status` and
 `revoked_offer` when applicable, and `at`; annotation receipts also contain
 `annotation_id`. Lease renewal receipts contain `ok`, `ticket_id`,
 `lease_expires_at`, and `at`. Memory write and checkpoint receipts contain
-`ok`, `memory_id`, `scope`, `generation`, and `at`. Unsuccessful structured
-results retain their error details instead of being projected as successful
-receipts. Routing-only
+`ok`, `memory_id`, `scope`, `generation`, and `at`. Progress receipts contain
+`ok`, `ticket_id`, `attempt`, `revision`, `fresh_until`, and `at`. Unsuccessful
+structured results retain their error details instead of being projected as
+successful receipts. Routing-only
 `recipient_identities` fields are never included in MCP responses, including
 when the full response view is selected. They remain in the durable journal so
 Central can authorize and filter events before returning them.

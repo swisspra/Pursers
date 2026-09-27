@@ -59,6 +59,7 @@ submissions without a valid clone-owned proof.
 External execution hosts should instead use a role profile:
 
 - `--tools worker` exposes only `ticket_get`, `ticket_claim`, `lease_renew`,
+  `ticket_progress_update`,
   `ticket_submit`, `ticket_unclaim`, `ticket_annotate`, `ticket_question_ask`,
   and `ticket_request_human`.
 - `--tools reviewer` exposes only `dispatch_my_offers`, `ticket_get`,

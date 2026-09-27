@@ -9,6 +9,7 @@ from pursers_client import (
     DISPATCH_KINDS,
     HELD_TICKET_KINDS,
     KNOWN_EVENT_KINDS,
+    PROGRESS_EVENT_KINDS,
     JoinedIdentity,
     REVIEWER_WAIT_KINDS,
     REVIEW_LEASE_EXPIRED,
@@ -59,6 +60,8 @@ def test_holder_wait_contract_uses_only_central_emitted_kinds() -> None:
 def test_role_wait_contracts_include_dispatch_submission_and_holder_updates() -> None:
     assert WORKER_WAIT_KINDS == DISPATCH_KINDS | HELD_TICKET_KINDS
     assert REVIEWER_WAIT_KINDS == SUBMITTED_RELEVANT_KINDS | HELD_TICKET_KINDS
+    assert PROGRESS_EVENT_KINDS <= KNOWN_EVENT_KINDS
+    assert PROGRESS_EVENT_KINDS.isdisjoint(WORKER_WAIT_KINDS)
 
 
 def test_only_mine_retains_rejection_for_the_submitting_holder() -> None:

@@ -110,6 +110,9 @@ class BoardSnapshotBoundsTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(serialized), 4_096)
         self.assertTrue(payload["truncated"])
         self.assertGreater(payload["omitted_counts"]["tickets"], 0)
+        self.assertTrue(
+            any(row["principal_id"] == "PR-admin" for row in payload["agents"])
+        )
         for name, total in payload["total_counts"].items():
             self.assertEqual(
                 total,

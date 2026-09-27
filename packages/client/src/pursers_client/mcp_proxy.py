@@ -65,6 +65,7 @@ DEFAULT_TOOLS = frozenset(
         "ticket_list",
         "ticket_question_answer",
         "ticket_question_ask",
+        "ticket_progress_update",
         "ticket_request_human",
     }
 )
@@ -74,6 +75,7 @@ WORKER_TOOLS = frozenset(
         "ticket_annotate",
         "ticket_claim",
         "ticket_get",
+        "ticket_progress_update",
         "ticket_question_ask",
         "ticket_request_human",
         "ticket_submit",

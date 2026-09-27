@@ -33,7 +33,8 @@ TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "agent_capabilities_set", "agent_readiness_set",
     )),
     ("Tickets", (
-        "ticket_get", "ticket_create", "ticket_update", "ticket_annotate",
+        "ticket_get", "ticket_create", "ticket_update",
+        "ticket_progress_update", "ticket_annotate",
         "ticket_assign", "ticket_claim", "ticket_unclaim", "lease_renew",
         "board_reap", "ticket_submit", "ticket_cancel", "dispatch_my_offers",
         "ticket_list",
@@ -86,6 +87,7 @@ TOOL_SCOPES: dict[str, str] = {
     "ticket_get": "`board:read` and visibility of the ticket",
     "ticket_create": "`board:write`, or restricted `board:intake`",
     "ticket_update": "`board:write` or `board:coordinate`; creator/admin checks also apply",
+    "ticket_progress_update": "`board:write` and the exact current live work lease; board capability must be enabled",
     "ticket_annotate": "`board:write`, `board:review`, or `board:coordinate`; role limits apply",
     "ticket_assign": "`board:coordinate` (deprecated compatibility tool)",
     "ticket_claim": "`board:write` and a live offer or assignment for this seat",
@@ -165,6 +167,7 @@ SPECIAL_RESPONSE_FIELDS = {
 
 COMPACT_RESPONSE_FIELDS = {
     "ticket_update": "ok, ticket_id, status, parked, generation, dispatch_state, revoked_offer, at",
+    "ticket_progress_update": "ok, ticket_id, attempt, revision, fresh_until, at",
     "ticket_annotate": "ok, ticket_id, status, parked, generation, dispatch_state, revoked_offer, at, annotation_id",
     "ticket_claim": "ok, ticket_id, status, parked, generation, dispatch_state, revoked_offer, at",
     "ticket_unclaim": "ok, ticket_id, status, parked, generation, dispatch_state, revoked_offer, at",
