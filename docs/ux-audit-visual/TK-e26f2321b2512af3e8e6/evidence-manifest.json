@@ -1,0 +1,191 @@
+{
+  "schema": "pursers-fleet-browser-evidence-v1",
+  "ticket_id": "TK-e26f2321b2512af3e8e6",
+  "task_space_id": 28,
+  "fixture": "synthetic-safe loopback dashboard data",
+  "approved_base": "f17bad906d4a6d036506118c0f3b2d6735418cde",
+  "tested_ui_revision": "db974bf9e808137ddc346c128324981b7068984f",
+  "routes": [
+    {
+      "route": "home",
+      "heading": "Good to see your Team",
+      "active_nav": "Home",
+      "main_state": "ready",
+      "horizontal_overflow": false
+    },
+    {
+      "route": "projects",
+      "heading": "Connected projects",
+      "active_nav": "Projects",
+      "main_state": "ready",
+      "horizontal_overflow": false
+    },
+    {
+      "route": "work",
+      "heading": "Work across every project",
+      "active_nav": "Work",
+      "main_state": "ready",
+      "horizontal_overflow": false
+    },
+    {
+      "route": "team",
+      "heading": "Unified agent pool",
+      "active_nav": "Team",
+      "main_state": "ready",
+      "empty_state_count": 1,
+      "horizontal_overflow": false
+    },
+    {
+      "route": "approvals",
+      "heading": "Decisions that need judgment",
+      "active_nav": "Approvals",
+      "main_state": "ready",
+      "empty_state_count": 3,
+      "horizontal_overflow": false
+    },
+    {
+      "route": "activity",
+      "heading": "Bounded activity",
+      "active_nav": "Activity",
+      "main_state": "ready",
+      "horizontal_overflow": false
+    },
+    {
+      "route": "settings",
+      "heading": "Connections and advanced operations",
+      "active_nav": "Settings",
+      "main_state": "error",
+      "error_state_count": 3,
+      "horizontal_overflow": false,
+      "note": "The bounded fixture intentionally omits privileged settings backends. The route rendered its product error treatment."
+    },
+    {
+      "route": "board-detail",
+      "path": "#/central/north/board/atlas-ops/tickets",
+      "active_nav": "Work",
+      "panel_state": "error",
+      "horizontal_overflow": false,
+      "note": "The bounded fixture intentionally omits get_board. The product rendered Board detail unavailable and the reconnecting recovery banner."
+    }
+  ],
+  "states": {
+    "loading": {
+      "method": "Block app.js for one navigation and inspect server-delivered initial contract",
+      "main_state": "loading",
+      "hub_state": "loading",
+      "status_text": "Loading…"
+    },
+    "empty": {
+      "routes": [
+        "team",
+        "approvals"
+      ],
+      "source": "product-rendered from independently seeded empty collections"
+    },
+    "error": {
+      "route": "board-detail",
+      "panel_state": "error",
+      "connection_state": "reconnecting",
+      "recovery_hint_present": true,
+      "source": "product-rendered from independently seeded unavailable board detail"
+    }
+  },
+  "preferences": {
+    "light_comfortable": {
+      "theme": "light",
+      "density": "comfortable",
+      "horizontal_overflow": false
+    },
+    "dark_compact": {
+      "theme": "dark",
+      "density": "compact",
+      "theme_button": "Light theme",
+      "density_button": "Comfortable density",
+      "horizontal_overflow": false
+    },
+    "reduced_motion": {
+      "media_query_matches": true,
+      "animated_elements": 0,
+      "transitioning_elements": 0
+    }
+  },
+  "font": {
+    "family": "IBM Plex Sans",
+    "document_fonts_check": true,
+    "faces": [
+      {
+        "weight": "400",
+        "status": "loaded"
+      },
+      {
+        "weight": "600 700",
+        "status": "loaded"
+      }
+    ]
+  },
+  "keyboard_focus_order": [
+    "Skip to main content",
+    "Pursers Fleet",
+    "Home",
+    "Projects",
+    "Work",
+    "Team",
+    "Approvals",
+    "Activity"
+  ],
+  "viewports": {
+    "desktop": {
+      "width": 1440,
+      "height": 900,
+      "horizontal_overflow": false
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "horizontal_overflow": false
+    },
+    "zoom_200": {
+      "page_scale": 2,
+      "visual_viewport_width": 195,
+      "layout_width": 390,
+      "horizontal_overflow": false
+    }
+  },
+  "screenshots": [
+    {
+      "file": "before-light-1440x900.png",
+      "revision": "f17bad906d4a6d036506118c0f3b2d6735418cde",
+      "sha256": "3999b41f8355ad15070627ceee93420ae70c2e9164c0e6724ba5225d2fe1a97c"
+    },
+    {
+      "file": "before-light-390x844.png",
+      "revision": "f17bad906d4a6d036506118c0f3b2d6735418cde",
+      "sha256": "35ee0e1858dc6a134b1a16b447cb4d01dd7d91ce0bf8ddae24fe7722563e66f9"
+    },
+    {
+      "file": "after-light-1440x900.png",
+      "revision": "db974bf9e808137ddc346c128324981b7068984f",
+      "sha256": "56dae9fef20b98da753dda790c3dbb5c11a604b5effce2027eeb797de5f943bb"
+    },
+    {
+      "file": "after-light-390x844.png",
+      "revision": "db974bf9e808137ddc346c128324981b7068984f",
+      "sha256": "3c1359c550ff6d0d75c6a2c2012f3e29d9ad66893fe12c6d4973173f5017fef3"
+    },
+    {
+      "file": "after-dark-1440x900.png",
+      "revision": "db974bf9e808137ddc346c128324981b7068984f",
+      "sha256": "997dc22180af2ac9d55b0bdb2b7085ab1fe7864fb53d79c474576756a4944073"
+    },
+    {
+      "file": "after-dark-390x844.png",
+      "revision": "db974bf9e808137ddc346c128324981b7068984f",
+      "sha256": "7b481498a7fb37e8f9a3b1a11d855f74635186de878d73f464a455ef6f4c6af6"
+    },
+    {
+      "file": "after-dark-error-1440x900.png",
+      "revision": "db974bf9e808137ddc346c128324981b7068984f",
+      "sha256": "2a42344bd0f61b7a9383f4f81345c2493a09908de8997730c05d7256eb623c8c"
+    }
+  ]
+}
