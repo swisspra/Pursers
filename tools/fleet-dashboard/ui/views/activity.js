@@ -3,11 +3,12 @@
   'use strict';
 
   let esc, fmt, pageHead, warmTruthStrip, warmTickets, ticketHref, boardHref,
-    warmBoards, autonomousRows, autonomousStateLabel;
+    warmBoards, autonomousRows, autonomousStateLabel, fleetData;
 
   function useContext(context) {
     ({esc, fmt, pageHead, warmTruthStrip, warmTickets, ticketHref, boardHref,
       warmBoards, autonomousRows, autonomousStateLabel} = context);
+    fleetData = context.fleetData;
   }
 
   function loadActivityStyles() {
@@ -136,6 +137,75 @@
     </section>`;
   }
 
+  function caseStudyMetric(metric, suffix = '') {
+    if (!metric || metric.status !== 'available' || !Number.isFinite(metric.seconds)) {
+      return 'Unavailable';
+    }
+    const seconds = metric.seconds;
+    const value = seconds >= 3600
+      ? `${(seconds / 3600).toFixed(1)} h`
+      : seconds >= 60
+        ? `${(seconds / 60).toFixed(1)} min`
+        : `${seconds.toFixed(1)} s`;
+    return `${value}${suffix}`;
+  }
+
+  function caseStudyRun(study, run, central) {
+    const ticketRows = (run.tickets || []).map(ticket => {
+      const phases = (ticket.timeline || []).map(item => `<li data-phase="${esc(item.phase)}">
+        <span>${esc(activityLabel(item.phase))}</span>
+        <time datetime="${esc(item.occurred_at)}">${esc(fmt(item.occurred_at))}</time>
+        <small>${esc(activityLabel(item.quality))} · ${esc(activityLabel(item.source))}</small>
+      </li>`).join('');
+      return `<details class="case-study-ticket" data-pursers-ticket="${esc(ticket.ticket_id)}">
+        <summary><a class="id" href="${ticketHref(central, ticket.board_id, ticket.ticket_id)}">${esc(ticket.ticket_id)}</a><span>${ticket.accepted ? 'Accepted' : 'Incomplete'}</span></summary>
+        <ol class="case-study-phases">${phases || '<li><span>Lifecycle unavailable</span></li>'}</ol>
+        <dl class="case-study-ticket-metrics">
+          <div><dt>Queue</dt><dd>${esc(caseStudyMetric(ticket.metrics?.queue_time))}</dd></div>
+          <div><dt>Ownership</dt><dd>${esc(caseStudyMetric(ticket.metrics?.ownership_time))}</dd></div>
+          <div><dt>Review queue</dt><dd>${esc(caseStudyMetric(ticket.metrics?.review_queue_time))}</dd></div>
+          <div><dt>Review work</dt><dd>${esc(caseStudyMetric(ticket.metrics?.review_work_time))}</dd></div>
+        </dl>
+      </details>`;
+    }).join('');
+    return `<section class="case-study-lane" data-arm="${esc(run.arm)}" data-state="${run.complete ? 'complete' : 'incomplete'}">
+      <div class="case-study-lane-head"><div><p class="eyebrow">${esc(activityLabel(run.arm))}</p><h4>${esc(run.run_id)}</h4></div><span class="status">${run.complete ? 'Complete' : 'Evidence incomplete'}</span></div>
+      <dl class="case-study-run-metrics">
+        <div><dt>Wall time</dt><dd>${esc(caseStudyMetric(run.wall_time))}</dd></div>
+        <div><dt>Observed peak</dt><dd>${esc(run.observed_peak_concurrency)} concurrent</dd></div>
+        <div><dt>Accepted</dt><dd>${esc(run.accepted_count)} / ${esc((run.tickets || []).length)}</dd></div>
+        <div><dt>Cost</dt><dd>Unavailable</dd></div>
+      </dl>
+      ${run.missing?.length ? `<p class="warning">${esc(run.missing.join(' · '))}</p>` : ''}
+      <div class="case-study-tickets">${ticketRows}</div>
+    </section>`;
+  }
+
+  function renderCaseStudies() {
+    const rows = [];
+    for (const [central, data] of Object.entries(fleetData || {})) {
+      for (const study of data.case_studies || []) rows.push({central, study});
+    }
+    if (!rows.length) return '';
+    return `<section class="case-studies" aria-labelledby="case-study-title">
+      <div class="case-study-heading"><div><p class="eyebrow">Measured runs</p><h3 id="case-study-title">Sequential and parallel evidence</h3></div><p>Only preregistered, source-backed pairs produce speedup. Missing or mismatched evidence stays visible.</p></div>
+      ${rows.map(({central, study}) => {
+        const runs = new Map((study.runs || []).map(run => [run.run_id, run]));
+        return (study.comparisons || []).map(comparison => {
+          const sequential = runs.get(comparison.sequential_run_id);
+          const parallel = runs.get(comparison.parallel_run_id);
+          const ratio = comparison.speedup?.status === 'available' ? `${comparison.speedup.ratio.toFixed(2)}×` : 'Unavailable';
+          return `<article class="case-study" data-comparison-state="${esc(comparison.status)}">
+            <header><div><p class="eyebrow">${esc(study.study_id)} · ${esc(comparison.pair_id)}</p><h3>${esc(ratio)} speedup</h3></div><span class="status">${esc(activityLabel(comparison.status))}</span></header>
+            ${comparison.reasons?.length ? `<p class="warning">${esc(comparison.reasons.join(' '))}</p>` : '<p class="meta">Matched ticket templates and complete source windows.</p>'}
+            <div class="case-study-lanes">${sequential ? caseStudyRun(study, sequential, central) : ''}${parallel ? caseStudyRun(study, parallel, central) : ''}</div>
+            <p class="meta">Cost unavailable unless supplied by source telemetry. No estimate is inferred from model, time, or token fields.</p>
+          </article>`;
+        }).join('');
+      }).join('')}
+    </section>`;
+  }
+
   function renderWarmActivity() {
     const allRows = activityRows();
     const rows = allRows.slice(0, 20);
@@ -153,6 +223,7 @@
         <div><b>${esc(activeBoards)} / ${esc(boards.length)}</b><span>boards with retained events</span></div>
         <p><b>Bounded history.</b> ${esc(boundary)}</p>
       </section>
+      ${renderCaseStudies()}
       ${renderActivityTimeline(rows)}`;
   }
 
