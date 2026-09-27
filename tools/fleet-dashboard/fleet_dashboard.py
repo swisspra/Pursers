@@ -6924,6 +6924,32 @@ class SeatConfigManager:
             "import_review": self.import_review(),
         }
 
+    def team_seats(self) -> dict[str, Any]:
+        """Return the Team route's bounded, credential-free seat projection."""
+        rows = []
+        for record in self.inventory.load()["seats"]:
+            desired = self._desired(record)
+            row = {
+                "name": desired.name,
+                "host": desired.host,
+                "role": desired.role,
+                "home_board": desired.home_board,
+                "boards": desired.boards,
+                "tier_max": desired.tier_max,
+                "skills": list(desired.skills),
+                "can_review": desired.can_review,
+                "can_work": desired.can_work,
+                "model": desired.model,
+                "provider": desired.provider,
+            }
+            host_mode = record.get("host_mode", record.get("runtime_mode"))
+            if isinstance(host_mode, str):
+                normalized_mode = host_mode.strip().casefold()
+                if normalized_mode in {"acp", "interactive", "persistent", "resident", "session"}:
+                    row["host_mode"] = normalized_mode
+            rows.append(row)
+        return {"schema_version": 1, "seats": sorted(rows, key=lambda row: row["name"])}
+
     @staticmethod
     def _doctor_summary(checks: list[dict[str, Any]]) -> dict[str, str | None]:
         order = {"PASS": 0, "WARN": 1, "FAIL": 2}
@@ -8488,6 +8514,7 @@ def make_handler(
                 route
                 in {
                     "/api/config/seats",
+                    "/api/team/seats",
                     "/api/config/bridge",
                     "/api/attention",
                     "/api/config/release",
@@ -8497,6 +8524,8 @@ def make_handler(
                 try:
                     if route == "/api/config/seats":
                         payload = seats.seats()
+                    elif route == "/api/team/seats":
+                        payload = seats.team_seats()
                     elif route == "/api/config/bridge":
                         payload = seats.bridge()
                     elif route == "/api/config/release":

@@ -172,6 +172,48 @@
   border-top: 1px solid var(--team-rule);
 }
 
+.team-roster-card .team-lifecycle {
+  order: 9;
+  border-top: 1px solid var(--team-rule);
+}
+
+.team-lifecycle > summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  cursor: pointer;
+  color: var(--team-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.team-lifecycle-grid {
+  display: grid;
+  gap: 8px;
+  padding: 4px 0 12px;
+}
+
+.team-lifecycle-grid p {
+  display: grid;
+  grid-template-columns: minmax(92px, 0.35fr) minmax(0, 1fr);
+  gap: 10px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.team-lifecycle-grid span {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+.team-lifecycle-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 12px;
+}
+
 :root[data-density="compact"] .team-roster-grid .team-roster-card > .team-cost,
 :root[data-density="compact"] .team-roster-grid .team-roster-card > .agent-ops {
   display: block;
