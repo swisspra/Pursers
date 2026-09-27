@@ -104,6 +104,7 @@ def test_primary_route_modules_own_renderers_and_receive_shared_context() -> Non
             assert renderer not in app
 
     assert "view.render(context)" in registry
+    assert "view.bind(context, root)" in registry
     assert "FleetViewModules.render(kind,fleetViewContext())" in app
 
 
@@ -446,7 +447,7 @@ console.log(JSON.stringify({{html,empty}}));
 
     assert "3 projects" in html
     assert "2 coordinators" in html
-    assert html.count("Coordinator") == 2
+    assert html.count('projects-detail-label">Coordinator') == 2
     assert "In progress</dt><dd>3" in html
     assert "Review ready</dt><dd>3" in html
     for state in ("open", "claimed", "in progress", "submitted", "closed", "reviewing"):
@@ -456,9 +457,11 @@ console.log(JSON.stringify({{html,empty}}));
     assert 'class="board-card" data-board-id="alpha" data-projects-card' in html
     assert "needs attention" in html
     assert "offline &lt;retry>" in html
-    assert 'href="#/seats">+ Add project</a>' in html
-    assert 'href="#/seats">Add project</a>' in result["empty"]
+    assert 'data-project-add-open>+ Add project</button>' in html
+    assert 'data-project-add-open>Add project</button>' in result["empty"]
     assert "existing guarded Connections flow" in result["empty"]
+    assert 'id="project-lifecycle-form"' in html
+    assert 'data-project-remove="Alpha"' in html
 
 
 def test_projects_route_styles_cover_responsive_and_density_modes() -> None:
@@ -10042,6 +10045,179 @@ def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Pat
                 for path in tmp_path.rglob("*")
                 if path.is_file() and (path == jwks_path or keys_dir in path.parents)
             }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_project_lifecycle_non_git_preview_apply_and_replay(tmp_path: Path) -> None:
+    central = FakeDoorCentral()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    cache = dashboard.DashboardCache([fetcher], 60)
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, seat_manager=SimpleNamespace()),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    folder = tmp_path / "plain-folder"
+    folder.mkdir()
+    marker = folder / "keep.txt"
+    marker.write_text("preserve", encoding="utf-8")
+
+    def post(path: str, payload: dict) -> tuple[int, dict]:
+        request = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            return response.status, json.load(response)
+
+    try:
+        status, plan = post(
+            "/api/lifecycle/plan",
+            {
+                "action": "add",
+                "name": "plain",
+                "board_id": "plain-board",
+                "work_dir": str(folder),
+                "git_mode": "none",
+                "repository_url": None,
+                "integration_ref": "main",
+                "prepare_fleet_clone": False,
+            },
+        )
+        assert status == 200
+        assert plan["blocked"] is False
+        assert plan["source"]["git_mode"] == "none"
+        assert "plain" not in central.registry_data["projects"]
+        assert "plain-board" not in central.created_boards
+
+        status, result = post(
+            "/api/lifecycle/apply",
+            {
+                "plan_id": plan["plan_id"],
+                "plan_digest": plan["plan_digest"],
+                "confirmation": "plain",
+            },
+        )
+        assert status == 200
+        assert result["ok"] is True
+        assert result["doors"] is None
+        assert result["replayed"] is False
+        assert central.registry_data["projects"]["plain"] == {
+            "board_id": "plain-board",
+            "work_dir": str(folder),
+            "status": "active",
+        }
+        assert marker.read_text(encoding="utf-8") == "preserve"
+        assert not (folder / ".git").exists()
+
+        _status, replay = post(
+            "/api/lifecycle/apply",
+            {
+                "plan_id": plan["plan_id"],
+                "plan_digest": plan["plan_digest"],
+                "confirmation": "plain",
+            },
+        )
+        assert replay["replayed"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_project_lifecycle_remove_requires_pause_and_preserves_every_path(
+    tmp_path: Path,
+) -> None:
+    central = FakeDoorCentral()
+    folder = tmp_path / "existing"
+    folder.mkdir()
+    marker = folder / "repository.data"
+    marker.write_text("never delete", encoding="utf-8")
+    central.registry_data["projects"]["existing-proj"]["work_dir"] = str(folder)
+    board = central.client_factory("unused", "unused", "existing-board")
+
+    async def board_snapshot(**_kwargs: object) -> dict:
+        return {
+            "tickets": [],
+            "latest_seq": 12,
+            "truncated": False,
+            "omitted_counts": {"tickets": 0},
+        }
+
+    async def ticket_list(**_kwargs: object) -> dict:
+        return {"tickets": [], "total_matching": 0}
+
+    board.board_snapshot = board_snapshot
+    board.ticket_list = ticket_list
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+    cache = dashboard.DashboardCache(
+        [dashboard.FleetFetcher(config, client_factory=central.client_factory)], 60
+    )
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, seat_manager=SimpleNamespace()),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post(path: str, payload: dict) -> dict:
+        request = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            return json.load(response)
+
+    try:
+        blocked = post(
+            "/api/lifecycle/plan", {"action": "remove", "name": "existing-proj"}
+        )
+        assert blocked["blocked"] is True
+        assert any("paused" in item for item in blocked["blockers"])
+
+        central.registry_data["projects"]["existing-proj"]["status"] = "paused"
+        plan = post(
+            "/api/lifecycle/plan", {"action": "remove", "name": "existing-proj"}
+        )
+        assert plan["blocked"] is False
+        result = post(
+            "/api/lifecycle/apply",
+            {
+                "plan_id": plan["plan_id"],
+                "plan_digest": plan["plan_digest"],
+                "confirmation": "existing-proj",
+            },
+        )
+        assert result["removed_reference"] is True
+        assert "existing-proj" not in central.registry_data["projects"]
+        assert marker.read_text(encoding="utf-8") == "never delete"
+        assert "Central board and durable board history" in result["preserved"]
+        assert "existing-board" in central.created_boards
     finally:
         server.shutdown()
         server.server_close()

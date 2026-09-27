@@ -92,6 +92,33 @@ incoming tokens. Operator files outside the dashboard checkout should not be mod
 
 ## Add project
 
+The **Projects** page provides the guarded lifecycle flow for new work. It first
+creates a ten-minute, single-use preview through `POST /api/lifecycle/plan`.
+The preview shows the registry entry, board and policy reconciliation, optional
+Git source clone, optional Fleet clone, and the permission required for every
+operation. Planning only reads the selected folder, Git metadata, registry, and
+board state. A dirty or ambiguous checkout blocks apply without changing it.
+
+After the operator types the project name, `POST /api/lifecycle/apply` verifies
+the plan digest, registry CAS digest, folder/Git observation, administrator
+membership, expiry, and Central selection before applying. Non-Git folders do
+not run Git or create a clone. Clone-from-remote uses non-interactive Git and
+only accepts an absent or empty target. Credential-bearing repository URLs are
+rejected and an observed credential-bearing origin is never returned to the
+browser. Protected-door issuance remains a separate explicit action.
+
+**Remove from Fleet** uses the same preview and typed confirmation. Removal is
+blocked until the project is paused, the board snapshot is complete, and there
+is no active work, review, or pending offer. Apply removes only the CAS-protected
+`project_registry` entry. It preserves the Central board and history, project
+folder, repositories and worktrees, Fleet clone, seats, tokens, keys, JWKS,
+shared credentials, tickets, journals, logs, and backups. The preview preserves
+the prior entry as the input for a fresh re-add plan if rollback is needed.
+
+The older `/api/projects/add` endpoint and the Config-page card remain
+compatible for existing operators. They retain their one-action contract and
+one-time door return behavior.
+
 The **Add project** card provides single-action provisioning to transform onboarding
 into "Add project once, copy door twice":
 

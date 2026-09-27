@@ -88,6 +88,15 @@ from butler_settings import (
     validate_board_butler_document,
     validate_autonomous_command_request,
 )
+from project_lifecycle import (
+    ProjectLifecycleConflictError,
+    ProjectLifecycleError,
+    ProjectLifecycleStore,
+    build_add_plan,
+    build_remove_plan,
+    clone_project_source,
+    inspect_project_source,
+)
 
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -5910,6 +5919,9 @@ class FleetFetcher:
         work_dir: str,
         integration_ref: str = "main",
         seats_manager: Any = None,
+        repository_url: str | None = None,
+        prepare_fleet_clone: bool = True,
+        issue_doors: bool = True,
     ) -> dict[str, Any]:
         progress: dict[str, Any] = {}
         try:
@@ -5919,6 +5931,9 @@ class FleetFetcher:
                 work_dir=work_dir,
                 integration_ref=integration_ref,
                 seats_manager=seats_manager,
+                repository_url=repository_url,
+                prepare_fleet_clone=prepare_fleet_clone,
+                issue_doors=issue_doors,
                 progress=progress,
             )
         except asyncio.CancelledError:
@@ -5945,9 +5960,15 @@ class FleetFetcher:
         work_dir: str,
         integration_ref: str = "main",
         seats_manager: Any = None,
+        repository_url: str | None = None,
+        prepare_fleet_clone: bool = True,
+        issue_doors: bool = True,
         progress: dict[str, Any],
     ) -> dict[str, Any]:
-        keys_dir, jwks_path = self._require_doors_config()
+        if issue_doors:
+            keys_dir, jwks_path = self._require_doors_config()
+        else:
+            keys_dir = jwks_path = None
         if not isinstance(project_name, str) or not project_name.strip():
             raise ValueError("project name must be a non-empty string")
         project_name = project_name.strip()
@@ -5982,6 +6003,11 @@ class FleetFetcher:
             and existing_entry.get("board_id") == board_id
             and existing_entry.get("work_dir") == work_dir
             and existing_entry.get("status") == "active"
+            and (
+                repository_url is None
+                or existing_entry.get("repository_url") == repository_url
+            )
+            and existing_entry.get("integration_ref", "main") == integration_ref
         ):
             steps.append({
                 "step": "registry_admin",
@@ -5998,6 +6024,8 @@ class FleetFetcher:
                 new_entry["fleet_clone_dir"] = existing_entry["fleet_clone_dir"]
             if isinstance(existing_entry, dict) and "repository_url" in existing_entry:
                 new_entry["repository_url"] = existing_entry["repository_url"]
+            if repository_url:
+                new_entry["repository_url"] = repository_url
             if integration_ref != "main":
                 new_entry["integration_ref"] = integration_ref
             projects[project_name] = new_entry
@@ -6138,7 +6166,11 @@ class FleetFetcher:
 
         # Step e: fleet clone prepare (existing prepare_fleet_clone path)
         progress["failed_step"] = "fleet_clone"
-        if seats_manager is not None and hasattr(seats_manager, "prepare_fleet_clone"):
+        if (
+            prepare_fleet_clone
+            and seats_manager is not None
+            and hasattr(seats_manager, "prepare_fleet_clone")
+        ):
             reg_payload = await self.fetch_project_registry()
             reg_entry = reg_payload["registry"]["projects"].get(project_name, {})
             clone_dir_str = reg_entry.get("fleet_clone_dir")
@@ -6169,40 +6201,56 @@ class FleetFetcher:
                     "status": "prepared",
                     "message": f"Fleet clone prepared at {prepared['clone']['path']}.",
                 })
-        else:
+        elif prepare_fleet_clone:
             steps.append({
                 "step": "fleet_clone",
                 "status": "already present",
                 "message": "Fleet clone step skipped (no seats manager).",
             })
+        else:
+            steps.append({
+                "step": "fleet_clone",
+                "status": "not requested",
+                "message": "Fleet clone was not requested; the project folder is preserved.",
+            })
 
         # Issue only missing door strings. Re-running Add project must not
         # silently mint fresh JWTs or rewrite otherwise unchanged key state.
         progress["failed_step"] = "door_credentials"
-        existing_doors = {
-            (str(item.get("board")), str(item.get("role")))
-            for item in door_admin.list_doors(jwks_path)
-        }
         issued_doors: dict[str, str] = {}
-        for role in ("worker", "reviewer"):
-            if (board_id, role) in existing_doors:
-                continue
-            credential = door_admin.issue_credential(
-                board=board_id,
-                role=role,
-                central_url=self.config.url,
-                jwks_path=jwks_path,
-                keys_dir=keys_dir,
-                rotate=False,
-            )
-            issued_doors[role] = credential.door_string
+        if issue_doors:
+            assert keys_dir is not None and jwks_path is not None
+            existing_doors = {
+                (str(item.get("board")), str(item.get("role")))
+                for item in door_admin.list_doors(jwks_path)
+            }
+            for role in ("worker", "reviewer"):
+                if (board_id, role) in existing_doors:
+                    continue
+                credential = door_admin.issue_credential(
+                    board=board_id,
+                    role=role,
+                    central_url=self.config.url,
+                    jwks_path=jwks_path,
+                    keys_dir=keys_dir,
+                    rotate=False,
+                )
+                issued_doors[role] = credential.door_string
         steps.append({
             "step": "door_credentials",
-            "status": "created" if issued_doors else "already present",
+            "status": (
+                "created"
+                if issued_doors
+                else "already present" if issue_doors else "not requested"
+            ),
             "message": (
                 "Missing door credentials issued."
                 if issued_doors
-                else "Door credentials already present; no credentials changed."
+                else (
+                    "Door credentials already present; no credentials changed."
+                    if issue_doors
+                    else "Door credential issuance remains a separate explicit action."
+                )
             ),
         })
 
@@ -6210,6 +6258,237 @@ class FleetFetcher:
             "ok": True,
             "steps": steps,
             "doors": issued_doors or None,
+        }
+
+    async def _project_removal_observation(
+        self, board_id: str
+    ) -> dict[str, Any]:
+        """Read real bounded board state needed to prove project quiescence."""
+        active_states = {
+            "claimed",
+            "in_progress",
+            "creating_report",
+            "submitted",
+            "reviewing",
+            "in_review",
+        }
+        complete = True
+        async with self._client(board_id) as client:
+            try:
+                snapshot = await client.board_snapshot(
+                    limit=SNAPSHOT_LIMIT,
+                    max_bytes=SNAPSHOT_MAX_BYTES,
+                    include_retired=True,
+                )
+            except Exception:  # noqa: BLE001 - incomplete reads must fail closed.
+                snapshot = {}
+                complete = False
+            try:
+                page = await client.ticket_list(
+                    include_closed=False, limit=TICKET_LIST_LIMIT, view="work"
+                )
+            except Exception:  # noqa: BLE001 - incomplete reads must fail closed.
+                page = {}
+                complete = False
+
+        snapshot_rows = snapshot.get("tickets") if isinstance(snapshot, dict) else None
+        page_rows = page.get("tickets") if isinstance(page, dict) else None
+        by_id: dict[str, dict[str, Any]] = {}
+        for row in [
+            *(snapshot_rows if isinstance(snapshot_rows, list) else []),
+            *(page_rows if isinstance(page_rows, list) else []),
+        ]:
+            if not isinstance(row, dict) or not isinstance(row.get("ticket_id"), str):
+                continue
+            by_id[row["ticket_id"]] = row
+        tickets = list(by_id.values())
+
+        omitted = snapshot.get("omitted_counts") if isinstance(snapshot, dict) else None
+        snapshot_truncated = (
+            bool(snapshot.get("truncated")) if isinstance(snapshot, dict) else True
+        )
+        if snapshot_truncated:
+            complete = False
+        if isinstance(omitted, dict) and int(omitted.get("tickets") or 0) > 0:
+            complete = False
+        total_matching = page.get("total_matching") if isinstance(page, dict) else None
+        if isinstance(total_matching, int) and total_matching > len(
+            page_rows if isinstance(page_rows, list) else []
+        ):
+            complete = False
+
+        active = [
+            {"ticket_id": row["ticket_id"], "status": row.get("status")}
+            for row in tickets
+            if row.get("status") in active_states
+        ][:50]
+        offers = [
+            {"ticket_id": row["ticket_id"], "status": row.get("status")}
+            for row in tickets
+            if isinstance(row.get("dispatch_state"), dict)
+            and row["dispatch_state"].get("state") == "offered"
+        ][:50]
+        return {
+            "complete": complete,
+            "active_tickets": active,
+            "pending_offers": offers,
+            "ticket_count": len(tickets),
+            "snapshot_latest_seq": snapshot.get("latest_seq")
+            if isinstance(snapshot, dict)
+            else None,
+        }
+
+    async def build_project_lifecycle_plan(
+        self, request: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Build a read-only, permission-checked add or remove preview."""
+        action = request.get("action")
+        if action not in {"add", "remove"}:
+            raise ProjectLifecycleError("action must be add or remove")
+        await self._require_board_admin(self.config.home_board)
+        registry_payload = await self.fetch_project_registry()
+        registry = registry_payload["registry"]
+        central = str(getattr(self.config, "label", "default"))
+        actor = self.config.agent_name
+
+        if action == "add":
+            allowed = {
+                "action",
+                "name",
+                "board_id",
+                "work_dir",
+                "git_mode",
+                "repository_url",
+                "integration_ref",
+                "prepare_fleet_clone",
+            }
+            if set(request) - allowed:
+                raise ProjectLifecycleError("add plan contains unsupported fields")
+            source = await asyncio.to_thread(
+                inspect_project_source,
+                work_dir=request.get("work_dir"),
+                git_mode=request.get("git_mode", "existing"),
+                repository_url=request.get("repository_url"),
+                integration_ref=request.get("integration_ref", "main"),
+            )
+            async with self._client(self.config.home_board) as client:
+                listed = await _client_call(client, "board_list", {})
+            board_id = request.get("board_id")
+            boards = listed.get("boards") if isinstance(listed, dict) else None
+            board_exists = any(
+                isinstance(row, dict) and row.get("board_id") == board_id
+                for row in (boards if isinstance(boards, list) else [])
+            )
+            if board_exists and isinstance(board_id, str):
+                await self._require_board_admin(board_id)
+            return build_add_plan(
+                request=request,
+                registry=registry,
+                registry_expected_sha256=registry_payload["expected_sha256"],
+                source=source,
+                board_exists=board_exists,
+                actor=actor,
+                central=central,
+            )
+
+        if set(request) != {"action", "name"}:
+            raise ProjectLifecycleError("remove plan must contain only action and name")
+        projects = registry.get("projects") if isinstance(registry, dict) else None
+        entry = projects.get(request.get("name")) if isinstance(projects, dict) else None
+        board_id = entry.get("board_id") if isinstance(entry, dict) else None
+        if not isinstance(board_id, str):
+            raise ProjectLifecycleError("project is not registered")
+        await self._require_board_admin(board_id)
+        observation = await self._project_removal_observation(board_id)
+        return build_remove_plan(
+            request=request,
+            registry=registry,
+            registry_expected_sha256=registry_payload["expected_sha256"],
+            board_observation=observation,
+            actor=actor,
+            central=central,
+        )
+
+    async def apply_project_lifecycle_plan(
+        self, plan: Mapping[str, Any], seats_manager: Any
+    ) -> dict[str, Any]:
+        """Apply one already-reserved plan after rechecking observed state."""
+        await self._require_board_admin(self.config.home_board)
+        registry_payload = await self.fetch_project_registry()
+        if registry_payload["expected_sha256"] != plan.get("registry_expected_sha256"):
+            raise ProjectLifecycleConflictError(
+                "project registry changed after preview; create a new plan"
+            )
+
+        if plan.get("kind") == "project-add":
+            source = plan.get("source")
+            if not isinstance(source, Mapping):
+                raise ProjectLifecycleError("add plan source is missing")
+            refreshed = await asyncio.to_thread(
+                inspect_project_source,
+                work_dir=source.get("path"),
+                git_mode=source.get("git_mode"),
+                repository_url=source.get("repository_url"),
+                integration_ref=source.get("integration_ref", "main"),
+            )
+            if refreshed.get("digest") != source.get("digest"):
+                raise ProjectLifecycleConflictError(
+                    "project folder or Git state changed after preview; create a new plan"
+                )
+            await asyncio.to_thread(clone_project_source, plan)
+            result = await self.add_project(
+                project_name=str(plan["project"]),
+                board_id=str(plan["board_id"]),
+                work_dir=str(source["path"]),
+                integration_ref=str(source.get("integration_ref", "main")),
+                seats_manager=seats_manager,
+                repository_url=source.get("repository_url")
+                or source.get("observed_origin"),
+                prepare_fleet_clone=bool(plan.get("prepare_fleet_clone")),
+                issue_doors=False,
+            )
+            return {
+                "ok": True,
+                "kind": "project-add",
+                "project": plan["project"],
+                "steps": result.get("steps", []),
+                "doors": None,
+                "preserved": [
+                    "existing project folders and repositories",
+                    "board history and shared credentials",
+                ],
+            }
+
+        if plan.get("kind") != "project-remove":
+            raise ProjectLifecycleError("unsupported project lifecycle plan")
+        board_id = str(plan["board_id"])
+        await self._require_board_admin(board_id)
+        observation = await self._project_removal_observation(board_id)
+        fresh = build_remove_plan(
+            request={"action": "remove", "name": plan["project"]},
+            registry=registry_payload["registry"],
+            registry_expected_sha256=registry_payload["expected_sha256"],
+            board_observation=observation,
+            actor=self.config.agent_name,
+            central=str(getattr(self.config, "label", "default")),
+        )
+        if fresh["blocked"]:
+            raise ProjectLifecycleConflictError(
+                "project is no longer quiescent; create a new removal preview"
+            )
+        registry = copy.deepcopy(registry_payload["registry"])
+        removed = registry["projects"].pop(str(plan["project"]))
+        await self.save_project_registry(
+            registry, registry_payload["expected_sha256"]
+        )
+        return {
+            "ok": True,
+            "kind": "project-remove",
+            "project": plan["project"],
+            "removed_reference": True,
+            "rollback": "Re-add the preserved registry entry with a fresh CAS plan.",
+            "preserved": list(plan.get("preserved") or []),
+            "removed_entry": removed,
         }
 
 
@@ -7786,6 +8065,7 @@ class DashboardCache:
         }
         self._detail_lock = threading.Lock()
         self._details: dict[tuple[str, str], TimedCache] = {}
+        self.project_lifecycle = ProjectLifecycleStore()
 
     def labels(self) -> list[str]:
         return list(self.fetchers)
@@ -8083,6 +8363,61 @@ class DashboardCache:
             ),
             label,
         )
+
+    def plan_project_lifecycle(
+        self, request: Mapping[str, Any], central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        plan = self._async_runner.run(
+            self.fetchers[label].build_project_lifecycle_plan(request)
+        )
+        return self._labeled(self.project_lifecycle.add(plan), label)
+
+    def get_project_lifecycle_plan(
+        self, plan_id: str, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        fetcher = self.fetchers[label]
+        return self._labeled(
+            self.project_lifecycle.get(
+                plan_id, actor=fetcher.config.agent_name, central=label
+            ),
+            label,
+        )
+
+    def apply_project_lifecycle(
+        self,
+        request: Mapping[str, Any],
+        seats_manager: Any,
+        central: str | None = None,
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        fetcher = self.fetchers[label]
+        plan, previous = self.project_lifecycle.reserve(
+            request.get("plan_id"),
+            actor=fetcher.config.agent_name,
+            central=label,
+            plan_digest=request.get("plan_digest"),
+            confirmation=request.get("confirmation"),
+        )
+        if previous is not None:
+            return self._labeled({**previous, "replayed": True}, label)
+        plan_id = str(plan["plan_id"])
+        try:
+            result = self._async_runner.run(
+                fetcher.apply_project_lifecycle_plan(plan, seats_manager)
+            )
+        except Exception as exc:
+            self.project_lifecycle.fail(plan_id, type(exc).__name__)
+            raise
+        receipt = {
+            **result,
+            "plan_id": plan_id,
+            "plan_digest": plan["plan_digest"],
+            "replayed": False,
+        }
+        self.project_lifecycle.complete(plan_id, receipt)
+        return self._labeled(receipt, label)
 
     def close(self) -> None:
         for fetcher in self.fetchers.values():
@@ -8912,6 +9247,8 @@ def make_handler(
                 "/api/doors/copy",
                 "/api/doors/rotate",
                 "/api/projects/add",
+                "/api/lifecycle/plan",
+                "/api/lifecycle/apply",
             }
             worker_action = re.fullmatch(
                 r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)", route
@@ -9213,6 +9550,35 @@ def make_handler(
                                 "rotate_door",
                                 request["board"],
                                 request["role"],
+                                central=central,
+                            )
+                        )
+                elif route == "/api/lifecycle/plan":
+                    if not isinstance(request, dict):
+                        raise ProjectLifecycleError("request must be an object")
+                    with project_operation_lock:
+                        body = _json_bytes(
+                            cache_call(
+                                "plan_project_lifecycle",
+                                request,
+                                central=central,
+                            )
+                        )
+                elif route == "/api/lifecycle/apply":
+                    if not isinstance(request, dict) or set(request) != {
+                        "plan_id",
+                        "plan_digest",
+                        "confirmation",
+                    }:
+                        raise ProjectLifecycleError(
+                            "request must contain plan_id, plan_digest, and confirmation"
+                        )
+                    with project_operation_lock:
+                        body = _json_bytes(
+                            cache_call(
+                                "apply_project_lifecycle",
+                                request,
+                                seats,
                                 central=central,
                             )
                         )

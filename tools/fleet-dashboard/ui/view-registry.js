@@ -19,6 +19,10 @@
       }
       return view.render(context);
     },
+    bind(id, context, root) {
+      const view = views.get(id);
+      if (view && typeof view.bind === 'function') view.bind(context, root);
+    },
     describe() { return [...views.values()].map(({id, owns}) => ({id, owns})); }
   });
 })();
