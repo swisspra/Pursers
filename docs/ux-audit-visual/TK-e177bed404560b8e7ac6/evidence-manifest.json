@@ -1,0 +1,31 @@
+{
+  "ticket_id": "TK-e177bed404560b8e7ac6",
+  "fixture_provenance": "synthetic-safe-local",
+  "baseline": "f17bad906d4a6d036506118c0f3b2d6735418cde",
+  "candidate_ui_source": "d5424aa5e612521192e9a88a81e0bd784065a263",
+  "task_space_id": 32,
+  "assertions": {
+    "desktop_viewport": "1440x900",
+    "mobile_viewport": "390x844",
+    "home_css_loaded": true,
+    "minimum_action_height_css_px": 44,
+    "keyboard_focus_outline_css_px": 3,
+    "zoom_200_horizontal_overflow_css_px": 0,
+    "mobile_horizontal_overflow_css_px": 0,
+    "reduced_motion_matches": true,
+    "loading_aria_busy": true,
+    "empty_guidance_visible": true,
+    "reconnecting_state_visible": true,
+    "calm_state_visible": true,
+    "high_pressure_state_visible": true
+  },
+  "files": {
+    "before-light-1440x900.png": "bd0b92a45b5d0381e2b9f4f753fee12ca45a51efe990870bedf08254f3cfcef3",
+    "before-light-390x844.png": "aa06630f0617cfc1a293843a60c66b933f99aba6fd825a73c9954afc618319a9",
+    "after-high-light-1440x900.png": "5925c0a4a5c2a24d925bc2fec0bdf8a2deb5d2ebe6b2d66f905f6d1fa46f8ba5",
+    "after-high-light-390x844.png": "5c39e6150a34311d6c8cfe8942f72c266a02b3058e0dd717547c3bd1504bbcdc",
+    "after-high-dark-compact-1440x900.png": "83482e5fab07a4ed474c09b52029fd0ae8ecf991ac48a5f5ced1bb5a15e4c0c5",
+    "after-calm-light-1440x900.png": "12e6c1e4661856514a4e07e141be3dbc5e26e928aa00df4728fab21be6ee0337",
+    "after-error-light-1440x900.png": "02ac96a120ac21f3ea60c07208b49522f70a7623afee2ef85335d6628e1d1c69"
+  }
+}
