@@ -150,6 +150,7 @@ CONFIG_API_MAX_BYTES = 40_000
 CONFIG_JOB_LIMIT = 100
 CONFIG_OPS_PLAN_TTL_SECONDS = 120
 CONFIG_SEAT_PLAN_TTL_SECONDS = 600
+DOOR_CREDENTIAL_PLAN_TTL_SECONDS = 300
 CONFIG_PLAN_LIMIT = 50
 GIT_TIMEOUT_SECONDS = 120
 GIT_ERROR_TAIL_CHARS = 2_000
@@ -4721,6 +4722,9 @@ class FleetFetcher:
         self._configured_but_unreadable: list[str] = []
         self._active_registry_boards: list[str] = [config.home_board]
         self._seat_definitions: dict[str, dict[str, Any]] = {}
+        self._door_plans: dict[str, dict[str, Any]] = {}
+        self._door_plan_lock = threading.Lock()
+        self._door_audit_lock = threading.Lock()
         self._client_pool = _FleetClientPool(config, client_factory)
 
     def enable_client_reuse(self) -> None:
@@ -6061,6 +6065,419 @@ class FleetFetcher:
         if board_id not in active_boards:
             raise ValueError(f"board {board_id!r} is not an active registry project")
         await self._require_board_admin(board_id)
+
+    @staticmethod
+    def _door_state_digest(jwks_path: Path) -> str:
+        try:
+            payload = jwks_path.read_bytes()
+        except FileNotFoundError:
+            payload = b""
+        except OSError as exc:
+            raise RuntimeError("cannot read the configured Doors state") from exc
+        return hashlib.sha256(payload).hexdigest()
+
+    def _door_audit(self, operation: str, phase: str, **fields: Any) -> None:
+        """Append one fsynced, secret-free audit event."""
+        _keys_dir, jwks_path = self._require_doors_config()
+        audit_dir = jwks_path.parent / ".fleet-dashboard"
+        audit_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(audit_dir, 0o700)
+        path = audit_dir / "credential-actions.jsonl"
+        record = {
+            "at": self.now_factory().isoformat(),
+            "operation": operation,
+            "phase": phase,
+            "central": self.config.label,
+            **fields,
+        }
+        encoded = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+        with self._door_audit_lock:
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags, 0o600)
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise RuntimeError("credential audit destination must be a regular file")
+                os.fchmod(descriptor, 0o600)
+                if os.write(descriptor, encoded) != len(encoded):
+                    raise OSError("incomplete credential audit append")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+    @staticmethod
+    def _atomic_private_write(path: Path, payload: bytes) -> None:
+        path.parent.mkdir(parents=False, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "wb", closefd=True) as stream:
+                descriptor = -1
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _validate_private_destination(
+        value: Any, *, keys_dir: Path, jwks_path: Path
+    ) -> Path:
+        if not isinstance(value, Path):
+            raise ValueError("private-file delivery requires a configured seat")
+        path = value.expanduser().resolve()
+        if path == jwks_path or path == keys_dir or keys_dir in path.parents:
+            raise ValueError("seat credential file overlaps Doors key infrastructure")
+        if not path.is_absolute() or not path.parent.is_dir():
+            raise ValueError("seat credential parent directory must already exist")
+        parent_mode = stat.S_IMODE(path.parent.stat().st_mode)
+        if parent_mode & 0o077:
+            raise ValueError("seat credential parent directory must be private")
+        if path.exists():
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ValueError("seat credential destination must be a regular 0600 file")
+        return path
+
+    @staticmethod
+    def _door_plan_digest(plan: Mapping[str, Any]) -> str:
+        digestable = {
+            key: value
+            for key, value in plan.items()
+            if key not in {"destination_path", "expires_at_monotonic", "digest"}
+        }
+        if isinstance(plan.get("destination_path"), Path):
+            digestable["destination_binding"] = hashlib.sha256(
+                os.fsencode(plan["destination_path"])
+            ).hexdigest()
+        return hashlib.sha256(
+            json.dumps(digestable, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    async def prepare_door_credential(
+        self,
+        request: Any,
+        *,
+        destination_path: Path | None = None,
+        ca_configured: bool = False,
+    ) -> dict[str, Any]:
+        if not isinstance(request, dict):
+            raise ValueError("credential plan request must be an object")
+        allowed = {"operation", "board", "role", "delivery", "seat"}
+        required = {"operation", "board", "role", "delivery"}
+        if set(request) - allowed or not required <= set(request):
+            raise ValueError(
+                "credential plan requires operation, board, role, and delivery; seat is optional"
+            )
+        operation = request["operation"]
+        board_id = request["board"]
+        role = request["role"]
+        delivery = request["delivery"]
+        seat = request.get("seat")
+        if operation not in {"issue", "rotate", "revoke"}:
+            raise ValueError("operation must be issue, rotate, or revoke")
+        if not isinstance(board_id, str) or not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        if role not in door_admin.VALID_ROLES:
+            raise ValueError("role must be worker or reviewer")
+        if delivery not in {"reveal_once", "private_file", "none"}:
+            raise ValueError("delivery must be reveal_once, private_file, or none")
+        if operation == "revoke":
+            if delivery != "none" or seat is not None or destination_path is not None:
+                raise ValueError("revoke requires delivery=none and no seat")
+        elif delivery == "none":
+            raise ValueError("issue and rotate require a delivery method")
+        elif delivery == "private_file":
+            if not isinstance(seat, str) or not seat:
+                raise ValueError("private-file delivery requires a seat")
+        elif seat is not None or destination_path is not None:
+            raise ValueError("one-time reveal must not select a seat file")
+
+        keys_dir, jwks_path = self._require_doors_config()
+        await self._authorize_door_action(board_id)
+        destination = None
+        if delivery == "private_file":
+            destination = self._validate_private_destination(
+                destination_path, keys_dir=keys_dir, jwks_path=jwks_path
+            )
+
+        matching = [
+            row
+            for row in door_admin.list_doors(jwks_path)
+            if row.get("board") == board_id and row.get("role") == role
+        ]
+        if len(matching) > 1:
+            raise RuntimeError("multiple active keys exist for this board and role")
+        current = matching[0] if matching else None
+        if operation in {"rotate", "revoke"} and current is None:
+            raise ValueError(f"cannot {operation}: no active key for this board and role")
+
+        impact = {
+            "issue": (
+                "Issues a board- and role-scoped credential without replacing "
+                "the active signing key."
+            ),
+            "rotate": (
+                "Replaces the active signing key immediately. Every seat using "
+                "the previous key must receive a new credential and rejoin."
+            ),
+            "revoke": (
+                "Removes the active public key immediately. Every credential "
+                "signed by it stops authenticating."
+            ),
+        }[operation]
+        created_at = self.now_factory()
+        public_delivery = (
+            {
+                "mode": "private_file",
+                "seat": seat,
+                "destination": "configured token file",
+                "value_included": False,
+            }
+            if delivery == "private_file"
+            else {"mode": delivery, "value_included": False}
+        )
+        plan: dict[str, Any] = {
+            "schema_version": 1,
+            "operation": operation,
+            "board": board_id,
+            "role": role,
+            "delivery": public_delivery,
+            "current_kid": current.get("kid") if current else None,
+            "observed_state_digest": self._door_state_digest(jwks_path),
+            "impact": impact,
+            "confirmation": f"Confirm {operation} for {board_id} ({role}). {impact}",
+            "certificate_guidance": {
+                "https": urlsplit(self.config.url).scheme == "https",
+                "ca_configured_for_seat": bool(ca_configured),
+                "message": (
+                    "Keep the seat's configured CA file when connecting to this HTTPS Central."
+                    if urlsplit(self.config.url).scheme == "https" and ca_configured
+                    else "Configure the Central CA on the seat before connecting."
+                    if urlsplit(self.config.url).scheme == "https"
+                    else "Loopback HTTP does not require a CA file."
+                ),
+            },
+            "seat_bundle": {
+                "credential_kind": "administrator_provisioned_token_file",
+                "board": board_id,
+                "role": role,
+                "membership_mutated": False,
+                "restart_required": False,
+            },
+            "created_at": created_at.isoformat(),
+            "expires_at": (
+                created_at + timedelta(seconds=DOOR_CREDENTIAL_PLAN_TTL_SECONDS)
+            ).isoformat(),
+            "expires_in_s": DOOR_CREDENTIAL_PLAN_TTL_SECONDS,
+            "destination_path": destination,
+            "expires_at_monotonic": time.monotonic() + DOOR_CREDENTIAL_PLAN_TTL_SECONDS,
+        }
+        digest = self._door_plan_digest(plan)
+        plan_id = uuid.uuid4().hex
+        with self._door_plan_lock:
+            self._door_plans = {
+                key: value
+                for key, value in self._door_plans.items()
+                if value["expires_at_monotonic"] > time.monotonic()
+            }
+            if len(self._door_plans) >= CONFIG_PLAN_LIMIT:
+                self._door_plans.pop(next(iter(self._door_plans)))
+            self._door_plans[plan_id] = {**plan, "digest": digest}
+        self._door_audit(
+            operation,
+            "planned",
+            board=board_id,
+            role=role,
+            delivery=delivery,
+            plan_id=plan_id,
+        )
+        return {
+            "ok": True,
+            "plan_id": plan_id,
+            "digest": digest,
+            **{
+                key: value
+                for key, value in plan.items()
+                if key not in {"destination_path", "expires_at_monotonic"}
+            },
+        }
+
+    def _stage_door_issue(
+        self,
+        *,
+        board: str,
+        role: str,
+        rotate: bool,
+        keys_dir: Path,
+        jwks_path: Path,
+    ) -> tuple[door_admin.IssuedCredential, Path, Path, Path]:
+        keys_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging_root = Path(
+            tempfile.mkdtemp(prefix=".fleet-door-", dir=keys_dir.parent)
+        )
+        staged_keys = staging_root / "keys"
+        if keys_dir.exists():
+            shutil.copytree(keys_dir, staged_keys)
+        else:
+            staged_keys.mkdir(mode=0o700)
+        staged_jwks = staging_root / "jwks.json"
+        if jwks_path.exists():
+            shutil.copy2(jwks_path, staged_jwks)
+        issued = door_admin.issue_credential(
+            board=board,
+            role=role,
+            central_url=self.config.url,
+            jwks_path=staged_jwks,
+            keys_dir=staged_keys,
+            rotate=rotate,
+        )
+        return issued, staging_root, staged_keys, staged_jwks
+
+    def _publish_staged_door(
+        self,
+        *,
+        staged_keys: Path,
+        staged_jwks: Path,
+        keys_dir: Path,
+        jwks_path: Path,
+    ) -> list[Path]:
+        keys_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        created: list[Path] = []
+        for staged in staged_keys.glob("*.pem"):
+            target = keys_dir / staged.name
+            if target.exists():
+                continue
+            self._atomic_private_write(target, staged.read_bytes())
+            created.append(target)
+        try:
+            jwks_mode = stat.S_IMODE(jwks_path.stat().st_mode) if jwks_path.exists() else 0o644
+            door_admin._atomic_write(jwks_path, staged_jwks.read_bytes(), jwks_mode)
+        except Exception:
+            for path in created:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+        return created
+
+    async def confirm_door_credential(self, plan_id: Any, digest: Any) -> dict[str, Any]:
+        if not isinstance(plan_id, str) or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
+            raise ValueError("valid plan_id is required")
+        if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise ValueError("valid plan digest is required")
+        with self._door_plan_lock:
+            plan = self._door_plans.pop(plan_id, None)
+        if plan is None:
+            raise KeyError(plan_id)
+        operation = str(plan["operation"])
+        board = str(plan["board"])
+        role = str(plan["role"])
+        delivery = str(plan["delivery"]["mode"])
+        if plan["expires_at_monotonic"] <= time.monotonic():
+            self._door_audit(operation, "denied", board=board, role=role, reason="expired")
+            raise RuntimeError("credential confirmation plan expired")
+        expected = str(plan["digest"])
+        if not hmac.compare_digest(digest, expected) or not hmac.compare_digest(
+            self._door_plan_digest(plan), expected
+        ):
+            self._door_audit(operation, "denied", board=board, role=role, reason="digest_mismatch")
+            raise ValueError("credential plan digest mismatch")
+
+        keys_dir, jwks_path = self._require_doors_config()
+        await self._authorize_door_action(board)
+        if not hmac.compare_digest(
+            self._door_state_digest(jwks_path), str(plan["observed_state_digest"])
+        ):
+            self._door_audit(operation, "denied", board=board, role=role, reason="state_changed")
+            raise RuntimeError("Doors state changed; prepare a new credential plan")
+
+        self._door_audit(operation, "confirmed", board=board, role=role, delivery=delivery)
+        if operation == "revoke":
+            kid = str(plan["current_kid"])
+            door_admin.revoke_kid(jwks_path, kid)
+            self._door_audit(operation, "completed", board=board, role=role, kid=kid)
+            return {
+                "ok": True,
+                "operation": operation,
+                "board": board,
+                "role": role,
+                "kid": kid,
+                "credential_changed": True,
+                "impact": plan["impact"],
+            }
+
+        issued: door_admin.IssuedCredential
+        staging_root: Path
+        issued, staging_root, staged_keys, staged_jwks = self._stage_door_issue(
+            board=board,
+            role=role,
+            rotate=operation == "rotate",
+            keys_dir=keys_dir,
+            jwks_path=jwks_path,
+        )
+        destination = plan.get("destination_path")
+        previous: bytes | None = None
+        destination_existed = False
+        try:
+            if isinstance(destination, Path):
+                destination_existed = destination.exists()
+                previous = destination.read_bytes() if destination_existed else None
+                self._atomic_private_write(
+                    destination, (issued.token + "\n").encode("utf-8")
+                )
+            self._publish_staged_door(
+                staged_keys=staged_keys,
+                staged_jwks=staged_jwks,
+                keys_dir=keys_dir,
+                jwks_path=jwks_path,
+            )
+        except Exception:
+            if isinstance(destination, Path):
+                try:
+                    if destination_existed and previous is not None:
+                        self._atomic_private_write(destination, previous)
+                    elif not destination_existed:
+                        destination.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            self._door_audit(operation, "interrupted", board=board, role=role)
+            raise
+        finally:
+            shutil.rmtree(staging_root, ignore_errors=True)
+
+        self._door_audit(
+            operation, "completed", board=board, role=role, kid=issued.kid, delivery=delivery
+        )
+        result = {
+            "ok": True,
+            "operation": operation,
+            "board": board,
+            "role": role,
+            "kid": issued.kid,
+            "exp": issued.claims.get("exp"),
+            "credential_changed": True,
+            "delivery": plan["delivery"],
+            "impact": plan["impact"],
+            "seat_bundle": plan["seat_bundle"],
+        }
+        if delivery == "reveal_once":
+            result["door_string"] = issued.door_string
+            result["one_time_reveal"] = True
+        return result
 
     async def copy_door(self, board_id: str, role: str) -> dict[str, Any]:
         if not BOARD_ID_RE.fullmatch(board_id):
@@ -7411,6 +7828,42 @@ class SeatConfigManager:
             "import_review": self.import_review(),
         }
 
+    def credential_delivery_target(
+        self, seat_name: Any, board_id: Any, role: Any
+    ) -> dict[str, Any]:
+        """Resolve a seat bundle's private token target without exposing its path."""
+        if not isinstance(seat_name, str) or not seat_name:
+            raise ValueError("seat is required for private-file delivery")
+        if not isinstance(board_id, str) or not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        if role not in door_admin.VALID_ROLES:
+            raise ValueError("role must be worker or reviewer")
+        record = next(
+            (
+                row
+                for row in self.inventory.load()["seats"]
+                if row.get("name") == seat_name
+            ),
+            None,
+        )
+        if record is None:
+            raise ValueError("configured seat not found")
+        desired = self._desired(record)
+        if desired.role != role:
+            raise PermissionError("seat role does not match the requested credential role")
+        if desired.boards == "registry":
+            board_allowed = True
+        elif desired.boards == "home":
+            board_allowed = board_id == desired.home_board
+        else:
+            board_allowed = board_id in (desired.boards or "").split(",")
+        if not board_allowed:
+            raise PermissionError("seat bundle does not include the requested board")
+        return {
+            "path": Path(desired.token_file).expanduser().resolve(),
+            "ca_configured": bool(desired.ca_file),
+        }
+
     def team_seats(self) -> dict[str, Any]:
         """Return the Team route's bounded, credential-free seat projection."""
         rows = []
@@ -8612,6 +9065,37 @@ class DashboardCache:
             self._async_runner.run(self.fetchers[label].fetch_doors()), label
         )
 
+    def plan_door_credential(
+        self,
+        request: Any,
+        *,
+        destination_path: Path | None = None,
+        ca_configured: bool = False,
+        central: str | None = None,
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            self._async_runner.run(
+                self.fetchers[label].prepare_door_credential(
+                    request,
+                    destination_path=destination_path,
+                    ca_configured=ca_configured,
+                )
+            ),
+            label,
+        )
+
+    def confirm_door_credential(
+        self, plan_id: Any, digest: Any, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            self._async_runner.run(
+                self.fetchers[label].confirm_door_credential(plan_id, digest)
+            ),
+            label,
+        )
+
     def copy_door(
         self, board_id: str, role: str, central: str | None = None
     ) -> dict[str, Any]:
@@ -9535,6 +10019,8 @@ def make_handler(
                 "/api/attention",
                 "/api/human/resolve",
                 "/api/butler/mark",
+                "/api/doors/plan",
+                "/api/doors/confirm",
                 "/api/doors/copy",
                 "/api/doors/rotate",
                 "/api/projects/add",
@@ -9815,40 +10301,54 @@ def make_handler(
                             central=central,
                         )
                     )
+                elif route == "/api/doors/plan":
+                    if not isinstance(request, dict):
+                        raise ValueError("credential plan request must be an object")
+                    target: dict[str, Any] = {}
+                    if request.get("delivery") == "private_file":
+                        target = seats.credential_delivery_target(
+                            request.get("seat"), request.get("board"), request.get("role")
+                        )
+                    lock = (
+                        project_operation_lock
+                        if evidence_trace is not None
+                        else nullcontext()
+                    )
+                    with lock:
+                        body = _json_bytes(
+                            cache_call(
+                                "plan_door_credential",
+                                request,
+                                destination_path=target.get("path"),
+                                ca_configured=bool(target.get("ca_configured")),
+                                central=central,
+                            )
+                        )
+                elif route == "/api/doors/confirm":
+                    if not isinstance(request, dict) or set(request) != {"plan_id", "digest"}:
+                        raise ValueError("request must contain only plan_id and digest")
+                    lock = (
+                        project_operation_lock
+                        if evidence_trace is not None
+                        else nullcontext()
+                    )
+                    with lock:
+                        body = _json_bytes(
+                            cache_call(
+                                "confirm_door_credential",
+                                request["plan_id"],
+                                request["digest"],
+                                central=central,
+                            )
+                        )
                 elif route == "/api/doors/copy":
-                    if not isinstance(request, dict) or set(request) != {"board", "role"}:
-                        raise ValueError("request must contain only board and role")
-                    lock = (
-                        project_operation_lock
-                        if evidence_trace is not None
-                        else nullcontext()
+                    raise ValueError(
+                        "direct credential copy is disabled; use /api/doors/plan and confirm"
                     )
-                    with lock:
-                        body = _json_bytes(
-                            cache_call(
-                                "copy_door",
-                                request["board"],
-                                request["role"],
-                                central=central,
-                            )
-                        )
                 elif route == "/api/doors/rotate":
-                    if not isinstance(request, dict) or set(request) != {"board", "role"}:
-                        raise ValueError("request must contain only board and role")
-                    lock = (
-                        project_operation_lock
-                        if evidence_trace is not None
-                        else nullcontext()
+                    raise ValueError(
+                        "direct credential rotation is disabled; use /api/doors/plan and confirm"
                     )
-                    with lock:
-                        body = _json_bytes(
-                            cache_call(
-                                "rotate_door",
-                                request["board"],
-                                request["role"],
-                                central=central,
-                            )
-                        )
                 elif route == "/api/lifecycle/plan":
                     if not isinstance(request, dict):
                         raise ProjectLifecycleError("request must be an object")
