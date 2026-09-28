@@ -298,7 +298,7 @@ def test_team_host_mode_round_trips_through_plan_apply_inventory_and_render(
             "config_path": str(tmp_path / f"{name}.config"),
         }
         plan = manager.plan(payload)
-        manager.apply(plan["plan_id"])
+        manager.apply(plan["plan_id"], plan["digest"])
 
     projection = manager.team_seats()
     modes = {row["name"]: row["host_mode"] for row in projection["seats"]}
@@ -7021,7 +7021,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     assert secret not in encoded_plan
     assert "[REDACTED]" in encoded_plan
 
-    result = manager.apply(plan["plan_id"])
+    result = manager.apply(plan["plan_id"], plan["digest"])
     assert result["needs_restart"] is True
     assert result["backup_path"]
     assert "worker-one" in result["prompt"]
@@ -7545,10 +7545,10 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
 
         def plan(self, request: object) -> dict:
             calls.append(("plan", request))
-            return {"plan_id": "a" * 32, "changes": []}
+            return {"plan_id": "a" * 32, "digest": "c" * 64, "changes": []}
 
-        def apply(self, plan_id: object) -> dict:
-            calls.append(("apply", plan_id))
+        def apply(self, plan_id: object, digest: object) -> dict:
+            calls.append(("apply", plan_id, digest))
             return {"backup_path": "/tmp/config.backup", "needs_restart": True}
 
         def prompt(self, request: object) -> dict:
@@ -7637,8 +7637,12 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             assert json.load(response)["latest_tag"] == "v5.0.0a20"
         clone = post("/api/config/registry/clone", {"project": "fixture"})
         assert clone["clone"]["status"] == "ready"
-        assert post("/api/config/plan", {"name": "fixture"})["plan_id"] == "a" * 32
-        assert post("/api/config/apply", {"plan_id": "a" * 32})["backup_path"]
+        seat_plan = post("/api/config/plan", {"name": "fixture"})
+        assert seat_plan["plan_id"] == "a" * 32
+        assert post(
+            "/api/config/apply",
+            {"plan_id": seat_plan["plan_id"], "digest": seat_plan["digest"]},
+        )["backup_path"]
         assert post("/api/config/prompt", {"name": "fixture"})["prompt"]
         assert post("/api/config/doctor", {"names": ["fixture"]})["status"] == "queued"
         assert post("/api/config/import", {})["imported"] == []
@@ -7667,7 +7671,7 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             ({"schema_version": 1, "projects": {}}, "a" * 64),
         ),
         ("plan", {"name": "fixture"}),
-        ("apply", "a" * 32),
+        ("apply", "a" * 32, "c" * 64),
         ("prompt", {"name": "fixture"}),
         ("doctor", ["fixture"]),
         ("import", None),
@@ -11637,3 +11641,166 @@ def test_timed_cache_first_load_still_blocks_and_propagates_errors() -> None:
     cache = dashboard.TimedCache(5.0, loader, _cache_runner)
     with pytest.raises(RuntimeError, match="no central"):
         cache.get()
+
+
+def test_seat_bundle_plan_is_copyable_digest_bound_and_drift_checked(
+    tmp_path: Path,
+) -> None:
+    secret = "private-token-value-that-must-not-reach-browser"
+    token = tmp_path / "seat.jwt"
+    token.write_text("header.synthetic.signature")
+    config = tmp_path / "config.toml"
+    config.write_text(f'api_token = "{secret}"\n')
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "state",
+        bridge_installer=SimpleNamespace(version="5.0.6"),
+        latest_version=lambda: None,
+    )
+    request = {
+        "host": "codex",
+        "role": "coordinator",
+        "name": "coordinator-one",
+        "central_url": "https://central.example.invalid/mcp",
+        "home_board": "",
+        "boards": "project-a,project-b,project-c",
+        "token_file": str(token),
+        "ca_file": "",
+        "bridge_command": "pursers-wait-bridge",
+        "config_path": str(config),
+        "tier_max": 2,
+        "skills": [],
+        "can_work": False,
+        "can_review": False,
+        "provider": "example-provider",
+        "model": "example-model",
+    }
+
+    plan = manager.plan(request)
+    encoded = json.dumps(plan)
+    assert plan["expires_in_s"] == 600
+    assert re.fullmatch(r"[a-f0-9]{64}", plan["digest"])
+    assert re.fullmatch(r"[a-f0-9]{64}", plan["observed_digest"])
+    assert secret not in encoded
+    assert plan["bundle"]["board_memberships"]["board_ids"] == [
+        "project-a",
+        "project-b",
+        "project-c",
+    ]
+    assert plan["bundle"]["automation"]["starts_host"] is False
+
+    original_config = config.read_text()
+    with pytest.raises(TypeError, match="digest"):
+        manager.apply(plan["plan_id"])
+    assert config.read_text() == original_config
+    assert manager.seats()["seats"] == []
+
+    with pytest.raises(ValueError, match="digest is required"):
+        manager.apply(plan["plan_id"], None)
+    assert config.read_text() == original_config
+    assert manager.seats()["seats"] == []
+
+    with pytest.raises(ValueError, match="digest mismatch"):
+        manager.apply(plan["plan_id"], "0" * 64)
+    assert config.read_text() == original_config
+    assert manager.seats()["seats"] == []
+
+    stale = manager.plan(request)
+    config.write_text(config.read_text() + "# operator edit\n")
+    with pytest.raises(RuntimeError, match="no longer matches"):
+        manager.apply(stale["plan_id"], stale["digest"])
+
+    current = manager.plan(request)
+    result = manager.apply(current["plan_id"], current["digest"])
+    assert result["doctor_follow_up"]["required"] is True
+    assert result["doctor_follow_up"]["seat"] == "coordinator-one"
+
+
+def test_seat_bundle_http_apply_requires_digest_before_mutation(
+    tmp_path: Path,
+) -> None:
+    token = tmp_path / "seat.jwt"
+    token.write_text("header.synthetic.signature")
+    config = tmp_path / "config.toml"
+    config.write_text("# operator config\n")
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "state",
+        bridge_installer=SimpleNamespace(version="5.0.6"),
+        latest_version=lambda: None,
+    )
+    request = {
+        "host": "codex",
+        "role": "worker",
+        "name": "worker-one",
+        "central_url": "https://central.example.invalid/mcp",
+        "home_board": "pursers",
+        "boards": "registry",
+        "token_file": str(token),
+        "ca_file": "",
+        "bridge_command": "pursers-wait-bridge",
+        "config_path": str(config),
+        "tier_max": 2,
+        "skills": [],
+        "can_work": True,
+        "can_review": False,
+        "provider": "example-provider",
+        "model": "example-model",
+    }
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            return value or "default"
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=manager)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post(path: str, payload: object) -> tuple[int, dict]:
+        http_request = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(http_request) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.load(exc)
+
+    original_config = config.read_text()
+    try:
+        status, plan = post("/api/config/plan", request)
+        assert status == 200
+
+        status, missing = post(
+            "/api/config/apply", {"plan_id": plan["plan_id"]}
+        )
+        assert status == 400
+        assert missing["error"] == "request must contain only plan_id and digest"
+        assert config.read_text() == original_config
+        assert manager.seats()["seats"] == []
+
+        status, non_string = post(
+            "/api/config/apply",
+            {"plan_id": plan["plan_id"], "digest": None},
+        )
+        assert status == 400
+        assert non_string["error"] == "seat plan digest is required"
+        assert config.read_text() == original_config
+        assert manager.seats()["seats"] == []
+
+        status, mismatch = post(
+            "/api/config/apply",
+            {"plan_id": plan["plan_id"], "digest": "0" * 64},
+        )
+        assert status == 400
+        assert mismatch["error"] == "seat plan digest mismatch"
+        assert config.read_text() == original_config
+        assert manager.seats()["seats"] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()

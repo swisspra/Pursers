@@ -71,6 +71,53 @@ def desired(tmp_path: Path, host: str, **overrides):
     return target
 
 
+def test_setup_bundle_supports_explicit_multiboard_coordinator_without_secrets(
+    tmp_path: Path,
+) -> None:
+    target = desired(
+        tmp_path,
+        "codex",
+        role="coordinator",
+        name="coordinator-one",
+        home_board="",
+        boards="project-a,project-b,project-c",
+        can_work=False,
+        can_review=False,
+        provider="example-provider",
+        model="example-model",
+    )
+
+    bundle = seat_config.seat_setup_bundle(
+        target,
+        [{"path": "/PATH/TO/config.toml", "content": "token_file=/PATH/TO/seat.jwt"}],
+    )
+
+    assert bundle["board_memberships"] == {
+        "mode": "explicit",
+        "anchor_board": "pursers",
+        "board_ids": ["project-a", "project-b", "project-c"],
+        "meaning": "exactly the listed boards",
+    }
+    assert bundle["seat"]["permissions"]["can_work"] is False
+    assert bundle["seat"]["permissions"]["can_review"] is False
+    assert bundle["credential"]["value_included"] is False
+    assert bundle["automation"] == {
+        "starts_host": False,
+        "issues_credentials": False,
+        "mutates_membership": False,
+    }
+
+
+def test_explicit_board_list_rejects_duplicates(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="must be unique"):
+        desired(
+            tmp_path,
+            "codex",
+            home_board="",
+            boards="project-a,project-a",
+        )
+
+
 def test_profiles_match_wait_bridge_and_keep_host_margins() -> None:
     actual = seat_config.wait_bridge_host_timeouts()
     assert actual == {

@@ -73,6 +73,7 @@ from seat_config import (  # noqa: I001
     adapter_for,
     connector_skill_suggestions,
     discover_managed_seats,
+    seat_setup_bundle,
 )
 from release_ops import ReleaseOpsManager
 import runtime_environment
@@ -131,6 +132,7 @@ WORKER_API_MAX_BYTES = 20_000
 CONFIG_API_MAX_BYTES = 40_000
 CONFIG_JOB_LIMIT = 100
 CONFIG_OPS_PLAN_TTL_SECONDS = 120
+CONFIG_SEAT_PLAN_TTL_SECONDS = 600
 CONFIG_PLAN_LIMIT = 50
 GIT_TIMEOUT_SECONDS = 120
 GIT_ERROR_TAIL_CHARS = 2_000
@@ -6350,7 +6352,7 @@ class SeatConfigManager:
             bridge_installer=self.bridge_installer,
             inventory=self.inventory,
         )
-        self._plans: dict[str, tuple[DesiredSeat, list[Any]]] = {}
+        self._plans: dict[str, dict[str, Any]] = {}
         self._ops_plans: dict[str, dict[str, Any]] = {}
         self._active_ops: set[str] = set()
         self._jobs: dict[str, dict[str, Any]] = {}
@@ -7071,20 +7073,99 @@ class SeatConfigManager:
     def bridge(self) -> dict[str, Any]:
         return self._bridge_inspection()
 
+    @staticmethod
+    def _seat_plan_digests(
+        desired: DesiredSeat, changes: list[Any]
+    ) -> tuple[str, str]:
+        observations = [
+            {
+                "path": str(change.path),
+                "action": change.action,
+                "before_sha256": hashlib.sha256(
+                    (change.before or "").encode("utf-8")
+                ).hexdigest(),
+            }
+            for change in changes
+        ]
+        observed_digest = hashlib.sha256(
+            json.dumps(
+                observations, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        request = {
+            "seat": asdict(desired),
+            "observed_digest": observed_digest,
+            "changes": [
+                {
+                    **row,
+                    "after_sha256": hashlib.sha256(
+                        (change.after or "").encode("utf-8")
+                    ).hexdigest(),
+                    "mode": change.mode,
+                }
+                for row, change in zip(observations, changes, strict=True)
+            ],
+        }
+        digest = hashlib.sha256(
+            json.dumps(request, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        return digest, observed_digest
+
+    @staticmethod
+    def _assert_seat_plan_state(changes: list[Any]) -> None:
+        for change in changes:
+            if change.action != "write":
+                continue
+            current = (
+                change.path.read_text(encoding="utf-8")
+                if change.path.exists()
+                else None
+            )
+            if current != change.before:
+                raise RuntimeError(
+                    f"seat plan no longer matches {change.path}; generate a new plan"
+                )
+
     def plan(self, payload: Any) -> dict[str, Any]:
         desired = self._desired(payload)
         changes = list(adapter_for(desired).plan(desired))
         plan_id = uuid.uuid4().hex
+        digest, observed_digest = self._seat_plan_digests(desired, changes)
+        created_at = datetime.now(timezone.utc)
+        expires_at = created_at + timedelta(seconds=CONFIG_SEAT_PLAN_TTL_SECONDS)
+        configuration_files = [
+            {
+                "path": self._clean_text(str(change.path)),
+                "content": self._clean_text(change.after),
+            }
+            for change in changes
+            if change.action == "write" and isinstance(change.after, str)
+        ]
+        bundle = seat_setup_bundle(desired, configuration_files)
         with self._lock:
             if len(self._plans) >= CONFIG_PLAN_LIMIT:
                 self._plans.pop(next(iter(self._plans)))
-            self._plans[plan_id] = (desired, changes)
+            self._plans[plan_id] = {
+                "desired": desired,
+                "changes": changes,
+                "digest": digest,
+                "expires_at": time.monotonic() + CONFIG_SEAT_PLAN_TTL_SECONDS,
+            }
         self._journal("plan", seat=desired.name, changes=len(changes))
         return {
+            "schema_version": 1,
             "plan_id": plan_id,
+            "digest": digest,
+            "observed_digest": observed_digest,
+            "created_at": created_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "expires_in_s": CONFIG_SEAT_PLAN_TTL_SECONDS,
             "seat": desired.name,
             "token_file_exists": Path(desired.token_file).expanduser().is_file(),
             "ca_file_exists": Path(desired.ca_file).expanduser().is_file(),
+            "bundle": bundle,
             "changes": [
                 {
                     "path": str(change.path),
@@ -7103,14 +7184,23 @@ class SeatConfigManager:
             "skills": connector_skill_suggestions(adapter_for(desired).inspect()),
         }
 
-    def apply(self, plan_id: Any) -> dict[str, Any]:
+    def apply(self, plan_id: Any, digest: Any) -> dict[str, Any]:
         if not isinstance(plan_id, str):
             raise ValueError("plan_id is required")  # noqa: TRY004 - API contract.
+        if not isinstance(digest, str):
+            raise ValueError("seat plan digest is required")
         with self._lock:
             pending = self._plans.pop(plan_id, None)
         if pending is None:
             raise KeyError(plan_id)
-        desired, changes = pending
+        desired = pending["desired"]
+        changes = pending["changes"]
+        expected_digest = pending["digest"]
+        if not hmac.compare_digest(digest, expected_digest):
+            raise ValueError("seat plan digest mismatch")
+        if pending["expires_at"] <= time.monotonic():
+            raise RuntimeError("seat plan expired; generate a new plan")
+        self._assert_seat_plan_state(changes)
         result = adapter_for(desired).apply(changes)
         self.inventory.upsert(
             desired, bridge_version=self.bridge_installer.version, doctor=None
@@ -7127,6 +7217,11 @@ class SeatConfigManager:
             "needs_restart": bool(result.changed),
             "restart_prompt": f"Restart {desired.host} to load the updated seat.",
             "prompt": PromptRenderer().render(desired),
+            "doctor_follow_up": {
+                "required": True,
+                "seat": desired.name,
+                "checks": seat_setup_bundle(desired, [])["doctor_checks"],
+            },
         }
 
     def prompt(self, payload: Any) -> dict[str, Any]:
@@ -8978,9 +9073,14 @@ def make_handler(
                 elif route == "/api/config/suggestions":
                     body = _json_bytes(seats.suggestions(request))
                 elif route == "/api/config/apply":
-                    if not isinstance(request, dict) or set(request) != {"plan_id"}:
-                        raise ValueError("request must contain only plan_id")
-                    body = _json_bytes(seats.apply(request["plan_id"]))
+                    if (
+                        not isinstance(request, dict)
+                        or set(request) != {"plan_id", "digest"}
+                    ):
+                        raise ValueError("request must contain only plan_id and digest")
+                    body = _json_bytes(
+                        seats.apply(request["plan_id"], request["digest"])
+                    )
                 elif route == "/api/config/prompt":
                     body = _json_bytes(seats.prompt(request))
                 elif route == "/api/config/doctor":
