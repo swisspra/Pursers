@@ -72,6 +72,7 @@ STATE_KEY = "coordinator_findings"
 SUBSCRIPTION_HEALTH_KEY = "board_butler_subscription_health"
 FLEET_STATE_KEY = "autonomous_butler_state"
 PROJECT_ONBOARDING_AUDIT_KEY = "board_butler_project_onboarding"
+PROJECT_ONBOARDING_RETRY_KEY_PREFIX = "butler_retry."
 EVALUATION_STATE_PREFIX = "board_butler_evaluation."
 CONFIG_KEY = "coordinator_config"
 SCHEMA_VERSION = 1
@@ -8887,47 +8888,213 @@ class CentralProjectRegistry:
     async def audit_project_onboarding(self, event: Mapping[str, Any]) -> None:
         self.audit_events.append(copy.deepcopy(dict(event)))
 
-    async def load_retry_state(self, api: Mapping[str, Any]) -> dict[tuple[str, str], Any]:
+    async def _state_value(self, key: str) -> str | None:
         try:
-            raw = await self.backend.client.board_state_get(
-                PROJECT_ONBOARDING_AUDIT_KEY
-            )
+            raw = await self.backend.client.board_state_get(key)
         except Exception as exc:
             if "state key not found" in str(exc).casefold():
-                return {}
+                return None
             raise
         state = raw.get("state", {})
         value = state.get("value") if isinstance(state, Mapping) else None
+        if not isinstance(value, str):
+            raise RuntimeError(f"{key} state value is malformed")
+        return value
+
+    @staticmethod
+    def _retry_state_key(source_id: str, project_hint: str) -> str:
+        material = json.dumps(
+            [source_id, project_hint], ensure_ascii=True, separators=(",", ":")
+        )
+        return PROJECT_ONBOARDING_RETRY_KEY_PREFIX + hashlib.sha256(
+            material.encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _retry_row(
+        value: str | None, source_id: str, project_hint: str
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
         try:
-            document = json.loads(value) if isinstance(value, str) else {}
+            document = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("project onboarding retry state is malformed") from exc
+        if (
+            not isinstance(document, Mapping)
+            or document.get("schema_version") != 1
+            or document.get("source_id") != source_id
+            or document.get("project_hint") != project_hint
+        ):
+            raise RuntimeError("project onboarding retry state is malformed")
+        retry = document.get("retry")
+        if retry is None:
+            return None
+        if not isinstance(retry, Mapping):
+            raise RuntimeError("project onboarding retry state is malformed")
+        attempts = retry.get("attempts")
+        retry_at = retry.get("retry_at")
+        if (
+            not isinstance(attempts, int)
+            or isinstance(attempts, bool)
+            or attempts < 1
+            or (retry_at is not None and parse_time(retry_at) is None)
+        ):
+            raise RuntimeError("project onboarding retry state is malformed")
+        return {"attempts": attempts, "retry_at": retry_at}
+
+    @classmethod
+    def _merge_retry_events(
+        cls,
+        value: str | None,
+        source_id: str,
+        project_hint: str,
+        events: Sequence[Mapping[str, Any]],
+    ) -> str:
+        row = cls._retry_row(value, source_id, project_hint)
+        for event in events:
+            if (
+                event.get("source_id") != source_id
+                or event.get("project_hint") != project_hint
+            ):
+                continue
+            if event.get("status") in {"onboarded", "already_registered"}:
+                row = None
+                continue
+            attempts = event.get("retry_attempts")
+            retry_at = event.get("retry_at")
+            if (
+                not isinstance(attempts, int)
+                or isinstance(attempts, bool)
+                or attempts < 1
+                or (retry_at is not None and parse_time(retry_at) is None)
+            ):
+                continue
+            if row is not None:
+                current_attempts = row["attempts"]
+                current_retry_at = parse_time(row.get("retry_at"))
+                proposed_retry_at = parse_time(retry_at)
+                if attempts < current_attempts or (
+                    attempts == current_attempts
+                    and current_retry_at is not None
+                    and (
+                        proposed_retry_at is None
+                        or proposed_retry_at <= current_retry_at
+                    )
+                ):
+                    continue
+            row = {"attempts": attempts, "retry_at": retry_at}
+        candidate = {
+            "schema_version": 1,
+            "source_id": source_id,
+            "project_hint": project_hint,
+            "retry": row,
+        }
+        encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+        if len(encoded) > 5_000:
+            raise RuntimeError("project onboarding retry state capacity exceeded")
+        return encoded
+
+    async def _legacy_retry_events(self) -> list[Mapping[str, Any]]:
+        value = await self._state_value(PROJECT_ONBOARDING_AUDIT_KEY)
+        if value is None:
+            return []
+        try:
+            document = json.loads(value)
         except json.JSONDecodeError:
-            return {}
-        rows = document.get("events") if isinstance(document, Mapping) else None
-        if not isinstance(rows, list):
-            return {}
+            return []
+        raw_events = document.get("events") if isinstance(document, Mapping) else None
+        if not isinstance(raw_events, list):
+            return []
+        return [row for row in raw_events if isinstance(row, Mapping)]
+
+    async def _flush_retry_key(
+        self,
+        source_id: str,
+        project_hint: str,
+        events: Sequence[Mapping[str, Any]],
+    ) -> None:
+        state_key = self._retry_state_key(source_id, project_hint)
+        expected_value = await self._state_value(state_key)
+        for attempt in range(STATE_WRITE_MAX_ATTEMPTS):
+            candidate = self._merge_retry_events(
+                expected_value, source_id, project_hint, events
+            )
+            if candidate == expected_value:
+                return
+            expected_digest = (
+                hashlib.sha256(expected_value.encode("utf-8")).hexdigest()
+                if expected_value is not None
+                else None
+            )
+            try:
+                await self.backend.client.board_state_update(
+                    state_key,
+                    candidate,
+                    expected_sha256=expected_digest,
+                )
+                return
+            except Exception as exc:
+                if "state precondition failed" not in str(exc).casefold():
+                    raise
+                if attempt + 1 >= STATE_WRITE_MAX_ATTEMPTS:
+                    raise StateWriteConflict(
+                        state_key, STATE_WRITE_MAX_ATTEMPTS
+                    ) from exc
+                expected_value = await self._state_value(state_key)
+                delay = STATE_WRITE_RETRY_BASE_DELAY_S * (2**attempt)
+                delay += random.uniform(0.0, STATE_WRITE_RETRY_BASE_DELAY_S)
+                await asyncio.sleep(delay)
+
+    async def _flush_retry_state(self, events: Sequence[Mapping[str, Any]]) -> None:
+        keys = sorted(
+            {
+                (event.get("source_id"), event.get("project_hint"))
+                for event in events
+                if isinstance(event.get("source_id"), str)
+                and isinstance(event.get("project_hint"), str)
+                and (
+                    event.get("status") in {"onboarded", "already_registered"}
+                    or (
+                        isinstance(event.get("retry_attempts"), int)
+                        and not isinstance(event.get("retry_attempts"), bool)
+                        and event.get("retry_attempts") >= 1
+                    )
+                )
+            }
+        )
+        for source_id, project_hint in keys:
+            await self._flush_retry_key(source_id, project_hint, events)
+
+    async def load_retry_state(
+        self,
+        api: Mapping[str, Any],
+        keys: Sequence[tuple[str, str]],
+    ) -> dict[tuple[str, str], Any]:
+        legacy_events = await self._legacy_retry_events()
         result: dict[tuple[str, str], Any] = {}
         retry_type = api["RetryState"]
-        for row in rows:
-            if not isinstance(row, Mapping):
-                continue
-            source_id = row.get("source_id")
-            project_hint = row.get("project_hint")
-            if not isinstance(source_id, str) or not isinstance(project_hint, str):
+        for source_id, project_hint in sorted(set(keys)):
+            state_key = self._retry_state_key(source_id, project_hint)
+            value = await self._state_value(state_key)
+            if value is None:
+                value = self._merge_retry_events(
+                    None, source_id, project_hint, legacy_events
+                )
+            row = self._retry_row(value, source_id, project_hint)
+            if row is None:
                 continue
             key = (source_id, project_hint)
-            if row.get("status") in {"onboarded", "already_registered"}:
-                result.pop(key, None)
-                continue
-            attempts = row.get("retry_attempts")
-            if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 1:
-                continue
-            retry_at = parse_time(row.get("retry_at"))
-            result[key] = retry_type(attempts=attempts, retry_at=retry_at)
+            result[key] = retry_type(
+                attempts=row["attempts"], retry_at=parse_time(row.get("retry_at"))
+            )
         return result
 
     async def flush_audits(self) -> None:
         if not self.audit_events:
             return
+        pending_events = copy.deepcopy(self.audit_events)
+        await self._flush_retry_state(pending_events)
         try:
             raw = await self.backend.client.board_state_get(
                 PROJECT_ONBOARDING_AUDIT_KEY
@@ -8954,7 +9121,7 @@ class CentralProjectRegistry:
             for item in document.get("events", [])
             if isinstance(item, Mapping)
         ]
-        rows.extend(self.audit_events)
+        rows.extend(pending_events)
         rows = rows[-MAX_PROJECT_ONBOARDING_AUDITS:]
         candidate = {"schema_version": 1, "events": rows}
         encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
@@ -8993,6 +9160,7 @@ class CentralBackend:
         )
         self._project_registry_adapter: CentralProjectRegistry | None = None
         self._project_onboarder: Any = None
+        self._project_onboarding_retry_keys: set[tuple[str, str]] = set()
         self.subscription_healthy = True
         self._subscription_failure_active = False
 
@@ -9020,15 +9188,24 @@ class CentralBackend:
             ]
         if self._project_registry_adapter is None:
             self._project_registry_adapter = CentralProjectRegistry(self)
+        item_keys = {(item.source_id, item.project_hint) for item in items}
+        new_retry_keys = sorted(item_keys - self._project_onboarding_retry_keys)
+        retry_state: dict[tuple[str, str], Any] = {}
+        if new_retry_keys:
+            retry_state = await self._project_registry_adapter.load_retry_state(
+                _project_onboarding_api(), new_retry_keys
+            )
         if self._project_onboarder is None:
             api = _project_onboarding_api()
-            retry_state = await self._project_registry_adapter.load_retry_state(api)
             self._project_onboarder = api["ProjectOnboarder"](
                 self._project_registry_adapter,
                 self._project_onboarding_policies,
                 clock=utc_now,
                 retry_state=retry_state,
             )
+        else:
+            self._project_onboarder.retry_state.update(retry_state)
+        self._project_onboarding_retry_keys.update(new_retry_keys)
         results = await self._project_onboarder.run_cycle(items)
         await self._project_registry_adapter.flush_audits()
         return [
