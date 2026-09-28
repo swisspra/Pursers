@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.6] - 2026-09-28
+
+This release includes `pursers-central==0.1.4`,
+`pursers-client==0.1.5`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.0.6`, `pursers==5.0.6`,
+`pursers-wait-bridge==0.1.3`, and
+`pursers-acp==0.1.4`.
+
 ### Added
 
 - Fleet Dashboard has a new visual shell with self-hosted typography, shared
@@ -33,6 +41,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Design contracts for Fleet public display, ticket progress checkpoints,
   seat and project lifecycle, and a controlled sequential-versus-parallel case
   study, plus a documented 5.0.5 visual baseline.
+- Workers can persist bounded progress assessments with a completion range,
+  confidence, evidence, and revision fencing without renewing their lease.
 
 ### Changed
 
@@ -51,6 +61,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   report push as unavailable.
 - The CI manifest's live-authority check uses one takeover mode and rejects a
   Central session authenticated as the wrong board, agent, role, or principal.
+- Typed MCP ticket errors retain their safe structured detail through the
+  client and Personal dashboard instead of being reduced to a generic error.
+- Fleet executor readiness and seat-kit checks recognize valid generated Goose
+  seats while continuing to reject incomplete capability metadata.
+- Registry administration honors each registry's configured home board, and
+  onboarding tolerates a pinned memory entry whose optional content is absent.
+- Fleet interactive links meet the 44-pixel touch-target requirement, the
+  keyboard-help dialog traps and restores focus, and completed search
+  navigation clears its query state.
+- Fleet Team uses source-backed host mode to distinguish ACP sessions from
+  persistent seats instead of inferring lifecycle from host names.
+- Board Butler no longer exits on an optimistic board-state conflict; the
+  question is deferred and replayed with fresh state.
 
 ### Security
 
