@@ -298,8 +298,6 @@ def project_public_snapshot(
             "work": public_counts,
         }
         work_items = []
-        work_aliases: dict[str, str] = {}
-        duplicate_aliases: set[str] = set()
         for identifier, (_ticket, state, changed_at) in unique.items():
             if counts[state] < cohort_minimum:
                 continue
@@ -307,9 +305,6 @@ def project_public_snapshot(
             if not ALIAS_RE.fullmatch(item_alias):
                 suppressed = True
                 continue
-            if item_alias in work_aliases.values():
-                duplicate_aliases.add(item_alias)
-            work_aliases[identifier] = item_alias
             work_items.append(
                 {
                     "alias": item_alias,
@@ -318,11 +313,6 @@ def project_public_snapshot(
                 }
             )
             all_tickets.append((identifier, _ticket, state, changed_at))
-        if duplicate_aliases:
-            work_items = [
-                item for item in work_items if item["alias"] not in duplicate_aliases
-            ]
-            suppressed = True
         work_items.sort(key=lambda item: (item["state"], item["alias"]))
         projects.append(row)
         project_details[alias] = {"project": row, "work_items": work_items}

@@ -359,6 +359,40 @@ def test_work_alias_collision_across_projects_suppresses_both_rows() -> None:
     assert projection["summary"]["suppressed"] is True
 
 
+def test_mixed_local_and_cross_project_alias_collision_suppresses_every_row() -> None:
+    source = source_with_tickets(5)
+    second = json.loads(json.dumps(source["boards"][0]))
+    second["board_id"] = "another-private-board"
+    for index, ticket in enumerate(second["tickets"]):
+        ticket["id"] = f"TK-another-secret-{index}"
+    source["boards"].append(second)
+    colliding_ids = {
+        "TK-secret-ticket-0",
+        "TK-secret-ticket-1",
+        "TK-another-secret-0",
+    }
+    collision_alias = "work-aaaaaaaaaaaaaaaa"
+
+    def mixed_collision(key: bytes, entity: str, identifier: str) -> str:
+        if entity == "work" and identifier in colliding_ids:
+            return collision_alias
+        return public.public_alias(key, entity, identifier)
+
+    projection = public.project_public_snapshot(
+        source, b"k" * 32, now=NOW, aliaser=mixed_collision
+    )
+
+    work_items = [
+        item
+        for detail in projection["projects"].values()
+        for item in detail["work_items"]
+    ]
+    assert len(projection["projects"]) == 2
+    assert len(work_items) == 7
+    assert all(item["alias"] != collision_alias for item in work_items)
+    assert projection["summary"]["suppressed"] is True
+
+
 def test_duplicate_source_project_is_suppressed() -> None:
     source = rich_source()
     source["boards"].append(dict(source["boards"][0]))
