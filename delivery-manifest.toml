@@ -580,6 +580,15 @@ evidence = [".github/workflows/ci.yml"]
 evidence_contains = ["tools/release_train.py"]
 
 [[artifacts]]
+id = "operator-tool:tools/rollout_doctor.py"
+kind = "operator-tool"
+source = "tools/rollout_doctor.py"
+state = "delivered"
+channel = "documented v5.0.6 local-runtime rollout command"
+evidence = ["docs/releases/RUNBOOK-v5.0.6.md", "tools/tests/test_rollout_doctor.py"]
+evidence_contains = ["tools/rollout_doctor.py"]
+
+[[artifacts]]
 id = "operator-tool:tools/release_versions.py"
 kind = "operator-tool"
 source = "tools/release_versions.py"
