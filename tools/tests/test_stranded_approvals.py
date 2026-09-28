@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import subprocess
 from pathlib import Path
 
@@ -56,6 +57,8 @@ def test_synthetic_repo_classifies_all_required_cases(tmp_path: Path) -> None:
     rebased = _commit(repo, "original landed content")
 
     _git(repo, "switch", "main")
+    (repo / "reference.txt").write_text("landed by another implementation\n", encoding="utf-8")
+    _commit(repo, "Merge TK-stranded by reference")
     (repo / "rebased.txt").write_text("alpha\nbeta\n", encoding="utf-8")
     (repo / "carrier.txt").write_text("different commit\n", encoding="utf-8")
     _commit(repo, "rebased carrier")
@@ -69,6 +72,7 @@ def test_synthetic_repo_classifies_all_required_cases(tmp_path: Path) -> None:
         _ticket("TK-ancestor", "ancestor", "codex/TK-ancestor", ancestor),
         _ticket("TK-rebased", "rebased", "codex/TK-rebased", rebased),
         _ticket("TK-stranded", "stranded", "codex/TK-stranded", stranded),
+        _ticket("TK-unlanded", "unlanded", "codex/TK-unlanded", stranded),
         {
             "ticket_id": "TK-no-sha",
             "title": "no sha",
@@ -91,11 +95,14 @@ def test_synthetic_repo_classifies_all_required_cases(tmp_path: Path) -> None:
         2,
         2,
     )
-    assert results["TK-stranded"].state == "STRANDED"
-    assert (results["TK-stranded"].matched_lines, results["TK-stranded"].added_lines) == (
-        0,
-        2,
-    )
+    assert results["TK-stranded"].state == "LANDED_BY_REFERENCE"
+    assert results["TK-stranded"].matched_lines is None
+    assert results["TK-stranded"].added_lines is None
+    assert results["TK-unlanded"].state == "STRANDED"
+    assert (
+        results["TK-unlanded"].matched_lines,
+        results["TK-unlanded"].added_lines,
+    ) == (0, 2)
     assert results["TK-no-sha"].state == "UNVERIFIABLE"
     assert results["TK-missing"].state == "BRANCH_MISSING"
 
@@ -112,6 +119,17 @@ class _FakeClient:
             selected = [
                 ticket for ticket in selected if ticket["status"] == arguments["status"]
             ]
+        if "assigned_to" in arguments:
+            needle = str(arguments["assigned_to"]).casefold()
+            selected = [
+                ticket
+                for ticket in selected
+                if needle
+                in {
+                    str(ticket.get("assigned_to_agent_id") or "").casefold(),
+                    str(ticket.get("assigned_to") or "").casefold(),
+                }
+            ]
         if "ticket_ids" in arguments:
             wanted = set(arguments["ticket_ids"])
             selected = [ticket for ticket in selected if ticket["ticket_id"] in wanted]
@@ -120,6 +138,20 @@ class _FakeClient:
             "tickets": selected[:limit],
             "count": len(selected[:limit]),
             "total_matching": len(selected),
+        }
+
+    async def board_status(self, **arguments: object) -> dict[str, object]:
+        self.calls.append({"board_status": True, **arguments})
+        agents = {
+            (str(ticket.get("assigned_to_agent_id")), str(ticket.get("assigned_to")))
+            for ticket in self.tickets
+            if ticket.get("assigned_to_agent_id") or ticket.get("assigned_to")
+        }
+        return {
+            "agents": [
+                {"agent_id": agent_id, "agent_name": agent_name}
+                for agent_id, agent_name in sorted(agents)
+            ]
         }
 
 
@@ -149,10 +181,166 @@ async def test_ticket_reader_uses_archived_status_pages_and_bounded_full_batches
 
 
 @pytest.mark.anyio
-async def test_ticket_reader_rejects_truncated_status_page() -> None:
+async def test_ticket_reader_splits_oversized_status_by_retired_assignees() -> None:
     tickets = [
-        {"ticket_id": f"TK-{index}", "status": "closed", "title": "ticket"}
+        {
+            "ticket_id": f"TK-{index:04d}",
+            "status": "closed",
+            "title": "ticket",
+            "assigned_to_agent_id": "AI-a" if index % 2 == 0 else "AI-b",
+            "assigned_to": "retired-a" if index % 2 == 0 else "retired-b",
+        }
+        for index in range(674)
+    ]
+    client = _FakeClient(tickets)
+
+    result = await stranded_approvals.fetch_all_tickets(client)
+
+    assert [ticket["ticket_id"] for ticket in result] == [
+        ticket["ticket_id"] for ticket in tickets
+    ]
+    board_calls = [call for call in client.calls if call.get("board_status")]
+    assert board_calls == [{"board_status": True, "include_retired": True}]
+    assigned_calls = [call for call in client.calls if "assigned_to" in call]
+    assert {call["assigned_to"] for call in assigned_calls} == {"AI-a", "AI-b"}
+
+
+@pytest.mark.anyio
+async def test_ticket_reader_fails_closed_when_split_still_misses_ids() -> None:
+    tickets = [
+        {"ticket_id": f"TK-{index:04d}", "status": "closed", "title": "ticket"}
         for index in range(501)
     ]
-    with pytest.raises(stranded_approvals.AuditError, match="page is incomplete"):
+    with pytest.raises(stranded_approvals.AuditError, match="covered 500 of 501"):
         await stranded_approvals.fetch_all_tickets(_FakeClient(tickets))
+
+
+@pytest.mark.anyio
+async def test_ticket_reader_rejects_missing_id_from_full_batch() -> None:
+    class MissingFullClient(_FakeClient):
+        async def ticket_list(self, **arguments: object) -> dict[str, object]:
+            result = await super().ticket_list(**arguments)
+            if arguments.get("view") == "full" and result["tickets"]:
+                rows = list(result["tickets"])[1:]
+                return {"tickets": rows, "count": len(rows), "total_matching": len(rows)}
+            return result
+
+    tickets = [
+        {"ticket_id": "TK-one", "status": "closed", "title": "one"},
+        {"ticket_id": "TK-two", "status": "open", "title": "two"},
+    ]
+    with pytest.raises(stranded_approvals.AuditError, match="ticket batch mismatch"):
+        await stranded_approvals.fetch_all_tickets(MissingFullClient(tickets))
+
+
+@pytest.mark.anyio
+async def test_live_reader_uses_dedicated_non_takeover_read_only_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx2
+    import pursers_client
+
+    captured: dict[str, object] = {}
+
+    @asynccontextmanager
+    async def transport_context():
+        yield object()
+
+    class FakeBoardClient(_FakeClient):
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            super().__init__([])
+            captured.update(kwargs)
+
+        async def __aenter__(self) -> "FakeBoardClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(httpx2, "AsyncClient", lambda **_kwargs: transport_context())
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
+    args = stranded_approvals.build_parser().parse_args(
+        ["--central-url", "https://central.example/mcp", "--board", "pursers"]
+    )
+
+    assert await stranded_approvals.read_live_tickets(args, "token") == []
+    assert args.agent_name == stranded_approvals.DEFAULT_AUDIT_AGENT_NAME
+    assert captured["agent_name"] == stranded_approvals.DEFAULT_AUDIT_AGENT_NAME
+    assert captured["allow_takeover"] is False
+    assert captured["allow_matching_takeover"] is True
+    assert (
+        captured["agent_platform"]
+        == stranded_approvals.DEFAULT_AUDIT_AGENT_PLATFORM
+    )
+    assert captured["task_focus"] == stranded_approvals.DEFAULT_AUDIT_TASK_FOCUS
+    assert captured["capabilities"] == {
+        "can_work": False,
+        "can_review": False,
+        "tier_max": 2,
+        "max_parallel": 1,
+    }
+
+
+@pytest.mark.anyio
+async def test_default_identity_is_rerunnable_without_arbitrary_seat_takeover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pursers_central.central as central
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    jwks_path = tmp_path / "jwks.json"
+    jwks_path.write_text('{"keys": []}', encoding="utf-8")
+    for key, value in {
+        "CENTRAL_AUTH_MODE": "jwt",
+        "CENTRAL_JWT_ISSUER": "https://issuer.example",
+        "CENTRAL_JWT_AUDIENCE": "http://localhost:8765/mcp",
+        "CENTRAL_JWKS_PATH": str(jwks_path),
+        "CENTRAL_ADMISSION": "invite",
+        "STORE_BACKEND": "sqlite",
+    }.items():
+        monkeypatch.setenv(key, value)
+    mcp, _service = central.build_server(
+        "localhost", 8765, tmp_path / "central-data"
+    )
+    principal = central.Principal(
+        "PR-audit", "audit", frozenset({"board:read", "board:write"})
+    )
+    monkeypatch.setattr(central, "current_principal", lambda: principal)
+
+    default_args = stranded_approvals.build_parser().parse_args([])
+    default_join = {
+        "board_id": "pursers",
+        **stranded_approvals._client_identity_options(default_args),
+    }
+    first = await mcp.call_tool("board_join", default_join)
+    second = await mcp.call_tool("board_join", default_join)
+    assert first.structured_content["agent_name"] == default_args.agent_name
+    assert second.structured_content["rejoined"] is True
+
+    named_args = stranded_approvals.build_parser().parse_args(
+        ["--agent-name", "coordinator-1"]
+    )
+    named_join = {
+        "board_id": "pursers",
+        **stranded_approvals._client_identity_options(named_args),
+    }
+    await mcp.call_tool("board_join", named_join)
+    with pytest.raises(ToolError, match="seat name already active"):
+        await mcp.call_tool("board_join", named_join)
+
+    takeover_args = stranded_approvals.build_parser().parse_args(
+        [
+            "--agent-name",
+            "coordinator-1",
+            "--allow-takeover",
+        ]
+    )
+    takeover_join = {
+        "board_id": "pursers",
+        **stranded_approvals._client_identity_options(takeover_args),
+    }
+    assert takeover_join["allow_matching_takeover"] is False
+    assert takeover_join["allow_takeover"] is True
+    taken_over = await mcp.call_tool("board_join", takeover_join)
+    assert taken_over.structured_content["rejoined"] is True
