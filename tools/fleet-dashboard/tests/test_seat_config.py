@@ -123,6 +123,30 @@ def test_role_rejects_incompatible_capability(
         desired(tmp_path, "codex", role=role, **override)
 
 
+@pytest.mark.parametrize("host_mode", ["external", "resident", "session", ""])
+def test_host_mode_rejects_noncanonical_values(
+    tmp_path: Path, host_mode: str
+) -> None:
+    with pytest.raises(ValueError, match="host_mode must be acp or persistent"):
+        desired(tmp_path, "codex", host_mode=host_mode)
+
+
+def test_inventory_upsert_preserves_declared_host_mode(tmp_path: Path) -> None:
+    inventory = seat_config.SeatInventory(tmp_path / "seats.json")
+    inventory.upsert(
+        desired(tmp_path, "codex", host_mode=" PERSISTENT "),
+        bridge_version="0.1.2",
+    )
+
+    record = inventory.upsert(
+        desired(tmp_path, "codex", host_mode=None),
+        bridge_version="0.1.3",
+    )
+
+    assert record["host_mode"] == "persistent"
+    assert inventory.load()["seats"][0]["host_mode"] == "persistent"
+
+
 def test_codex_plan_apply_inspect_backup_and_idempotency(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text("# keep this comment\n[features]\nweb_search = true\n")

@@ -42,6 +42,7 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 MANAGED_COMMENT = "# pursers-managed; edit through the fleet dashboard"
 DEFAULT_REGISTRY_BOARD = "pursers"
+HOST_MODES = {"acp", "persistent"}
 CONNECTOR_TOKEN_SHA256_ENV = "PURSERS_BOARD_CONNECTOR_TOKEN_SHA256"
 CAPABILITY_ENV = {
     "tier_max": "PURSERS_TIER_MAX",
@@ -633,6 +634,7 @@ class DesiredSeat:
     provider: str | None = None
     boards: str | None = None
     registry_board: str = DEFAULT_REGISTRY_BOARD
+    host_mode: str | None = None
 
     def __post_init__(self) -> None:
         if self.host not in HOST_PROFILES:
@@ -702,6 +704,13 @@ class DesiredSeat:
             value = getattr(self, field_name)
             if value is not None and (not isinstance(value, str) or len(value) > 200):
                 raise ValueError(f"{field_name} must be a string up to 200 characters")
+        if self.host_mode is not None:
+            if not isinstance(self.host_mode, str):
+                raise ValueError("host_mode must be acp or persistent")
+            normalized_host_mode = self.host_mode.strip().casefold()
+            if normalized_host_mode not in HOST_MODES:
+                raise ValueError("host_mode must be acp or persistent")
+            object.__setattr__(self, "host_mode", normalized_host_mode)
 
     @property
     def connector_name(self) -> str:
@@ -1843,6 +1852,10 @@ class PromptRenderer:
                 "This name is bound to this Codex CLI session. "
                 "Each session passes its own per-call agent_name to a2a_wait."
             ),
+            "zed": (
+                "This name is bound to this Zed ACP session. "
+                "Open Zed and rejoin with the same principal and seat identity."
+            ),
             "goose": "Run from the generated Goose seat folder and use its pinned interpreter.",
             "claude-desktop": (
                 "Claude Desktop uses a 200s bridge block under its 240s host deadline."
@@ -1925,11 +1938,19 @@ class SeatInventory:
         doctor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         document = self.load()
+        previous = next(
+            (row for row in document["seats"] if row.get("name") == desired.name),
+            None,
+        )
         record = {
             **asdict(desired),
             "bridge_version": bridge_version,
             "last_doctor": doctor,
         }
+        if desired.host_mode is None and isinstance(previous, dict):
+            previous_mode = previous.get("host_mode")
+            if previous_mode in HOST_MODES:
+                record["host_mode"] = previous_mode
         seats = [row for row in document["seats"] if row.get("name") != desired.name]
         seats.append(record)
         document["seats"] = sorted(seats, key=lambda row: row["name"])

@@ -107,6 +107,311 @@ def test_primary_route_modules_own_renderers_and_receive_shared_context() -> Non
     assert "FleetViewModules.render(kind,fleetViewContext())" in app
 
 
+def _render_team_lifecycle(
+    *,
+    agents: list[dict[str, Any]],
+    workers: list[dict[str, Any]],
+    inventory: list[dict[str, Any]],
+) -> str:
+    registry = dashboard.UI_ASSETS["/ui/view-registry.js"][1].decode("utf-8")
+    team = dashboard.UI_ASSETS["/ui/views/team.js"][1].decode("utf-8")
+    program = f"""
+eval({json.dumps(registry)});
+eval({json.dumps(team)});
+const esc = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;');
+const fleetData = {{fleet:{{agents:{json.dumps(agents)},inactive_agents:[],pool_summary:{{unknown_model:0}},pool_scope:{{covered_boards:['board-a','board-b'],excluded_boards:[]}},boards:[]}}}};
+const hubWorkers = {{fleet:{{workers:{json.dumps(workers)}}}}};
+const workerForAgent = (central, agent) => (hubWorkers[central]?.workers || []).find(worker => worker.name === agent.agent_name) || null;
+const agentIdentity = agent => String(agent.agent_id || (agent.principal_id && `${{agent.principal_id}}:${{agent.agent_name || agent.name}}`) || agent.agent_name || agent.name || 'unknown');
+const agentDisplayState = (agent, resident) => resident?.running === false ? 'offline' : (agent.pool_status === 'busy' ? 'working' : agent.pool_status || 'offline');
+const context = {{
+  esc,
+  pageHead:(kicker,title,copy,action='')=>`<header><b>${{esc(kicker)}}</b><h2>${{esc(title)}}</h2><p>${{esc(copy)}}</p>${{action}}</header>`,
+  fleetData,
+  hubWorkers,
+  hubSeatInventory:{{seats:{json.dumps(inventory)}}},
+  centralLabels:['fleet'],
+  defaultCentral:'fleet',
+  agentIdentity,
+  agentMatchesFilters:()=>true,
+  agentDisplayState,
+  workerForAgent,
+  liveAgentCard:(central,agent)=>{{
+    const resident=workerForAgent(central,agent);
+    const boards=(agent.boards||[]).join('|');
+    const projections=(agent.seats||[]).map(seat=>`${{seat.board_id}}:${{seat.role}}:${{seat.capabilities?.tier_max}}:${{seat.capabilities?.model}}:${{seat.capabilities?.provider}}`).join('|');
+    const work=(agent.seats||[]).map(seat=>seat.current_ticket_id).filter(Boolean).join('|');
+    const controls=resident?'<button>Test</button><button>Start</button><button>Stop</button><button>Restart</button>':'<span class="meta">Live pool seat · not locally managed</span>';
+    return `<article class="agent-card agent-state-${{agentDisplayState(agent,resident)}}"><h3>${{esc(agent.agent_name)}}</h3><div class="agent-board-list">${{esc(boards)}}</div><p>${{esc(projections)}}</p><p>${{esc(work)}}</p><details class="agent-ops">${{controls}}</details></article>`;
+  }},
+  renderGuide:()=>'',
+  agentCountStrip:()=>'',
+  agentFilterBar:()=>'',
+  agentPoolScope:()=>'',
+  inactiveAgentDrawer:()=>'',
+  autonomousRows:()=>[],
+  autonomousStateLabel:()=>'',
+  autonomousObservationLabel:()=>''
+}};
+console.log(globalThis.FleetViewModules.render('team', context));
+"""
+    return subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    ).stdout
+
+
+def test_team_seat_projection_excludes_paths_credentials_and_doctor_details(
+    tmp_path: Path,
+) -> None:
+    inventory = tmp_path / "seats.json"
+    inventory.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "seats": [
+                    {
+                        "host": "codex",
+                        "host_mode": "acp",
+                        "role": "worker",
+                        "name": "safe-seat",
+                        "central_url": "https://central.example.invalid/mcp",
+                        "home_board": "",
+                        "boards": "registry",
+                        "token_file": "/PATH/TO/token.jwt",
+                        "ca_file": "/PATH/TO/ca.pem",
+                        "bridge_command": "/PATH/TO/pursers-wait-bridge",
+                        "config_path": "/PATH/TO/config.toml",
+                        "seat_dir": "/PATH/TO/seat",
+                        "repository": "/PATH/TO/repository",
+                        "tier_max": 2,
+                        "skills": ["frontend"],
+                        "can_review": False,
+                        "can_work": True,
+                        "model": "model-a",
+                        "provider": "provider-a",
+                        "last_doctor": {
+                            "overall": "PASS",
+                            "checks": [{"message": "/PATH/TO/private-detail"}],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = dashboard.SeatConfigManager(
+        inventory_path=inventory,
+        state_dir=tmp_path / "state",
+    )
+
+    projection = manager.team_seats()
+
+    assert projection == {
+        "schema_version": 1,
+        "seats": [
+            {
+                "name": "safe-seat",
+                "host": "codex",
+                "host_mode": "acp",
+                "role": "worker",
+                "home_board": "",
+                "boards": "registry",
+                "tier_max": 2,
+                "skills": ["frontend"],
+                "can_review": False,
+                "can_work": True,
+                "model": "model-a",
+                "provider": "provider-a",
+            }
+        ],
+    }
+    serialized = json.dumps(projection)
+    assert "/PATH/TO/" not in serialized
+    assert "token_file" not in serialized
+    assert "central_url" not in serialized
+    assert "last_doctor" not in serialized
+
+
+def test_team_lifecycle_keeps_offline_acp_seat_and_registry_boards_source_backed() -> None:
+    rendered = _render_team_lifecycle(
+        agents=[],
+        workers=[],
+        inventory=[
+            {
+                "name": "acp-seat",
+                "host": "codex",
+                "host_mode": "acp",
+                "role": "worker",
+                "boards": "registry",
+                "home_board": "",
+                "tier_max": 2,
+                "model": "model-a",
+                "provider": "provider-a",
+                "can_work": True,
+                "can_review": False,
+            }
+        ],
+    )
+
+    assert "acp-seat" in rendered
+    assert 'data-team-host-mode="acp"' in rendered
+    assert "Interactive ACP session" in rendered
+    assert "Open the host and rejoin with the same principal and seat identity." in rendered
+    assert "Fleet does not own its process" in rendered
+    assert "Start, Stop, and Restart happen in the ACP host, not in Fleet." in rendered
+    assert "board-a|board-b" in rendered
+    assert "board-a:worker:2:model-a:provider-a" in rendered
+    assert "board-b:worker:2:model-a:provider-a" in rendered
+    assert "Plan seat changes" in rendered
+    assert "preserves repositories, worktrees, credentials, logs, tickets, journal, and backups" in rendered
+
+
+def test_team_host_mode_round_trips_through_plan_apply_inventory_and_render(
+    tmp_path: Path,
+) -> None:
+    class Bridge:
+        version = "0.1.2"
+
+        def inspect(self) -> dict:
+            return {"version": self.version, "command": None}
+
+    manager = dashboard.SeatConfigManager(
+        tmp_path / "state/seats.json",
+        state_dir=tmp_path / "state",
+        bridge_installer=Bridge(),
+        latest_version=lambda: None,
+    )
+    for host, host_mode, name in (
+        ("codex", "persistent", "offline-codex"),
+        ("zed", "acp", "zed-session"),
+    ):
+        payload = {
+            "host": host,
+            "host_mode": host_mode,
+            "role": "worker",
+            "name": name,
+            "central_url": "https://central.example.invalid/mcp",
+            "home_board": "",
+            "token_file": str(tmp_path / f"{name}.jwt"),
+            "ca_file": str(tmp_path / "ca.pem"),
+            "bridge_command": str(tmp_path / "pursers-wait-bridge"),
+            "config_path": str(tmp_path / f"{name}.config"),
+        }
+        plan = manager.plan(payload)
+        manager.apply(plan["plan_id"])
+
+    projection = manager.team_seats()
+    modes = {row["name"]: row["host_mode"] for row in projection["seats"]}
+    assert modes == {"offline-codex": "persistent", "zed-session": "acp"}
+
+    rendered = _render_team_lifecycle(
+        agents=[], workers=[], inventory=projection["seats"]
+    )
+    assert 'data-team-host-mode="persistent"' in rendered
+    assert 'data-team-host-mode="acp"' in rendered
+    assert "offline-codex" in rendered
+    assert "zed-session" in rendered
+    assert "Persistent resident" in rendered
+    assert "Interactive ACP session" in rendered
+
+
+def test_team_missing_host_mode_never_guesses_from_host_name() -> None:
+    rendered = _render_team_lifecycle(
+        agents=[],
+        workers=[],
+        inventory=[
+            {
+                "name": "legacy-codex",
+                "host": "codex",
+                "role": "worker",
+                "boards": "registry",
+                "home_board": "",
+                "tier_max": 2,
+                "can_work": True,
+                "can_review": False,
+            }
+        ],
+    )
+
+    assert 'data-team-host-mode="external"' in rendered
+    assert "Interactive ACP session" not in rendered
+    assert "Persistent resident" not in rendered
+
+
+def test_settings_plan_payload_requires_explicit_host_mode() -> None:
+    app = dashboard.UI_ASSETS["/ui/assets/app.js"][1].decode("utf-8")
+
+    assert "host_mode:f.get('host_mode')||null" in app
+    assert 'select name="host_mode" required' in app
+    assert "Choose ownership" in app
+    assert ">zed</option>" in app
+
+
+def test_team_lifecycle_preserves_resident_controls_and_denies_unowned_process_control() -> None:
+    rendered = _render_team_lifecycle(
+        agents=[
+            {
+                "agent_name": "resident-seat",
+                "agent_id": "AI-resident",
+                "pool_status": "offline",
+                "boards": ["board-a", "board-b"],
+                "seats": [
+                    {
+                        "board_id": "board-a",
+                        "role": "worker",
+                        "current_ticket_id": "TK-current",
+                        "capabilities": {
+                            "tier_max": 2,
+                            "model": "model-r",
+                            "provider": "provider-r",
+                        },
+                    },
+                    {
+                        "board_id": "board-b",
+                        "role": "worker",
+                        "capabilities": {
+                            "tier_max": 2,
+                            "model": "model-r",
+                            "provider": "provider-r",
+                        },
+                    },
+                ],
+            },
+            {
+                "agent_name": "external-seat",
+                "agent_id": "AI-external",
+                "pool_status": "available",
+                "boards": ["board-a"],
+                "seats": [],
+            },
+        ],
+        workers=[{"name": "resident-seat", "running": False}],
+        inventory=[
+            {
+                "name": "resident-seat",
+                "host": "headless",
+                "host_mode": "persistent",
+                "role": "worker",
+                "boards": "board-a,board-b",
+                "tier_max": 2,
+                "model": "model-r",
+                "provider": "provider-r",
+            }
+        ],
+    )
+
+    assert 'data-team-host-mode="persistent"' in rendered
+    assert "Persistent resident" in rendered
+    assert "Fleet manages this resident process." in rendered
+    assert "Stop keeps membership and history." in rendered
+    assert all(control in rendered for control in ("Test", "Start", "Stop", "Restart"))
+    assert "TK-current" in rendered
+    assert 'data-team-host-mode="external"' in rendered
+    assert "Fleet cannot start, stop, restart, or remove an unowned host process." in rendered
+    assert "No local seat inventory; lifecycle changes are unavailable here." in rendered
+    assert "<input" not in rendered
+
+
 def test_projects_route_groups_centrals_and_preserves_board_actions_and_states() -> None:
     registry = dashboard.UI_ASSETS["/ui/view-registry.js"][1].decode("utf-8")
     projects = dashboard.UI_ASSETS["/ui/views/projects.js"][1].decode("utf-8")
@@ -7207,6 +7512,9 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         def seats(self) -> dict:
             return {"seats": [], "discovered_configs": []}
 
+        def team_seats(self) -> dict:
+            return {"schema_version": 1, "seats": [{"name": "safe-seat"}]}
+
         def bridge(self) -> dict:
             return {
                 "installed_version": "0.1.2",
@@ -7304,6 +7612,11 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
     try:
         with urllib.request.urlopen(base + "/api/config/seats") as response:
             assert json.load(response)["seats"] == []
+        with urllib.request.urlopen(base + "/api/team/seats") as response:
+            assert json.load(response) == {
+                "schema_version": 1,
+                "seats": [{"name": "safe-seat"}],
+            }
         with urllib.request.urlopen(base + "/api/config/bridge") as response:
             bridge = json.load(response)
             assert bridge == {
