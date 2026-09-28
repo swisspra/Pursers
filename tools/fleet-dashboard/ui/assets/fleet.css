@@ -431,6 +431,11 @@ summary,button,[role="button"],input,select,textarea{min-height:44px}
   .guided-summary{grid-template-columns:1fr 1fr}
   .search-results{right:auto;left:0;width:calc(100vw - 28px)}
 }
+.ticket-activity-heading a{
+  min-width:44px;
+  justify-content:center;
+  padding-inline:6px;
+}
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{
     animation-duration:.01ms!important;
@@ -527,7 +532,7 @@ h1,h2,h3,h4{font-family:inherit}
 }
 .app-shell>main>.shell-header h1{font-size:clamp(30px,3.2vw,40px);line-height:1.1;letter-spacing:-.035em}
 .shell-meta{margin-top:9px;font-size:13px;line-height:1.45}
-.app-shell>main .shell-meta a{display:inline;min-height:0}
+.app-shell>main .shell-meta a{display:inline-flex;align-items:center;min-width:44px;min-height:44px;margin-block:-13px;padding-inline:6px}
 .shell-tools{display:grid;gap:7px;min-width:0}
 .shell-actions{display:grid;grid-template-columns:auto minmax(220px,1fr);align-items:center;gap:10px}
 .view-controls button,#filter{min-height:44px;border-radius:0;background:transparent}

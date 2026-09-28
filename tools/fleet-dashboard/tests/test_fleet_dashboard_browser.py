@@ -788,7 +788,7 @@ for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
     ticket.open = true;
     ticket.querySelector("summary").focus();
     let overflowStyle = document.querySelector("#refresh-overflow-fixture");
-    if (!overflowStyle) {{ overflowStyle=document.createElement("style");overflowStyle.id="refresh-overflow-fixture";overflowStyle.textContent="#detail-view .table-scroll table{{min-width:1100px}}";document.head.appendChild(overflowStyle); }}
+    if (!overflowStyle) {{ overflowStyle=document.createElement("style");overflowStyle.id="refresh-overflow-fixture";overflowStyle.textContent="#detail-view .table-scroll table{{min-width:1800px}}";document.head.appendChild(overflowStyle); }}
     const scroller = document.querySelector("#detail-view .table-scroll");
     if (scroller) scroller.scrollLeft = 35;
     window.scrollTo(0, Math.min(420, document.documentElement.scrollHeight-innerHeight));
