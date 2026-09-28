@@ -300,6 +300,65 @@ def test_collision_suppresses_both_project_rows() -> None:
     assert projection["summary"]["suppressed"] is True
 
 
+def test_duplicate_active_agent_rows_do_not_satisfy_privacy_cohort() -> None:
+    source = rich_source()
+    duplicate = dict(source["agents"][0])
+    source["agents"] = [dict(duplicate) for _index in range(5)]
+
+    projection = project(source)
+
+    assert projection["summary"]["fleet"] == {
+        "active_agents": "none",
+        "roles": [],
+    }
+    assert projection["summary"]["suppressed"] is True
+
+
+def test_active_agent_without_immutable_id_is_suppressed() -> None:
+    source = rich_source()
+    source["agents"][0].pop("agent_id")
+
+    projection = project(source)
+
+    assert projection["summary"]["fleet"] == {
+        "active_agents": "none",
+        "roles": [],
+    }
+    assert projection["summary"]["suppressed"] is True
+
+
+def test_work_alias_collision_across_projects_suppresses_both_rows() -> None:
+    source = source_with_tickets(5)
+    second = json.loads(json.dumps(source["boards"][0]))
+    second["board_id"] = "another-private-board"
+    for index, ticket in enumerate(second["tickets"]):
+        ticket["id"] = f"TK-another-secret-{index}"
+    source["boards"].append(second)
+    colliding_ids = {"TK-secret-ticket-0", "TK-another-secret-0"}
+    collision_alias = "work-aaaaaaaaaaaaaaaa"
+
+    def cross_project_collision(
+        key: bytes, entity: str, identifier: str
+    ) -> str:
+        if entity == "work" and identifier in colliding_ids:
+            return collision_alias
+        return public.public_alias(key, entity, identifier)
+
+    projection = public.project_public_snapshot(
+        source, b"k" * 32, now=NOW, aliaser=cross_project_collision
+    )
+
+    work_items = [
+        item
+        for detail in projection["projects"].values()
+        for item in detail["work_items"]
+    ]
+    assert len(projection["projects"]) == 2
+    assert len(work_items) == 8
+    assert all(item["alias"] != collision_alias for item in work_items)
+    assert projection["summary"]["suppressed"] is True
+
+
 def test_duplicate_source_project_is_suppressed() -> None:
     source = rich_source()
     source["boards"].append(dict(source["boards"][0]))

@@ -327,19 +327,41 @@ def project_public_snapshot(
         projects.append(row)
         project_details[alias] = {"project": row, "work_items": work_items}
 
+    work_alias_counts = Counter(
+        item["alias"]
+        for detail in project_details.values()
+        for item in detail["work_items"]
+    )
+    global_work_alias_collisions = {
+        alias for alias, count in work_alias_counts.items() if count > 1
+    }
+    if global_work_alias_collisions:
+        for detail in project_details.values():
+            detail["work_items"] = [
+                item
+                for item in detail["work_items"]
+                if item["alias"] not in global_work_alias_collisions
+            ]
+        suppressed = True
+
     projects.sort(key=lambda row: row["alias"])
     raw_agents = source.get("agents")
-    active_agents = [
-        row
-        for row in raw_agents or []
-        if isinstance(row, Mapping)
-        and str(row.get("pool_status") or "").casefold()
-        in {"busy", "available", "connected", "working"}
-    ]
-    active_bucket, hidden = _bucket(len(active_agents), cohort_minimum)
-    suppressed = suppressed or hidden
-    roles = Counter()
-    for agent in active_agents:
+    active_agent_roles: dict[str, set[str]] = {}
+    for agent in raw_agents or []:
+        if not isinstance(agent, Mapping):
+            suppressed = True
+            continue
+        if str(agent.get("pool_status") or "").casefold() not in {
+            "busy",
+            "available",
+            "connected",
+            "working",
+        }:
+            continue
+        agent_id = agent.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            suppressed = True
+            continue
         raw_roles = {
             str(seat.get("role") or "").casefold()
             for seat in agent.get("seats") or []
@@ -347,8 +369,21 @@ def project_public_snapshot(
         }
         if not raw_roles:
             raw_roles = {str(agent.get("role") or "other").casefold()}
-        for role in raw_roles:
-            roles[role if role in ROLE_VALUES else "other"] += 1
+        normalized_roles = {
+            role if role in ROLE_VALUES else "other" for role in raw_roles
+        }
+        if agent_id in active_agent_roles:
+            suppressed = True
+            active_agent_roles[agent_id].update(normalized_roles)
+        else:
+            active_agent_roles[agent_id] = normalized_roles
+
+    active_bucket, hidden = _bucket(len(active_agent_roles), cohort_minimum)
+    suppressed = suppressed or hidden
+    roles = Counter()
+    for agent_roles in active_agent_roles.values():
+        for role in agent_roles:
+            roles[role] += 1
     role_rows = []
     for role, count in sorted(roles.items()):
         bucket, role_hidden = _bucket(count, cohort_minimum)
