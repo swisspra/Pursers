@@ -35,6 +35,8 @@ TICKET_STATUSES = (
 )
 DEFAULT_THRESHOLD = 0.90
 TICKET_BATCH_SIZE = 25
+TICKET_PAGE_LIMIT = 500
+DEFAULT_AUDIT_AGENT_NAME = "stranded-approvals-audit"
 
 
 class AuditError(RuntimeError):
@@ -43,6 +45,8 @@ class AuditError(RuntimeError):
 
 class TicketClient(Protocol):
     async def ticket_list(self, **arguments: Any) -> dict[str, Any]: ...
+
+    async def board_status(self, **arguments: Any) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -84,7 +88,9 @@ def _chunks(values: Sequence[str], size: int = TICKET_BATCH_SIZE) -> Iterable[li
         yield list(values[offset : offset + size])
 
 
-def _ticket_rows(result: Mapping[str, Any], *, label: str) -> list[dict[str, Any]]:
+def _ticket_page(
+    result: Mapping[str, Any], *, label: str
+) -> tuple[list[dict[str, Any]], int]:
     raw = result.get("tickets")
     if not isinstance(raw, list):
         raise AuditError(f"{label}: board response omitted tickets")
@@ -95,12 +101,84 @@ def _ticket_rows(result: Mapping[str, Any], *, label: str) -> list[dict[str, Any
     total = result.get("total_matching")
     if count != len(rows) or not isinstance(total, int):
         raise AuditError(f"{label}: board response has invalid counts")
+    return rows, total
+
+
+def _ticket_rows(result: Mapping[str, Any], *, label: str) -> list[dict[str, Any]]:
+    rows, total = _ticket_page(result, label=label)
     if total != len(rows):
         raise AuditError(
             f"{label}: ticket page is incomplete ({len(rows)}/{total}); "
             "reduce the server-side page size before trusting this audit"
         )
     return rows
+
+
+def _status_assignees(result: Mapping[str, Any]) -> list[str]:
+    agents = result.get("agents")
+    if not isinstance(agents, list):
+        raise AuditError("board status omitted agents for oversized status split")
+    selectors: set[str] = set()
+    for agent in agents:
+        if not isinstance(agent, Mapping):
+            raise AuditError("board status contained a non-object agent")
+        agent_id = agent.get("agent_id")
+        agent_name = agent.get("agent_name")
+        if isinstance(agent_id, str) and agent_id:
+            selectors.add(agent_id)
+        elif isinstance(agent_name, str) and agent_name:
+            selectors.add(agent_name)
+    return sorted(selectors)
+
+
+async def _complete_status_page(
+    client: TicketClient, status: str
+) -> list[dict[str, Any]]:
+    result = await client.ticket_list(
+        status=status,
+        include_closed=True,
+        include_archived=True,
+        limit=TICKET_PAGE_LIMIT,
+        view="summary",
+    )
+    rows, total = _ticket_page(result, label=f"status {status}")
+    if total == len(rows):
+        return rows
+
+    # ticket_list has no cursor today.  The initial bounded page is retained as
+    # the unassigned/unknown-assignee pass, then stable agent identities from
+    # board_status fill in omitted assigned rows.  The final total check stays
+    # fail-closed, including the case where one assignee alone exceeds 500.
+    status_result = await client.board_status(include_retired=True)
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        ticket_id = row.get("ticket_id")
+        if not isinstance(ticket_id, str) or not ticket_id:
+            raise AuditError(f"status {status}: ticket omitted ticket_id")
+        by_id[ticket_id] = row
+    for assignee in _status_assignees(status_result):
+        assigned = await client.ticket_list(
+            status=status,
+            assigned_to=assignee,
+            include_closed=True,
+            include_archived=True,
+            limit=TICKET_PAGE_LIMIT,
+            view="summary",
+        )
+        for row in _ticket_rows(
+            assigned, label=f"status {status} assignee {assignee}"
+        ):
+            ticket_id = row.get("ticket_id")
+            if not isinstance(ticket_id, str) or not ticket_id:
+                raise AuditError(
+                    f"status {status} assignee {assignee}: ticket omitted ticket_id"
+                )
+            by_id[ticket_id] = row
+    if len(by_id) != total:
+        raise AuditError(
+            f"status {status}: split pages covered {len(by_id)} of {total} tickets"
+        )
+    return [by_id[ticket_id] for ticket_id in sorted(by_id)]
 
 
 async def fetch_all_tickets(client: TicketClient) -> list[dict[str, Any]]:
@@ -118,14 +196,7 @@ async def fetch_all_tickets(client: TicketClient) -> list[dict[str, Any]]:
     ticket_ids: list[str] = []
     seen: set[str] = set()
     for status in TICKET_STATUSES:
-        result = await client.ticket_list(
-            status=status,
-            include_closed=True,
-            include_archived=True,
-            limit=500,
-            view="summary",
-        )
-        for ticket in _ticket_rows(result, label=f"status {status}"):
+        for ticket in await _complete_status_page(client, status):
             ticket_id = ticket.get("ticket_id")
             if not isinstance(ticket_id, str) or not ticket_id:
                 raise AuditError(f"status {status}: ticket omitted ticket_id")
@@ -200,6 +271,22 @@ def _is_ancestor(repo: Path, commit: str, main_ref: str) -> bool:
     )
 
 
+def _main_names_ticket(repo: Path, ticket_id: str, main_ref: str) -> bool:
+    if not ticket_id or ticket_id == "-":
+        return False
+    return bool(
+        _git(
+            repo,
+            "log",
+            "-1",
+            "--format=%H",
+            "--fixed-strings",
+            f"--grep={ticket_id}",
+            main_ref,
+        ).stdout.strip()
+    )
+
+
 def _added_lines_by_path(repo: Path, base: str, commit: str) -> dict[str, list[str]]:
     names = _git(
         repo,
@@ -270,6 +357,8 @@ def classify_approval(
         return ApprovalResult(ticket_id, commit, "BRANCH_MISSING", title)
     if _is_ancestor(repo, commit, main_ref):
         return ApprovalResult(ticket_id, commit, "LANDED_ANCESTOR", title)
+    if _main_names_ticket(repo, ticket_id, main_ref):
+        return ApprovalResult(ticket_id, commit, "LANDED_BY_REFERENCE", title)
     matched, total = content_match_counts(repo, commit, main_ref)
     ratio = matched / total if total else 0.0
     state = "LANDED_CONTENT" if ratio >= threshold else "STRANDED"
@@ -318,10 +407,10 @@ def read_token(path_value: str | None) -> str:
     return token
 
 
-def _capabilities(role: str) -> dict[str, Any]:
+def _capabilities(_role: str) -> dict[str, Any]:
     return {
-        "can_work": role == "worker",
-        "can_review": role == "reviewer",
+        "can_work": False,
+        "can_review": False,
         "tier_max": 2,
         "max_parallel": 1,
     }
@@ -345,7 +434,7 @@ async def read_live_tickets(args: argparse.Namespace, token: str) -> list[dict[s
             agent_name=args.agent_name,
             role=args.role,
             capabilities=_capabilities(args.role),
-            allow_takeover=True,
+            allow_takeover=args.allow_takeover,
             http_client=http,
         ) as client:
             return await fetch_all_tickets(client)
@@ -367,7 +456,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ca-file", type=Path)
     parser.add_argument("--board", default=os.environ.get("ONBOARD_BOARD_ID"))
-    parser.add_argument("--agent-name", default=os.environ.get("ONBOARD_AGENT_NAME"))
+    parser.add_argument("--agent-name", default=DEFAULT_AUDIT_AGENT_NAME)
+    parser.add_argument(
+        "--allow-takeover",
+        action="store_true",
+        help="explicitly allow the audit identity to take over an existing seat",
+    )
     parser.add_argument(
         "--role",
         choices=("worker", "reviewer", "coordinator", "orchestrator"),
