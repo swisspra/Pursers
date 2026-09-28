@@ -1416,6 +1416,8 @@ class BoardJoinFailure(ToolError):
 
 
 def _split_identity_failure() -> BoardJoinFailure | None:
+    if _RUNTIME_CONFIG_ERROR:
+        return BoardJoinFailure("configuration", _RUNTIME_CONFIG_ERROR)
     if os.environ.get("PURSERS_REQUIRE_TOKEN_MATCH", "").strip() != "1":
         return None
     connector_fingerprint = os.environ.get(CONNECTOR_TOKEN_SHA256_ENV, "").strip()
@@ -7553,7 +7555,11 @@ def _door_forget(args: argparse.Namespace) -> None:
 def _configure_runtime() -> None:
     global CENTRAL_URL, BOARD_ID, CENTRAL_TOKEN, RUNTIME_ROLE, RUNTIME_FROM_DOOR
     global BASE_AGENT_NAME, AGENT_NAME, _RUNTIME_CONFIG_ERROR
-    config = door_state.resolve()
+    try:
+        config = door_state.resolve()
+    except ValueError as exc:
+        _RUNTIME_CONFIG_ERROR = str(exc)
+        raise
     CENTRAL_URL = config["url"]
     BOARD_ID = config["board"]
     CENTRAL_TOKEN = config["token"]
@@ -7625,10 +7631,13 @@ def main() -> None:
         return
     try:
         _configure_runtime()
-    except (OSError, ValueError) as exc:
-        print(f"FATAL: {exc}", file=sys.stderr)
-        return
-    if not CENTRAL_TOKEN:
+    except (OSError, ValueError):
+        # Keep stdio available so tool calls can report the deferred,
+        # structured configuration failure without advancing a cursor.  The
+        # resolver already stored a bounded, secret-safe explanation in
+        # _RUNTIME_CONFIG_ERROR for DeferredBoardConnection.client().
+        _log("runtime configuration deferred: configuration")
+    if not CENTRAL_TOKEN and not _RUNTIME_CONFIG_ERROR:
         print(
             "FATAL: no Central token; set explicit environment or join a door",
             file=sys.stderr,

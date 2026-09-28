@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
+import json
 import os
 import socket
 import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -28,6 +32,27 @@ from pursers_client import (  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 
 TEST_TIMEOUT_S = float(os.environ.get("PURSERS_TEST_TIMEOUT_S", "30"))
+
+
+def _segment(value: dict[str, object]) -> str:
+    return base64.urlsafe_b64encode(
+        json.dumps(value, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
+
+
+def _door() -> str:
+    signature = base64.urlsafe_b64encode(b"synthetic-signature").decode().rstrip("=")
+    token = (
+        f"{_segment({'alg': 'RS256', 'kid': 'test-key'})}."
+        f"{_segment({'exp': 2_000_000_000})}.{signature}"
+    )
+    envelope = {
+        "u": "http://127.0.0.1:8766/mcp",
+        "b": "sandbox",
+        "r": "worker",
+        "t": token,
+    }
+    return f"prs1.{_segment(envelope)}"
 
 
 class _UnauthorizedHandler(BaseHTTPRequestHandler):
@@ -163,6 +188,149 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=TEST_TIMEOUT_S)
+
+    async def test_main_defers_mismatched_explicit_token_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            token_file = Path(raw) / "seat-token"
+            token_file.write_text("seat-token\n", encoding="utf-8")
+            stderr = io.StringIO()
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "ONBOARD_CENTRAL_TOKEN": "inherited-admin-token",
+                        "ONBOARD_CENTRAL_TOKEN_FILE": str(token_file),
+                    },
+                    clear=True,
+                ),
+                patch.object(sys, "argv", ["pursers-wait-bridge"]),
+                patch.object(wait_server, "_RUNTIME_CONFIG_ERROR", None),
+                patch.object(wait_server.mcp, "run") as run,
+                redirect_stderr(stderr),
+            ):
+                wait_server.main()
+            run.assert_called_once_with(transport="stdio")
+            self.assertNotIn("inherited-admin-token", stderr.getvalue())
+            self.assertNotIn(raw, stderr.getvalue())
+
+    async def test_main_defers_empty_token_file_with_stored_door(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state = Path(raw)
+            wait_server.door_state.store(state / "doors.json", _door())
+            token_file = state / "seat-token"
+            for contents in ("", " \n\t"):
+                with self.subTest(contents=repr(contents)):
+                    token_file.write_text(contents, encoding="utf-8")
+                    stderr = io.StringIO()
+                    with (
+                        patch.dict(
+                            os.environ,
+                            {
+                                "PURSERS_BRIDGE_STATE_DIR": raw,
+                                "ONBOARD_CENTRAL_TOKEN_FILE": str(token_file),
+                                "ONBOARD_BOARD_ID": "sandbox",
+                                "PURSERS_ROLE": "worker",
+                            },
+                            clear=True,
+                        ),
+                        patch.object(sys, "argv", ["pursers-wait-bridge"]),
+                        patch.object(wait_server, "_RUNTIME_CONFIG_ERROR", None),
+                        patch.object(wait_server.mcp, "run") as run,
+                        redirect_stderr(stderr),
+                    ):
+                        wait_server.main()
+                    run.assert_called_once_with(transport="stdio")
+                    self.assertNotIn(raw, stderr.getvalue())
+
+    async def test_stdio_runtime_config_failures_are_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            mismatch = temporary / "mismatch-token"
+            mismatch.write_text("file-token\n", encoding="utf-8")
+            empty = temporary / "empty-token"
+            empty.write_text("", encoding="utf-8")
+            unreadable = temporary / "missing-token"
+
+            cases = (
+                ("mismatch", mismatch, "inherited-admin-token"),
+                ("empty", empty, "inherited-admin-token"),
+                ("unreadable", unreadable, "inherited-admin-token"),
+            )
+            for label, token_file, direct_token in cases:
+                with self.subTest(label=label):
+                    env = os.environ.copy()
+                    env.update(
+                        {
+                            "ONBOARD_CENTRAL_URL": "http://127.0.0.1:1/mcp",
+                            "ONBOARD_CENTRAL_TOKEN": direct_token,
+                            "ONBOARD_CENTRAL_TOKEN_FILE": str(token_file),
+                            "ONBOARD_BOARD_ID": "pursers",
+                            "ONBOARD_AGENT_NAME": "startup-test",
+                            "PURSERS_BRIDGE_STATE_DIR": str(temporary / "state"),
+                            "PURSERS_BRIDGE_STATS": str(
+                                temporary / f"{label}-bridge-stats.json"
+                            ),
+                            "PURSERS_ROLE": "worker",
+                            "PURSERS_WAIT_MODE": "push",
+                            "PYTHONPATH": os.pathsep.join(
+                                (str(CLIENT_SRC), str(ROOT))
+                            ),
+                        }
+                    )
+                    env.pop("PURSERS_ALLOW_ENV_TOKEN", None)
+                    params = StdioServerParameters(
+                        command=sys.executable,
+                        args=[str(ROOT / "pursers_wait_server.py")],
+                        env=env,
+                    )
+                    async with Client(
+                        params,
+                        mode="2026-07-28",
+                        read_timeout_seconds=TEST_TIMEOUT_S,
+                    ) as client:
+                        result = await client.call_tool(
+                            "a2a_wait",
+                            {
+                                "agent_name": "startup-test",
+                                "boards": ["pursers"],
+                                "only_mine": True,
+                                "since_seq": {"pursers": 38_519},
+                                "timeout_s": 1,
+                                "wait_for": "claimable",
+                            },
+                        )
+
+                    self.assertFalse(result.is_error)
+                    payload = dict(result.structured_content or {})
+                    value = dict(payload.get("result", payload))
+                    self.assertEqual(value["new_seq"], {"pursers": 38_519})
+                    self.assertEqual(value["events"], [])
+                    self.assertEqual(value["mode"], "error")
+                    self.assertEqual(value["reason"], "push_unavailable")
+                    self.assertEqual(
+                        value["error"]["cause_class"], "configuration"
+                    )
+                    self.assertFalse(value["error"]["retryable"])
+                    self.assertEqual(
+                        value["error"]["action"],
+                        "repair_configuration_then_rearm_from_unchanged_cursor",
+                    )
+                    rendered = repr(value)
+                    self.assertNotIn(direct_token, rendered)
+                    self.assertNotIn(raw, rendered)
+
+    async def test_runtime_config_split_identity_is_a_configuration_failure(
+        self,
+    ) -> None:
+        with patch.object(
+            wait_server,
+            "_RUNTIME_CONFIG_ERROR",
+            "split identity: explicit token sources differ",
+        ):
+            failure = wait_server._split_identity_failure()
+        self.assertIsNotNone(failure)
+        self.assertEqual(failure.cause_class, "configuration")
+        self.assertIn("split identity", str(failure))
 
     async def test_fingerprint_mismatch_refuses_start_and_match_passes(self) -> None:
         connection = wait_server.DeferredBoardConnection(
