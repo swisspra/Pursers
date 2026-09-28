@@ -4276,6 +4276,149 @@ def test_approved_not_landed_observer_reuses_equivalent_content_check(
     )
 
 
+def test_mature_board_hydrates_closed_approval_without_intake_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pursers_client
+
+    options = args(tmp_path)
+    options.repo = REPOSITORY_ROOT
+    backend = butler.CentralBackend(options, "opaque")
+    approved = {
+        "ticket_id": "TK-approved-closed",
+        "title": "Approved but not landed",
+        "status": "closed",
+        "review_verdict": "approve",
+        "updated_at": (NOW - butler.timedelta(days=2)).isoformat(),
+        "latest_verdict": {
+            "verdict": "approve",
+            "reviewed_at": (NOW - butler.timedelta(days=2)).isoformat(),
+        },
+        "submission_history": [
+            {"notes": "branch_and_commit: worker/TK-approved@" + "a" * 40}
+        ],
+    }
+    open_tickets = [
+        {
+            "ticket_id": f"TK-open-{index:03d}",
+            "title": "Open",
+            "status": "open",
+            "updated_at": NOW.isoformat(),
+            "annotation_count": 0,
+        }
+        for index in range(500)
+    ]
+    by_id = {
+        str(row["ticket_id"]): row for row in [*open_tickets, approved]
+    }
+
+    class Client:
+        async def __aenter__(self) -> "Client":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def ticket_list(self, **arguments: Any) -> Mapping[str, Any]:
+            if "ticket_ids" in arguments:
+                rows = [by_id[ticket_id] for ticket_id in arguments["ticket_ids"]]
+            elif "status" in arguments:
+                rows = (
+                    open_tickets
+                    if arguments["status"] == "open"
+                    else [approved]
+                    if arguments["status"] == "closed"
+                    else []
+                )
+            else:
+                rows = [open_tickets[0]]
+                return {"tickets": rows, "count": 1, "total_matching": 501}
+            return {
+                "tickets": rows,
+                "count": len(rows),
+                "total_matching": len(rows),
+            }
+
+        async def board_question_inbox(
+            self, **_arguments: Any
+        ) -> Mapping[str, Any]:
+            return {"questions": [], "total": 0}
+
+        async def ticket_get(
+            self, ticket_id: str, **_arguments: Any
+        ) -> Mapping[str, Any]:
+            return {"ticket": by_id[ticket_id]}
+
+    monkeypatch.setattr(pursers_client, "BoardClient", lambda *_args, **_kwargs: Client())
+    api = butler._stranded_approvals_api()
+    monkeypatch.setitem(
+        api,
+        "classify_approval",
+        lambda ticket, **_kwargs: SimpleNamespace(
+            ticket_id=ticket["ticket_id"],
+            approved_sha="a" * 40,
+            state="STRANDED",
+            matched_lines=0,
+            added_lines=1,
+        ),
+    )
+    snapshot = {
+        "truncated": True,
+        "coordination_tickets_complete": True,
+        "coordination_tickets": [
+            {
+                "ticket_id": "TK-open-000",
+                "status": "open",
+                "updated_at": NOW.isoformat(),
+                "annotation_count": 0,
+            }
+        ],
+        "agents": [],
+    }
+
+    context = asyncio.run(
+        backend._observation_context_for_board("mature-board", snapshot, NOW)
+    )
+    findings = butler.derive_board_observations(context)
+
+    assert "TK-approved-closed" in context.tickets
+    assert context.tickets_complete is False
+    stranded = [
+        row for row in findings if row.get("observer") == "approved_not_landed"
+    ]
+    assert [row["ticket_id"] for row in stranded] == ["TK-approved-closed"]
+    assert "state=STRANDED" in stranded[0]["evidence"]
+    assert any(
+        row.get("observer") == "coverage_gap" for row in findings
+    )
+
+
+def test_approved_not_landed_accepts_future_proven_landed_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = butler.ObservationContext(
+        board_id="pursers",
+        tickets={
+            "TK-reference": {
+                "ticket_id": "TK-reference",
+                "status": "closed",
+                "review_verdict": "approve",
+            }
+        },
+        questions=(),
+        now=NOW,
+        repo=REPOSITORY_ROOT,
+        main_ref="refs/heads/main",
+    )
+    monkeypatch.setitem(
+        butler._stranded_approvals_api(),
+        "classify_approval",
+        lambda *_args, **_kwargs: SimpleNamespace(state="LANDED_BY_REFERENCE"),
+    )
+
+    assert butler._observe_stranded_approvals(context) == []
+
+
 @pytest.mark.parametrize(
     ("count", "level", "human_attention"),
     [(2, "warn", False), (3, "critical", True)],

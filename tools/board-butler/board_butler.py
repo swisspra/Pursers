@@ -7516,7 +7516,10 @@ def _observe_stranded_approvals(
                 })
             )
             continue
-        if result.state in {"LANDED_ANCESTOR", "LANDED_CONTENT"}:
+        # The shared classifier may add new independently proven landing
+        # mechanisms (for example LANDED_BY_REFERENCE).  Any LANDED_* result
+        # is affirmative evidence; unknown/non-landed states remain nags.
+        if result.state.startswith("LANDED_"):
             continue
         approved_at = _approved_at(ticket)
         age_s = (
@@ -9499,6 +9502,34 @@ class CentralBackend:
             capabilities=dict(BOARD_BUTLER_CAPABILITIES),
             allow_takeover=True,
         ) as client:
+            # A board snapshot deliberately bounds its include-closed page.
+            # On a mature board that page can exceed 500 rows and disappears
+            # from the snapshot entirely.  Reuse the standalone approval
+            # auditor's deterministic status/batch reader so closed approvals
+            # remain observable without trusting a truncated fallback.
+            complete_ticket_index: dict[str, Mapping[str, Any]] = {}
+            try:
+                complete_rows = await _stranded_approvals_api()[
+                    "fetch_all_tickets"
+                ](client)
+            except Exception:
+                tickets_complete = False
+            else:
+                for row in complete_rows:
+                    ticket_id = row.get("ticket_id")
+                    if not isinstance(ticket_id, str) or not ticket_id:
+                        tickets_complete = False
+                        complete_ticket_index = {}
+                        break
+                    # Question and active-ticket observers require the richer
+                    # single-ticket shape (including complete annotations and
+                    # dispatch history), so retain this batch index only for
+                    # the closed approvals that motivated the complete read.
+                    if (
+                        row.get("status") == "closed"
+                        and row.get("review_verdict") == "approve"
+                    ):
+                        complete_ticket_index[ticket_id] = row
             question_rows: dict[str, Mapping[str, Any]] = {}
             for question_state in ("open", "accepted", "answered"):
                 try:
@@ -9557,14 +9588,15 @@ class CentralBackend:
                 )
             ]
             approved_ticket_ids = [
-                str(row.get("ticket_id"))
+                ticket_id
                 for row in sorted(
-                    ticket_rows,
+                    complete_ticket_index.values(),
                     key=lambda row: str(row.get("updated_at", "")),
                     reverse=True,
                 )
-                if row.get("ticket_id")
+                if (ticket_id := str(row.get("ticket_id") or ""))
                 and row.get("status") == "closed"
+                and row.get("review_verdict") == "approve"
             ]
             ordered_ids = list(
                 dict.fromkeys(
@@ -9574,6 +9606,14 @@ class CentralBackend:
             if len(ordered_ids) > OBSERVATION_TICKET_LIMIT:
                 tickets_complete = False
             for ticket_id in ordered_ids[:OBSERVATION_TICKET_LIMIT]:
+                complete_ticket = complete_ticket_index.get(ticket_id)
+                if complete_ticket is not None:
+                    tickets[ticket_id] = complete_ticket
+                    if int(
+                        complete_ticket.get("annotations_omitted_count", 0) or 0
+                    ) > 0:
+                        tickets_complete = False
+                    continue
                 try:
                     payload = await client.ticket_get(
                         ticket_id, view="full", include_dispatch_history=True
