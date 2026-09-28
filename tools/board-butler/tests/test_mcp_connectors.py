@@ -756,6 +756,125 @@ def test_private_runtime_config_permissions_and_probe_drift(tmp_path: Path) -> N
         asyncio.run(connector.call_tool("operation-denied", "dangerous", {}))
 
 
+@pytest.mark.parametrize(
+    "invalid_kind",
+    ["mode", "symlink", "empty", "oversized", "invalid_utf8"],
+)
+def test_optional_secret_only_absence_disables_family(
+    tmp_path: Path, invalid_kind: str
+) -> None:
+    auth_secret = tmp_path / "auth.secret"
+    auth_secret.write_text(SECRET, encoding="utf-8")
+    auth_secret.chmod(0o600)
+    optional_secret = tmp_path / "ado.secret"
+    config = tmp_path / "connector.json"
+
+    def write_config() -> None:
+        config.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "approved_connector_ids": ["connector:test"],
+                    "connectors": [
+                        {
+                            "connector_id": "connector:test",
+                            "protocol_revision": "2026-07-28",
+                            "endpoint_ref": "endpoint:test",
+                            "tools_read_only": ["lookup", "ado_search"],
+                            "tools_risky_mutating": [],
+                            "tools_denied": [],
+                        }
+                    ],
+                    "endpoints": {
+                        "endpoint:test": {
+                            "transport": "streamable_http",
+                            "url": "http://127.0.0.1:8123/mcp",
+                            "secret_headers": {
+                                "Authorization": {
+                                    "file": str(auth_secret),
+                                    "prefix": "Bearer",
+                                },
+                                "X-Azure-DevOps-PAT": {
+                                    "file": str(optional_secret),
+                                    "prefix": "",
+                                    "unlocks": ["ado_*"],
+                                    "optional": True,
+                                },
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+
+    write_config()
+    (connector,) = butler.load_connector_runtimes(
+        config,
+        default_board_id="pursers",
+        default_project_id="pursers",
+        default_actor_id="board-butler-1",
+    )
+    _endpoint, resolved = connector._resolve_private()
+    assert resolved.unavailable_unlocks == ("ado_*",)
+
+    if invalid_kind == "mode":
+        optional_secret.write_text(SECOND_SECRET, encoding="utf-8")
+        optional_secret.chmod(0o644)
+    elif invalid_kind == "symlink":
+        target = tmp_path / "ado-target.secret"
+        target.write_text(SECOND_SECRET, encoding="utf-8")
+        target.chmod(0o600)
+        optional_secret.symlink_to(target)
+    elif invalid_kind == "empty":
+        optional_secret.write_text("", encoding="utf-8")
+        optional_secret.chmod(0o600)
+    elif invalid_kind == "oversized":
+        optional_secret.write_text("x" * 8_193, encoding="utf-8")
+        optional_secret.chmod(0o600)
+    else:
+        optional_secret.write_bytes(b"\xff")
+        optional_secret.chmod(0o600)
+
+    with pytest.raises(butler.ConnectorConfigError) as caught:
+        connector._resolve_private()
+    assert str(optional_secret) not in str(caught.value)
+
+
+def test_optional_secret_resolver_failure_is_not_treated_as_absent() -> None:
+    current = _transport_declaration("streamable_http")
+    endpoint = butler.HttpConnectorEndpoint(
+        "https://connector.example/mcp",
+        secret_headers={
+            "X-Azure-DevOps-PAT": {
+                "secret_ref": "secret:ado",
+                "unlocks": ["ado_*"],
+                "optional": True,
+            }
+        },
+    )
+
+    def fail(_ref: str) -> str:
+        raise RuntimeError(f"{SECRET} {PRIVATE_PATH}/credential")
+
+    connector = butler.ConnectorRuntime(
+        board_id="board-http",
+        project_id="project-one",
+        actor_id="butler-one",
+        policy_digest_sha256=SHA,
+        declaration=current,
+        approved_connector_ids=["connector:test"],
+        endpoint_resolver=lambda _ref: endpoint,
+        secret_resolver=fail,
+        persistence=butler.InMemoryConnectorPersistence(),
+    )
+    with pytest.raises(butler.ConnectorConfigError) as caught:
+        connector._resolve_private()
+    assert SECRET not in str(caught.value)
+    assert PRIVATE_PATH not in str(caught.value)
+
+
 def test_probe_accepts_classified_denied_tools_but_never_calls_them() -> None:
     class ClassifiedClient(FakeClient):
         async def list_tools(self, **_kwargs: Any) -> Model:

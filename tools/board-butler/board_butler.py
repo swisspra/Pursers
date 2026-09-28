@@ -487,6 +487,10 @@ class ConnectorConfigError(ConnectorError, ValueError):
     """A connector declaration or resolved endpoint is invalid."""
 
 
+class _ConnectorSecretUnavailable(ConnectorConfigError):
+    """A referenced optional connector secret is genuinely absent."""
+
+
 class ConnectorDenied(ConnectorError):
     """The exact allowlist or deterministic policy gate denied an operation."""
 
@@ -3742,6 +3746,12 @@ class ConnectorRuntime:
     def _resolve_secret(self, secret_ref: str) -> str:
         try:
             secret = self.secret_resolver(secret_ref)
+        except _ConnectorSecretUnavailable:
+            raise
+        except (FileNotFoundError, KeyError):
+            raise _ConnectorSecretUnavailable(
+                "connector secret reference is unavailable"
+            ) from None
         except Exception:
             raise ConnectorConfigError(
                 "connector secret reference is unavailable"
@@ -3785,7 +3795,7 @@ class ConnectorRuntime:
             for item in endpoint.secret_headers:
                 try:
                     value = self._resolve_secret(item.secret_ref)
-                except ConnectorConfigError:
+                except _ConnectorSecretUnavailable:
                     if not item.optional:
                         raise
                     unavailable_unlocks.extend(item.unlocks)
@@ -4524,6 +4534,12 @@ def _read_connector_private_file(path: Path, label: str, limit: int) -> bytes:
 
 
 def _connector_secret_file(path: Path) -> str:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        raise _ConnectorSecretUnavailable("connector secret is unavailable") from None
+    except OSError:
+        raise ConnectorConfigError("connector secret is unreadable") from None
     raw = _read_connector_private_file(path, "connector secret", 8_192)
     try:
         value = raw.decode("utf-8")
