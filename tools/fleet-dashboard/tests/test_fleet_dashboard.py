@@ -11637,3 +11637,62 @@ def test_timed_cache_first_load_still_blocks_and_propagates_errors() -> None:
     cache = dashboard.TimedCache(5.0, loader, _cache_runner)
     with pytest.raises(RuntimeError, match="no central"):
         cache.get()
+
+
+def test_seat_bundle_plan_is_copyable_digest_bound_and_drift_checked(
+    tmp_path: Path,
+) -> None:
+    secret = "private-token-value-that-must-not-reach-browser"
+    token = tmp_path / "seat.jwt"
+    token.write_text("header.synthetic.signature")
+    config = tmp_path / "config.toml"
+    config.write_text(f'api_token = "{secret}"\n')
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "state",
+        bridge_installer=SimpleNamespace(version="5.0.6"),
+        latest_version=lambda: None,
+    )
+    request = {
+        "host": "codex",
+        "role": "coordinator",
+        "name": "coordinator-one",
+        "central_url": "https://central.example.invalid/mcp",
+        "home_board": "",
+        "boards": "project-a,project-b,project-c",
+        "token_file": str(token),
+        "ca_file": "",
+        "bridge_command": "pursers-wait-bridge",
+        "config_path": str(config),
+        "tier_max": 2,
+        "skills": [],
+        "can_work": False,
+        "can_review": False,
+        "provider": "example-provider",
+        "model": "example-model",
+    }
+
+    plan = manager.plan(request)
+    encoded = json.dumps(plan)
+    assert plan["expires_in_s"] == 600
+    assert re.fullmatch(r"[a-f0-9]{64}", plan["digest"])
+    assert re.fullmatch(r"[a-f0-9]{64}", plan["observed_digest"])
+    assert secret not in encoded
+    assert plan["bundle"]["board_memberships"]["board_ids"] == [
+        "project-a",
+        "project-b",
+        "project-c",
+    ]
+    assert plan["bundle"]["automation"]["starts_host"] is False
+
+    with pytest.raises(ValueError, match="digest mismatch"):
+        manager.apply(plan["plan_id"], "0" * 64)
+
+    stale = manager.plan(request)
+    config.write_text(config.read_text() + "# operator edit\n")
+    with pytest.raises(RuntimeError, match="no longer matches"):
+        manager.apply(stale["plan_id"], stale["digest"])
+
+    current = manager.plan(request)
+    result = manager.apply(current["plan_id"], current["digest"])
+    assert result["doctor_follow_up"]["required"] is True
+    assert result["doctor_follow_up"]["seat"] == "coordinator-one"

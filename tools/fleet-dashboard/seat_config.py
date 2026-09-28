@@ -672,6 +672,10 @@ class DesiredSeat:
             )
         ):
             raise ValueError("boards must be registry, home, or comma-separated IDs")
+        if self.boards not in {"registry", "home"} and len(explicit_boards) != len(
+            set(explicit_boards)
+        ):
+            raise ValueError("explicit board IDs must be unique")
         if self.board_connector_name is not None and not SAFE_NAME.fullmatch(
             self.board_connector_name
         ):
@@ -765,6 +769,98 @@ def capability_env(desired: DesiredSeat) -> dict[str, str]:
         "home_board": desired.home_board,
     }
     return {CAPABILITY_ENV[key]: value for key, value in values.items()}
+
+
+def seat_setup_bundle(
+    desired: DesiredSeat,
+    configuration_files: Sequence[dict[str, str]],
+) -> dict[str, Any]:
+    """Return a copyable, secret-free setup bundle for one planned seat.
+
+    ``configuration_files`` must already be redacted by the caller.  This
+    helper deliberately works from references and declared capabilities only;
+    it never reads a credential file.
+    """
+    if desired.boards == "registry":
+        membership = {
+            "mode": "registry",
+            "anchor_board": desired.registry_board,
+            "board_ids": [],
+            "meaning": "every active WORK project in project_registry",
+        }
+    elif desired.boards == "home":
+        membership = {
+            "mode": "home",
+            "anchor_board": desired.home_board,
+            "board_ids": [desired.home_board],
+            "meaning": "the dedicated home board only",
+        }
+    else:
+        board_ids = (desired.boards or "").split(",")
+        membership = {
+            "mode": "explicit",
+            "anchor_board": desired.anchor_board,
+            "board_ids": board_ids,
+            "meaning": "exactly the listed boards",
+        }
+
+    credential = {
+        "kind": "administrator_provisioned_token_file",
+        "path": desired.token_file,
+        "value_included": False,
+    }
+    return {
+        "schema_version": 1,
+        "seat": {
+            "name": desired.name,
+            "role": desired.role,
+            "host": desired.host,
+            "provider": desired.provider,
+            "model": desired.model,
+            "work_directory": desired.seat_dir,
+            "permissions": {
+                "tier_max": desired.tier_max,
+                "skills": list(desired.skills),
+                "can_work": desired.can_work,
+                "can_review": desired.can_review,
+            },
+        },
+        "board_memberships": membership,
+        "credential": credential,
+        "bridge": {
+            "command": desired.bridge_command,
+            "central_url": desired.central_url,
+            "ca_file": desired.ca_file or None,
+            "host_timeout_s": desired.profile.host_timeout_s,
+            "block_s": desired.profile.block_s,
+            "environment": capability_env(desired),
+        },
+        "configuration_files": list(configuration_files),
+        "session_prompt": PromptRenderer().render(desired),
+        "manual_checklist": [
+            "Provision the referenced token file through the existing issuance path.",
+            "Confirm the same principal and role on every selected board.",
+            "Apply the generated host configuration or confirm Fleet apply.",
+            "Restart the ACP host when the plan reports that a restart is required.",
+            "Run Doctor and require identity, membership, permissions, and push checks to pass.",
+        ],
+        "doctor_checks": [
+            "config",
+            "host-timeout",
+            "token-file",
+            "ca-file",
+            "split-identity",
+            "identity",
+            "live-smoke",
+            "host-runtime",
+            "restart",
+        ],
+        "automation": {
+            "starts_host": False,
+            "issues_credentials": False,
+            "mutates_membership": False,
+        },
+    }
 
 
 def _managed_bool(env: dict[str, Any], key: str, default: bool) -> bool:
