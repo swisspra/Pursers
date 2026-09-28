@@ -2899,6 +2899,87 @@ def test_findings_cas_conflict_rereads_and_preserves_concurrent_refresh(
     assert sum(row.get("observation_key") == "refresh-row" for row in rows) == 1
 
 
+def test_refresh_findings_cas_conflict_rereads_and_preserves_concurrent_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pursers_client import BoardClientError
+
+    options = args(tmp_path, dry_run=False)
+    options.home_board = "home"
+    backend = butler.CentralBackend(options, "opaque")
+    initial_question = {
+        "kind": "would_answer",
+        "question_id": "CQ-initial",
+        "ticket_id": "TK-initial",
+        "observed_at": NOW.isoformat(),
+    }
+    initial = {
+        "schema_version": 2,
+        "generated_at": NOW.isoformat(),
+        "effective_mode": "shadow",
+        "findings": [initial_question],
+        "truncation": {"findings": 0},
+    }
+    concurrent_question = {
+        "kind": "would_answer",
+        "question_id": "CQ-concurrent",
+        "ticket_id": "TK-concurrent",
+        "observed_at": NOW.isoformat(),
+    }
+    concurrent = copy.deepcopy(initial)
+    concurrent["findings"].append(concurrent_question)
+    observation = {
+        "kind": butler.OBSERVATION_FINDING_KIND,
+        "observation_key": "refresh-row",
+        "level": "info",
+        "observed_at": NOW.isoformat(),
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.value = json.dumps(initial, sort_keys=True, separators=(",", ":"))
+            self.calls = 0
+
+        async def board_state_get(self, key: str) -> Mapping[str, Any]:
+            assert key == butler.STATE_KEY
+            return {"state": {"value": self.value}}
+
+        async def board_state_update(
+            self, key: str, value: str, *, expected_sha256: str | None
+        ) -> Mapping[str, Any]:
+            assert key == butler.STATE_KEY
+            self.calls += 1
+            if self.calls == 1:
+                self.value = json.dumps(
+                    concurrent, sort_keys=True, separators=(",", ":")
+                )
+                raise BoardClientError("state precondition failed")
+            assert expected_sha256 == butler.hashlib.sha256(
+                self.value.encode("utf-8")
+            ).hexdigest()
+            self.value = value
+            return {"ok": True}
+
+    client = Client()
+
+    @contextlib.asynccontextmanager
+    async def client_for_board(board_id: str) -> Any:
+        assert board_id == "away"
+        yield client
+
+    monkeypatch.setattr(backend, "_client_for_board", client_for_board)
+    monkeypatch.setattr(butler, "STATE_WRITE_RETRY_BASE_DELAY_S", 0)
+    asyncio.run(
+        backend._write_observation_findings("away", [observation], NOW)
+    )
+
+    rows = json.loads(client.value)["findings"]
+    assert client.calls == 2
+    assert sum(row.get("question_id") == "CQ-initial" for row in rows) == 1
+    assert sum(row.get("question_id") == "CQ-concurrent" for row in rows) == 1
+    assert sum(row.get("observation_key") == "refresh-row" for row in rows) == 1
+
+
 def test_evaluation_cas_conflict_preserves_concurrent_mark(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3057,6 +3138,68 @@ def test_persistent_state_conflict_keeps_question_replayable(
     assert '"phase":"subscription_event"' in warning
     status = json.loads(options.runtime_status_file.read_text(encoding="utf-8"))
     assert status["running"] is False
+
+
+def test_persistent_refresh_conflict_is_reported_without_terminating_resident(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = args(tmp_path)
+    options.once = False
+    options.refresh_seconds = 60
+    options.runtime_status_file = tmp_path / "runtime.json"
+    marked: list[str] = []
+    original_mark = butler.RuntimeStatus.mark
+
+    def record_mark(
+        self: Any, activity: str, at: Any = None
+    ) -> None:
+        marked.append(activity)
+        original_mark(self, activity, at)
+
+    monkeypatch.setattr(butler.RuntimeStatus, "mark", record_mark)
+
+    class StopResident(RuntimeError):
+        pass
+
+    class Backend:
+        latest_seq = 10
+        subscription_healthy = True
+        refreshes = 0
+        waits = 0
+
+        async def __aenter__(self) -> "Backend":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def refresh_registry_findings(self, _now: Any) -> Mapping[str, Any]:
+            self.refreshes += 1
+            raise butler.StateWriteConflict(
+                butler.STATE_KEY,
+                butler.STATE_WRITE_MAX_ATTEMPTS,
+                board_id="fullplatts",
+            )
+
+        async def wait_for_question(
+            self, _cursor: int, _timeout: float
+        ) -> tuple[int, None]:
+            self.waits += 1
+            raise StopResident
+
+    backend = Backend()
+    with pytest.raises(StopResident):
+        asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
+
+    assert backend.refreshes == 1
+    assert backend.waits == 1
+    assert "registry_refresh_state_write_conflict" in marked
+    warning = capsys.readouterr().err
+    assert '"action":"deferred_for_refresh_retry"' in warning
+    assert '"board_id":"fullplatts"' in warning
+    assert '"phase":"registry_refresh"' in warning
 
 
 def test_restart_replays_pending_question_after_concurrent_refresh_conflict(

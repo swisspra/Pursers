@@ -454,10 +454,13 @@ class FindingCapacityError(ValueError):
 class StateWriteConflict(RuntimeError):
     """A bounded board-state CAS retry could not make progress."""
 
-    def __init__(self, key: str, attempts: int) -> None:
+    def __init__(
+        self, key: str, attempts: int, *, board_id: str | None = None
+    ) -> None:
         super().__init__(f"state write conflict persisted for {key}")
         self.key = key
         self.attempts = attempts
+        self.board_id = board_id
 
 
 class ConnectorError(RuntimeError):
@@ -8439,6 +8442,18 @@ class CentralBackend:
         expected_value: str | None,
         reapply: Callable[[str | None, str | None, str], str],
     ) -> Mapping[str, Any]:
+        return await self._write_state_with_retry_for_client(
+            self.client, key, value, expected_value, reapply
+        )
+
+    async def _write_state_with_retry_for_client(
+        self,
+        client: Any,
+        key: str,
+        value: str,
+        expected_value: str | None,
+        reapply: Callable[[str | None, str | None, str], str],
+    ) -> Mapping[str, Any]:
         from pursers_client import BoardClientError
 
         candidate = value
@@ -8450,7 +8465,7 @@ class CentralBackend:
                 else None
             )
             try:
-                return await self.client.board_state_update(
+                return await client.board_state_update(
                     key, candidate, expected_sha256=expected_digest
                 )
             except BoardClientError as exc:
@@ -8459,7 +8474,7 @@ class CentralBackend:
                 if attempt + 1 >= STATE_WRITE_MAX_ATTEMPTS:
                     raise StateWriteConflict(key, STATE_WRITE_MAX_ATTEMPTS) from exc
                 try:
-                    raw = await self.client.board_state_get(key)
+                    raw = await client.board_state_get(key)
                 except BoardClientError as read_exc:
                     if "state key not found" not in str(read_exc).casefold():
                         raise
@@ -8832,17 +8847,7 @@ class CentralBackend:
         findings: Sequence[Mapping[str, Any]],
         now: datetime,
     ) -> None:
-        from pursers_client import BoardClient
-
-        async with BoardClient(
-            self.args.url,
-            self.token,
-            board_id,
-            agent_name=self.args.agent_name,
-            role="coordinator",
-            capabilities=dict(BOARD_BUTLER_CAPABILITIES),
-            allow_takeover=True,
-        ) as client:
+        async with self._client_for_board(board_id) as client:
             try:
                 raw = await client.board_state_get(STATE_KEY)
             except Exception as exc:
@@ -8851,16 +8856,18 @@ class CentralBackend:
                 raw = {}
             state, previous_value = _decode_state(raw)
             merged = merge_observation_findings(state, findings, now)
-            expected = (
-                hashlib.sha256(previous_value.encode("utf-8")).hexdigest()
-                if previous_value is not None
-                else None
-            )
-            await client.board_state_update(
-                STATE_KEY,
-                json.dumps(merged, sort_keys=True, separators=(",", ":")),
-                expected_sha256=expected,
-            )
+            try:
+                await self._write_state_with_retry_for_client(
+                    client,
+                    STATE_KEY,
+                    json.dumps(merged, sort_keys=True, separators=(",", ":")),
+                    previous_value,
+                    _reapply_findings_value,
+                )
+            except StateWriteConflict as exc:
+                raise StateWriteConflict(
+                    exc.key, exc.attempts, board_id=board_id
+                ) from exc
 
     async def _execute_mechanical_action(self, action: MechanicalAction) -> None:
         from pursers_client import BoardClient
@@ -9661,6 +9668,24 @@ def report_state_write_conflict(
     runtime.mark("state_write_conflict")
 
 
+def report_refresh_state_write_conflict(
+    runtime: RuntimeStatus, conflict: StateWriteConflict
+) -> None:
+    warning = {
+        "event": "state_write_conflict",
+        "phase": "registry_refresh",
+        "board_id": str(conflict.board_id or "unknown")[:160],
+        "state_key": conflict.key,
+        "attempts": conflict.attempts,
+        "action": "deferred_for_refresh_retry",
+    }
+    print(
+        "board-butler: " + json.dumps(warning, sort_keys=True, separators=(",", ":")),
+        file=sys.stderr,
+    )
+    runtime.mark("registry_refresh_state_write_conflict")
+
+
 async def run(
     args: argparse.Namespace,
     *,
@@ -9695,14 +9720,18 @@ async def run(
                     monotonic_now = asyncio.get_running_loop().time()
                     refreshed_cycle = False
                     if refresh is not None and monotonic_now >= next_refresh:
-                        observation = await refresh(utc_now())
-                        refreshed_cycle = True
-                        runtime.mark("registry_refresh")
-                        print(
-                            "board-butler: refresh "
-                            + json.dumps(observation, sort_keys=True),
-                            file=sys.stderr,
-                        )
+                        try:
+                            observation = await refresh(utc_now())
+                        except StateWriteConflict as exc:
+                            report_refresh_state_write_conflict(runtime, exc)
+                        else:
+                            refreshed_cycle = True
+                            runtime.mark("registry_refresh")
+                            print(
+                                "board-butler: refresh "
+                                + json.dumps(observation, sort_keys=True),
+                                file=sys.stderr,
+                            )
                         next_refresh = (
                             asyncio.get_running_loop().time() + args.refresh_seconds
                         )
