@@ -551,12 +551,14 @@ operation IDs, and outcome remain durable.
 
 ## Dashboard contract
 
-Fleet Settings exposes per-board mode, runner, approved templates, desired
-min/target/max counts, board and host ceilings, cooldowns, budgets, connectors,
-and authorization fingerprint. Team shows desired versus actual capacity and
-seat lifecycle. Activity shows commands and redacted audits. Controls create
-typed commands with the displayed config revision and require confirmation for
-kill, resume, drain, retire, and autonomous enablement.
+The operator grants `host_seat_cap` with the typed `set_host_seat_cap` Butler
+command. Butler validates its config-revision precondition, advances the command
+through plan/confirm, and commits only the delegated cap, host-runtime revision,
+envelope fingerprint, and matching authorization. Worker/reviewer maxima are
+not operator inputs to this control. A Fleet Settings editor for the command is
+a separate follow-up; this ticket does not add a direct config-write UI. Team
+continues to show desired versus actual capacity and seat lifecycle. Activity
+shows commands and redacted audits.
 
 The UI labels `pending`, `applying`, `degraded`, `killed`, and `auto-demoted`
 exactly as returned. It does not optimistically display a desired value as

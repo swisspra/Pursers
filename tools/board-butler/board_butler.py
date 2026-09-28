@@ -11124,6 +11124,27 @@ class CentralBackend:
                 configs[board_id] = config
         return configs
 
+    async def _apply_host_seat_cap_commands(
+        self, board_ids: Sequence[str], now: datetime
+    ) -> None:
+        """Apply accepted cap-only human grants through the command lifecycle."""
+        api = supervisor_roster_api()
+        for board_id in sorted(set(board_ids)):
+            async with self._client_for_board(board_id) as client:
+                pending = await client.butler_command_inspect(
+                    status="accepted", limit=50
+                )
+                for command in pending.get("commands", []):
+                    if not isinstance(command, Mapping) or command.get("intent") != "set_host_seat_cap":
+                        continue
+                    current = await client.butler_config_get()
+                    config = current.get("config")
+                    if not isinstance(config, Mapping):
+                        raise RuntimeError("host seat cap command requires existing config")
+                    await api["apply_host_seat_cap_command"](
+                        client, command, config, now=now
+                    )
+
     async def _write_fleet_state(
         self, board_id: str, document: Mapping[str, Any]
     ) -> None:
@@ -11239,6 +11260,8 @@ class CentralBackend:
             raise RuntimeError("fleet runtime configuration is incomplete")
         if getattr(self.args, "runtime_mode", "shadow") != "active":
             raise RuntimeError("fleet reconciliation requires active runtime mode")
+        if self.client is not None:
+            await self._apply_host_seat_cap_commands(active_boards, now)
         configs = await self._autonomous_fleet_configs(active_boards)
         if not configs:
             return {"status": "shadow", "boards": []}

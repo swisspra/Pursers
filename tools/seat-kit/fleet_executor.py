@@ -1485,6 +1485,13 @@ class FleetExecutor:
             )
             if stored_binding != requested_binding and not adopting_legacy:
                 raise PolicyError("seat_identity_or_state_drift")
+        target: ServiceTemplate | None = None
+        if action == "re_role":
+            target = self._target_template(request)
+            if target.template_id == template.template_id:
+                raise PolicyError("target_template_unchanged")
+            if self.store.principal_active_elsewhere(target.principal_id, seat_id):
+                raise PolicyError("principal_not_independent")
         observation = self.adapter.inspect(seat_id, template)
         if (
             seat
@@ -1595,9 +1602,7 @@ class FleetExecutor:
         if action == "re_role":
             if seat.get("lifecycle") != "draining":
                 raise PolicyError("seat_not_drained")
-            target = self._target_template(request)
-            if target.template_id == template.template_id:
-                raise PolicyError("target_template_unchanged")
+            assert target is not None
             self.adapter.stop(seat_id, template)
             stopped = self.adapter.inspect(seat_id, template)
             if stopped.running:

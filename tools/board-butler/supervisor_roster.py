@@ -8,6 +8,7 @@ has no process, launchd, credential, or filesystem mutation surface.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -253,8 +254,10 @@ def grant_from_config(config: Mapping[str, Any], now: datetime) -> SupervisorGra
         or expires_at <= now
     ):
         raise SupervisorPlanError("authorization_invalid")
-    cap = host.get("agent_process_ceiling")
+    cap = envelope.get("host_seat_cap", host.get("agent_process_ceiling"))
     if isinstance(cap, bool) or not isinstance(cap, int):
+        raise SupervisorPlanError("host_seat_cap_invalid")
+    if cap != host.get("agent_process_ceiling"):
         raise SupervisorPlanError("host_seat_cap_invalid")
     cooldowns = desired.get("cooldowns")
     cooldown = 120
@@ -829,6 +832,127 @@ class ButlerCommandClient(Protocol):
         *,
         priority: str = "normal",
     ) -> Mapping[str, Any]: ...
+
+    async def butler_command_acknowledge(
+        self, command_id: str, expected_revision: int,
+        target_status: str, reason_code: str,
+    ) -> Mapping[str, Any]: ...
+
+    async def butler_config_set(
+        self, mutation_id: str, sender_channel: str, config: dict[str, Any],
+        expected_revision: int, *, authorization_command_id: str | None = None,
+    ) -> Mapping[str, Any]: ...
+
+    async def butler_command_result(
+        self, command_id: str, expected_revision: int, result: dict[str, Any],
+    ) -> Mapping[str, Any]: ...
+
+
+def plan_host_seat_cap_grant(
+    current: Mapping[str, Any], command: Mapping[str, Any], *, now: datetime
+) -> dict[str, Any]:
+    """Plan the exact immutable-envelope update delegated by a human command."""
+    sender = command.get("sender")
+    parameters = command.get("parameters")
+    cap = parameters.get("host_seat_cap") if isinstance(parameters, Mapping) else None
+    if (
+        command.get("intent") != "set_host_seat_cap"
+        or command.get("status") != "applying"
+        or not isinstance(sender, Mapping)
+        or sender.get("channel") != "human"
+        or isinstance(cap, bool)
+        or not isinstance(cap, int)
+        or not 2 <= cap <= 100
+        or command.get("expected_config_revision") != current.get("revision")
+    ):
+        raise SupervisorPlanError("host_seat_cap_command_invalid")
+    updated = copy.deepcopy(dict(current))
+    updated["revision"] = int(current["revision"]) + 1
+    updated["enabled"] = True
+    updated["desired"]["mode"] = "autonomous"
+    updated["host_runtime"].update(
+        {
+            "revision": int(current["host_runtime"]["revision"]) + 1,
+            "agent_process_ceiling": cap,
+            "configured_by": str(sender.get("agent_id")),
+            "configured_at": now.astimezone(timezone.utc).isoformat(),
+        }
+    )
+    updated["envelope"]["host_seat_cap"] = cap
+    envelope = dict(updated["envelope"])
+    envelope.pop("fingerprint_sha256", None)
+    updated["envelope"]["fingerprint_sha256"] = digest(envelope)
+    updated["authorization"] = {
+        "authorization_id": command["command_id"],
+        "config_revision": updated["revision"],
+        "envelope_fingerprint_sha256": updated["envelope"]["fingerprint_sha256"],
+        "expires_at": command["expires_at"],
+    }
+    body = {
+        "schema": "pursers_host_seat_cap_plan_v1",
+        "command_id": command["command_id"],
+        "command_digest_sha256": command["request_digest_sha256"],
+        "prior_config_digest_sha256": digest(current),
+        "planned_at": now.astimezone(timezone.utc).isoformat(),
+        "config": updated,
+    }
+    body["plan_digest_sha256"] = digest(body)
+    return body
+
+
+def confirm_host_seat_cap_grant(
+    plan: Mapping[str, Any], current: Mapping[str, Any], command: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Fail closed if the human command or current config changed after planning."""
+    material = dict(plan)
+    claimed = material.pop("plan_digest_sha256", None)
+    if not isinstance(claimed, str) or not secrets_compare(claimed, digest(material)):
+        raise SupervisorPlanError("host_seat_cap_plan_digest_mismatch")
+    try:
+        planned_at = datetime.fromisoformat(str(plan["planned_at"]).replace("Z", "+00:00"))
+    except (KeyError, ValueError) as exc:
+        raise SupervisorPlanError("host_seat_cap_plan_invalid") from exc
+    expected = plan_host_seat_cap_grant(current, command, now=planned_at)
+    if dict(plan) != expected:
+        raise SupervisorPlanError("host_seat_cap_plan_not_current")
+    return copy.deepcopy(dict(plan["config"]))
+
+
+async def apply_host_seat_cap_command(
+    client: ButlerCommandClient,
+    command: Mapping[str, Any],
+    current: Mapping[str, Any],
+    *,
+    now: datetime,
+) -> tuple[dict[str, Any], Mapping[str, Any]]:
+    """Advance, plan, confirm and commit one cap-only human command."""
+    active = dict(command)
+    for target in ("validating", "pending", "applying"):
+        response = await client.butler_command_acknowledge(
+            str(active["command_id"]), int(active["revision"]), target,
+            f"host_cap_{target}",
+        )
+        active = dict(response["command"])
+    plan = plan_host_seat_cap_grant(current, active, now=now)
+    updated = confirm_host_seat_cap_grant(plan, current, active)
+    await client.butler_config_set(
+        mutation_id=f"host-cap-{active['command_id']}",
+        sender_channel="a2a",
+        config=updated,
+        expected_revision=int(current["revision"]),
+        authorization_command_id=str(active["command_id"]),
+    )
+    result = await client.butler_command_result(
+        str(active["command_id"]), int(active["revision"]),
+        {
+            "outcome": "succeeded",
+            "reason_code": "host_seat_cap_committed",
+            "commit_state": "reached",
+            "effect_observation_ref": f"butler-config-{updated['revision']}",
+            "config_revision": updated["revision"],
+        },
+    )
+    return updated, result
 
 
 async def confirm_with_command(

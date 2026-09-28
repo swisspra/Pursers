@@ -1040,17 +1040,19 @@ class BoardClient:
         sender_channel: str,
         config: dict[str, Any],
         expected_revision: int,
+        *,
+        authorization_command_id: str | None = None,
     ) -> dict[str, Any]:
-        return await self._call(
-            "butler_config_set",
-            {
-                "agent_name": self.agent_name,
-                "mutation_id": mutation_id,
-                "sender_channel": sender_channel,
-                "config": config,
-                "expected_revision": expected_revision,
-            },
-        )
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "mutation_id": mutation_id,
+            "sender_channel": sender_channel,
+            "config": config,
+            "expected_revision": expected_revision,
+        }
+        if authorization_command_id is not None:
+            arguments["authorization_command_id"] = authorization_command_id
+        return await self._call("butler_config_set", arguments)
 
     async def butler_command_submit(
         self,

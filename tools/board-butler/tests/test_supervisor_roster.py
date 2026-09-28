@@ -274,6 +274,7 @@ def test_grant_uses_single_host_cap_and_matching_envelope_authorization() -> Non
         },
         "envelope": {
             "fingerprint_sha256": FINGERPRINT,
+            "host_seat_cap": 15,
             "approved_template_ids": [
                 "template:worker:direct",
                 "template:reviewer:direct",
@@ -298,6 +299,35 @@ def test_grant_uses_single_host_cap_and_matching_envelope_authorization() -> Non
     assert resolved.host_seat_cap == 15
     assert resolved.gate_concurrency_ceiling == 3
     assert resolved.cooldown_s == 90
+
+    command = {
+        "command_id": "host-cap-command-1",
+        "request_digest_sha256": "a" * 64,
+        "intent": "set_host_seat_cap",
+        "status": "applying",
+        "revision": 4,
+        "sender": {"channel": "human", "agent_id": "human-admin"},
+        "parameters": {"host_seat_cap": 10},
+        "expected_config_revision": config["revision"],
+        "expires_at": (NOW + timedelta(hours=1)).isoformat(),
+    }
+    plan = roster.plan_host_seat_cap_grant(config, command, now=NOW)
+    confirmed = roster.confirm_host_seat_cap_grant(plan, config, command)
+    assert confirmed["host_runtime"]["agent_process_ceiling"] == 10
+    assert confirmed["envelope"]["host_seat_cap"] == 10
+    assert confirmed["authorization"]["authorization_id"] == command["command_id"]
+    envelope = dict(confirmed["envelope"])
+    fingerprint = envelope.pop("fingerprint_sha256")
+    assert fingerprint == roster.digest(envelope)
+    tampered = copy.deepcopy(plan)
+    tampered["config"]["envelope"]["host_seat_cap"] = 9
+    with pytest.raises(roster.SupervisorPlanError, match="plan_digest_mismatch"):
+        roster.confirm_host_seat_cap_grant(tampered, config, command)
+
+    config["envelope"]["host_seat_cap"] = 14
+    with pytest.raises(roster.SupervisorPlanError, match="host_seat_cap_invalid"):
+        roster.grant_from_config(config, NOW)
+    config["envelope"]["host_seat_cap"] = 15
 
     config["authorization"]["envelope_fingerprint_sha256"] = "b" * 64
     with pytest.raises(roster.SupervisorPlanError, match="authorization_invalid"):

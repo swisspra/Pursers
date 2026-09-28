@@ -559,6 +559,43 @@ def test_drained_worker_re_roles_through_exact_canonical_action(
     revision, digest = install(
         supervisor_roster(actions=[re_role], seats=[draining_seat], revision=3)
     )
+    runtime["service"].store.save_seat(
+        seat_id="reviewer-b",
+        board_id="pursers",
+        template=reviewer,
+        identity_id="identity:reviewer-b",
+        state_id="state:reviewer-b",
+        state_dir_id="state-dir:reviewer-b",
+        generation=1,
+        lifecycle="ready",
+        process_ref="pid:reviewer-b",
+        now=NOW,
+    )
+    calls_before_collision = list(runtime["adapter"].calls)
+    blocked = runtime["service"].handle(
+        signed_request(
+            runtime, "re_role", "op-canonical-re-role-principal-collision",
+            identity_id=binding["identity_id"], state_id=binding["state_id"],
+            state_dir_id=binding["state_dir_id"], roster_revision=revision,
+            roster_digest=digest, target_template=reviewer,
+        )
+    )
+    assert blocked["outcome"] == "rejected"
+    assert blocked["reason_code"] == "principal_not_independent"
+    collision_calls = runtime["adapter"].calls[len(calls_before_collision):]
+    assert collision_calls == []
+    runtime["service"].store.save_seat(
+        seat_id="reviewer-b",
+        board_id="pursers",
+        template=reviewer,
+        identity_id="identity:reviewer-b",
+        state_id="state:reviewer-b",
+        state_dir_id="state-dir:reviewer-b",
+        generation=2,
+        lifecycle="stopped",
+        process_ref=None,
+        now=NOW,
+    )
     changed = runtime["service"].handle(
         signed_request(
             runtime, "re_role", "op-canonical-re-role",
