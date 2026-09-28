@@ -157,6 +157,30 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
 
         self.service.mutate("pursers", mutate)
 
+    def seed_content_absent_handoff(self) -> None:
+        def mutate(document: dict[str, object]) -> None:
+            memories = document["memories"]
+            assert isinstance(memories, list)
+            memories.append(
+                {
+                    "schema_version": 2,
+                    "memory_id": "MEM-content-absent",
+                    "title": "structured handoff",
+                    "summary": "handoff fields are the content",
+                    "scope": "project",
+                    "author_principal_id": self.principal.principal_id,
+                    "author_agent_id": self.agent_id,
+                    "author_agent_name": "admin-agent",
+                    "memory_type": "handoff",
+                    "priority": 3,
+                    "pinned": True,
+                    "created_at_epoch": 100.0,
+                    "next_steps": ["continue from the structured fields"],
+                }
+            )
+
+        self.service.mutate("pursers", mutate)
+
     def seed_fat_journal(self, event_count: int = 240) -> tuple[int, list[dict]]:
         start = self.service.journal.read_after("pursers", 0, 1)["latest_cursor"]
         recipients = [self.agent_id] + [
@@ -224,6 +248,80 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
         print(
             "fat-onboard bytes: "
             f"after={len(serialized)} snapshot={len(snapshot_bytes)}"
+        )
+
+    async def test_onboard_serializes_pinned_memory_without_content(self) -> None:
+        self.seed_content_absent_handoff()
+
+        result = await self.call(
+            "board_onboard",
+            agent_name="admin-agent",
+            allow_takeover=True,
+        )
+
+        self.assertFalse(result.is_error)
+        briefing = result.structured_content["briefing"]
+        handoff = briefing["latest_handoff"]
+        self.assertEqual(handoff["memory_id"], "MEM-content-absent")
+        self.assertNotIn("content", handoff)
+        self.assertNotIn("content_truncated", handoff)
+        self.assertFalse(handoff["truncated"])
+
+    async def test_onboard_briefing_failure_rolls_back_identity_and_cache(
+        self,
+    ) -> None:
+        worker = central.Principal(
+            "PR-onboard-failure",
+            "onboard-failure",
+            frozenset({"board:read", "board:write"}),
+        )
+        await self.call(
+            "board_member_add",
+            agent_name="admin-agent",
+            principal_id=worker.principal_id,
+            role="member",
+        )
+        self.seed_content_absent_handoff()
+        board_path = self.service._path("pursers")
+        version_before = self.service.store.document_version(board_path)
+        failed_agent_id = central.agent_id(
+            "pursers", worker.principal_id, "failed-onboard"
+        )
+        real_mutate = self.service.mutate
+
+        def fail_after_briefing(board_id, callback, **kwargs):
+            def wrapped(document):
+                callback(document)
+                raise RuntimeError("forced onboarding briefing failure")
+
+            return real_mutate(board_id, wrapped, **kwargs)
+
+        self.principal = worker
+        with patch.object(
+            self.service, "mutate", side_effect=fail_after_briefing
+        ), self.assertRaisesRegex(
+            Exception, "Error executing tool board_onboard"
+        ) as caught:
+            await self.call("board_onboard", agent_name="failed-onboard")
+
+        cause = caught.exception
+        while (
+            cause is not None
+            and str(cause) != "forced onboarding briefing failure"
+        ):
+            cause = cause.__cause__
+        self.assertIsNotNone(cause)
+
+        cached = self.service.load("pursers")
+        self.assertNotIn(failed_agent_id, cached["members"])
+        self.assertEqual(
+            self.service.store.document_version(board_path), version_before
+        )
+        self.service.store.invalidate_parsed_cache(board_path)
+        durable = self.service.load("pursers")
+        self.assertNotIn(failed_agent_id, durable["members"])
+        self.assertEqual(
+            self.service.store.document_version(board_path), version_before
         )
 
     async def test_onboard_small_snapshot_preserves_all_collections(self) -> None:

@@ -6014,6 +6014,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if key in projected
         }
         omitted: dict[str, int] = {}
+        content_truncated = False
 
         if "content" in projected:
             content = projected.get("content", "")
