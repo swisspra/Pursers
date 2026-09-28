@@ -4,6 +4,9 @@ Use this guide with [the timed demo script](DEMO-SCRIPT.md). The target is a
 clean 1440 × 900, light-theme recording with readable product state and no
 credential or personal-data exposure.
 
+The separately validated, public-projection-only Fleet screenshots and short
+video plan are in [fleet-public-media](fleet-public-media/README.md).
+
 ## Before recording
 
 1. Create a fresh macOS user or a dedicated recording profile. Disable desktop
