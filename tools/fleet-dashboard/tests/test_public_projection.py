@@ -180,6 +180,53 @@ def test_projection_is_closed_bucketed_and_canary_free() -> None:
     assert_no_canaries(projection)
 
 
+def test_projection_consumes_product_aggregate_without_leaking_source_fields() -> None:
+    tickets = [
+        {
+            "ticket_id": f"TK-secret-ticket-{index}",
+            "title": "sensitive-project-name",
+            "status": "open",
+            "updated_at": (NOW - timedelta(hours=2)).isoformat(),
+            "description": "person@example.invalid /PATH/TO/private/secret",
+        }
+        for index in range(5)
+    ]
+    agents = [
+        {
+            "agent_id": f"AI-secret-agent-{index}",
+            "principal_id": f"PR-secret-principal-{index}",
+            "agent_name": f"person-{index}@example.invalid",
+            "role": "worker",
+            "status": "available",
+            "last_activity_at": (NOW - timedelta(minutes=5)).isoformat(),
+            "lifecycle_status": "active",
+        }
+        for index in range(5)
+    ]
+    fleet = dashboard.aggregate_fleet(
+        [
+            {
+                "board_id": "sensitive-project-name",
+                "label": "private-host.internal",
+                "snapshot": {"tickets": tickets, "agents": agents},
+                "events": [],
+                "human_requests": [],
+            }
+        ],
+        stale_seconds=300,
+        now=NOW,
+    )
+
+    projection = project(fleet)
+
+    assert projection["summary"]["projects"][0]["work"]["queued"] == "few"
+    assert projection["summary"]["fleet"] == {
+        "active_agents": "few",
+        "roles": [{"role": "worker", "count": "few"}],
+    }
+    assert_no_canaries({"fleet_projection": projection})
+
+
 @pytest.mark.parametrize(
     ("count", "expected_project", "expected_bucket"),
     [
@@ -249,6 +296,16 @@ def test_collision_suppresses_both_project_rows() -> None:
     projection = public.project_public_snapshot(
         source, b"k" * 32, now=NOW, aliaser=collision
     )
+    assert projection["summary"]["projects"] == []
+    assert projection["summary"]["suppressed"] is True
+
+
+def test_duplicate_source_project_is_suppressed() -> None:
+    source = rich_source()
+    source["boards"].append(dict(source["boards"][0]))
+
+    projection = project(source)
+
     assert projection["summary"]["projects"] == []
     assert projection["summary"]["suppressed"] is True
 
@@ -438,3 +495,41 @@ def test_public_mode_refuses_central_credentials(
                 "/PATH/TO/private/alias.key",
             ]
         )
+
+
+def test_public_preview_allows_random_port_without_changing_private_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN", raising=False)
+    public_args = dashboard.parse_args(
+        [
+            "--mode",
+            "public",
+            "--port",
+            "0",
+            "--public-input",
+            "/PATH/TO/private/snapshot.json",
+            "--public-alias-key",
+            "/PATH/TO/private/alias.key",
+        ]
+    )
+    assert public_args.port == 0
+    with pytest.raises(SystemExit):
+        dashboard.parse_args(["--port", "0"])
+
+
+@pytest.mark.parametrize(
+    ("private_state", "public_state"),
+    [
+        ("assigned", "queued"),
+        ("creating_report", "active"),
+        ("in_review", "review"),
+    ],
+)
+def test_current_private_states_are_coarsened(
+    private_state: str, public_state: str
+) -> None:
+    projection = project(source_with_tickets(5, state=private_state))
+
+    alias = projection["summary"]["projects"][0]["alias"]
+    assert projection["projects"][alias]["work_items"][0]["state"] == public_state

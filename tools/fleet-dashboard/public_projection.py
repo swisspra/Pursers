@@ -51,12 +51,15 @@ ROLE_VALUES = {"worker", "reviewer", "coordinator", "other"}
 _STATE_MAP = {
     "open": "queued",
     "offered": "queued",
+    "assigned": "queued",
     "claimed": "active",
     "in_progress": "active",
     "in-progress": "active",
     "reporting": "active",
+    "creating_report": "active",
     "submitted": "review",
     "reviewing": "review",
+    "in_review": "review",
     "closed": "completed",
     "rejected": "ended",
     "canceled": "ended",
@@ -207,7 +210,7 @@ def _project_aliases(
             continue
         alias = aliaser(key, "project", board_id)
         by_alias.setdefault(alias, []).append(board_id)
-    collisions = {alias for alias, ids in by_alias.items() if len(set(ids)) > 1}
+    collisions = {alias for alias, ids in by_alias.items() if len(ids) > 1}
     return (
         {
             ids[0]: alias

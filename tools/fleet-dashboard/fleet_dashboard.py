@@ -9689,8 +9689,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.host != "127.0.0.1":
         parser.error("--host must be 127.0.0.1; non-loopback binding is refused")
-    if not 1 <= args.port <= 65_535:
-        parser.error("--port must be between 1 and 65535")
+    minimum_port = 0 if args.mode == "public" else 1
+    if not minimum_port <= args.port <= 65_535:
+        parser.error(
+            "--port must be between 0 and 65535 in public mode"
+            if args.mode == "public"
+            else "--port must be between 1 and 65535"
+        )
     if args.stale_seconds < 1 or args.cache_seconds <= 0:
         parser.error("stale and cache intervals must be positive")
     if not DASHBOARD_AGENT_NAME_RE.fullmatch(args.agent_name):
