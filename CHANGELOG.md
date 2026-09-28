@@ -74,6 +74,8 @@ This release includes `pursers-central==0.1.4`,
   persistent seats instead of inferring lifecycle from host names.
 - Board Butler no longer exits on an optimistic board-state conflict; the
   question is deferred and replayed with fresh state.
+- Fleet and Board Butler launch templates share explicit runtime, PID, kill,
+  and provider-secret paths so their process controls use the same contract.
 
 ### Security
 
