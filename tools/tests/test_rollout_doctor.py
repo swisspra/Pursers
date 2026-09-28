@@ -40,10 +40,24 @@ product = "5.0.6"
 [packages]
 client = "0.1.5"
 wait_bridge = "0.1.3"
+central = "0.1.4"
+acp = "0.1.4"
+import = "5.0.0"
 """,
     )
     _write(path / "marker.txt", marker)
     _write(path / "tools/example.py", "print('fixture')\n")
+    _write(
+        path / "tools/board-butler/board_butler.py",
+        """await process_question(x)
+await process_question(y)
+_is_state_precondition_conflict(a)
+_is_state_precondition_conflict(b)
+def _is_state_precondition_conflict(exc): pass
+deferred question after state precondition conflict
+deferred pending question after state precondition conflict
+""",
+    )
     _git(["add", "."], path)
     env = {
         "GIT_AUTHOR_DATE": "2026-09-27T00:00:00+00:00",
@@ -126,6 +140,12 @@ find-links = ["file:///PATH/TO/wheels/v5.0.6"]
         )
     _write(snapshot / "processes.txt", f"python {active}/src/tools/example.py\n")
     now = datetime(2026, 9, 27, 19, 1, tzinfo=timezone.utc)
+    wheel_dir = tmp_path / "wheels"
+    wheel = wheel_dir / "fixture-5.0.6-py3-none-any.whl"
+    _write(wheel, "fixture wheel\n")
+    digest = __import__("hashlib").sha256(wheel.read_bytes()).hexdigest()
+    sums = wheel_dir / "SHA256SUMS.txt"
+    _write(sums, f"{digest}  {wheel.name}\n")
     proofs = {
         "coordinator-digest": {
             "connected": True,
@@ -136,6 +156,14 @@ find-links = ["file:///PATH/TO/wheels/v5.0.6"]
         "board-butler": {
             "effective_state": "autonomous",
             "capabilities": ["approved_merge", "TK-ee3d61fd"],
+            "fleet": {"status": "reconciled", "boards": ["pursers"]},
+            "state_precondition_conflict": {
+                "ticket_id": "TK-164fb22b",
+                "release_sha": release_sha,
+                "post_restart_refresh_seen": True,
+                "state_precondition_traceback": False,
+                "evidence_kind": "live-runtime",
+            },
         },
         "dashboard": {
             "release_sha": release_sha,
@@ -155,6 +183,9 @@ find-links = ["file:///PATH/TO/wheels/v5.0.6"]
         snapshot_root=snapshot,
         proof_dir=proof_dir,
         release_sha=release_sha,
+        release_tag="v5.0.6",
+        wheel_dir=wheel_dir,
+        sha256s=sums,
         now=now,
         fresh_seconds=300,
         inventory_only=False,
@@ -217,11 +248,114 @@ def test_inspect_fails_closed_for_stale_or_missing_post_rollout_proofs(
     assert stale.exists()
 
 
+def test_inspect_fails_closed_when_butler_fleet_remains_disabled(
+    tmp_path: Path,
+) -> None:
+    args, _active, _stale, _release_sha = _fixture(tmp_path)
+    _write(
+        args.proof_dir / "board-butler.json",
+        json.dumps(
+            {
+                "effective_state": "autonomous",
+                "capabilities": ["approved_merge", "TK-ee3d61fd"],
+                "fleet": {"status": "disabled"},
+                "state_precondition_conflict": {
+                    "ticket_id": "TK-164fb22b",
+                    "release_sha": _release_sha,
+                    "post_restart_refresh_seen": True,
+                    "state_precondition_traceback": False,
+                    "evidence_kind": "live-runtime",
+                },
+            }
+        ),
+    )
+
+    result = doctor.inspect(args)
+
+    assert result["checks"]["board_butler_autonomous_merge"]["status"] == "PASS"
+    check = result["checks"]["board_butler_fleet_reconciled"]
+    assert check["status"] == "FAIL"
+    assert "fleet status is not reconciled" in check["detail"]
+
+
+def test_inspect_reports_and_accepts_exact_authorized_butler_hotfix(
+    tmp_path: Path,
+) -> None:
+    args, _active, _stale, release_sha = _fixture(tmp_path)
+    repo = args.pursers_home / "runtimes/fleet-dashboard/repo"
+    _write(repo / "tools/board-butler/board_butler.py", "# TK-164fb22b\n")
+    patch_sha256 = doctor._git_diff_sha256(repo)
+    assert patch_sha256 is not None
+    proof_path = args.proof_dir / "board-butler.json"
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    proof["hotfix"] = {
+        "ticket_id": "TK-164fb22b",
+        "release_sha": release_sha,
+        "carried_forward": True,
+        "patch_sha256": patch_sha256,
+    }
+    _write(proof_path, json.dumps(proof))
+
+    result = doctor.inspect(args)
+
+    fleet = next(
+        row
+        for row in result["inventory"]
+        if row["consumer"] == "runtime:fleet-dashboard+board-butler"
+    )
+    assert fleet["clean"] is False
+    assert fleet["dirty_paths"] == [" M tools/board-butler/board_butler.py"]
+    assert fleet["worktree_diff_sha256"] == patch_sha256
+    assert result["checks"][fleet["consumer"]]["status"] == "PASS"
+
+
+def test_inspect_fails_closed_without_precondition_conflict_survival_proof(
+    tmp_path: Path,
+) -> None:
+    args, _active, _stale, _release_sha = _fixture(tmp_path)
+    proof_path = args.proof_dir / "board-butler.json"
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    proof.pop("state_precondition_conflict")
+    _write(proof_path, json.dumps(proof))
+
+    result = doctor.inspect(args)
+
+    assert result["checks"]["board_butler_precondition_conflict_survival"]["status"] == "FAIL"
+
+
+def test_inspect_fails_closed_for_release_input_and_version_mismatch(
+    tmp_path: Path,
+) -> None:
+    args, _active, _stale, _release_sha = _fixture(tmp_path)
+    args.release_tag = "v5.0.7"
+    wheel = next(args.wheel_dir.glob("*.whl"))
+    _write(wheel, "tampered\n")
+    fleet = args.pursers_home / "runtimes/fleet-dashboard/repo"
+    manifest = fleet / "tools/release_versions.toml"
+    _write(manifest, manifest.read_text(encoding="utf-8").replace('central = "0.1.4"', 'central = "9.9.9"'))
+
+    result = doctor.inspect(args)
+
+    assert result["checks"]["release_wheel_inputs"]["status"] == "FAIL"
+    assert result["checks"]["release_version_manifest"]["status"] == "FAIL"
+
+
+def test_release_inputs_are_required() -> None:
+    with pytest.raises(SystemExit):
+        doctor.parse_args(["--release-sha", "a" * 40])
+
+
 def test_main_writes_only_when_output_is_explicit(tmp_path: Path, capsys) -> None:
     args, _active, stale, release_sha = _fixture(tmp_path)
     argv = [
         "--release-sha",
         release_sha,
+        "--release-tag",
+        "v5.0.6",
+        "--wheel-dir",
+        str(args.wheel_dir),
+        "--sha256s",
+        str(args.sha256s),
         "--home",
         str(args.home),
         "--pursers-home",
@@ -254,6 +388,12 @@ def test_inventory_only_reports_without_rollout_proofs(tmp_path: Path, capsys) -
             "--inventory-only",
             "--release-sha",
             release_sha,
+            "--release-tag",
+            "v5.0.6",
+            "--wheel-dir",
+            str(args.wheel_dir),
+            "--sha256s",
+            str(args.sha256s),
             "--home",
             str(args.home),
             "--pursers-home",
@@ -273,4 +413,15 @@ def test_inventory_only_reports_without_rollout_proofs(tmp_path: Path, capsys) -
 
 def test_short_release_sha_is_rejected() -> None:
     with pytest.raises(SystemExit):
-        doctor.parse_args(["--release-sha", "abc123"])
+        doctor.parse_args(
+            [
+                "--release-sha",
+                "abc123",
+                "--release-tag",
+                "v5.0.6",
+                "--wheel-dir",
+                "/wheels",
+                "--sha256s",
+                "/wheels/SHA256SUMS.txt",
+            ]
+        )

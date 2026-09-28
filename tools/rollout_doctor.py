@@ -23,8 +23,17 @@ RELEASE_TAG = "v5.0.6"
 EXPECTED_PRODUCT = "5.0.6"
 EXPECTED_WAIT_BRIDGE = "0.1.3"
 EXPECTED_CLIENT = "0.1.5"
+EXPECTED_PACKAGES = {
+    "product": "5.0.6",
+    "client": "0.1.5",
+    "wait_bridge": "0.1.3",
+    "central": "0.1.4",
+    "acp": "0.1.4",
+    "import": "5.0.0",
+}
 RUNTIME_NAMES = re.compile(r"^(?:registry-main|review(?:-main)?)-[A-Za-z0-9._-]+$")
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 LAUNCHD_LABELS = (
     "com.pursers.fleet-dashboard",
     "com.pursers.coordinator",
@@ -62,8 +71,39 @@ def _git_sha(repo: Path) -> str | None:
 
 
 def _git_clean(repo: Path) -> bool | None:
-    value = _run(("git", "status", "--porcelain", "--untracked-files=all"), cwd=repo)
-    return None if value is None else not value
+    status = _git_status(repo)
+    return None if status is None else not status
+
+
+def _git_status(repo: Path) -> list[str] | None:
+    try:
+        completed = subprocess.run(
+            ("git", "status", "--porcelain", "--untracked-files=all"),
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return completed.stdout.splitlines() if completed.returncode == 0 else None
+
+
+def _git_diff_sha256(repo: Path) -> str | None:
+    try:
+        completed = subprocess.run(
+            ("git", "diff", "--binary", "--no-ext-diff"),
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0 or not completed.stdout:
+        return None
+    return hashlib.sha256(completed.stdout).hexdigest()
 
 
 def _release_versions(repo: Path) -> dict[str, str]:
@@ -150,12 +190,15 @@ def _repo_record(
     pursers_home: Path,
     referenced: bool,
 ) -> dict[str, Any]:
+    status = _git_status(repo)
     return {
         "consumer": consumer,
         "path": _safe_path(repo, home, pursers_home),
         "present": repo.is_dir(),
         "sha": _git_sha(repo),
-        "clean": _git_clean(repo),
+        "clean": None if status is None else not status,
+        "dirty_paths": status,
+        "worktree_diff_sha256": _git_diff_sha256(repo),
         "versions": _release_versions(repo),
         "referenced": referenced,
     }
@@ -240,6 +283,38 @@ def _file_sha256(path: Path) -> str | None:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+def _wheel_checksums(wheel_dir: Path, sums_path: Path) -> bool:
+    try:
+        rows = sums_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    seen: set[str] = set()
+    for row in rows:
+        match = re.fullmatch(r"([0-9a-f]{64})  ([^/]+\.whl)", row)
+        if match is None or match.group(2) in seen:
+            return False
+        expected, name = match.groups()
+        seen.add(name)
+        if _file_sha256(wheel_dir / name) != expected:
+            return False
+    return bool(seen) and {path.name for path in wheel_dir.glob("*.whl")} == seen
+
+
+def _butler_conflict_guard(repo: Path) -> bool:
+    try:
+        source = (repo / "tools/board-butler/board_butler.py").read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return False
+    return (
+        source.count("_is_state_precondition_conflict") >= 3
+        and source.count("await process_question(") >= 2
+        and "deferred question after state precondition conflict" in source
+        and "deferred pending question after state precondition conflict" in source
+    )
 
 
 def _entrypoint(text: str) -> Path | None:
@@ -360,16 +435,39 @@ def _post_rollout_checks(
         )
     butler = _proof(proof_dir, "board-butler")
     capabilities = butler.get("capabilities", []) if butler else []
+    fleet = butler.get("fleet") if butler else None
     merged = isinstance(capabilities, list) and any(
         item in {"approved_merge", "pr-review-merge", "TK-ee3d61fd"}
         for item in capabilities
     )
     autonomous = butler is not None and butler.get("effective_state") == "autonomous"
+    fleet_reconciled = isinstance(fleet, Mapping) and fleet.get("status") == "reconciled"
     checks["board_butler_autonomous_merge"] = _check(
         "PASS" if autonomous and merged else "FAIL",
-        "autonomous mode includes the landed approved-merge capability"
+        "autonomous mode includes approved merge"
         if autonomous and merged
         else "missing autonomous/approved-merge proof",
+    )
+    checks["board_butler_fleet_reconciled"] = _check(
+        "PASS" if fleet_reconciled else "FAIL",
+        "new post-restart refresh reports fleet status reconciled"
+        if fleet_reconciled
+        else "fleet status is not reconciled",
+    )
+    conflict = butler.get("state_precondition_conflict") if butler else None
+    conflict_survived = (
+        isinstance(conflict, Mapping)
+        and conflict.get("ticket_id") == "TK-164fb22b"
+        and conflict.get("release_sha") == release_sha
+        and conflict.get("post_restart_refresh_seen") is True
+        and conflict.get("state_precondition_traceback") is False
+        and conflict.get("evidence_kind") == "live-runtime"
+    )
+    checks["board_butler_precondition_conflict_survival"] = _check(
+        "PASS" if conflict_survived else "FAIL",
+        "post-restart refreshes continued without a state-precondition traceback"
+        if conflict_survived
+        else "missing release-bound post-restart refresh/no-traceback proof",
     )
     dashboard = _proof(proof_dir, "dashboard")
     shell = dashboard.get("visual_shell") if dashboard else None
@@ -478,6 +576,8 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         f"expected wait-bridge {EXPECTED_WAIT_BRIDGE}, client {EXPECTED_CLIENT}, "
         f"find-links {RELEASE_TAG}",
     )
+    butler_proof = _proof(proof_dir, "board-butler")
+    hotfix = butler_proof.get("hotfix") if butler_proof else None
     for row in repositories:
         required = row["consumer"] in {
             "runtime:fleet-dashboard+board-butler",
@@ -485,13 +585,58 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         } or row["referenced"]
         if not required:
             continue
-        good = row["sha"] == args.release_sha and row["clean"] is True
+        carried_hotfix = (
+            row["consumer"] == "runtime:fleet-dashboard+board-butler"
+            and isinstance(hotfix, Mapping)
+            and hotfix.get("ticket_id") == "TK-164fb22b"
+            and hotfix.get("carried_forward") is True
+            and hotfix.get("release_sha") == args.release_sha
+            and SHA256.fullmatch(str(hotfix.get("patch_sha256", ""))) is not None
+            and hotfix.get("patch_sha256") == row["worktree_diff_sha256"]
+            and row["dirty_paths"] == [" M tools/board-butler/board_butler.py"]
+        )
+        good = row["sha"] == args.release_sha and (
+            row["clean"] is True or carried_hotfix
+        )
         checks[row["consumer"]] = _check(
             "PASS" if good else "FAIL",
-            "clean checkout at release SHA"
+            "release SHA with exact TK-164fb22b carry-forward patch"
+            if carried_hotfix
+            else "clean checkout at release SHA"
             if good
             else "active checkout missing, dirty, or at the wrong SHA",
         )
+    version_sources = [
+        row["versions"] for row in repositories if row["sha"] == args.release_sha
+    ]
+    versions_ok = bool(version_sources) and all(
+        all(versions.get(key) == value for key, value in EXPECTED_PACKAGES.items())
+        for versions in version_sources
+    )
+    checks["release_version_manifest"] = _check(
+        "PASS" if versions_ok else "FAIL",
+        "release_versions.toml matches the approved package map"
+        if versions_ok
+        else "release package versions are missing or mismatched",
+    )
+    fleet_repo = pursers_home / "runtimes/fleet-dashboard/repo"
+    checks["board_butler_conflict_guard_source"] = _check(
+        "PASS" if _butler_conflict_guard(fleet_repo) else "FAIL",
+        "running Butler source guards both process_question call sites"
+        if _butler_conflict_guard(fleet_repo)
+        else "running Butler source lacks the two conflict-deferral guards",
+    )
+    release_inputs_ok = (
+        args.release_tag == RELEASE_TAG
+        and args.sha256s.resolve().parent == args.wheel_dir.resolve()
+        and _wheel_checksums(args.wheel_dir.resolve(), args.sha256s.resolve())
+    )
+    checks["release_wheel_inputs"] = _check(
+        "PASS" if release_inputs_ok else "FAIL",
+        "release tag and complete SHA256SUMS wheel cohort match"
+        if release_inputs_ok
+        else "release tag, wheel directory, or SHA256SUMS validation failed",
+    )
     for row in launchd_rows:
         source_shas = {source["sha"] for source in row["sources"]}
         sources_ok = bool(source_shas) and source_shas == {args.release_sha}
@@ -583,6 +728,9 @@ def _utc(value: str) -> datetime:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
+    parser.add_argument("--release-tag", required=True)
+    parser.add_argument("--wheel-dir", type=Path, required=True)
+    parser.add_argument("--sha256s", type=Path, required=True)
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--pursers-home", type=Path)
     parser.add_argument("--proof-dir", type=Path)

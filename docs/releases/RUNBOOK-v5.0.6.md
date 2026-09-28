@@ -8,7 +8,8 @@ checkout SHAs until post-rollout verification has passed.
 Only the operator may perform this rollout. The commands below download,
 install, switch checkouts, and restart local services. Workers and reviewers
 must not run them. Do not push `main`, create or move a tag, publish a package,
-delete a runtime, or edit a launchd job while following this runbook.
+or delete a runtime while following this runbook. The only launchd definition
+change is the explicit, backed-up Board Butler runtime switch in section 7.
 
 ## 1. Establish the approved release
 
@@ -21,16 +22,25 @@ hostname, token path, or other personal identifier.
 set -eu
 
 export RELEASE_TAG=v5.0.6
-export RELEASE_SHA=<APPROVED_FULL_40_HEX_SHA>
+: "${RELEASE_SHA:?set the operator-approved full 40-hex release SHA}"
 export PURSERS_HOME=/PATH/TO/.pursers
 export RELEASE_DOWNLOAD=/PATH/TO/downloaded-v5.0.6
 export NEW_WHEEL_DIR="$PURSERS_HOME/central/.private-arm/wheels/v5.0.6"
 export OLD_WHEEL_DIR="$PURSERS_HOME/central/.private-arm/wheels/v5.0.5"
 export FLEET_REPO="$PURSERS_HOME/runtimes/fleet-dashboard/repo"
 export COORDINATOR_REPO="$PURSERS_HOME/coordinator/src"
+export RELEASE_CHECKOUT=/PATH/TO/clean-v5.0.6-checkout
+export FLEET_PYTHON=/PATH/TO/fleet-dashboard-python
+export COORDINATOR_PYTHON=/PATH/TO/coordinator-python
+export BUTLER_PLIST=/PATH/TO/Library/LaunchAgents/com.pursers.board-butler.plist
+export BUTLER_RUNTIME_STATUS=/PATH/TO/private/board-butler-state/runtime.json
+export BUTLER_LOG=/PATH/TO/private/logs/board-butler.log
+export BUTLER_FIX_SHA=${BUTLER_FIX_SHA:-NONE}
+export BUTLER_HOTFIX_BACKUP=board_butler.py.bak-hotfix-precondition-20260928163252
 export ROLLOUT_STATE="$PURSERS_HOME/rollout/v5.0.6"
 export RELEASE_SHORT="$(printf %.8s "$RELEASE_SHA")"
 export NEW_REGISTRY_RUNTIME="$PURSERS_HOME/runtimes/registry-main-$RELEASE_SHORT"
+export BUTLER_PYTHON="$NEW_REGISTRY_RUNTIME/.venv/bin/python"
 
 case "$RELEASE_SHA" in
   *[!0-9a-f]*|'') echo "RELEASE_SHA must be lowercase hex" >&2; exit 64 ;;
@@ -53,9 +63,10 @@ git merge-base --is-ancestor "$RELEASE_SHA" refs/remotes/origin/main
 git show "$RELEASE_SHA:tools/release_versions.toml"
 ```
 
-The manifest at `RELEASE_SHA` must say product `5.0.6`, wait bridge `0.1.3`,
-and the approved package versions. Do not infer a missing version from an old
-checkout.
+The manifest at `RELEASE_SHA` must match the default approved map: product
+`5.0.6`, client `0.1.5`, wait bridge `0.1.3`, central `0.1.4`, ACP `0.1.4`,
+and import `5.0.0`. A changed map fails verification; do not trust prose or an
+old checkout over `tools/release_versions.toml` at the approved SHA.
 
 ## 2. Capture the baseline inventory
 
@@ -66,6 +77,9 @@ inventory mode deliberately does not require post-rollout proof files.
 python3 tools/rollout_doctor.py \
   --inventory-only \
   --release-sha "$RELEASE_SHA" \
+  --release-tag "$RELEASE_TAG" \
+  --wheel-dir "$OLD_WHEEL_DIR" \
+  --sha256s "$OLD_WHEEL_DIR/SHA256SUMS.txt" \
   --pursers-home "$PURSERS_HOME" \
   > /PATH/TO/v5.0.6-before.json
 ```
@@ -87,6 +101,11 @@ The expected baseline uv tool is wait bridge `0.1.2`, client `0.1.4`, with
 `find-links` pointing to the v5.0.5 wheel directory. A different baseline is
 not automatically wrong, but it must be explained in the rollout record.
 
+The live Fleet/Butler clone is intentionally dirty while the TK-164fb22b
+precondition-conflict stopgap is installed. The inventory must show both
+`clean: false` and the exact two `dirty_paths` below. Capture the patch and
+backup before any checkout operation. Stop if any other path is dirty.
+
 Record the current SHAs before any checkout switch. These are rollback inputs,
 not guessed values.
 
@@ -96,7 +115,20 @@ git -C "$FLEET_REPO" rev-parse --verify 'HEAD^{commit}' \
   > "$ROLLOUT_STATE/fleet.previous-sha"
 git -C "$COORDINATOR_REPO" rev-parse --verify 'HEAD^{commit}' \
   > "$ROLLOUT_STATE/coordinator.previous-sha"
-test -z "$(git -C "$FLEET_REPO" status --porcelain --untracked-files=all)"
+FLEET_DIRTY=$(git -C "$FLEET_REPO" status --porcelain --untracked-files=all)
+EXPECTED_FLEET_DIRTY=$(printf '%s\n%s' \
+  ' M tools/board-butler/board_butler.py' \
+  "?? tools/board-butler/$BUTLER_HOTFIX_BACKUP")
+test "$FLEET_DIRTY" = "$EXPECTED_FLEET_DIRTY"
+grep -F 'TK-164fb22b' "$FLEET_REPO/tools/board-butler/board_butler.py"
+git -C "$FLEET_REPO" diff --binary -- tools/board-butler/board_butler.py \
+  > "$ROLLOUT_STATE/TK-164fb22b.patch"
+test -s "$ROLLOUT_STATE/TK-164fb22b.patch"
+cp -p "$FLEET_REPO/tools/board-butler/$BUTLER_HOTFIX_BACKUP" \
+  "$ROLLOUT_STATE/$BUTLER_HOTFIX_BACKUP"
+shasum -a 256 "$ROLLOUT_STATE/TK-164fb22b.patch" \
+  "$ROLLOUT_STATE/$BUTLER_HOTFIX_BACKUP" \
+  > "$ROLLOUT_STATE/TK-164fb22b.SHA256SUMS"
 test -z "$(git -C "$COORDINATOR_REPO" status --porcelain --untracked-files=all)"
 ```
 
@@ -120,7 +152,6 @@ the seven exact manifest-derived filenames. Extra or missing wheels fail the
 rollout.
 
 ```sh
-RELEASE_CHECKOUT=/PATH/TO/clean-v5.0.6-checkout
 test "$(git -C "$RELEASE_CHECKOUT" rev-parse --verify 'HEAD^{commit}')" = "$RELEASE_SHA"
 python3 - "$RELEASE_CHECKOUT" "$RELEASE_DOWNLOAD" <<'PY'
 import sys
@@ -214,30 +245,113 @@ location is host-owned and must not be copied into this repository.
 Rollback: restore that captured reference to the previous runtime. Keep both
 runtime directories; do not delete either one during the rollout.
 
-## 6. Refresh the service checkouts
+## 6. Refresh the service checkouts without losing the Butler hotfix
 
-Both service clones must be clean. Fetch the tag, prove its exact SHA, and
-switch to a detached checkout. Do not pull or merge an unbounded branch tip.
+The coordinator clone must be clean. The Fleet/Butler clone must have exactly
+the captured TK-164fb22b dirt and no other change. Fetch the tag without
+touching either worktree, then prove its exact SHA. Do not pull or merge an
+unbounded branch tip.
 
 ```sh
 for repo in "$FLEET_REPO" "$COORDINATOR_REPO"; do
-  test -z "$(git -C "$repo" status --porcelain --untracked-files=all)"
   git -C "$repo" fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
   test "$(git -C "$repo" rev-parse --verify "$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
-  git -C "$repo" checkout --detach "$RELEASE_SHA"
-  test "$(git -C "$repo" rev-parse --verify 'HEAD^{commit}')" = "$RELEASE_SHA"
+done
+test -z "$(git -C "$COORDINATOR_REPO" status --porcelain --untracked-files=all)"
+git -C "$COORDINATOR_REPO" checkout --detach "$RELEASE_SHA"
+test "$(git -C "$COORDINATOR_REPO" rev-parse --verify 'HEAD^{commit}')" = "$RELEASE_SHA"
+```
+
+Decide whether the release contains the reviewed permanent TK-164fb22b fix.
+`BUTLER_FIX_SHA` must be the coordinator-approved full fix commit, or the
+literal `NONE`. A matching comment or ticket string is not proof of ancestry.
+
+```sh
+RELEASE_HAS_BUTLER_FIX=false
+if test "$BUTLER_FIX_SHA" != NONE; then
+  case "$BUTLER_FIX_SHA" in
+    *[!0-9a-f]*|'') echo "BUTLER_FIX_SHA must be full lowercase hex or NONE" >&2; exit 64 ;;
+  esac
+  test "${#BUTLER_FIX_SHA}" -eq 40
+  git -C "$FLEET_REPO" merge-base --is-ancestor "$BUTLER_FIX_SHA" "$RELEASE_SHA"
+  RELEASE_HAS_BUTLER_FIX=true
+fi
+```
+
+Preserve the exact dirty state in Git's object store before switching. This is
+not permission to reset arbitrary dirt: the exact-path check in section 2 must
+have passed. Record the immutable stash commit for rollback.
+
+```sh
+git -C "$FLEET_REPO" stash push --include-untracked \
+  -m 'v5.0.6 rollout preserve TK-164fb22b' -- \
+  tools/board-butler/board_butler.py \
+  "tools/board-butler/$BUTLER_HOTFIX_BACKUP"
+git -C "$FLEET_REPO" rev-parse --verify refs/stash \
+  > "$ROLLOUT_STATE/fleet.hotfix-stash-sha"
+test -z "$(git -C "$FLEET_REPO" status --porcelain --untracked-files=all)"
+git -C "$FLEET_REPO" checkout --detach "$RELEASE_SHA"
+test "$(git -C "$FLEET_REPO" rev-parse --verify 'HEAD^{commit}')" = "$RELEASE_SHA"
+```
+
+If the approved fix is in the tag, keep the release checkout clean. Otherwise,
+explicitly carry forward only the captured patch. A patch that no longer
+applies cleanly is a hard stop requiring a reviewed port; never discard it or
+force a checkout.
+
+```sh
+if test "$RELEASE_HAS_BUTLER_FIX" = true; then
+  test -z "$(git -C "$FLEET_REPO" status --porcelain --untracked-files=all)"
+else
+  git -C "$FLEET_REPO" apply --check "$ROLLOUT_STATE/TK-164fb22b.patch"
+  git -C "$FLEET_REPO" apply "$ROLLOUT_STATE/TK-164fb22b.patch"
+  test "$(git -C "$FLEET_REPO" status --porcelain --untracked-files=all)" = \
+    ' M tools/board-butler/board_butler.py'
+  grep -F 'TK-164fb22b' "$FLEET_REPO/tools/board-butler/board_butler.py"
+  git -C "$FLEET_REPO" diff --binary --no-ext-diff | shasum -a 256 | \
+    awk '{print $1}' > "$ROLLOUT_STATE/fleet.carried-hotfix.sha256"
+fi
+```
+
+The service source SHA and its Python environment are separate rollout inputs.
+The v5.0.5 Board Butler can run the Fleet checkout from the registry runtime
+environment, so changing only the clone leaves it on client `0.1.4`. Read the
+approved version from the release checkout and upgrade every distinct service
+interpreter from `NEW_WHEEL_DIR`; do not resolve a release runtime from the
+public package index.
+
+```sh
+CLIENT_VERSION=$(python3 -c \
+  'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["packages"]["client"])' \
+  "$RELEASE_CHECKOUT/tools/release_versions.toml")
+
+for python in "$FLEET_PYTHON" "$COORDINATOR_PYTHON" "$BUTLER_PYTHON"; do
+  test -x "$python"
+  uv pip install --python "$python" --no-index --find-links "$NEW_WHEEL_DIR" \
+    "pursers-client==$CLIENT_VERSION"
+  "$python" -c \
+    'import importlib.metadata as m,sys; assert m.version("pursers-client") == sys.argv[1]' \
+    "$CLIENT_VERSION"
 done
 ```
 
-If a service cannot import from its existing environment at the new checkout,
-install the manifest-approved wheels into that service's existing environment
-from `NEW_WHEEL_DIR`, using `--no-index --find-links`. Never resolve a release
-runtime from the public package index.
+If two services share one interpreter, the repeated exact install is harmless
+and must produce the same version check. Rollback requires reinstalling each
+interpreter's recorded v5.0.5 package set from `OLD_WHEEL_DIR`, not merely
+moving the Git checkout back.
 
 Rollback a checkout with its recorded full SHA:
 
 ```sh
+if test -f "$ROLLOUT_STATE/fleet.carried-hotfix.sha256"; then
+  git -C "$FLEET_REPO" apply --reverse --check "$ROLLOUT_STATE/TK-164fb22b.patch"
+  git -C "$FLEET_REPO" apply --reverse "$ROLLOUT_STATE/TK-164fb22b.patch"
+fi
 git -C "$FLEET_REPO" checkout --detach "$(cat "$ROLLOUT_STATE/fleet.previous-sha")"
+git -C "$FLEET_REPO" stash apply \
+  "$(cat "$ROLLOUT_STATE/fleet.hotfix-stash-sha")"
+test "$(git -C "$FLEET_REPO" status --porcelain --untracked-files=all)" = \
+  "$EXPECTED_FLEET_DIRTY"
 git -C "$COORDINATOR_REPO" checkout --detach "$(cat "$ROLLOUT_STATE/coordinator.previous-sha")"
 ```
 
@@ -281,16 +395,107 @@ packages if required, kickstart only the coordinator, and recheck the digest.
 Board Butler shares `FLEET_REPO`; do not move the checkout again. Preserve its
 authorization, token, state, and kill-file paths.
 
+Before restarting it, prove the installed launchd definition enables the full
+fleet path. `active` mode, the active authorization, the fleet observation and
+state files, and all three executor settings are one atomic precondition. The
+v5.0.6 launch wrapper must pass all of those settings to `board_butler.py`.
+Back up the definition, then move Board Butler off the v5.0.5 registry venv and
+onto the new side-by-side registry runtime. Do not edit its credential paths or
+fleet authorization values.
+
 ```sh
-launchctl kickstart -k "gui/$(id -u)/com.pursers.board-butler"
+test ! -e "$ROLLOUT_STATE/board-butler.plist.before-v5.0.6"
+cp -p "$BUTLER_PLIST" "$ROLLOUT_STATE/board-butler.plist.before-v5.0.6"
+/usr/libexec/PlistBuddy -c \
+  "Set :EnvironmentVariables:PURSERS_BUTLER_PYTHON $BUTLER_PYTHON" \
+  "$BUTLER_PLIST"
+plutil -lint "$BUTLER_PLIST"
+test "$(plutil -extract EnvironmentVariables.PURSERS_BUTLER_PYTHON raw \
+  "$BUTLER_PLIST")" = "$BUTLER_PYTHON"
+test "$(plutil -extract EnvironmentVariables.PURSERS_BUTLER_REPO raw \
+  "$BUTLER_PLIST")" = "$FLEET_REPO"
+test "$(plutil -extract EnvironmentVariables.PURSERS_BUTLER_RUNTIME_MODE raw \
+  "$BUTLER_PLIST")" = active
+for key in \
+  PURSERS_BUTLER_ACTIVE_AUTHORIZATION_FILE \
+  PURSERS_BUTLER_ACTIVE_BOARD \
+  PURSERS_BUTLER_FLEET_OBSERVATION_FILE \
+  PURSERS_BUTLER_FLEET_STATE_FILE \
+  PURSERS_BUTLER_FLEET_EXECUTOR_SOCKET \
+  PURSERS_BUTLER_FLEET_EXECUTOR_KEY_ID \
+  PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY
+do
+  test -n "$(plutil -extract "EnvironmentVariables.$key" raw "$BUTLER_PLIST")"
+done
+for option in \
+  --active-authorization-file --fleet-observation-file --fleet-state-file \
+  --fleet-executor-socket --fleet-executor-key-id --fleet-executor-private-key
+do
+  grep -F -- "$option" "$FLEET_REPO/tools/board-butler/launch.sh"
+done
+```
+
+Stop if any value or wrapper flag is missing. Restore the previous complete
+plist/runtime tuple on rollback; never start an active Butler with a partial
+executor configuration. The exact definition rollback is:
+
+```sh
+cp -p "$ROLLOUT_STATE/board-butler.plist.before-v5.0.6" "$BUTLER_PLIST"
+plutil -lint "$BUTLER_PLIST"
+```
+
+```sh
+BUTLER_LOG_OFFSET=$(wc -c < "$BUTLER_LOG")
+launchctl bootout "gui/$(id -u)/com.pursers.board-butler"
+launchctl bootstrap "gui/$(id -u)" "$BUTLER_PLIST"
 launchctl print "gui/$(id -u)/com.pursers.board-butler"
+python3 - "$BUTLER_RUNTIME_STATUS" "$BUTLER_LOG" "$BUTLER_LOG_OFFSET" <<'PY'
+import json, sys, time
+from pathlib import Path
+
+runtime_path, log_path, offset = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3])
+deadline = time.monotonic() + 120
+last_fleet = None
+while time.monotonic() < deadline:
+    runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+    if runtime.get("running") is not True or runtime.get("mode") != "active":
+        raise SystemExit(f"board-butler runtime is not active: {runtime!r}")
+    with log_path.open("r", encoding="utf-8") as handle:
+        handle.seek(offset)
+        lines = handle.readlines()
+    for line in lines:
+        marker = "board-butler: refresh "
+        if marker not in line:
+            continue
+        observation = json.loads(line.split(marker, 1)[1])
+        last_fleet = observation.get("fleet", {})
+        if last_fleet.get("status") == "reconciled":
+            print("board-butler fleet status=reconciled")
+            raise SystemExit(0)
+    time.sleep(2)
+raise SystemExit(f"no new reconciled fleet refresh after restart: {last_fleet!r}")
+PY
 ```
 
 Success requires its effective state to remain `autonomous` and its runtime to
 advertise the landed approved-review merge capability from `TK-ee3d61fd`.
+A new refresh event after the saved log offset must report
+`fleet.status=reconciled`; if the bounded wait sees only `disabled`, `shadow`,
+a missing field, or no new refresh, the rollout failed even when
+`butler_config_get` reports `effective_mode=autonomous`.
 Rollback by restoring `fleet.previous-sha`, restoring compatible packages, and
-restarting Board Butler; then also restart and recheck Fleet Dashboard because
-the two jobs share the checkout.
+restoring the saved plist, then reloading Board Butler so launchd uses the old
+environment:
+
+```sh
+cp -p "$ROLLOUT_STATE/board-butler.plist.before-v5.0.6" "$BUTLER_PLIST"
+launchctl bootout "gui/$(id -u)/com.pursers.board-butler"
+launchctl bootstrap "gui/$(id -u)" "$BUTLER_PLIST"
+launchctl print "gui/$(id -u)/com.pursers.board-butler"
+```
+
+Also restart and recheck Fleet Dashboard because the two jobs share the
+checkout.
 
 ### Mong1 supervisor — drain first
 
@@ -315,6 +520,25 @@ their saved positive cursors and use push waits. If that fails, restore the
 previous supervisor runtime reference and restart once more; do not reset
 cursors or take over a seat identity.
 
+### Cold-boot and power-loss recovery
+
+An unexpected host loss abandons every in-flight claim. Do not resume the
+rollout or assume that a pre-boot lease still exists. Bring Central and the
+registry runtime up first, confirm every active WORK board is reachable, then
+start the coordinator and inspect the board state. Preserve all seat worktrees
+and checkpoints. Each worker/reviewer must reconnect with its own identity and
+saved positive cursor, accept a newly issued offer, and reclaim through the
+board before continuing. Never manufacture a claim, reset a cursor to zero, or
+delete an abandoned worktree during recovery.
+
+Start Board Butler only after its complete active/fleet preflight above passes.
+A `board_state` compare-and-swap precondition conflict must be deferred while
+the process stays alive, then replayed against fresh state. If Butler exits,
+advances past the event without replay, or loops on stale state, the rollout
+failed: retain logs/state, perform the exact rollback, and do not bypass the
+precondition. Re-run the fleet `status=reconciled` check before the supervisor
+or any remaining rollout step.
+
 ## 8. Collect post-rollout proof and run the doctor
 
 Store private proof under `<PURSERS_HOME>/rollout/v5.0.6/proofs`; do not commit
@@ -325,12 +549,18 @@ it. The operator's evidence collector must produce these JSON files:
 | `coordinator-digest.json` | `connected: true`, fresh ISO-8601 `last_event_at` |
 | `wait-worker.json` | `mode: "push"`, or non-empty `mode_by_board` whose values are all `push` |
 | `wait-reviewer.json` | same push evidence for a reviewer |
-| `board-butler.json` | `effective_state: "autonomous"`; `capabilities` includes `approved_merge`, `pr-review-merge`, or `TK-ee3d61fd` |
+| `board-butler.json` | `effective_state: "autonomous"`; approved-merge capability; `fleet.status: "reconciled"`; `state_precondition_conflict` binds `TK-164fb22b` and the release SHA with `post_restart_refresh_seen: true`, `state_precondition_traceback: false`, and `evidence_kind: "live-runtime"`; when carried, `hotfix` binds the ticket, release SHA, `carried_forward: true`, and the doctor's worktree patch SHA-256 |
 | `dashboard.json` | exact `release_sha`; `visual_shell: "warm-guided-home-v1"` |
 | `release-checks.json` | exact `release_sha`; `ci_manifest: "pass"`; `release_train: "pass"` |
 
 The proof must come from product-produced responses or observed runtime state.
 Do not construct expected values and present them as observations.
+
+For conflict evidence, the doctor inspects the running source for the
+`_is_state_precondition_conflict` guard at both `process_question` call sites.
+Retain the post-restart refresh log and prove it contains no `state precondition
+failed` traceback. When TK-164fb22b lands, replace this temporary source/log
+evidence with its authoritative focused test ID in the rollout record.
 
 At the clean `RELEASE_SHA` checkout, run the release gates:
 
@@ -345,6 +575,9 @@ release-checks evidence. Then run verification mode:
 ```sh
 python3 tools/rollout_doctor.py \
   --release-sha "$RELEASE_SHA" \
+  --release-tag "$RELEASE_TAG" \
+  --wheel-dir "$NEW_WHEEL_DIR" \
+  --sha256s "$NEW_WHEEL_DIR/SHA256SUMS.txt" \
   --pursers-home "$PURSERS_HOME" \
   --proof-dir "$ROLLOUT_STATE/proofs" \
   > /PATH/TO/v5.0.6-after.json
