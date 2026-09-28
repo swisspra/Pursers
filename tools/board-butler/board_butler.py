@@ -11071,11 +11071,19 @@ class CentralBackend:
         supervisor_report: Mapping[str, Any] | None = None
         raw_supervisor = observation.get("supervisor_observation")
         if isinstance(raw_supervisor, Mapping):
-            control_board = (
-                self.args.home_board
-                if self.args.home_board in configs
-                else sorted(configs)[0]
-            )
+            if set(raw_supervisor) == {"control_board_id", "observation"}:
+                control_board = raw_supervisor.get("control_board_id")
+                raw_supervisor = raw_supervisor.get("observation")
+                if control_board not in configs or not isinstance(raw_supervisor, Mapping):
+                    raise RuntimeError("supervisor control board is invalid")
+            elif self.args.home_board in configs:
+                control_board = self.args.home_board
+            elif len(configs) == 1:
+                control_board = next(iter(configs))
+            else:
+                raise RuntimeError(
+                    "multi-project supervisor observation requires control_board_id"
+                )
             supervisor_report = await self._confirm_supervisor_roster(
                 control_board,
                 configs[control_board],

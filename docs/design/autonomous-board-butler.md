@@ -229,9 +229,9 @@ cycle reads one consistent snapshot, validates authorization, computes a pure
 plan, persists the plan with its input revisions, and executes at most the
 configured operation and start-rate ceilings.
 
-### Mong1 supervisor ownership
+### Host-agnostic registry supervisor ownership
 
-The mong1 host has one Butler-owned, versioned roster document. It contains a
+Each managed host has one Butler-owned, versioned roster document. It contains a
 monotonic revision, the operator's `host_seat_cap`, its envelope fingerprint,
 the desired active role for every opaque seat identity, the full-gate
 concurrency budget, and a canonical plan digest. The supervisor reads this
@@ -249,6 +249,15 @@ digest. The host executor accepts a mutation only when its board, authorization
 fingerprint, seat generation, approved template, and lifecycle action match
 that canonical document. A malformed canonical document fails closed; legacy
 configuration is consulted only when the canonical document is absent.
+
+The planner and roster are executor-agnostic. They identify opaque seats,
+approved templates, generations, state-directory IDs, lifecycle actions, and
+registry projects, but do not name an IDE, model provider, process manager, or
+operating system. A host adapter translates those actions: the development
+host may use its supervisor adapter, while a Linux deployment can use seat-kit
+Goose CLI/ACP templates through the existing systemd `ServiceAdapter`. Other
+MCP-capable IDE/provider adapters use the same typed roster and executor
+boundary; adding one does not change demand planning or authorization.
 
 The operator grant is the single integer `host_seat_cap`. Setting or changing
 it creates a new authorization whose envelope fingerprint covers the cap,
@@ -269,6 +278,22 @@ prioritizes the older bottleneck, pauses idle capacity down to its safety
 floors, and raises the gate budget only when headroom permits. A growing gate
 queue without headroom instead reduces concurrent gate-heavy seats. Durable
 hysteresis and scale/re-role cooldowns prevent oscillation.
+
+Registry observations carry per-project demand and an operator-owned project
+priority. The canonical roster publishes a `project_admission` table containing
+nonzero weighted share units for every project with queued work, review, rework,
+or gate demand. Queue age increases that weight, so a low-priority project that
+waits continues to gain service instead of starving; priority affects ordering
+but never changes the host cap or authorization. Role-mix and gate decisions
+use the validated aggregate of those project observations, and inconsistent
+per-project versus aggregate totals fail closed. Seats remain a shared registry
+pool rather than being permanently pinned to one board, allowing hundreds of
+projects to share worker/reviewer/ACP capacity.
+
+One explicitly named control board holds the host grant, roster CAS state, and
+authorization fingerprint. A multi-project observation must name that board;
+the reconciler never chooses one project implicitly. Other active projects
+contribute demand and priority only, so they cannot raise host authority.
 
 Lifecycle changes are two-phase. The plan first marks a seat draining so no
 new offer is routed to it. Stop, remove, or re-role is confirmable only after a

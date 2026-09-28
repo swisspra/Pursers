@@ -28,6 +28,7 @@ PLAN_FIELDS = frozenset(
         "config_revision", "envelope_fingerprint_sha256", "host_seat_cap",
         "gate_concurrency_ceiling",
         "observation_digest_sha256", "desired", "full_gate_concurrency",
+        "project_admission",
         "actions", "findings", "audit", "plan_digest_sha256",
     }
 )
@@ -170,6 +171,18 @@ class SupervisorDemand:
 
 
 @dataclass(frozen=True)
+class SupervisorProjectDemand:
+    project_id: str
+    priority: int
+    demand: SupervisorDemand
+
+    def __post_init__(self) -> None:
+        _identifier(self.project_id, "project_id")
+        if not 1 <= self.priority <= 100:
+            raise SupervisorPlanError("project_priority_invalid")
+
+
+@dataclass(frozen=True)
 class SupervisorObservation:
     observed_at: datetime
     seats: tuple[SupervisorSeat, ...]
@@ -177,6 +190,7 @@ class SupervisorObservation:
     host_load_ratio: float
     memory_headroom_ratio: float
     disk_headroom_ratio: float
+    projects: tuple[SupervisorProjectDemand, ...] = ()
 
     def __post_init__(self) -> None:
         if self.observed_at.tzinfo is None:
@@ -188,6 +202,11 @@ class SupervisorObservation:
             values = [getattr(seat, attribute) for seat in self.seats]
             if len(values) != len(set(values)):
                 raise SupervisorPlanError(f"ambiguous_{attribute}")
+        project_ids = [project.project_id for project in self.projects]
+        if len(project_ids) != len(set(project_ids)):
+            raise SupervisorPlanError("ambiguous_project_id")
+        if self.projects and self.demand != _aggregate_project_demand(self.projects):
+            raise SupervisorPlanError("project_demand_aggregate_mismatch")
 
 
 def _validate_config_schema(config: Mapping[str, Any]) -> None:
@@ -254,10 +273,40 @@ def grant_from_config(config: Mapping[str, Any], now: datetime) -> SupervisorGra
     )
 
 
+def _demand_from_mapping(value: Mapping[str, Any]) -> SupervisorDemand:
+    expected = {
+        "unassignable_work", "unassignable_review", "oldest_work_age_s",
+        "oldest_review_age_s", "rejection_rework", "full_gate_queue_depth",
+        "full_gate_oldest_wait_s",
+    }
+    if set(value) != expected:
+        raise SupervisorPlanError("observation_fields_invalid")
+    return SupervisorDemand(**{key: value[key] for key in expected})
+
+
+def _aggregate_project_demand(
+    projects: tuple[SupervisorProjectDemand, ...],
+) -> SupervisorDemand:
+    return SupervisorDemand(
+        unassignable_work=sum(item.demand.unassignable_work for item in projects),
+        unassignable_review=sum(item.demand.unassignable_review for item in projects),
+        oldest_work_age_s=max((item.demand.oldest_work_age_s for item in projects), default=0),
+        oldest_review_age_s=max((item.demand.oldest_review_age_s for item in projects), default=0),
+        rejection_rework=sum(item.demand.rejection_rework for item in projects),
+        full_gate_queue_depth=sum(item.demand.full_gate_queue_depth for item in projects),
+        full_gate_oldest_wait_s=max(
+            (item.demand.full_gate_oldest_wait_s for item in projects), default=0
+        ),
+    )
+
+
 def observation_from_fixture(value: Mapping[str, Any]) -> SupervisorObservation:
-    if not isinstance(value, Mapping) or set(value) != {
-        "observed_at", "seats", "demand", "host"
-    }:
+    required = {"observed_at", "seats", "demand", "host"}
+    if (
+        not isinstance(value, Mapping)
+        or not required <= set(value)
+        or set(value) - required - {"projects"}
+    ):
         raise SupervisorPlanError("observation_fields_invalid")
     demand = value["demand"]
     host = value["host"]
@@ -268,15 +317,23 @@ def observation_from_fixture(value: Mapping[str, Any]) -> SupervisorObservation:
         or not isinstance(seats, list)
     ):
         raise SupervisorPlanError("observation_invalid")
-    expected_demand = {
-        "unassignable_work", "unassignable_review", "oldest_work_age_s",
-        "oldest_review_age_s", "rejection_rework", "full_gate_queue_depth",
-        "full_gate_oldest_wait_s",
-    }
-    if set(demand) != expected_demand or set(host) != {
+    if set(host) != {
         "load_ratio", "memory_headroom_ratio", "disk_headroom_ratio"
     }:
         raise SupervisorPlanError("observation_fields_invalid")
+    parsed_projects: list[SupervisorProjectDemand] = []
+    for row in value.get("projects", []):
+        if not isinstance(row, Mapping) or set(row) != {"project_id", "priority", "demand"}:
+            raise SupervisorPlanError("project_demand_fields_invalid")
+        if not isinstance(row["demand"], Mapping):
+            raise SupervisorPlanError("project_demand_invalid")
+        parsed_projects.append(
+            SupervisorProjectDemand(
+                project_id=_identifier(row["project_id"], "project_id"),
+                priority=_count(row["priority"], "project_priority", 100),
+                demand=_demand_from_mapping(row["demand"]),
+            )
+        )
     parsed_seats: list[SupervisorSeat] = []
     for row in seats:
         if not isinstance(row, Mapping) or set(row) != {
@@ -300,10 +357,11 @@ def observation_from_fixture(value: Mapping[str, Any]) -> SupervisorObservation:
     return SupervisorObservation(
         observed_at=_time(value["observed_at"], "observed_at"),
         seats=tuple(parsed_seats),
-        demand=SupervisorDemand(**{key: demand[key] for key in expected_demand}),
+        demand=_demand_from_mapping(demand),
         host_load_ratio=_ratio(host["load_ratio"], "host_load_ratio"),
         memory_headroom_ratio=_ratio(host["memory_headroom_ratio"], "memory_headroom_ratio"),
         disk_headroom_ratio=_ratio(host["disk_headroom_ratio"], "disk_headroom_ratio"),
+        projects=tuple(parsed_projects),
     )
 
 
@@ -327,7 +385,46 @@ def _observation_document(observation: SupervisorObservation) -> dict[str, Any]:
             "memory_headroom_ratio": observation.memory_headroom_ratio,
             "disk_headroom_ratio": observation.disk_headroom_ratio,
         },
+        "projects": [
+            {
+                "project_id": project.project_id,
+                "priority": project.priority,
+                "demand": dict(project.demand.__dict__),
+            }
+            for project in sorted(observation.projects, key=lambda item: item.project_id)
+        ],
     }
+
+
+def _project_admission(
+    grant: SupervisorGrant, observation: SupervisorObservation
+) -> list[dict[str, Any]]:
+    projects = observation.projects or (
+        SupervisorProjectDemand(grant.board_id, 50, observation.demand),
+    )
+    rows: list[dict[str, Any]] = []
+    for project in sorted(projects, key=lambda item: item.project_id):
+        demand = project.demand
+        role_pressure = {
+            "worker": demand.unassignable_work + demand.rejection_rework,
+            "reviewer": demand.unassignable_review + demand.rejection_rework,
+            "verifier": demand.full_gate_queue_depth,
+        }
+        total = sum(role_pressure.values())
+        age_boost = max(
+            demand.oldest_work_age_s,
+            demand.oldest_review_age_s,
+            demand.full_gate_oldest_wait_s,
+        ) // 120
+        rows.append(
+            {
+                "project_id": project.project_id,
+                "priority": project.priority,
+                "share_units": max(1, project.priority + total + age_boost) if total else 0,
+                "role_pressure": role_pressure,
+            }
+        )
+    return rows
 
 
 def _desired_mix(
@@ -539,6 +636,7 @@ def create_plan(
         "observation_digest_sha256": digest(_observation_document(observation)),
         "desired": desired,
         "full_gate_concurrency": gate_budget,
+        "project_admission": _project_admission(grant, observation),
         "actions": actions,
         "findings": findings,
         "audit": [
@@ -674,6 +772,7 @@ def confirm_plan(
         "gate_concurrency_ceiling": grant.gate_concurrency_ceiling,
         "desired": dict(desired),
         "full_gate_concurrency": plan["full_gate_concurrency"],
+        "project_admission": [dict(row) for row in plan["project_admission"]],
         "seats": _observation_document(observation)["seats"],
         "actions": [dict(action) for action in actions],
         "plan_digest_sha256": claimed_digest,

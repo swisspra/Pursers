@@ -109,6 +109,36 @@ def test_gate_budget_uses_headroom_and_releases_gate_heavy_capacity_when_low() -
     assert saturated["desired"]["verifier"] == 0
 
 
+def test_registry_projects_receive_weighted_nonzero_admission_without_provider_assumptions() -> None:
+    value = fixture()
+    empty = {key: 0 for key in value["demand"]}
+    project_a = {**empty, "unassignable_work": 1, "oldest_work_age_s": 600}
+    project_b = {**empty, "unassignable_review": 1}
+    value["projects"] = [
+        {"project_id": "project-a", "priority": 10, "demand": project_a},
+        {"project_id": "project-b", "priority": 90, "demand": project_b},
+    ]
+    value["demand"] = {
+        **empty,
+        "unassignable_work": 1,
+        "unassignable_review": 1,
+        "oldest_work_age_s": 600,
+    }
+
+    plan = roster.create_plan(grant(cap=4), observation(value), now=NOW)
+    admission = {row["project_id"]: row for row in plan["project_admission"]}
+
+    assert admission["project-a"]["share_units"] > 0
+    assert admission["project-b"]["share_units"] > admission["project-a"]["share_units"]
+    assert admission["project-a"]["role_pressure"]["worker"] == 1
+    assert admission["project-b"]["role_pressure"]["reviewer"] == 1
+
+    invalid = copy.deepcopy(value)
+    invalid["demand"]["unassignable_work"] = 2
+    with pytest.raises(roster.SupervisorPlanError, match="project_demand_aggregate_mismatch"):
+        observation(invalid)
+
+
 def test_cap_is_never_exceeded_and_migration_overage_is_audited() -> None:
     value = fixture()
     value["demand"].update(

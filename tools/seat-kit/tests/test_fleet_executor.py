@@ -237,6 +237,14 @@ def supervisor_roster(*, actions: list[dict[str, Any]]) -> dict[str, Any]:
         "gate_concurrency_ceiling": 2,
         "desired": {"worker": 1, "reviewer": 1, "verifier": 0},
         "full_gate_concurrency": 1,
+        "project_admission": [
+            {
+                "project_id": "pursers",
+                "priority": 50,
+                "share_units": 51,
+                "role_pressure": {"worker": 1, "reviewer": 0, "verifier": 0},
+            }
+        ],
         "seats": [],
         "actions": actions,
         "plan_digest_sha256": "b" * 64,

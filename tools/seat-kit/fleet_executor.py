@@ -47,6 +47,7 @@ SUPERVISOR_ROSTER_FIELDS = frozenset(
         "gate_concurrency_ceiling",
         "desired",
         "full_gate_concurrency",
+        "project_admission",
         "seats",
         "actions",
         "plan_digest_sha256",
@@ -1596,6 +1597,7 @@ def _valid_supervisor_roster(document: Any) -> bool:
     desired = document.get("desired")
     seats = document.get("seats")
     actions = document.get("actions")
+    project_admission = document.get("project_admission")
     if (
         document.get("schema") != SUPERVISOR_ROSTER_SCHEMA
         or not isinstance(document.get("revision"), int)
@@ -1619,6 +1621,7 @@ def _valid_supervisor_roster(document: Any) -> bool:
         or sum(desired.values()) > document["host_seat_cap"]
         or not isinstance(seats, list)
         or not isinstance(actions, list)
+        or not isinstance(project_admission, list)
         or not isinstance(document.get("audit"), list)
         or not isinstance(document.get("findings"), list)
         or not isinstance(document.get("board_id"), str)
@@ -1633,6 +1636,33 @@ def _valid_supervisor_roster(document: Any) -> bool:
         _parse_time(document.get("confirmed_at"), "confirmed_at")
     except PolicyError:
         return False
+    project_ids: set[str] = set()
+    for project in project_admission:
+        if not isinstance(project, Mapping) or set(project) != {
+            "project_id", "priority", "share_units", "role_pressure"
+        }:
+            return False
+        project_id = project.get("project_id")
+        pressure = project.get("role_pressure")
+        if (
+            not isinstance(project_id, str)
+            or not SAFE_ID.fullmatch(project_id)
+            or project_id in project_ids
+            or not isinstance(project.get("priority"), int)
+            or isinstance(project.get("priority"), bool)
+            or not 1 <= project["priority"] <= 100
+            or not isinstance(project.get("share_units"), int)
+            or isinstance(project.get("share_units"), bool)
+            or project["share_units"] < 0
+            or not isinstance(pressure, Mapping)
+            or set(pressure) != {"worker", "reviewer", "verifier"}
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in pressure.values()
+            )
+        ):
+            return False
+        project_ids.add(project_id)
     identifiers: set[tuple[str, str]] = set()
     for seat in seats:
         if not isinstance(seat, Mapping) or set(seat) != {
