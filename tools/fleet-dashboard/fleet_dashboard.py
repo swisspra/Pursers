@@ -6941,12 +6941,8 @@ class SeatConfigManager:
                 "can_work": desired.can_work,
                 "model": desired.model,
                 "provider": desired.provider,
+                "host_mode": desired.host_mode,
             }
-            host_mode = record.get("host_mode", record.get("runtime_mode"))
-            if isinstance(host_mode, str):
-                normalized_mode = host_mode.strip().casefold()
-                if normalized_mode in {"acp", "interactive", "persistent", "resident", "session"}:
-                    row["host_mode"] = normalized_mode
             rows.append(row)
         return {"schema_version": 1, "seats": sorted(rows, key=lambda row: row["name"])}
 

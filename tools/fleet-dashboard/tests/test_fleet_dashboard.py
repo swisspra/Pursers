@@ -266,6 +266,87 @@ def test_team_lifecycle_keeps_offline_acp_seat_and_registry_boards_source_backed
     assert "preserves repositories, worktrees, credentials, logs, tickets, journal, and backups" in rendered
 
 
+def test_team_host_mode_round_trips_through_plan_apply_inventory_and_render(
+    tmp_path: Path,
+) -> None:
+    class Bridge:
+        version = "0.1.2"
+
+        def inspect(self) -> dict:
+            return {"version": self.version, "command": None}
+
+    manager = dashboard.SeatConfigManager(
+        tmp_path / "state/seats.json",
+        state_dir=tmp_path / "state",
+        bridge_installer=Bridge(),
+        latest_version=lambda: None,
+    )
+    for host, host_mode, name in (
+        ("codex", "persistent", "offline-codex"),
+        ("zed", "acp", "zed-session"),
+    ):
+        payload = {
+            "host": host,
+            "host_mode": host_mode,
+            "role": "worker",
+            "name": name,
+            "central_url": "https://central.example.invalid/mcp",
+            "home_board": "",
+            "token_file": str(tmp_path / f"{name}.jwt"),
+            "ca_file": str(tmp_path / "ca.pem"),
+            "bridge_command": str(tmp_path / "pursers-wait-bridge"),
+            "config_path": str(tmp_path / f"{name}.config"),
+        }
+        plan = manager.plan(payload)
+        manager.apply(plan["plan_id"])
+
+    projection = manager.team_seats()
+    modes = {row["name"]: row["host_mode"] for row in projection["seats"]}
+    assert modes == {"offline-codex": "persistent", "zed-session": "acp"}
+
+    rendered = _render_team_lifecycle(
+        agents=[], workers=[], inventory=projection["seats"]
+    )
+    assert 'data-team-host-mode="persistent"' in rendered
+    assert 'data-team-host-mode="acp"' in rendered
+    assert "offline-codex" in rendered
+    assert "zed-session" in rendered
+    assert "Persistent resident" in rendered
+    assert "Interactive ACP session" in rendered
+
+
+def test_team_missing_host_mode_never_guesses_from_host_name() -> None:
+    rendered = _render_team_lifecycle(
+        agents=[],
+        workers=[],
+        inventory=[
+            {
+                "name": "legacy-codex",
+                "host": "codex",
+                "role": "worker",
+                "boards": "registry",
+                "home_board": "",
+                "tier_max": 2,
+                "can_work": True,
+                "can_review": False,
+            }
+        ],
+    )
+
+    assert 'data-team-host-mode="external"' in rendered
+    assert "Interactive ACP session" not in rendered
+    assert "Persistent resident" not in rendered
+
+
+def test_settings_plan_payload_requires_explicit_host_mode() -> None:
+    app = dashboard.UI_ASSETS["/ui/assets/app.js"][1].decode("utf-8")
+
+    assert "host_mode:f.get('host_mode')||null" in app
+    assert 'select name="host_mode" required' in app
+    assert "Choose ownership" in app
+    assert ">zed</option>" in app
+
+
 def test_team_lifecycle_preserves_resident_controls_and_denies_unowned_process_control() -> None:
     rendered = _render_team_lifecycle(
         agents=[

@@ -22,10 +22,6 @@
   }
 function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){const key=`${central}/${agentIdentity(a)}/${a.agent_name||''}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}}for(const [central,d] of Object.entries(hubWorkers)){const live=fleetData[central]?.agents||[];for(const w of d.workers||[]){const stable=Boolean(w.agent_id||w.principal_id),represented=live.some(a=>agentIdentity(a)===agentIdentity(w));if(represented||(!stable&&live.some(a=>a.agent_name===w.name)))continue;const work=w.current_work||[],a={agent_name:w.name,agent_id:w.agent_id,principal_id:w.principal_id,pool_status:work.length?'busy':'offline',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null},key=`${central}/${agentIdentity(a)}/${a.agent_name||''}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}}const visible=records.filter(agentMatchesFilters),cards=visible.sort((a,b)=>{const rank={working:0,available:1,connected:2,stale:3,offline:4},as=agentDisplayState(a.agent,workerForAgent(a.central,a.agent)),bs=agentDisplayState(b.agent,workerForAgent(b.central,b.agent));return rank[as]-rank[bs]||String(a.agent.agent_name||'').localeCompare(String(b.agent.agent_name||''))||a.central.localeCompare(b.central)||agentIdentity(a.agent).localeCompare(agentIdentity(b.agent))}).map(x=>liveAgentCard(x.central,x.agent).replace('<article class="agent-card ','<article class="agent-card team-roster-card ').replace('<div class="agent-board-list">','<span class="team-cost meta">Cost unknown</span><div class="agent-board-list">')),empty=records.length===0?'No seats exist in the covered boards.':'No seats match the selected filters.',scope=agentPoolScope(),unknownModel=Object.values(fleetData).reduce((total,d)=>total+Number(d.pool_summary?.unknown_model||0),0),action='<div class="agent-actions"><button id="new-agent" class="primary-action" type="button">+ New agent</button></div>',filterMarkup=agentFilterBar(records),activeFilters=(filterMarkup.match(/ selected/g)||[]).length,existingFilters=typeof document==='undefined'?null:document.querySelector('.team-filter-disclosure'),narrow=typeof matchMedia==='function'&&matchMedia('(max-width: 720px)').matches,filtersOpen=existingFilters?existingFilters.open:!narrow;return`<div class="agents-hub team-roster">${pageHead('Team','Unified agent pool','Status and ownership first; source-backed runtime details follow.',action)}${renderGuide()}<section class="strip agent-model-summary" aria-label="Model attribution coverage"><div class="metric"><span>Unknown model</span><b>${esc(unknownModel)}</b></div></section>${agentCountStrip(records)}<details class="team-filter-disclosure" data-state-key="team-filters" ${filtersOpen?'open':''}><summary>Filters${activeFilters?` · ${activeFilters} active`:''}</summary>${filterMarkup}</details>${scope}<p id="hub-agent-status" class="muted">Showing ${cards.length} of ${records.length} seats</p><section class="agent-grid dense-agent-grid team-roster-grid" data-pursers-panel="agents" data-pursers-state="${cards.length?'ready':'empty'}" aria-label="Agent roster">${cards.join('')||`<p class="empty">${esc(empty)}</p>`}</section>${inactiveAgentDrawer()}</div>`}
 
-  const ACP_HOSTS = new Set([
-    'codex', 'codex-cli', 'goose', 'claude-code', 'claude-desktop'
-  ]);
-
   function configuredSeatForAgent(central, agent) {
     const matches = (hubSeatInventory?.seats || []).filter(
       seat => seat.name === agent.agent_name
@@ -93,21 +89,20 @@ function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d]
   function teamHostContract(central, agent) {
     const seat = configuredSeatForAgent(central, agent);
     const resident = workerForAgent(central, agent);
-    const declared = String(seat?.host_mode || seat?.runtime_mode || '').toLowerCase();
-    if (declared === 'persistent' || declared === 'resident') {
+    const declared = String(seat?.host_mode || '').toLowerCase();
+    if (declared === 'persistent') {
       return {mode: 'persistent', seat, resident, source: 'seat inventory'};
     }
-    if (declared === 'acp' || declared === 'session' || declared === 'interactive') {
+    if (declared === 'acp') {
       return {mode: 'acp', seat, resident: null, source: 'seat inventory'};
     }
     if (resident) return {mode: 'persistent', seat, resident, source: 'managed API worker'};
-    if (seat?.host === 'headless') {
-      return {mode: 'persistent', seat, resident: null, source: 'headless seat inventory'};
-    }
-    if (seat && ACP_HOSTS.has(seat.host)) {
-      return {mode: 'acp', seat, resident: null, source: `${seat.host} seat inventory`};
-    }
-    return {mode: 'external', seat, resident: null, source: 'Central observation only'};
+    return {
+      mode: 'external',
+      seat,
+      resident: null,
+      source: seat ? 'seat inventory without host_mode' : 'Central observation only'
+    };
   }
 
   function lifecyclePanel(central, agent) {
