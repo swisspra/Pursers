@@ -82,6 +82,20 @@ def _clone(seed: Path, target: Path) -> None:
     )
 
 
+def _seed_environment(root: Path, packages: dict[str, str]) -> Path:
+    interpreter = root / "bin/python"
+    _write(interpreter, "#!/bin/sh\nexit 0\n")
+    interpreter.chmod(0o755)
+    for distribution, version in packages.items():
+        normalized = distribution.replace("-", "_")
+        _write(
+            root
+            / f"lib/python3.12/site-packages/{normalized}-{version}.dist-info/METADATA",
+            f"Name: {distribution}\nVersion: {version}\n",
+        )
+    return interpreter
+
+
 def _fixture(tmp_path: Path) -> tuple[SimpleNamespace, Path, Path, str]:
     home = tmp_path / "home"
     pursers_home = home / ".pursers"
@@ -92,13 +106,28 @@ def _fixture(tmp_path: Path) -> tuple[SimpleNamespace, Path, Path, str]:
 
     active = pursers_home / "runtimes/registry-main-release"
     _clone(seed, active / "src")
-    (active / ".venv").mkdir()
+    active_python = _seed_environment(
+        active / ".venv",
+        {
+            "pursers-central": "0.1.4",
+            "pursers-client": "0.1.5",
+            "pursers-wait-bridge": "0.1.3",
+        },
+    )
     stale = pursers_home / "runtimes/review-stale"
     stale_sha = _seed_repo(stale / "src", "stale")
     assert stale_sha != release_sha
     (stale / ".venv").mkdir()
     _clone(seed, pursers_home / "runtimes/fleet-dashboard/repo")
     _clone(seed, pursers_home / "coordinator/src")
+    fleet_python = _seed_environment(
+        pursers_home / "runtimes/fleet-dashboard/.venv",
+        {"pursers-client": "0.1.5"},
+    )
+    coordinator_python = _seed_environment(
+        pursers_home / "coordinator/.venv",
+        {"pursers-client": "0.1.5"},
+    )
 
     tool = home / ".local/share/uv/tools/pursers-wait-bridge"
     _write(
@@ -134,9 +163,18 @@ find-links = ["file:///PATH/TO/wheels/v5.0.6"]
             launch_source = pursers_home / "coordinator/src"
         else:
             launch_source = active / "src"
+        python_line = {
+            "com.pursers.fleet-dashboard": f"PURSERS_FLEET_PYTHON => {fleet_python}",
+            "com.pursers.board-butler": f"PURSERS_BUTLER_PYTHON => {active_python}",
+            "com.pursers.coordinator": (
+                f"PURSERS_COORDINATOR_PYTHON => {coordinator_python}"
+            ),
+            "com.pursers.mong1-supervisor": "",
+        }[label]
         _write(
             snapshot / "launchd" / f"{label}.txt",
-            f"state = running\npid = 123\nprogram = {launch_source}/tools/example.py\n",
+            f"state = running\npid = 123\n{python_line}\n"
+            f"program = {launch_source}/tools/example.py\n",
         )
     _write(snapshot / "processes.txt", f"python {active}/src/tools/example.py\n")
     now = datetime(2026, 9, 27, 19, 1, tzinfo=timezone.utc)
@@ -215,6 +253,11 @@ def test_inspect_reports_complete_passing_inventory_and_stale_cleanup(
         for item in launchd.values()
     )
     assert all(item["entrypoint_sha256"] for item in launchd.values())
+    assert all(
+        item["python_environment"]["ok"] is True
+        for name, item in launchd.items()
+        if name != "launchd:com.pursers.mong1-supervisor"
+    )
     hosts = {
         item["consumer"]: item
         for item in result["inventory"]
@@ -340,6 +383,42 @@ def test_inspect_fails_closed_for_release_input_and_version_mismatch(
     assert result["checks"]["release_version_manifest"]["status"] == "FAIL"
 
 
+@pytest.mark.parametrize("installed_client", [None, "0.1.4"])
+def test_inspect_fails_closed_for_empty_or_old_active_service_environment(
+    tmp_path: Path, installed_client: str | None,
+) -> None:
+    args, active, _stale, _release_sha = _fixture(tmp_path)
+    environment = active / ".venv"
+    for metadata in environment.glob("lib/python*/site-packages/*.dist-info/METADATA"):
+        metadata.unlink()
+    if installed_client is not None:
+        _write(
+            environment
+            / f"lib/python3.12/site-packages/pursers_client-{installed_client}.dist-info/METADATA",
+            f"Name: pursers-client\nVersion: {installed_client}\n",
+        )
+
+    result = doctor.inspect(args)
+
+    runtime_check = result["checks"][
+        "runtime:registry-main-release:installed_packages"
+    ]
+    butler_check = result["checks"][
+        "launchd:com.pursers.board-butler:installed_packages"
+    ]
+    assert result["summary"]["ok"] is False
+    assert runtime_check["status"] == "FAIL"
+    assert butler_check["status"] == "FAIL"
+    runtime = next(
+        row
+        for row in result["inventory"]
+        if row["consumer"] == "runtime:registry-main-release"
+    )
+    assert runtime["python_environment"]["installed_versions"]["pursers-client"] == (
+        installed_client
+    )
+
+
 def test_release_inputs_are_required() -> None:
     with pytest.raises(SystemExit):
         doctor.parse_args(["--release-sha", "a" * 40])
@@ -353,6 +432,8 @@ def test_runbook_pins_reviewed_butler_fix_and_authoritative_suite() -> None:
     assert "ee5c9e436ce35fd906c0ac943559482046e9186a" in runbook
     assert "if git -C \"$FLEET_REPO\" merge-base --is-ancestor" in runbook
     assert "tools/board-butler/tests/test_board_butler.py" in runbook
+    assert "PURSERS_BUTLER_ENTRYPOINT" in runbook
+    assert "PURSERS_BUTLER_PROVIDER_SECRETS_DIR must be outside" in runbook
 
 
 def test_main_writes_only_when_output_is_explicit(tmp_path: Path, capsys) -> None:

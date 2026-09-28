@@ -32,6 +32,7 @@ export COORDINATOR_REPO="$PURSERS_HOME/coordinator/src"
 export RELEASE_CHECKOUT=/PATH/TO/clean-v5.0.6-checkout
 export FLEET_PYTHON=/PATH/TO/fleet-dashboard-python
 export COORDINATOR_PYTHON=/PATH/TO/coordinator-python
+export FLEET_PLIST=/PATH/TO/Library/LaunchAgents/com.pursers.fleet-dashboard.plist
 export BUTLER_PLIST=/PATH/TO/Library/LaunchAgents/com.pursers.board-butler.plist
 export BUTLER_RUNTIME_STATUS=/PATH/TO/private/board-butler-state/runtime.json
 export BUTLER_LOG=/PATH/TO/private/logs/board-butler.log
@@ -403,6 +404,9 @@ Before restarting it, prove the installed launchd definition enables the full
 fleet path. `active` mode, the active authorization, the fleet observation and
 state files, and all three executor settings are one atomic precondition. The
 v5.0.6 launch wrapper must pass all of those settings to `board_butler.py`.
+The Fleet launch template is also the deployment contract for the resident:
+its explicit `PURSERS_BUTLER_ENTRYPOINT` must name the selected checkout, and
+its shared provider-secret directory must remain outside that checkout.
 Back up the definition, then move Board Butler off the v5.0.5 registry venv and
 onto the new side-by-side registry runtime. Do not edit its credential paths or
 fleet authorization values.
@@ -418,6 +422,16 @@ test "$(plutil -extract EnvironmentVariables.PURSERS_BUTLER_PYTHON raw \
   "$BUTLER_PLIST")" = "$BUTLER_PYTHON"
 test "$(plutil -extract EnvironmentVariables.PURSERS_BUTLER_REPO raw \
   "$BUTLER_PLIST")" = "$FLEET_REPO"
+test "$(plutil -extract EnvironmentVariables.PURSERS_BUTLER_ENTRYPOINT raw \
+  "$FLEET_PLIST")" = "$FLEET_REPO/tools/board-butler/board_butler.py"
+BUTLER_PROVIDER_SECRETS_DIR=$(plutil -extract \
+  EnvironmentVariables.PURSERS_BUTLER_PROVIDER_SECRETS_DIR raw "$FLEET_PLIST")
+case "$BUTLER_PROVIDER_SECRETS_DIR/" in
+  "$FLEET_REPO/"*)
+    echo "PURSERS_BUTLER_PROVIDER_SECRETS_DIR must be outside the checkout" >&2
+    exit 64
+    ;;
+esac
 test "$(plutil -extract EnvironmentVariables.PURSERS_BUTLER_RUNTIME_MODE raw \
   "$BUTLER_PLIST")" = active
 for key in \

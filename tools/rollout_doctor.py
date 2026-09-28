@@ -31,6 +31,12 @@ EXPECTED_PACKAGES = {
     "acp": "0.1.4",
     "import": "5.0.0",
 }
+RUNTIME_REQUIRED_DISTRIBUTIONS = {
+    "pursers-central": EXPECTED_PACKAGES["central"],
+    "pursers-client": EXPECTED_CLIENT,
+    "pursers-wait-bridge": EXPECTED_WAIT_BRIDGE,
+}
+SERVICE_REQUIRED_DISTRIBUTIONS = {"pursers-client": EXPECTED_CLIENT}
 RUNTIME_NAMES = re.compile(r"^(?:registry-main|review(?:-main)?)-[A-Za-z0-9._-]+$")
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -145,6 +151,41 @@ def _metadata_version(tool_root: Path, distribution: str) -> str | None:
     return None
 
 
+def _python_environment(
+    interpreter: Path | None,
+    required: Mapping[str, str],
+    *,
+    home: Path,
+    pursers_home: Path,
+) -> dict[str, Any]:
+    environment = (
+        interpreter.parent.parent
+        if interpreter is not None and interpreter.parent.name == "bin"
+        else None
+    )
+    installed = {
+        distribution: (
+            _metadata_version(environment, distribution)
+            if environment is not None
+            else None
+        )
+        for distribution in required
+    }
+    present = interpreter is not None and interpreter.is_file()
+    return {
+        "interpreter": (
+            _safe_path(interpreter, home, pursers_home)
+            if interpreter is not None
+            else None
+        ),
+        "present": present,
+        "required_versions": dict(required),
+        "installed_versions": installed,
+        "ok": present
+        and all(installed[name] == version for name, version in required.items()),
+    }
+
+
 def _uv_tool(home: Path) -> dict[str, Any]:
     root = home / ".local/share/uv/tools/pursers-wait-bridge"
     receipt = root / "uv-receipt.toml"
@@ -189,9 +230,11 @@ def _repo_record(
     home: Path,
     pursers_home: Path,
     referenced: bool,
+    interpreter: Path | None = None,
+    required_distributions: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     status = _git_status(repo)
-    return {
+    record = {
         "consumer": consumer,
         "path": _safe_path(repo, home, pursers_home),
         "present": repo.is_dir(),
@@ -202,6 +245,14 @@ def _repo_record(
         "versions": _release_versions(repo),
         "referenced": referenced,
     }
+    if required_distributions is not None:
+        record["python_environment"] = _python_environment(
+            interpreter,
+            required_distributions,
+            home=home,
+            pursers_home=pursers_home,
+        )
+    return record
 
 
 def _recursive_strings(value: Any) -> Iterable[str]:
@@ -331,6 +382,29 @@ def _entrypoint(text: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def _launchd_interpreter(label: str, text: str) -> Path | None:
+    preferred_keys = {
+        "com.pursers.fleet-dashboard": "PURSERS_FLEET_PYTHON",
+        "com.pursers.board-butler": "PURSERS_BUTLER_PYTHON",
+        "com.pursers.coordinator": "PURSERS_COORDINATOR_PYTHON",
+    }
+    preferred = preferred_keys.get(label)
+    if preferred is not None:
+        match = re.search(
+            rf"(?m)^\s*{re.escape(preferred)}\s*(?:=>|=)\s*(/\S+)\s*$",
+            text,
+        )
+        if match is not None:
+            return Path(match.group(1))
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("program = "):
+            candidate = Path(line.removeprefix("program = "))
+            if candidate.name.startswith("python"):
+                return candidate
+    return None
+
+
 def _attach_launchd_sources(
     rows: list[dict[str, Any]],
     references: Mapping[str, str],
@@ -364,6 +438,13 @@ def _attach_launchd_sources(
             _safe_path(entrypoint, home, pursers_home) if entrypoint else None
         )
         row["entrypoint_sha256"] = _file_sha256(entrypoint) if entrypoint else None
+        if label != "com.pursers.mong1-supervisor":
+            row["python_environment"] = _python_environment(
+                _launchd_interpreter(label, text),
+                SERVICE_REQUIRED_DISTRIBUTIONS,
+                home=home,
+                pursers_home=pursers_home,
+            )
 
 
 def _process_text(snapshot_root: Path | None) -> str:
@@ -528,6 +609,8 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
                 home=home,
                 pursers_home=pursers_home,
                 referenced=_referenced(runtime, references),
+                interpreter=runtime / ".venv/bin/python",
+                required_distributions=RUNTIME_REQUIRED_DISTRIBUTIONS,
             )
         )
     fixed_repositories = (
@@ -606,6 +689,14 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
             if good
             else "active checkout missing, dirty, or at the wrong SHA",
         )
+        environment = row.get("python_environment")
+        if isinstance(environment, Mapping):
+            checks[f'{row["consumer"]}:installed_packages'] = _check(
+                "PASS" if environment.get("ok") is True else "FAIL",
+                "active interpreter has the required installed distributions"
+                if environment.get("ok") is True
+                else "active interpreter is missing or has mismatched installed distributions",
+            )
     version_sources = [
         row["versions"] for row in repositories if row["sha"] == args.release_sha
     ]
@@ -648,6 +739,15 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
             if row["loaded"] and row["running"] and sources_ok
             else "not loaded/running or source SHA is unresolved/mismatched",
         )
+        environment = row.get("python_environment")
+        if isinstance(environment, Mapping):
+            checks[f'{row["consumer"]}:installed_packages'] = _check(
+                "PASS" if environment.get("ok") is True else "FAIL",
+                "configured service interpreter has pursers-client "
+                f"{EXPECTED_CLIENT}"
+                if environment.get("ok") is True
+                else "configured service interpreter is missing or pursers-client is mismatched",
+            )
     configured_hosts = {row["consumer"] for row in mcp_rows if row["launches_wait_bridge"]}
     for name in ("host-mcp:Claude Desktop", "host-mcp:Zed"):
         alternatives = (
