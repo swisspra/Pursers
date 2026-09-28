@@ -638,7 +638,7 @@ usage: fleet_dashboard.py [-h] [--port PORT] [--url URL] [--token-file TOKEN_FIL
                           [--jwks-path JWKS_PATH] [--centrals CENTRALS] [--home-board HOME_BOARD]
                           [--agent-name AGENT_NAME] [--stale-seconds STALE_SECONDS] [--cache-seconds CACHE_SECONDS]
                           [--workers-dir WORKERS_DIR] [--butler-secrets-dir BUTLER_SECRETS_DIR]
-                          [--evidence-trace-config EVIDENCE_TRACE_CONFIG]
+                          [--evidence-trace-config EVIDENCE_TRACE_CONFIG] [--case-study-manifest CASE_STUDY_MANIFEST]
 
 Run the loopback fleet dashboard
 
@@ -662,6 +662,8 @@ options:
                         Private 0700 directory for write-only Board Butler keys
   --evidence-trace-config EVIDENCE_TRACE_CONFIG
                         Verifier-owned 0600 config for bounded Fleet evidence tracing
+  --case-study-manifest CASE_STUDY_MANIFEST
+                        Private 0600 preregistered case-study manifest; repeat for multiple studies
 ```
 
 ## Board Butler
