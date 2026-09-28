@@ -721,6 +721,7 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
             {
                 "ticket_id", "title", "status", "priority", "parked",
                 "assigned", "updated_at", "counts", "dispatch_summary",
+                "progress_freshness",
             },
         )
         work_payload = work.structured_content

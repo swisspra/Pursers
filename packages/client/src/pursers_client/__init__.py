@@ -45,6 +45,7 @@ from .events import (
     OFFER_EXPIRED,
     OFFER_REVOKED,
     PARK_EVENT_KINDS,
+    PROGRESS_EVENT_KINDS,
     REVIEW_OFFERED,
     REVIEW_LEASE_EXPIRED,
     REVIEW_LEASE_KINDS,
@@ -64,6 +65,8 @@ from .events import (
     TICKET_PARKED,
     TICKET_UNPARKED,
     TICKET_ARCHIVED,
+    TICKET_PROGRESS_RESET,
+    TICKET_PROGRESS_UPDATED,
     WORKER_WAIT_KINDS,
 )
 from .human_input import SENSITIVE_FORM_FALLBACK, human_form_safety
@@ -163,6 +166,7 @@ __all__ = [
     "OFFER_EXPIRED",
     "OFFER_REVOKED",
     "PARK_EVENT_KINDS",
+    "PROGRESS_EVENT_KINDS",
     "ScrubRejectedError",
     "SubscriptionAuthorizationError",
     "SENSITIVE_FORM_FALLBACK",
@@ -179,6 +183,8 @@ __all__ = [
     "TICKET_PARKED",
     "TICKET_UNPARKED",
     "TICKET_ARCHIVED",
+    "TICKET_PROGRESS_RESET",
+    "TICKET_PROGRESS_UPDATED",
     "WORKER_WAIT_KINDS",
     "active_registry_boards",
     "bootstrap_personal_review_policy",
