@@ -412,6 +412,55 @@ def test_team_lifecycle_preserves_resident_controls_and_denies_unowned_process_c
     assert "<input" not in rendered
 
 
+def test_team_cost_label_defines_currency_scope_window_and_incomplete_coverage() -> None:
+    rendered = _render_team_lifecycle(
+        agents=[
+            {
+                "agent_name": "cost-seat",
+                "agent_id": "AI-cost",
+                "principal_id": "PR-cost",
+                "pool_status": "available",
+                "boards": ["board-a"],
+                "seats": [
+                    {
+                        "board_id": "board-a",
+                        "role": "worker",
+                        "capabilities": {
+                            "tier_max": 2,
+                            "model": "model-current",
+                            "provider": "provider-current",
+                        },
+                    }
+                ],
+                "usage_attribution": {
+                    "scope": "visible_ticket_snapshot",
+                    "board_ids": ["board-a"],
+                    "ticket_count": 1,
+                    "window_start": "2030-01-01T00:00:00+00:00",
+                    "window_end": "2030-01-02T00:00:00+00:00",
+                    "cost_status": "known",
+                    "cost_microunits": 500_000,
+                    "currency": "EUR",
+                    "sources": ["usage_ledger"],
+                    "complete": False,
+                    "incomplete_reasons": ["partial_cost_records"],
+                    "provenance": "central_model_usage_v1",
+                },
+            }
+        ],
+        workers=[],
+        inventory=[],
+    )
+
+    assert 'data-team-cost-status="known"' in rendered
+    assert 'data-team-cost-coverage="incomplete"' in rendered
+    assert "Cost EUR 0.5" in rendered
+    assert "verified usage ledger" in rendered
+    assert "1 visible ticket · board-a" in rendered
+    assert "2030-01-01 to 2030-01-02" in rendered
+    assert "board-a:worker:2:model-current:provider-current" in rendered
+
+
 def test_projects_route_groups_centrals_and_preserves_board_actions_and_states() -> None:
     registry = dashboard.UI_ASSETS["/ui/view-registry.js"][1].decode("utf-8")
     projects = dashboard.UI_ASSETS["/ui/views/projects.js"][1].decode("utf-8")
@@ -1475,6 +1524,329 @@ def test_agent_projection_preserves_model_provider_and_counts_unknown_seats() ->
     }
     assert "model" not in seats["unknown"]["capabilities"]
     assert result["pool_summary"]["unknown_model"] == 1
+
+
+def test_agent_projection_uses_only_verified_exact_seat_cost_evidence() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-seat",
+                            "agent_name": "seat",
+                            "agent_id": "AI-seat",
+                            "last_activity_at": now.isoformat(),
+                            "capabilities": {
+                                "tier_max": 2,
+                                "host": "codex",
+                                "model": "Model/Current",
+                                "provider": "Provider/Current",
+                            },
+                        }
+                    ],
+                    "tickets": [
+                        {
+                            "ticket_id": "TK-cost",
+                            "status": "approved",
+                            "submission_history": [
+                                {
+                                    "runtime_model_usage": {
+                                        "schema_version": 1,
+                                        "agent_id": "AI-seat",
+                                        "role": "worker",
+                                        "input_tokens": 100,
+                                        "output_tokens": 20,
+                                    }
+                                }
+                            ],
+                            "model_usage": {
+                                "schema_version": 1,
+                                "cost_records": [
+                                    {
+                                        "schema_version": 1,
+                                        "source": "provider",
+                                        "verified": True,
+                                        "agent_id": "AI-seat",
+                                        "currency": "USD",
+                                        "cost_microunits": 1_250_000,
+                                        "complete": True,
+                                        "scope": {
+                                            "ticket_id": "TK-cost",
+                                            "board_id": "board",
+                                            "window_start": "2030-01-02T10:00:00Z",
+                                            "window_end": "2030-01-02T11:00:00Z",
+                                        },
+                                        "billing_account_id": "billing-secret-6471",
+                                        "provider": "must-not-override",
+                                        "model": "must-not-override",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    agent = result["agents"][0]
+    assert agent["seats"][0]["capabilities"] == {
+        "tier_max": 2,
+        "host": "codex",
+        "model": "Model/Current",
+        "provider": "Provider/Current",
+    }
+    assert agent["usage_attribution"] == {
+        "scope": "visible_ticket_snapshot",
+        "board_ids": ["board"],
+        "ticket_count": 1,
+        "window_start": "2030-01-02T10:00:00+00:00",
+        "window_end": "2030-01-02T11:00:00+00:00",
+        "cost_status": "known",
+        "cost_microunits": 1_250_000,
+        "currency": "USD",
+        "sources": ["provider"],
+        "complete": True,
+        "incomplete_reasons": [],
+        "provenance": "central_model_usage_v1",
+    }
+    rendered = json.dumps(agent, sort_keys=True)
+    assert "billing-secret-6471" not in rendered
+    assert "must-not-override" not in rendered
+
+
+def test_team_cost_aggregate_over_browser_safe_integer_fails_closed_end_to_end() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    amount = 999_999_999_999_999
+    tickets = []
+    for index in range(11):
+        ticket_id = f"TK-cost-{index}"
+        tickets.append(
+            {
+                "ticket_id": ticket_id,
+                "status": "approved",
+                "submission_history": [
+                    {"runtime_model_usage": {"agent_id": "AI-cost"}}
+                ],
+                "model_usage": {
+                    "cost_records": [
+                        {
+                            "schema_version": 1,
+                            "source": "provider",
+                            "verified": True,
+                            "agent_id": "AI-cost",
+                            "currency": "USD",
+                            "cost_microunits": amount,
+                            "complete": True,
+                            "scope": {
+                                "ticket_id": ticket_id,
+                                "board_id": "board",
+                                "window_start": "2030-01-02T10:00:00Z",
+                                "window_end": "2030-01-02T11:00:00Z",
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-cost",
+                            "agent_name": "cost-seat",
+                            "agent_id": "AI-cost",
+                            "last_activity_at": now.isoformat(),
+                            "capabilities": {
+                                "tier_max": 2,
+                                "model": "model-current",
+                                "provider": "provider-current",
+                            },
+                        }
+                    ],
+                    "tickets": tickets,
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    agent = result["agents"][0]
+    attribution = agent["usage_attribution"]
+    assert 11 * amount == 10_999_999_999_999_989
+    assert attribution["cost_status"] == "unknown"
+    assert attribution["cost_microunits"] is None
+    assert attribution["currency"] is None
+    assert attribution["complete"] is False
+    assert attribution["incomplete_reasons"] == [
+        "aggregate_exceeds_safe_integer"
+    ]
+
+    rendered = _render_team_lifecycle(
+        agents=[agent], workers=[], inventory=[]
+    )
+    assert 'data-team-cost-status="unknown"' in rendered
+    assert "Cost unknown" in rendered
+    assert "aggregate exceeds browser exact-integer range" in rendered
+    assert "10999999999.999988" not in rendered
+    assert "10999999999.999989" not in rendered
+
+
+def test_agent_projection_never_estimates_cost_from_tokens_or_model() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-seat",
+                            "agent_name": "seat",
+                            "agent_id": "AI-seat",
+                            "last_activity_at": now.isoformat(),
+                            "capabilities": {
+                                "tier_max": 3,
+                                "model": "expensive-looking-model",
+                                "provider": "provider-a",
+                            },
+                        }
+                    ],
+                    "tickets": [
+                        {
+                            "ticket_id": "TK-token-only",
+                            "status": "submitted",
+                            "submission_history": [
+                                {
+                                    "runtime_model_usage": {
+                                        "schema_version": 1,
+                                        "agent_id": "AI-seat",
+                                        "role": "worker",
+                                        "input_tokens": 9_000_000,
+                                        "output_tokens": 1_000_000,
+                                    }
+                                }
+                            ],
+                            "model_usage": {
+                                "schema_version": 1,
+                                "total_tokens": 10_000_000,
+                                "cost_records": [
+                                    {
+                                        "schema_version": 1,
+                                        "source": "provider",
+                                        "verified": False,
+                                        "agent_id": "AI-seat",
+                                        "currency": "USD",
+                                        "cost_microunits": 999_000_000,
+                                        "complete": True,
+                                        "scope": {
+                                            "ticket_id": "TK-token-only",
+                                            "board_id": "board",
+                                            "window_start": "2030-01-02T10:00:00Z",
+                                            "window_end": "2030-01-02T11:00:00Z",
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    attribution = result["agents"][0]["usage_attribution"]
+    assert attribution["cost_status"] == "unknown"
+    assert attribution["cost_microunits"] is None
+    assert attribution["currency"] is None
+    assert attribution["complete"] is False
+    assert attribution["incomplete_reasons"] == [
+        "cost_not_reported",
+        "usage_without_cost",
+    ]
+
+
+def test_cost_attribution_does_not_cross_shared_principal_seats() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    agents = [
+        {
+            "principal_id": "PR-shared",
+            "agent_name": name,
+            "agent_id": agent_id,
+            "last_activity_at": now.isoformat(),
+            "capabilities": {"tier_max": 2, "model": "m", "provider": "p"},
+        }
+        for name, agent_id in (("seat-a", "AI-a"), ("seat-b", "AI-b"))
+    ]
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": agents,
+                    "tickets": [
+                        {
+                            "ticket_id": "TK-a",
+                            "status": "approved",
+                            "submission_history": [
+                                {"runtime_model_usage": {"agent_id": "AI-a"}}
+                            ],
+                            "model_usage": {
+                                "cost_records": [
+                                    {
+                                        "schema_version": 1,
+                                        "source": "usage_ledger",
+                                        "verified": True,
+                                        "agent_id": "AI-a",
+                                        "currency": "EUR",
+                                        "cost_microunits": 500_000,
+                                        "complete": False,
+                                        "scope": {
+                                            "ticket_id": "TK-a",
+                                            "board_id": "board",
+                                            "window_start": "2030-01-02T10:00:00Z",
+                                            "window_end": "2030-01-02T11:00:00Z",
+                                        },
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    by_name = {agent["agent_name"]: agent for agent in result["agents"]}
+    assert by_name["seat-a"]["usage_attribution"]["cost_microunits"] == 500_000
+    assert by_name["seat-a"]["usage_attribution"]["complete"] is False
+    assert by_name["seat-a"]["usage_attribution"]["incomplete_reasons"] == [
+        "partial_cost_records"
+    ]
+    assert by_name["seat-b"]["usage_attribution"]["cost_status"] == "unknown"
+    assert by_name["seat-b"]["usage_attribution"]["cost_microunits"] is None
 
 
 def test_agent_projection_counts_zero_unknown_when_every_seat_is_stamped() -> None:

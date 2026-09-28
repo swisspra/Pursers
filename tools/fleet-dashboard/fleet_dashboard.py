@@ -3780,6 +3780,139 @@ def project_board_detail(
     return result
 
 
+def _ticket_runtime_usage_records(ticket: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return only identity-bearing usage records that Central actually retained."""
+    records: list[dict[str, Any]] = []
+    creation = ticket.get("creation_model_usage")
+    if isinstance(creation, dict):
+        records.append(creation)
+    for history_name in ("submission_history", "review_history"):
+        history = ticket.get(history_name)
+        if not isinstance(history, list):
+            continue
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            usage = item.get("runtime_model_usage")
+            if isinstance(usage, dict):
+                records.append(usage)
+    return records
+
+
+def _verified_ticket_cost_records(
+    ticket: dict[str, Any], *, board_id: str
+) -> list[dict[str, Any]]:
+    """Project a strict, identifier-free subset of provider cost evidence.
+
+    Cost is intentionally not derived from token counts, model names, or public
+    prices.  Central may eventually attach ``cost_records`` to its model usage
+    ledger; Fleet only accepts exact-seat records with a verified source,
+    currency, bounded integer amount, and explicit ticket/board/time scope.
+    Provider account, invoice, request, and other billing identifiers are never
+    copied into the browser projection.
+    """
+    usage = ticket.get("model_usage")
+    raw_records = usage.get("cost_records") if isinstance(usage, dict) else None
+    if not isinstance(raw_records, list):
+        return []
+    ticket_id = ticket.get("ticket_id")
+    if not isinstance(ticket_id, str) or not ticket_id:
+        return []
+    projected: list[dict[str, Any]] = []
+    for raw in raw_records[:128]:
+        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+            continue
+        source = raw.get("source")
+        agent_id = raw.get("agent_id")
+        currency = raw.get("currency")
+        cost = raw.get("cost_microunits")
+        complete = raw.get("complete")
+        scope = raw.get("scope")
+        if (
+            source not in {"provider", "usage_ledger"}
+            or raw.get("verified") is not True
+            or not isinstance(agent_id, str)
+            or not agent_id
+            or not isinstance(currency, str)
+            or re.fullmatch(r"[A-Z]{3}", currency) is None
+            or isinstance(cost, bool)
+            or not isinstance(cost, int)
+            or not 0 <= cost <= 1_000_000_000_000_000
+            or not isinstance(complete, bool)
+            or not isinstance(scope, dict)
+            or scope.get("ticket_id") != ticket_id
+            or scope.get("board_id") != board_id
+        ):
+            continue
+        window_start = _parse_time(scope.get("window_start"))
+        window_end = _parse_time(scope.get("window_end"))
+        if window_start is None or window_end is None or window_end < window_start:
+            continue
+        projected.append(
+            {
+                "agent_id": agent_id,
+                "source": source,
+                "currency": currency,
+                "cost_microunits": cost,
+                "complete": complete,
+                "ticket_id": ticket_id,
+                "board_id": board_id,
+                "window_start": window_start.astimezone(timezone.utc),
+                "window_end": window_end.astimezone(timezone.utc),
+            }
+        )
+    return projected
+
+
+def _seat_usage_attribution(group: dict[str, Any]) -> dict[str, Any]:
+    """Build a bounded seat-level scope without guessing shared-seat spend."""
+    usage_tickets = group["usage_tickets"]
+    cost_records = group["cost_records"]
+    cost_tickets = {
+        (record["board_id"], record["ticket_id"]) for record in cost_records
+    }
+    reasons: set[str] = set()
+    if group["usage_snapshot_incomplete"]:
+        reasons.add("visible_snapshot_truncated")
+    if usage_tickets - cost_tickets:
+        reasons.add("usage_without_cost")
+    if any(not record["complete"] for record in cost_records):
+        reasons.add("partial_cost_records")
+    currencies = sorted({record["currency"] for record in cost_records})
+    if len(currencies) > 1:
+        reasons.add("multiple_currencies")
+    if not cost_records:
+        reasons.add("cost_not_reported")
+    known = bool(cost_records) and len(currencies) == 1
+    total_cost = (
+        sum(record["cost_microunits"] for record in cost_records)
+        if known
+        else None
+    )
+    # Browser JSON consumers represent integers as IEEE-754 doubles. Fail
+    # closed rather than silently rounding a source-backed financial amount.
+    if total_cost is not None and total_cost > 9_007_199_254_740_991:
+        reasons.add("aggregate_exceeds_safe_integer")
+        known = False
+        total_cost = None
+    starts = [record["window_start"] for record in cost_records]
+    ends = [record["window_end"] for record in cost_records]
+    return {
+        "scope": "visible_ticket_snapshot",
+        "board_ids": sorted(group["usage_boards"] | group["cost_boards"]),
+        "ticket_count": len(usage_tickets | cost_tickets),
+        "window_start": min(starts).isoformat() if starts else None,
+        "window_end": max(ends).isoformat() if ends else None,
+        "cost_status": "known" if known else "unknown",
+        "cost_microunits": total_cost,
+        "currency": currencies[0] if known else None,
+        "sources": sorted({record["source"] for record in cost_records}),
+        "complete": known and not reasons,
+        "incomplete_reasons": sorted(reasons),
+        "provenance": "central_model_usage_v1",
+    }
+
+
 def aggregate_fleet(
     board_rows: list[dict[str, Any]],
     *,
@@ -3834,6 +3967,9 @@ def aggregate_fleet(
         )
         tickets = (
             snapshot.get("tickets") if isinstance(snapshot.get("tickets"), list) else []
+        )
+        snapshot_usage_incomplete = bool(
+            snapshot.get("truncated") or snapshot.get("_snapshot_truncation")
         )
         current_by_agent = _current_tickets_by_agent(tickets)
         agent_keys: dict[str, tuple[str, str]] = {}
@@ -3890,9 +4026,16 @@ def aggregate_fleet(
                     "busy": False,
                     "live": False,
                     "dispatch_ready": False,
+                    "usage_tickets": set(),
+                    "usage_boards": set(),
+                    "usage_snapshot_incomplete": set(),
+                    "cost_records": [],
+                    "cost_boards": set(),
                 },
             )
             group["boards"].add(board_id)
+            if snapshot_usage_incomplete:
+                group["usage_snapshot_incomplete"].add(board_id)
             if isinstance(agent_id, str) and agent_id:
                 group["agent_ids_by_board"].setdefault(board_id, set()).add(agent_id)
             current = current_by_agent.get(str(agent_id or ""))
@@ -3990,6 +4133,23 @@ def aggregate_fleet(
         for ticket in tickets:
             if not isinstance(ticket, dict):
                 continue
+            ticket_id = ticket.get("ticket_id")
+            if isinstance(ticket_id, str) and ticket_id:
+                for usage_record in _ticket_runtime_usage_records(ticket):
+                    usage_agent_id = usage_record.get("agent_id")
+                    key = agent_keys.get(usage_agent_id)
+                    if key is None:
+                        continue
+                    groups[key]["usage_tickets"].add((board_id, ticket_id))
+                    groups[key]["usage_boards"].add(board_id)
+                for cost_record in _verified_ticket_cost_records(
+                    ticket, board_id=board_id
+                ):
+                    key = agent_keys.get(cost_record["agent_id"])
+                    if key is None:
+                        continue
+                    groups[key]["cost_records"].append(cost_record)
+                    groups[key]["cost_boards"].add(board_id)
             status = str(ticket.get("status") or "")
             if status == "open":
                 counts["open"] += 1
@@ -4240,6 +4400,7 @@ def aggregate_fleet(
                 ),
                 "last_seen": last_seen.isoformat() if last_seen else None,
                 "pool_status": status,
+                "usage_attribution": _seat_usage_attribution(group),
                 **({"board_scope": board_scope} if scope_available else {}),
             }
         )

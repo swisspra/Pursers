@@ -20,7 +20,38 @@
       agentFilterBar, agentPoolScope, inactiveAgentDrawer, autonomousRows,
       autonomousStateLabel, autonomousObservationLabel} = context);
   }
-function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){const key=`${central}/${agentIdentity(a)}/${a.agent_name||''}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}}for(const [central,d] of Object.entries(hubWorkers)){const live=fleetData[central]?.agents||[];for(const w of d.workers||[]){const stable=Boolean(w.agent_id||w.principal_id),represented=live.some(a=>agentIdentity(a)===agentIdentity(w));if(represented||(!stable&&live.some(a=>a.agent_name===w.name)))continue;const work=w.current_work||[],a={agent_name:w.name,agent_id:w.agent_id,principal_id:w.principal_id,pool_status:work.length?'busy':'offline',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null},key=`${central}/${agentIdentity(a)}/${a.agent_name||''}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}}const visible=records.filter(agentMatchesFilters),cards=visible.sort((a,b)=>{const rank={working:0,available:1,connected:2,stale:3,offline:4},as=agentDisplayState(a.agent,workerForAgent(a.central,a.agent)),bs=agentDisplayState(b.agent,workerForAgent(b.central,b.agent));return rank[as]-rank[bs]||String(a.agent.agent_name||'').localeCompare(String(b.agent.agent_name||''))||a.central.localeCompare(b.central)||agentIdentity(a.agent).localeCompare(agentIdentity(b.agent))}).map(x=>liveAgentCard(x.central,x.agent).replace('<article class="agent-card ','<article class="agent-card team-roster-card ').replace('<div class="agent-board-list">','<span class="team-cost meta">Cost unknown</span><div class="agent-board-list">')),empty=records.length===0?'No seats exist in the covered boards.':'No seats match the selected filters.',scope=agentPoolScope(),unknownModel=Object.values(fleetData).reduce((total,d)=>total+Number(d.pool_summary?.unknown_model||0),0),action='<div class="agent-actions"><button id="new-agent" class="primary-action" type="button">+ New agent</button></div>',filterMarkup=agentFilterBar(records),activeFilters=(filterMarkup.match(/ selected/g)||[]).length,existingFilters=typeof document==='undefined'?null:document.querySelector('.team-filter-disclosure'),narrow=typeof matchMedia==='function'&&matchMedia('(max-width: 720px)').matches,filtersOpen=existingFilters?existingFilters.open:!narrow;return`<div class="agents-hub team-roster">${pageHead('Team','Unified agent pool','Status and ownership first; source-backed runtime details follow.',action)}${renderGuide()}<section class="strip agent-model-summary" aria-label="Model attribution coverage"><div class="metric"><span>Unknown model</span><b>${esc(unknownModel)}</b></div></section>${agentCountStrip(records)}<details class="team-filter-disclosure" data-state-key="team-filters" ${filtersOpen?'open':''}><summary>Filters${activeFilters?` · ${activeFilters} active`:''}</summary>${filterMarkup}</details>${scope}<p id="hub-agent-status" class="muted">Showing ${cards.length} of ${records.length} seats</p><section class="agent-grid dense-agent-grid team-roster-grid" data-pursers-panel="agents" data-pursers-state="${cards.length?'ready':'empty'}" aria-label="Agent roster">${cards.join('')||`<p class="empty">${esc(empty)}</p>`}</section>${inactiveAgentDrawer()}</div>`}
+function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){const key=`${central}/${agentIdentity(a)}/${a.agent_name||''}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}}for(const [central,d] of Object.entries(hubWorkers)){const live=fleetData[central]?.agents||[];for(const w of d.workers||[]){const stable=Boolean(w.agent_id||w.principal_id),represented=live.some(a=>agentIdentity(a)===agentIdentity(w));if(represented||(!stable&&live.some(a=>a.agent_name===w.name)))continue;const work=w.current_work||[],a={agent_name:w.name,agent_id:w.agent_id,principal_id:w.principal_id,pool_status:work.length?'busy':'offline',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null},key=`${central}/${agentIdentity(a)}/${a.agent_name||''}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}}const visible=records.filter(agentMatchesFilters),cards=visible.sort((a,b)=>{const rank={working:0,available:1,connected:2,stale:3,offline:4},as=agentDisplayState(a.agent,workerForAgent(a.central,a.agent)),bs=agentDisplayState(b.agent,workerForAgent(b.central,b.agent));return rank[as]-rank[bs]||String(a.agent.agent_name||'').localeCompare(String(b.agent.agent_name||''))||a.central.localeCompare(b.central)||agentIdentity(a.agent).localeCompare(agentIdentity(b.agent))}).map(x=>liveAgentCard(x.central,x.agent).replace('<article class="agent-card ','<article class="agent-card team-roster-card ').replace('<div class="agent-board-list">',`${typeof teamCostSummary==='function'?teamCostSummary(x.agent):'<span class="team-cost meta">Cost unknown</span>'}<div class="agent-board-list">`)),empty=records.length===0?'No seats exist in the covered boards.':'No seats match the selected filters.',scope=agentPoolScope(),unknownModel=Object.values(fleetData).reduce((total,d)=>total+Number(d.pool_summary?.unknown_model||0),0),action='<div class="agent-actions"><button id="new-agent" class="primary-action" type="button">+ New agent</button></div>',filterMarkup=agentFilterBar(records),activeFilters=(filterMarkup.match(/ selected/g)||[]).length,existingFilters=typeof document==='undefined'?null:document.querySelector('.team-filter-disclosure'),narrow=typeof matchMedia==='function'&&matchMedia('(max-width: 720px)').matches,filtersOpen=existingFilters?existingFilters.open:!narrow;return`<div class="agents-hub team-roster">${pageHead('Team','Unified agent pool','Status and ownership first; source-backed runtime details follow.',action)}${renderGuide()}<section class="strip agent-model-summary" aria-label="Model attribution coverage"><div class="metric"><span>Unknown model</span><b>${esc(unknownModel)}</b></div></section>${agentCountStrip(records)}<details class="team-filter-disclosure" data-state-key="team-filters" ${filtersOpen?'open':''}><summary>Filters${activeFilters?` · ${activeFilters} active`:''}</summary>${filterMarkup}</details>${scope}<p id="hub-agent-status" class="muted">Showing ${cards.length} of ${records.length} seats</p><section class="agent-grid dense-agent-grid team-roster-grid" data-pursers-panel="agents" data-pursers-state="${cards.length?'ready':'empty'}" aria-label="Agent roster">${cards.join('')||`<p class="empty">${esc(empty)}</p>`}</section>${inactiveAgentDrawer()}</div>`}
+
+  function formatCostMicrounits(value, currency) {
+    const whole = Math.trunc(value / 1000000);
+    const fraction = String(value % 1000000).padStart(6, '0').replace(/0+$/, '');
+    return `${currency} ${whole}${fraction ? `.${fraction}` : ''}`;
+  }
+
+  function teamCostSummary(agent) {
+    const usage = agent.usage_attribution || {};
+    const boards = (usage.board_ids || []).join(', ') || 'no attributed boards';
+    const tickets = Number(usage.ticket_count || 0);
+    const scope = `${tickets} visible ticket${tickets === 1 ? '' : 's'} · ${boards}`;
+    if (usage.cost_status !== 'known') {
+      const reasonLabels = {
+        cost_not_reported: 'no reported amount',
+        aggregate_exceeds_safe_integer: 'aggregate exceeds browser exact-integer range',
+        multiple_currencies: 'multiple currencies cannot be summed',
+        partial_cost_records: 'provider marked partial',
+        usage_without_cost: 'some usage has no cost record',
+        visible_snapshot_truncated: 'bounded snapshot incomplete'
+      };
+      const reasons = (usage.incomplete_reasons || []).map(reason => reasonLabels[reason] || reason).join('; ');
+      return `<span class="team-cost meta" data-team-cost-status="unknown">Cost unknown · ${esc(reasons || 'no verifiable provider or usage-ledger amount')} · ${esc(scope)}</span>`;
+    }
+    const sources = (usage.sources || []).map(source => source === 'provider' ? 'provider' : 'usage ledger').join(' + ');
+    const window = usage.window_start && usage.window_end
+      ? `${String(usage.window_start).slice(0, 10)} to ${String(usage.window_end).slice(0, 10)}`
+      : 'time window unavailable';
+    const coverage = usage.complete ? 'complete' : 'incomplete';
+    return `<span class="team-cost meta" data-team-cost-status="known" data-team-cost-coverage="${coverage}">Cost ${esc(formatCostMicrounits(usage.cost_microunits, usage.currency))} · verified ${esc(sources)} · ${esc(scope)} · ${esc(window)} · ${coverage}</span>`;
+  }
 
   function configuredSeatForAgent(central, agent) {
     const matches = (hubSeatInventory?.seats || []).filter(
@@ -143,7 +174,7 @@ function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d]
     const configured = configuredSeatForAgent(central, agent);
     let card = liveAgentCard(central, agent)
       .replace('<article class="agent-card ', '<article class="agent-card team-roster-card ')
-      .replace('<div class="agent-board-list">', '<span class="team-cost meta">Cost unknown</span><div class="agent-board-list">');
+      .replace('<div class="agent-board-list">', `${teamCostSummary(agent)}<div class="agent-board-list">`);
     if (configured) {
       card = card.replace(
         '<span class="meta">Live pool seat · not locally managed</span>',
