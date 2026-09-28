@@ -313,7 +313,7 @@ function doorsPanel() {
       <h3>Doors</h3>
       <span class="status">${doors.length} door keys</span>
     </div>
-    <p class="muted">Per-project door credentials for worker and reviewer seats. Copy door string to onboard a seat, or Rotate to generate a new key.</p>
+    <p class="muted">Issue, rotate, or revoke board- and role-scoped credentials. Fleet shows the impact first and requires explicit confirmation; secrets are revealed once or written to a configured seat token file.</p>
     <div id="door-rotate-warning" class="warning" style="display:${doorRotateOutcome?'block':'none'};margin-bottom:10px;">${esc(doorRotateOutcome)}</div>
     <div id="door-copy-status" class="status pass" style="display:none;margin-bottom:10px;"></div>
     <div id="door-action-status" class="error" role="alert" style="display:none;margin-bottom:10px;"></div>
@@ -338,8 +338,10 @@ function doorsPanel() {
             <td>${d.seats && d.seats.length ? d.seats.map(s => `<div><b>${esc(s.agent_name)}</b> <span class="meta">${esc(relativeAge(s.last_activity))}</span></div>`).join('') : '<span class="muted">None active</span>'}</td>
             <td>
               <div class="worker-actions">
-                <button type="button" data-door-action="copy" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}">Copy door string</button>
-                <button type="button" data-door-action="rotate" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}">Rotate</button>
+                <button type="button" data-door-action="issue" data-door-delivery="reveal_once" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}">Issue · reveal once</button>
+                ${(d.seats || []).map(s => `<button type="button" data-door-action="issue" data-door-delivery="private_file" data-door-seat="${esc(s.agent_name)}" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}">Issue to ${esc(s.agent_name)}</button>`).join('')}
+                <button type="button" data-door-action="rotate" data-door-delivery="reveal_once" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}">Rotate · reveal once</button>
+                <button type="button" class="danger-action" data-door-action="revoke" data-door-delivery="none" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}" ${d.kid ? '' : 'disabled'}>Revoke</button>
               </div>
             </td>
           </tr>`).join('') : '<tr><td colspan="6" class="empty">No doors available. Configure PURSERS_DOORS_KEYS_DIR and PURSERS_JWKS_PATH.</td></tr>'}
@@ -409,32 +411,38 @@ seatClick = async function(event) {
     try {
       const failure = document.querySelector('#door-action-status');
       if (failure) failure.style.display = 'none';
-      if (action === 'copy') {
-        const res = await configPost(`/api/doors/copy?${apiCentral(central)}`, {board, role});
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(res.door_string);
+      if (['issue', 'rotate', 'revoke'].includes(action)) {
+        const delivery = doorBtn.dataset.doorDelivery;
+        const planRequest = {operation: action, board, role, delivery};
+        if (delivery === 'private_file') planRequest.seat = doorBtn.dataset.doorSeat;
+        const plan = await configPost(`/api/doors/plan?${apiCentral(central)}`, planRequest);
+        if (!window.confirm(plan.confirmation)) return;
+        const res = await configPost(`/api/doors/confirm?${apiCentral(central)}`, {plan_id: plan.plan_id, digest: plan.digest});
+        credentialChanged = true;
+        let copied = false;
+        if (res.door_string && navigator.clipboard && navigator.clipboard.writeText) {
+          try {
+            await navigator.clipboard.writeText(res.door_string);
+            copied = true;
+          } catch (_clipboardError) {
+            copied = false;
+          }
         }
         const st = document.querySelector('#door-copy-status');
         if (st) {
-          st.textContent = `Door string copied for ${board} (${role}). Door strings are shown only once.`;
+          st.textContent = res.door_string
+            ? copied
+              ? `Credential issued for ${board} (${role}) and copied once. It cannot be retrieved from Fleet history.`
+              : `Clipboard unavailable. Copy this one-time credential now: ${res.door_string}`
+            : `${action[0].toUpperCase() + action.slice(1)} completed for ${board} (${role}). ${res.impact}`;
           st.style.display = 'block';
-          setTimeout(() => { st.style.display = 'none'; }, 6000);
+          setTimeout(() => { st.textContent = ''; st.style.display = 'none'; }, res.door_string && !copied ? 30000 : 6000);
         }
-      } else if (action === 'rotate') {
-        const res = await configPost(`/api/doors/rotate?${apiCentral(central)}`, {board, role});
-        credentialChanged = true;
-        let copyFailed = false;
-        try {
-          if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(res.door_string);
-          else copyFailed = true;
-        } catch (_clipboardError) {
-          copyFailed = true;
-        }
-        doorRotateOutcome = copyFailed
-          ? `Rotated ${board} (${role}) to key ${res.kid}. Credential changed, but clipboard copy failed; use Copy door string to recover it.`
-          : `Rotated ${board} (${role}) to key ${res.kid}. Warning: ${res.warning}`;
+        doorRotateOutcome = action === 'rotate' || action === 'revoke'
+          ? `${action[0].toUpperCase() + action.slice(1)} completed for ${board} (${role}). ${res.impact}`
+          : '';
         const warn = document.querySelector('#door-rotate-warning');
-        if (warn) {
+        if (warn && doorRotateOutcome) {
           warn.textContent = doorRotateOutcome;
           warn.style.display = 'block';
         }

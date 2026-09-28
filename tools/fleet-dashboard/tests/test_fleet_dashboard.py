@@ -10340,47 +10340,261 @@ def test_doors_endpoints_and_library_calls(tmp_path: Path) -> None:
             assert worker_entry["project"] == "existing-proj"
             assert worker_entry["board_id"] == "existing-board"
 
-        # POST /api/doors/copy
+        for legacy_path in ("/api/doors/copy", "/api/doors/rotate"):
+            legacy = urllib.request.Request(
+                base + legacy_path,
+                data=json.dumps(
+                    {"board": "existing-board", "role": "worker"}
+                ).encode(),
+                headers={"Content-Type": "application/json", "Origin": base},
+                method="POST",
+            )
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                urllib.request.urlopen(legacy)
+            assert exc_info.value.code == 400
+        assert not jwks_path.exists()
+
+        # Plan + confirm a one-time credential reveal.
         req = urllib.request.Request(
-            base + "/api/doors/copy",
-            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
+            base + "/api/doors/plan",
+            data=json.dumps(
+                {
+                    "operation": "issue",
+                    "board": "existing-board",
+                    "role": "worker",
+                    "delivery": "reveal_once",
+                }
+            ).encode(),
             headers={"Content-Type": "application/json", "Origin": base},
             method="POST",
         )
         with urllib.request.urlopen(req) as response:
             assert response.status == 200
             assert response.headers.get("Cache-Control") == "no-store"
+            plan_data = json.load(response)
+            assert "door_string" not in plan_data
+        req_confirm = urllib.request.Request(
+            base + "/api/doors/confirm",
+            data=json.dumps(
+                {"plan_id": plan_data["plan_id"], "digest": plan_data["digest"]}
+            ).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req_confirm) as response:
             copy_data = json.load(response)
             assert copy_data["ok"] is True
             assert copy_data["door_string"].startswith("prs1.")
             initial_kid = copy_data["kid"]
             assert initial_kid
 
-        # POST /api/doors/rotate
+        # Rotation uses the same digest-bound explicit confirmation flow.
         req_rot = urllib.request.Request(
-            base + "/api/doors/rotate",
-            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
+            base + "/api/doors/plan",
+            data=json.dumps(
+                {
+                    "operation": "rotate",
+                    "board": "existing-board",
+                    "role": "worker",
+                    "delivery": "reveal_once",
+                }
+            ).encode(),
             headers={"Content-Type": "application/json", "Origin": base},
             method="POST",
         )
         with urllib.request.urlopen(req_rot) as response:
+            rotate_plan = json.load(response)
+        req_rot_confirm = urllib.request.Request(
+            base + "/api/doors/confirm",
+            data=json.dumps(
+                {
+                    "plan_id": rotate_plan["plan_id"],
+                    "digest": rotate_plan["digest"],
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req_rot_confirm) as response:
             assert response.status == 200
             assert response.headers.get("Cache-Control") == "no-store"
             rot_data = json.load(response)
             assert rot_data["ok"] is True
             assert rot_data["door_string"].startswith("prs1.")
             assert rot_data["kid"] != initial_kid
-            assert "warning" in rot_data
+            assert "impact" in rot_data
 
         # Verify JWKS was updated
         jwks_content = json.loads(jwks_path.read_text(encoding="utf-8"))
         active_kids = [k["kid"] for k in jwks_content["keys"]]
         assert rot_data["kid"] in active_kids
         assert initial_kid not in active_kids
+
+        req_revoke_plan = urllib.request.Request(
+            base + "/api/doors/plan",
+            data=json.dumps(
+                {
+                    "operation": "revoke",
+                    "board": "existing-board",
+                    "role": "worker",
+                    "delivery": "none",
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req_revoke_plan) as response:
+            revoke_plan = json.load(response)
+        assert "stops authenticating" in revoke_plan["impact"]
+        req_revoke = urllib.request.Request(
+            base + "/api/doors/confirm",
+            data=json.dumps(
+                {
+                    "plan_id": revoke_plan["plan_id"],
+                    "digest": revoke_plan["digest"],
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req_revoke) as response:
+            revoked = json.load(response)
+        assert revoked["credential_changed"] is True
+        assert revoked["kid"] == rot_data["kid"]
+        assert not dashboard.door_admin.list_doors(jwks_path)
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_guided_credential_private_file_binds_seat_role_board_and_replay(
+    tmp_path: Path,
+) -> None:
+    private_dir = tmp_path / "private"
+    private_dir.mkdir(mode=0o700)
+    token_file = private_dir / "worker.jwt"
+    manager = dashboard.SeatConfigManager(state_dir=tmp_path / "state")
+    manager.inventory.upsert(
+        dashboard.DesiredSeat(
+            host="codex",
+            role="worker",
+            name="worker-one",
+            central_url="http://127.0.0.1:8766/mcp",
+            home_board="existing-board",
+            token_file=str(token_file),
+            ca_file="",
+            bridge_command="pursers-wait-bridge",
+            config_path=str(tmp_path / "config.toml"),
+            boards="home",
+        ),
+        bridge_version="test",
+    )
+    target = manager.credential_delivery_target(
+        "worker-one", "existing-board", "worker"
+    )
+    assert target["path"] == token_file
+    with pytest.raises(PermissionError, match="role"):
+        manager.credential_delivery_target(
+            "worker-one", "existing-board", "reviewer"
+        )
+    with pytest.raises(PermissionError, match="board"):
+        manager.credential_delivery_target("worker-one", "wrong-board", "worker")
+
+    central = FakeDoorCentral()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=tmp_path / "keys",
+        jwks_path=tmp_path / "jwks.json",
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    request = {
+        "operation": "issue",
+        "board": "existing-board",
+        "role": "worker",
+        "delivery": "private_file",
+        "seat": "worker-one",
+    }
+    plan = asyncio.run(
+        fetcher.prepare_door_credential(
+            request,
+            destination_path=target["path"],
+            ca_configured=target["ca_configured"],
+        )
+    )
+    assert str(token_file) not in json.dumps(plan)
+    assert "door_string" not in json.dumps(plan)
+    result = asyncio.run(
+        fetcher.confirm_door_credential(plan["plan_id"], plan["digest"])
+    )
+    assert result["delivery"]["destination"] == "configured token file"
+    assert "door_string" not in result
+    assert token_file.read_text(encoding="utf-8").startswith("eyJ")
+    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    with pytest.raises(KeyError):
+        asyncio.run(
+            fetcher.confirm_door_credential(plan["plan_id"], plan["digest"])
+        )
+    audit = (
+        tmp_path / ".fleet-dashboard" / "credential-actions.jsonl"
+    ).read_text(encoding="utf-8")
+    assert token_file.read_text(encoding="utf-8").strip() not in audit
+    assert str(token_file) not in audit
+
+
+def test_guided_credential_interrupted_publish_restores_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private_dir = tmp_path / "private"
+    private_dir.mkdir(mode=0o700)
+    token_file = private_dir / "worker.jwt"
+    token_file.write_text("previous-value\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    central = FakeDoorCentral()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=tmp_path / "keys",
+        jwks_path=tmp_path / "jwks.json",
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    plan = asyncio.run(
+        fetcher.prepare_door_credential(
+            {
+                "operation": "issue",
+                "board": "existing-board",
+                "role": "worker",
+                "delivery": "private_file",
+                "seat": "worker-one",
+            },
+            destination_path=token_file,
+        )
+    )
+
+    def interrupted(**_kwargs: Any) -> list[Path]:
+        raise OSError("synthetic publish interruption")
+
+    monkeypatch.setattr(fetcher, "_publish_staged_door", interrupted)
+    with pytest.raises(OSError, match="synthetic publish interruption"):
+        asyncio.run(
+            fetcher.confirm_door_credential(plan["plan_id"], plan["digest"])
+        )
+    assert token_file.read_text(encoding="utf-8") == "previous-value\n"
+    assert not config.jwks_path.exists()
+    assert not list(config.doors_keys_dir.glob("*.pem"))
+    with pytest.raises(KeyError):
+        asyncio.run(
+            fetcher.confirm_door_credential(plan["plan_id"], plan["digest"])
+        )
 
 
 def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Path) -> None:
@@ -10701,8 +10915,15 @@ def test_guards_reject_cross_origin_and_non_admin(tmp_path: Path) -> None:
 
     try:
         for path, body in (
-            ("/api/doors/copy", {"board": "pursers", "role": "worker"}),
-            ("/api/doors/rotate", {"board": "pursers", "role": "worker"}),
+            (
+                "/api/doors/plan",
+                {
+                    "operation": "issue",
+                    "board": "pursers",
+                    "role": "worker",
+                    "delivery": "reveal_once",
+                },
+            ),
             (
                 "/api/projects/add",
                 {"name": "demo", "board_id": "demo", "work_dir": "/PATH/TO/DEMO"},
@@ -10777,26 +10998,22 @@ def test_guards_reject_cross_origin_and_non_admin(tmp_path: Path) -> None:
             urllib.request.urlopen(req_doors)
         assert exc_info.value.code == 403
 
-        # POST /api/doors/copy with non-admin fails with 403
+        # Credential planning with non-admin fails with 403 before mutation.
         req_copy = urllib.request.Request(
-            base2 + "/api/doors/copy",
-            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
+            base2 + "/api/doors/plan",
+            data=json.dumps(
+                {
+                    "operation": "issue",
+                    "board": "existing-board",
+                    "role": "worker",
+                    "delivery": "reveal_once",
+                }
+            ).encode(),
             headers={"Content-Type": "application/json", "Origin": base2},
             method="POST",
         )
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(req_copy)
-        assert exc_info.value.code == 403
-
-        # POST /api/doors/rotate with non-admin fails with 403
-        req_rotate = urllib.request.Request(
-            base2 + "/api/doors/rotate",
-            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
-            headers={"Content-Type": "application/json", "Origin": base2},
-            method="POST",
-        )
-        with pytest.raises(urllib.error.HTTPError) as exc_info:
-            urllib.request.urlopen(req_rotate)
         assert exc_info.value.code == 403
 
         # Keys directory and JWKS remain byte-for-byte unchanged
@@ -10865,24 +11082,37 @@ def test_no_secret_assertions_in_state_logs_and_listings(tmp_path: Path) -> None
     base = f"http://127.0.0.1:{server.server_port}"
 
     try:
-        # Mint doors via copy, rotate, and add project
-        req_copy = urllib.request.Request(
-            base + "/api/doors/copy",
-            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
-            headers={"Content-Type": "application/json", "Origin": base},
-            method="POST",
-        )
-        with urllib.request.urlopen(req_copy) as response:
-            assert response.status == 200
-
-        req_rotate = urllib.request.Request(
-            base + "/api/doors/rotate",
-            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
-            headers={"Content-Type": "application/json", "Origin": base},
-            method="POST",
-        )
-        with urllib.request.urlopen(req_rotate) as response:
-            assert response.status == 200
+        # Mint and rotate through explicit plans. Confirmation responses are the
+        # only API payloads permitted to contain a one-time door reveal.
+        for operation in ("issue", "rotate"):
+            req_plan = urllib.request.Request(
+                base + "/api/doors/plan",
+                data=json.dumps(
+                    {
+                        "operation": operation,
+                        "board": "existing-board",
+                        "role": "worker",
+                        "delivery": "reveal_once",
+                    }
+                ).encode(),
+                headers={"Content-Type": "application/json", "Origin": base},
+                method="POST",
+            )
+            with urllib.request.urlopen(req_plan) as response:
+                credential_plan = json.load(response)
+            req_confirm = urllib.request.Request(
+                base + "/api/doors/confirm",
+                data=json.dumps(
+                    {
+                        "plan_id": credential_plan["plan_id"],
+                        "digest": credential_plan["digest"],
+                    }
+                ).encode(),
+                headers={"Content-Type": "application/json", "Origin": base},
+                method="POST",
+            )
+            with urllib.request.urlopen(req_confirm) as response:
+                assert response.status == 200
 
         req_add = urllib.request.Request(
             base + "/api/projects/add",
@@ -10922,8 +11152,11 @@ def test_doors_ui_rendering() -> None:
     assert "doors-panel" in html
     assert "add-project-panel" in html
     assert "add-project-form" in html
-    assert 'data-door-action="copy"' in html
+    assert 'data-door-action="issue"' in html
     assert 'data-door-action="rotate"' in html
+    assert 'data-door-action="revoke"' in html
+    assert "/api/doors/plan" in html
+    assert "/api/doors/confirm" in html
     assert 'name="integration_ref"' in html
 
 
@@ -11438,14 +11671,17 @@ def test_rotate_success_survives_clipboard_rejection_and_refreshes() -> None:
             "const seatClickBeforeDoors=()=>{};",
             "const warning={textContent:'',style:{display:'none'}};",
             "const failure={textContent:'',style:{display:'none'}};",
-            "const document={querySelector:(s)=>s==='#door-rotate-warning'?warning:failure};",
+            "const status={textContent:'',style:{display:'none'}};",
+            "const document={querySelector:(s)=>s==='#door-rotate-warning'?warning:s==='#door-copy-status'?status:failure};",
+            "const window={confirm:()=>true};",
+            "const setTimeout=()=>{};",
             "const navigator={clipboard:{writeText:async()=>{throw new Error('secret clipboard detail')}}};",
-            "const centralLabels=['fleet'],apiCentral=()=>'',configPost=async()=>({door_string:'door-secret',kid:'kid-new',warning:'old key revoked'});",
+            "let postCount=0; const centralLabels=['fleet'],apiCentral=()=>'',configPost=async()=>++postCount===1?({plan_id:'plan',digest:'digest',confirmation:'confirm rotation'}):({door_string:'door-secret',kid:'kid-new',impact:'previous credentials stop authenticating'});",
             "const refreshSeats=async()=>{refreshCount++},renderHub=()=>{renderCount++};",
             handler,
-            "const button={dataset:{doorAction:'rotate',board:'pursers',role:'worker'},disabled:false};",
+            "const button={dataset:{doorAction:'rotate',doorDelivery:'reveal_once',board:'pursers',role:'worker'},disabled:false};",
             "const event={target:{closest:(s)=>s==='[data-door-action]'?button:null}};",
-            "seatClick(event).then(()=>console.log(JSON.stringify({warning,failure,doorRotateOutcome,refreshCount,renderCount,disabled:button.disabled})));",
+            "seatClick(event).then(()=>console.log(JSON.stringify({warning,failure,status,doorRotateOutcome,refreshCount,renderCount,postCount,disabled:button.disabled})));",
         ]
     )
     result = json.loads(
@@ -11456,11 +11692,11 @@ def test_rotate_success_survives_clipboard_rejection_and_refreshes() -> None:
 
     assert result["refreshCount"] == 1
     assert result["renderCount"] == 1
+    assert result["postCount"] == 2
     assert result["disabled"] is False
     assert result["warning"]["style"]["display"] == "block"
-    assert "kid-new" in result["warning"]["textContent"]
-    assert "clipboard copy failed" in result["warning"]["textContent"]
-    assert "Credential changed" in result["warning"]["textContent"]
+    assert "previous credentials stop authenticating" in result["warning"]["textContent"]
+    assert "Clipboard unavailable" in result["status"]["textContent"]
     assert result["doorRotateOutcome"] == result["warning"]["textContent"]
     assert result["failure"]["style"]["display"] == "none"
     assert "secret clipboard detail" not in json.dumps(result)
