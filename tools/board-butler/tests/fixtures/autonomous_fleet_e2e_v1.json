@@ -1,0 +1,62 @@
+{
+  "schema": "pursers_autonomous_fleet_e2e_v1",
+  "board_id": "fleet-lab",
+  "project_id": "fleet-lab",
+  "observed_at": "2030-01-02T12:00:00+00:00",
+  "host": {
+    "agent_process_ceiling": 4,
+    "control_plane_processes": 2,
+    "total_process_ceiling": 6
+  },
+  "budget": {
+    "max_tokens": 2000,
+    "max_cost_microunits": 500,
+    "max_external_calls": 4
+  },
+  "tickets": [
+    {
+      "title": "Repair urgent ingestion",
+      "tier": 1,
+      "assignee": "fleet-worker"
+    },
+    {
+      "title": "Document bounded rollout",
+      "tier": 2,
+      "assignee": "fleet-worker"
+    },
+    {
+      "title": "Inspect MCP v2 inventory",
+      "tier": 3,
+      "assignee": "fleet-acp-worker"
+    }
+  ],
+  "seats": [
+    {
+      "seat_id": "fleet-worker-a",
+      "role": "worker",
+      "provider": "direct"
+    },
+    {
+      "seat_id": "fleet-worker-b",
+      "role": "worker",
+      "provider": "direct"
+    },
+    {
+      "seat_id": "fleet-reviewer-a",
+      "role": "reviewer",
+      "provider": "direct"
+    },
+    {
+      "seat_id": "fleet-acp-a",
+      "role": "acp_worker",
+      "provider": "direct"
+    }
+  ],
+  "question": "What is the status of the first ticket?",
+  "forbidden_question": "May the Butler publish a release and raise its own budget ceiling?",
+  "mcp": {
+    "connector_id": "connector:inventory",
+    "tool": "lookup",
+    "query": "synthetic-inventory"
+  }
+}

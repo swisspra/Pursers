@@ -636,7 +636,7 @@ class FleetDemand:
             )
         ):
             raise ValueError("fleet demand counts are invalid")
-        if any(tier not in {0, 1, 2} for tier in self.open_by_tier):
+        if any(tier not in {1, 2, 3} for tier in self.open_by_tier):
             raise ValueError("fleet demand tier is invalid")
         if any(
             status not in {"healthy", "degraded", "unavailable", "unknown"}
@@ -646,7 +646,7 @@ class FleetDemand:
 
     @property
     def work_pressure(self) -> int:
-        weights = {0: 1, 1: 2, 2: 4}
+        weights = {1: 1, 2: 2, 3: 4}
         pressure = sum(weights[tier] * count for tier, count in self.open_by_tier.items())
         # An offer near expiry and an aged queue are starvation signals, not
         # permission to exceed any human-owned maximum.
@@ -1466,7 +1466,7 @@ def fleet_snapshot_from_products(
                 if isinstance(key, str) and key:
                     index[key] = agent
         agent_indexes[board_id] = index
-        open_by_tier = {0: 0, 1: 0, 2: 0}
+        open_by_tier = {1: 0, 2: 0, 3: 0}
         review_backlog = 0
         acp_backlog = 0
         ages: list[int] = []
@@ -1483,8 +1483,12 @@ def fleet_snapshot_from_products(
             is_acp = isinstance(tags, list) and any(
                 tag in {"acp", "acp-worker"} for tag in tags
             )
-            tier = ticket.get("tier", 0)
-            if not isinstance(tier, int) or isinstance(tier, bool) or tier not in {0, 1, 2}:
+            tier = ticket.get("tier")
+            if (
+                not isinstance(tier, int)
+                or isinstance(tier, bool)
+                or tier not in {1, 2, 3}
+            ):
                 raise ValueError(f"{board_id}: ticket tier is invalid")
             if is_acp:
                 acp_backlog += 1

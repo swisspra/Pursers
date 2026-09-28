@@ -269,7 +269,7 @@ def test_product_snapshot_selector_consumes_real_board_shaped_state() -> None:
                     {
                         "ticket_id": "TK-work",
                         "status": "open",
-                        "tier": 2,
+                        "tier": 3,
                         "tags": [],
                         "created_at": (NOW - timedelta(minutes=10)).isoformat(),
                         "dispatch_state": {

@@ -170,7 +170,7 @@ class SeatTemplate:
             or not isinstance(can_review, bool)
             or not isinstance(tier_max, int)
             or isinstance(tier_max, bool)
-            or not 0 <= tier_max <= 2
+            or tier_max not in {1, 2, 3}
             or not isinstance(max_parallel, int)
             or isinstance(max_parallel, bool)
             or max_parallel != 1
