@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Plan and confirm Butler-owned supervisor rosters without touching the host.
 
-The live supervisor/executor consumes the confirmed document in a later rollout.
-This module deliberately has no process, launchd, credential, or filesystem
-mutation surface.
+The Board Butler refresh path persists the confirmed document and the host
+executor consumes it as an authorization boundary. This module deliberately
+has no process, launchd, credential, or filesystem mutation surface.
 """
 
 from __future__ import annotations
@@ -13,16 +13,20 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 
 ROSTER_SCHEMA = "pursers_supervisor_roster_v1"
+ROSTER_STATE_KEY = "supervisor_roster"
 PLAN_SCHEMA = "pursers_supervisor_roster_plan_v1"
+MAX_OBSERVATION_AGE_S = 180
 PLAN_FIELDS = frozenset(
     {
         "schema", "board_id", "prior_revision", "next_revision",
         "config_revision", "envelope_fingerprint_sha256", "host_seat_cap",
+        "gate_concurrency_ceiling",
         "observation_digest_sha256", "desired", "full_gate_concurrency",
         "actions", "findings", "audit", "plan_digest_sha256",
     }
@@ -86,6 +90,8 @@ class SupervisorGrant:
     config_revision: int
     envelope_fingerprint_sha256: str
     host_seat_cap: int
+    gate_concurrency_ceiling: int
+    approved_template_ids: tuple[str, ...]
     worker_floor: int = 1
     reviewer_floor: int = 1
     verifier_floor: int = 0
@@ -98,6 +104,15 @@ class SupervisorGrant:
             raise SupervisorPlanError("authorization_invalid")
         if not 1 <= self.host_seat_cap <= 100:
             raise SupervisorPlanError("host_seat_cap_invalid")
+        if not 1 <= self.gate_concurrency_ceiling <= 100:
+            raise SupervisorPlanError("gate_concurrency_ceiling_invalid")
+        if (
+            not self.approved_template_ids
+            or len(self.approved_template_ids) != len(set(self.approved_template_ids))
+        ):
+            raise SupervisorPlanError("approved_templates_invalid")
+        for template_id in self.approved_template_ids:
+            _identifier(template_id, "template_id")
         floors = (self.worker_floor, self.reviewer_floor, self.verifier_floor)
         if any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in floors):
             raise SupervisorPlanError("role_floor_invalid")
@@ -110,6 +125,8 @@ class SupervisorSeat:
     seat_id: str
     identity_id: str
     state_id: str
+    state_dir_id: str
+    generation: int
     role: str
     lifecycle: str
     work_claim: bool
@@ -120,6 +137,9 @@ class SupervisorSeat:
         _identifier(self.seat_id, "seat_id")
         _identifier(self.identity_id, "identity_id")
         _identifier(self.state_id, "state_id")
+        _identifier(self.state_dir_id, "state_dir_id")
+        if self.generation < 1:
+            raise SupervisorPlanError("seat_generation_invalid")
         if self.role not in ROLES or self.lifecycle not in LIFECYCLES:
             raise SupervisorPlanError("seat_state_invalid")
         if self.transition_at.tzinfo is None:
@@ -164,16 +184,31 @@ class SupervisorObservation:
         _ratio(self.host_load_ratio, "host_load_ratio")
         _ratio(self.memory_headroom_ratio, "memory_headroom_ratio")
         _ratio(self.disk_headroom_ratio, "disk_headroom_ratio")
-        for attribute in ("seat_id", "identity_id", "state_id"):
+        for attribute in ("seat_id", "identity_id", "state_id", "state_dir_id"):
             values = [getattr(seat, attribute) for seat in self.seats]
             if len(values) != len(set(values)):
                 raise SupervisorPlanError(f"ambiguous_{attribute}")
+
+
+def _validate_config_schema(config: Mapping[str, Any]) -> None:
+    try:
+        from jsonschema import Draft202012Validator
+
+        schema_path = (
+            Path(__file__).resolve().parents[2]
+            / "docs/design/schemas/autonomous-butler-config-v1.schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        Draft202012Validator(schema).validate(dict(config))
+    except Exception as exc:
+        raise SupervisorPlanError("config_schema_invalid") from exc
 
 
 def grant_from_config(config: Mapping[str, Any], now: datetime) -> SupervisorGrant:
     """Resolve the one-number grant from the existing authorized config."""
     if now.tzinfo is None or not isinstance(config, Mapping):
         raise SupervisorPlanError("config_invalid")
+    _validate_config_schema(config)
     desired = config.get("desired")
     envelope = config.get("envelope")
     authorization = config.get("authorization")
@@ -213,6 +248,8 @@ def grant_from_config(config: Mapping[str, Any], now: datetime) -> SupervisorGra
         config_revision=revision,
         envelope_fingerprint_sha256=fingerprint,
         host_seat_cap=cap,
+        gate_concurrency_ceiling=int(envelope["max_host_concurrency"]),
+        approved_template_ids=tuple(sorted(envelope["approved_template_ids"])),
         cooldown_s=cooldown,
     )
 
@@ -243,7 +280,8 @@ def observation_from_fixture(value: Mapping[str, Any]) -> SupervisorObservation:
     parsed_seats: list[SupervisorSeat] = []
     for row in seats:
         if not isinstance(row, Mapping) or set(row) != {
-            "seat_id", "identity_id", "state_id", "role", "lifecycle",
+            "seat_id", "identity_id", "state_id", "state_dir_id", "generation",
+            "role", "lifecycle",
             "work_claim", "review_lease", "transition_at",
         }:
             raise SupervisorPlanError("seat_fields_invalid")
@@ -252,7 +290,9 @@ def observation_from_fixture(value: Mapping[str, Any]) -> SupervisorObservation:
         parsed_seats.append(
             SupervisorSeat(
                 seat_id=row["seat_id"], identity_id=row["identity_id"],
-                state_id=row["state_id"], role=row["role"], lifecycle=row["lifecycle"],
+                state_id=row["state_id"], state_dir_id=row["state_dir_id"],
+                generation=_count(row["generation"], "seat_generation"),
+                role=row["role"], lifecycle=row["lifecycle"],
                 work_claim=row["work_claim"], review_lease=row["review_lease"],
                 transition_at=_time(row["transition_at"], "seat_transition"),
             )
@@ -273,7 +313,8 @@ def _observation_document(observation: SupervisorObservation) -> dict[str, Any]:
         "seats": [
             {
                 "seat_id": seat.seat_id, "identity_id": seat.identity_id,
-                "state_id": seat.state_id, "role": seat.role,
+                "state_id": seat.state_id, "state_dir_id": seat.state_dir_id,
+                "generation": seat.generation, "role": seat.role,
                 "lifecycle": seat.lifecycle, "work_claim": seat.work_claim,
                 "review_lease": seat.review_lease,
                 "transition_at": seat.transition_at.isoformat(),
@@ -327,13 +368,53 @@ def _desired_mix(
     if demand.full_gate_queue_depth == 0:
         gate_budget = 0
     elif healthy:
-        gate_budget = min(grant.host_seat_cap, max(1, math.ceil(demand.full_gate_queue_depth / 2)))
+        gate_budget = min(
+            grant.gate_concurrency_ceiling,
+            max(1, math.ceil(demand.full_gate_queue_depth / 2)),
+        )
     else:
         gate_budget = 1
         # A saturated host preserves the role floors and releases gate-heavy
         # capacity instead of admitting more simultaneous full gates.
         desired["verifier"] = grant.verifier_floor
     return desired, gate_budget
+
+
+def _template_for_role(grant: SupervisorGrant, role: str) -> str:
+    aliases = (role, "acp_worker" if role == "verifier" else role)
+    matches = [
+        template_id
+        for template_id in grant.approved_template_ids
+        if any(alias in template_id.split(":") for alias in aliases)
+    ]
+    if len(matches) != 1:
+        raise SupervisorPlanError(f"approved_template_for_{role}_invalid")
+    return matches[0]
+
+
+def _provision_action(
+    grant: SupervisorGrant, role: str, prior_revision: int, ordinal: int
+) -> dict[str, Any]:
+    material = digest(
+        {
+            "board_id": grant.board_id,
+            "config_revision": grant.config_revision,
+            "envelope": grant.envelope_fingerprint_sha256,
+            "prior_revision": prior_revision,
+            "role": role,
+            "ordinal": ordinal,
+        }
+    )
+    return {
+        "kind": "provision",
+        "target_role": role,
+        "template_id": _template_for_role(grant, role),
+        "seat_id": f"seat:{material[:32]}",
+        "identity_id": f"identity:{material[8:40]}",
+        "state_id": f"state:{material[16:48]}",
+        "state_dir_id": f"state-dir:{material[24:56]}",
+        "generation": 1,
+    }
 
 
 def _action(
@@ -348,6 +429,8 @@ def _action(
                 "seat_id": seat.seat_id,
                 "identity_id": seat.identity_id,
                 "state_id": seat.state_id,
+                "state_dir_id": seat.state_dir_id,
+                "generation": seat.generation,
             }
         )
     if target_role is not None:
@@ -362,9 +445,16 @@ def create_plan(
     observation: SupervisorObservation,
     *,
     prior_revision: int = 0,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Create one deterministic plan. It cannot mutate a process or roster."""
     _count(prior_revision, "prior_revision", 2**63 - 1)
+    current = datetime.now(timezone.utc) if now is None else now
+    if current.tzinfo is None:
+        raise SupervisorPlanError("current_time_invalid")
+    age_s = (current - observation.observed_at).total_seconds()
+    if age_s < -5 or age_s > MAX_OBSERVATION_AGE_S:
+        raise SupervisorPlanError("observation_stale")
     desired, gate_budget = _desired_mix(grant, observation)
     active = [seat for seat in observation.seats if seat.active]
     actions: list[dict[str, Any]] = []
@@ -423,7 +513,9 @@ def create_plan(
         while deficits[role] and len(observation.seats) + sum(
             action["kind"] == "provision" for action in actions
         ) < grant.host_seat_cap:
-            actions.append(_action("provision", None, target_role=role))
+            actions.append(
+                _provision_action(grant, role, prior_revision, len(actions))
+            )
             deficits[role] -= 1
             active_count += 1
 
@@ -443,6 +535,7 @@ def create_plan(
         "config_revision": grant.config_revision,
         "envelope_fingerprint_sha256": grant.envelope_fingerprint_sha256,
         "host_seat_cap": grant.host_seat_cap,
+        "gate_concurrency_ceiling": grant.gate_concurrency_ceiling,
         "observation_digest_sha256": digest(_observation_document(observation)),
         "desired": desired,
         "full_gate_concurrency": gate_budget,
@@ -466,8 +559,13 @@ def confirm_plan(
     plan: Mapping[str, Any],
     grant: SupervisorGrant,
     observation: SupervisorObservation,
+    *,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Revalidate a plan and return the supervisor-consumable roster document."""
+    current_time = datetime.now(timezone.utc) if now is None else now
+    if current_time.tzinfo is None:
+        raise SupervisorPlanError("current_time_invalid")
     if (
         not isinstance(plan, Mapping)
         or set(plan) != PLAN_FIELDS
@@ -483,12 +581,16 @@ def confirm_plan(
         or plan.get("config_revision") != grant.config_revision
         or plan.get("envelope_fingerprint_sha256") != grant.envelope_fingerprint_sha256
         or plan.get("host_seat_cap") != grant.host_seat_cap
+        or plan.get("gate_concurrency_ceiling") != grant.gate_concurrency_ceiling
     ):
         raise SupervisorPlanError("authorization_changed")
     if plan.get("observation_digest_sha256") != digest(_observation_document(observation)):
         raise SupervisorPlanError("observation_changed")
     expected = create_plan(
-        grant, observation, prior_revision=plan.get("prior_revision")
+        grant,
+        observation,
+        prior_revision=plan.get("prior_revision"),
+        now=current_time,
     )
     if dict(plan) != expected:
         raise SupervisorPlanError("plan_not_current")
@@ -510,9 +612,11 @@ def confirm_plan(
     for action in actions:
         if not isinstance(action, Mapping) or action.get("kind") not in MUTATING_ACTIONS:
             raise SupervisorPlanError("action_invalid")
-        expected_fields = {"kind", "target_role"} if action["kind"] == "provision" else {
-            "kind", "seat_id", "identity_id", "state_id"
+        expected_fields = {
+            "kind", "seat_id", "identity_id", "state_id", "state_dir_id", "generation"
         }
+        if action["kind"] == "provision":
+            expected_fields.update({"target_role", "template_id"})
         if action["kind"] in {"drain", "re_role"} and "target_role" in action:
             expected_fields.add("target_role")
         if set(action) != expected_fields:
@@ -523,8 +627,33 @@ def confirm_plan(
                 seat is None
                 or action.get("identity_id") != seat.identity_id
                 or action.get("state_id") != seat.state_id
+                or action.get("state_dir_id") != seat.state_dir_id
+                or action.get("generation") != seat.generation
             ):
                 raise SupervisorPlanError("seat_identity_changed")
+        else:
+            if action.get("template_id") not in grant.approved_template_ids:
+                raise SupervisorPlanError("provision_template_not_approved")
+            identifiers = [
+                action.get("seat_id"),
+                action.get("identity_id"),
+                action.get("state_id"),
+                action.get("state_dir_id"),
+            ]
+            if any(not isinstance(value, str) for value in identifiers):
+                raise SupervisorPlanError("provision_identity_invalid")
+            if any(
+                value in {
+                    getattr(seat, attribute)
+                    for seat in observation.seats
+                }
+                for value, attribute in zip(
+                    identifiers,
+                    ("seat_id", "identity_id", "state_id", "state_dir_id"),
+                    strict=True,
+                )
+            ):
+                raise SupervisorPlanError("provision_identity_reused")
         if action["kind"] in {"pause", "stop", "remove", "re_role"}:
             seat = seats[action["seat_id"]]
             if seat is None or seat.lifecycle != "draining" or seat.leased:
@@ -542,11 +671,13 @@ def confirm_plan(
         "config_revision": grant.config_revision,
         "envelope_fingerprint_sha256": grant.envelope_fingerprint_sha256,
         "host_seat_cap": grant.host_seat_cap,
+        "gate_concurrency_ceiling": grant.gate_concurrency_ceiling,
         "desired": dict(desired),
         "full_gate_concurrency": plan["full_gate_concurrency"],
+        "seats": _observation_document(observation)["seats"],
         "actions": [dict(action) for action in actions],
         "plan_digest_sha256": claimed_digest,
-        "confirmed_at": observation.observed_at.isoformat(),
+        "confirmed_at": current_time.isoformat(),
         "audit": [dict(row) for row in plan.get("audit", [])],
         "findings": [dict(row) for row in plan.get("findings", [])],
     }
@@ -560,6 +691,12 @@ def secrets_compare(left: str, right: str) -> bool:
 
 
 class ButlerCommandClient(Protocol):
+    async def board_state_get(self, key: str) -> Mapping[str, Any]: ...
+
+    async def board_state_update(
+        self, key: str, value: str, *, expected_sha256: str | None = None
+    ) -> Mapping[str, Any]: ...
+
     async def butler_command_submit(
         self,
         request_id: str,
@@ -579,10 +716,47 @@ async def confirm_with_command(
     plan: Mapping[str, Any],
     grant: SupervisorGrant,
     observation: SupervisorObservation,
+    *,
+    now: datetime | None = None,
 ) -> tuple[dict[str, Any], Mapping[str, Any]]:
-    """Confirm locally, then use Central's durable Butler command boundary."""
-    roster = confirm_plan(plan, grant, observation)
+    """CAS-persist the canonical roster, then reference it from a command."""
+    current_time = datetime.now(timezone.utc) if now is None else now
+    roster = confirm_plan(plan, grant, observation, now=current_time)
     plan_digest = roster["plan_digest_sha256"]
+    try:
+        current_state = await client.board_state_get(ROSTER_STATE_KEY)
+    except Exception as exc:
+        if "state key not found" not in str(exc).lower():
+            raise
+        prior_value = None
+    else:
+        state = current_state.get("state", {})
+        prior_value = state.get("value") if isinstance(state, Mapping) else None
+        if prior_value is not None and not isinstance(prior_value, str):
+            raise SupervisorPlanError("roster_state_invalid")
+    if prior_value is not None:
+        try:
+            prior = json.loads(prior_value)
+        except json.JSONDecodeError as exc:
+            raise SupervisorPlanError("roster_state_invalid") from exc
+        if (
+            not isinstance(prior, Mapping)
+            or prior.get("schema") != ROSTER_SCHEMA
+            or prior.get("revision") != plan["prior_revision"]
+        ):
+            raise SupervisorPlanError("roster_revision_changed")
+    elif plan["prior_revision"] != 0:
+        raise SupervisorPlanError("roster_revision_changed")
+    encoded = canonical_json(roster).decode("utf-8")
+    await client.board_state_update(
+        ROSTER_STATE_KEY,
+        encoded,
+        expected_sha256=(
+            hashlib.sha256(prior_value.encode("utf-8")).hexdigest()
+            if prior_value is not None
+            else None
+        ),
+    )
     response = await client.butler_command_submit(
         request_id=f"roster-{plan_digest[:32]}",
         project_id=grant.board_id,
@@ -593,7 +767,28 @@ async def confirm_with_command(
             "desired_digest_sha256": digest(roster),
         },
         expected_config_revision=grant.config_revision,
-        expires_at=(observation.observed_at + timedelta(minutes=5)).isoformat(),
+        expires_at=(current_time + timedelta(minutes=5)).isoformat(),
         priority="high",
     )
     return roster, response
+
+
+def roster_or_legacy(
+    stored_value: str | None, legacy: Mapping[str, Any]
+) -> tuple[str, Mapping[str, Any]]:
+    """Supervisor read boundary: fallback only when canonical state is absent."""
+    if stored_value is None:
+        return "legacy", dict(legacy)
+    try:
+        document = json.loads(stored_value)
+    except json.JSONDecodeError as exc:
+        raise SupervisorPlanError("roster_state_invalid") from exc
+    if (
+        not isinstance(document, Mapping)
+        or document.get("schema") != ROSTER_SCHEMA
+        or document.get("revision", 0) < 1
+        or not isinstance(document.get("actions"), list)
+        or not isinstance(document.get("plan_digest_sha256"), str)
+    ):
+        raise SupervisorPlanError("roster_state_invalid")
+    return "canonical", dict(document)

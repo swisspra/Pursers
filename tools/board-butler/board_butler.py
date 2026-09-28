@@ -73,6 +73,7 @@ SUBSCRIPTION_HEALTH_KEY = "board_butler_subscription_health"
 FLEET_STATE_KEY = "autonomous_butler_state"
 PROJECT_ONBOARDING_AUDIT_KEY = "board_butler_project_onboarding"
 PROJECT_ONBOARDING_RETRY_KEY_PREFIX = "butler_retry."
+SUPERVISOR_ROSTER_STATE_KEY = "supervisor_roster"
 EVALUATION_STATE_PREFIX = "board_butler_evaluation."
 CONFIG_KEY = "coordinator_config"
 SCHEMA_VERSION = 1
@@ -1236,7 +1237,8 @@ class FileFleetObservationSource:
             raise RuntimeError("fleet observation is invalid") from exc
         if (
             not isinstance(document, dict)
-            or set(document) != self.REQUIRED_FIELDS
+            or not self.REQUIRED_FIELDS <= set(document)
+            or set(document) - self.REQUIRED_FIELDS - {"supervisor_observation"}
             or document.get("schema") != "pursers_fleet_observation_v1"
             or document.get("schema_version") != 1
         ):
@@ -1256,9 +1258,27 @@ class FileFleetObservationSource:
             or not isinstance(document.get("provider_observations"), Mapping)
             or not isinstance(document.get("provider_maximums"), Mapping)
             or not isinstance(document.get("host_observation"), Mapping)
+            or (
+                "supervisor_observation" in document
+                and not isinstance(document.get("supervisor_observation"), Mapping)
+            )
         ):
             raise RuntimeError("fleet observation payload is invalid")
         return document
+
+
+_SUPERVISOR_ROSTER_API: dict[str, Any] | None = None
+
+
+def supervisor_roster_api() -> dict[str, Any]:
+    """Load the adjacent pure planner used by the production refresh path."""
+    global _SUPERVISOR_ROSTER_API
+    if _SUPERVISOR_ROSTER_API is None:
+        path = Path(__file__).with_name("supervisor_roster.py")
+        _SUPERVISOR_ROSTER_API = runpy.run_path(
+            str(path), run_name="board_butler_supervisor_roster"
+        )
+    return _SUPERVISOR_ROSTER_API
 
 
 def _fleet_operation_id(
@@ -10974,6 +10994,53 @@ class CentralBackend:
                 FLEET_STATE_KEY, encoded, expected_sha256=expected
             )
 
+    async def _confirm_supervisor_roster(
+        self,
+        board_id: str,
+        config: Mapping[str, Any],
+        raw_observation: Mapping[str, Any],
+        now: datetime,
+    ) -> Mapping[str, Any]:
+        """Plan and CAS-publish the supervisor's canonical control document."""
+        api = supervisor_roster_api()
+        grant = api["grant_from_config"](config, now)
+        observation = api["observation_from_fixture"](raw_observation)
+        async with self._client_for_board(board_id) as client:
+            try:
+                current = await client.board_state_get(SUPERVISOR_ROSTER_STATE_KEY)
+            except Exception as exc:
+                if "state key not found" not in str(exc).lower():
+                    raise
+                prior_revision = 0
+            else:
+                state = current.get("state", {})
+                value = state.get("value") if isinstance(state, Mapping) else None
+                try:
+                    document = json.loads(value) if isinstance(value, str) else None
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError("supervisor roster state is malformed") from exc
+                if not isinstance(document, Mapping):
+                    raise RuntimeError("supervisor roster state is malformed")
+                prior_revision = int(document.get("revision", -1))
+            plan = api["create_plan"](
+                grant,
+                observation,
+                prior_revision=prior_revision,
+                now=now,
+            )
+            roster, command = await api["confirm_with_command"](
+                client,
+                plan,
+                grant,
+                observation,
+                now=now,
+            )
+        return {
+            "revision": roster["revision"],
+            "digest_sha256": api["digest"](roster),
+            "command_id": command.get("command_id"),
+        }
+
     async def _reconcile_fleet(
         self,
         active_boards: Sequence[str],
@@ -11001,6 +11068,20 @@ class CentralBackend:
         observation = FileFleetObservationSource(
             self.args.fleet_observation_file
         ).load(now)
+        supervisor_report: Mapping[str, Any] | None = None
+        raw_supervisor = observation.get("supervisor_observation")
+        if isinstance(raw_supervisor, Mapping):
+            control_board = (
+                self.args.home_board
+                if self.args.home_board in configs
+                else sorted(configs)[0]
+            )
+            supervisor_report = await self._confirm_supervisor_roster(
+                control_board,
+                configs[control_board],
+                raw_supervisor,
+                now,
+            )
         provider_maximums_raw = observation["provider_maximums"]
         provider_maximums: dict[str, dict[str, int]] = {}
         for board_id in configs:
@@ -11081,7 +11162,7 @@ class CentralBackend:
                 board_id,
                 report["state_documents"][board_id],
             )
-        return {
+        result = {
             "status": "reconciled",
             "boards": sorted(configs),
             "operations": len(report["operations"]),
@@ -11090,6 +11171,9 @@ class CentralBackend:
                 for item in report["receipts"]
             ],
         }
+        if supervisor_report is not None:
+            result["supervisor_roster"] = copy.deepcopy(supervisor_report)
+        return result
 
     async def _project_name_from_registry(self) -> str | None:
         try:

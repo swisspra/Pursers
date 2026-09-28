@@ -226,6 +226,26 @@ def signed_request(
     return request
 
 
+def supervisor_roster(*, actions: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema": executor.SUPERVISOR_ROSTER_SCHEMA,
+        "revision": 1,
+        "board_id": "pursers",
+        "config_revision": 1,
+        "envelope_fingerprint_sha256": FINGERPRINT,
+        "host_seat_cap": 3,
+        "gate_concurrency_ceiling": 2,
+        "desired": {"worker": 1, "reviewer": 1, "verifier": 0},
+        "full_gate_concurrency": 1,
+        "seats": [],
+        "actions": actions,
+        "plan_digest_sha256": "b" * 64,
+        "confirmed_at": datetime.fromtimestamp(NOW, timezone.utc).isoformat(),
+        "audit": [],
+        "findings": [],
+    }
+
+
 def test_start_creates_ready_seat_and_publishes_bounded_receipt(runtime: dict[str, Any]) -> None:
     result = runtime["service"].handle(signed_request(runtime, "start", "op-start"))
 
@@ -250,6 +270,71 @@ def test_start_creates_ready_seat_and_publishes_bounded_receipt(runtime: dict[st
     jsonschema.Draft202012Validator(
         schema, format_checker=jsonschema.FormatChecker()
     ).validate(result)
+
+
+def test_canonical_supervisor_roster_authorizes_only_matching_mutation(
+    runtime: dict[str, Any],
+) -> None:
+    action = {
+        "kind": "provision",
+        "target_role": "worker",
+        "template_id": "worker-standard",
+        "seat_id": "worker-a",
+        "identity_id": "identity:worker-a",
+        "state_id": "state:worker-a",
+        "state_dir_id": "state-dir:worker-a",
+        "generation": 1,
+    }
+    runtime["service"].supervisor_control = {
+        "source": "canonical",
+        "document": supervisor_roster(actions=[action]),
+    }
+
+    result = runtime["service"].handle(
+        signed_request(runtime, "start", "op-roster-start")
+    )
+    assert result["outcome"] == "succeeded"
+
+    with pytest.raises(executor.PolicyError, match="operation_not_in_supervisor_roster"):
+        runtime["service"].handle(
+            signed_request(runtime, "stop", "op-roster-stop")
+        )
+
+
+def test_supervisor_roster_is_bound_to_board_and_authorization(
+    runtime: dict[str, Any],
+) -> None:
+    document = supervisor_roster(actions=[])
+    document["board_id"] = "other-board"
+    runtime["service"].supervisor_control = {
+        "source": "canonical",
+        "document": document,
+    }
+    with pytest.raises(
+        executor.PolicyError, match="supervisor_roster_authorization_mismatch"
+    ):
+        runtime["service"].handle(
+            signed_request(runtime, "inspect", "op-wrong-roster")
+        )
+
+
+def test_supervisor_control_prefers_canonical_and_fails_closed_when_malformed(
+    tmp_path: Path,
+) -> None:
+    roster_path = tmp_path / "roster.json"
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text(json.dumps({"max": 3}), encoding="utf-8")
+
+    control = executor.load_supervisor_control(roster_path, legacy_path)
+    assert control == {"source": "legacy", "document": {"max": 3}}
+
+    roster_path.write_text(json.dumps(supervisor_roster(actions=[])), encoding="utf-8")
+    control = executor.load_supervisor_control(roster_path, legacy_path)
+    assert control["source"] == "canonical"
+
+    roster_path.write_text('{"schema":"pursers_supervisor_roster_v1"}', encoding="utf-8")
+    with pytest.raises(executor.PolicyError, match="supervisor_roster_invalid"):
+        executor.load_supervisor_control(roster_path, legacy_path)
 
 
 def test_identical_operation_replays_without_second_mutation(runtime: dict[str, Any]) -> None:

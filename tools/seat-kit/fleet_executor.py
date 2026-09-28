@@ -35,6 +35,26 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 
 SCHEMA = "autonomous_butler_executor_v1"
+SUPERVISOR_ROSTER_SCHEMA = "pursers_supervisor_roster_v1"
+SUPERVISOR_ROSTER_FIELDS = frozenset(
+    {
+        "schema",
+        "revision",
+        "board_id",
+        "config_revision",
+        "envelope_fingerprint_sha256",
+        "host_seat_cap",
+        "gate_concurrency_ceiling",
+        "desired",
+        "full_gate_concurrency",
+        "seats",
+        "actions",
+        "plan_digest_sha256",
+        "confirmed_at",
+        "audit",
+        "findings",
+    }
+)
 SIGNING_CONTEXT = b"pursers-executor-v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1094,6 +1114,7 @@ class FleetExecutor:
         readiness: RegistryReadinessProvider,
         publisher: ReceiptPublisher,
         *,
+        supervisor_control: Mapping[str, Any] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.policy = policy
@@ -1102,7 +1123,44 @@ class FleetExecutor:
         self.leases = leases
         self.readiness = readiness
         self.publisher = publisher
+        self.supervisor_control = supervisor_control
         self.clock = clock
+
+    def _authorize_supervisor_roster(self, request: Mapping[str, Any]) -> None:
+        control = self.supervisor_control
+        if not isinstance(control, Mapping) or control.get("source") != "canonical":
+            return
+        roster = control.get("document")
+        if not isinstance(roster, Mapping):
+            raise PolicyError("supervisor_roster_invalid")
+        if (
+            roster.get("board_id") != request.get("board_id")
+            or roster.get("envelope_fingerprint_sha256")
+            != request.get("authorization_fingerprint_sha256")
+        ):
+            raise PolicyError("supervisor_roster_authorization_mismatch")
+        aliases = {
+            "start": {"provision", "start", "resume"},
+            "drain": {"drain"},
+            "stop": {"pause", "stop", "remove"},
+            "inspect": set(),
+        }
+        if request.get("action") == "inspect":
+            return
+        matches = [
+            row
+            for row in roster.get("actions", [])
+            if isinstance(row, Mapping)
+            and row.get("seat_id") == request.get("seat_id")
+            and row.get("kind") in aliases.get(str(request.get("action")), set())
+            and row.get("generation") == request.get("expected_seat_generation")
+            and (
+                row.get("template_id") is None
+                or row.get("template_id") == request.get("template_id")
+            )
+        ]
+        if len(matches) != 1:
+            raise PolicyError("operation_not_in_supervisor_roster")
 
     def _authenticate(self, request: Mapping[str, Any]) -> tuple[str, str]:
         if set(request) != REQUEST_FIELDS:
@@ -1234,6 +1292,7 @@ class FleetExecutor:
 
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         digest, key_id = self._authenticate(request)
+        self._authorize_supervisor_roster(request)
         operation_id = str(request["operation_id"])
         previous = self.store.operation(operation_id)
         if previous:
@@ -1495,12 +1554,136 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--socket", type=Path, required=True)
+    parser.add_argument("--supervisor-roster", type=Path)
+    parser.add_argument("--legacy-supervisor-config", type=Path)
     parser.add_argument(
         "--service-manager",
         choices=("auto", "launchd", "systemd"),
         default="auto",
     )
     return parser
+
+
+def load_supervisor_control(
+    roster_path: Path | None, legacy_path: Path | None
+) -> Mapping[str, Any] | None:
+    """Prefer a canonical roster; use legacy only when it is absent."""
+    if roster_path is None:
+        return None
+    if roster_path.exists():
+        try:
+            document = json.loads(roster_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PolicyError("supervisor_roster_invalid") from exc
+        if not _valid_supervisor_roster(document):
+            raise PolicyError("supervisor_roster_invalid")
+        return {"source": "canonical", "document": dict(document)}
+    if legacy_path is None or not legacy_path.is_file():
+        raise PolicyError("supervisor_roster_unavailable")
+    try:
+        legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PolicyError("legacy_supervisor_config_invalid") from exc
+    if not isinstance(legacy, Mapping):
+        raise PolicyError("legacy_supervisor_config_invalid")
+    return {"source": "legacy", "document": dict(legacy)}
+
+
+def _valid_supervisor_roster(document: Any) -> bool:
+    """Validate the persisted executor boundary without trusting producer code."""
+    if not isinstance(document, Mapping) or set(document) != SUPERVISOR_ROSTER_FIELDS:
+        return False
+    desired = document.get("desired")
+    seats = document.get("seats")
+    actions = document.get("actions")
+    if (
+        document.get("schema") != SUPERVISOR_ROSTER_SCHEMA
+        or not isinstance(document.get("revision"), int)
+        or isinstance(document.get("revision"), bool)
+        or document["revision"] < 1
+        or not isinstance(document.get("config_revision"), int)
+        or isinstance(document.get("config_revision"), bool)
+        or document["config_revision"] < 1
+        or not isinstance(document.get("host_seat_cap"), int)
+        or isinstance(document.get("host_seat_cap"), bool)
+        or not 1 <= document["host_seat_cap"] <= 256
+        or not isinstance(document.get("gate_concurrency_ceiling"), int)
+        or isinstance(document.get("gate_concurrency_ceiling"), bool)
+        or not 1 <= document["gate_concurrency_ceiling"] <= 256
+        or not isinstance(document.get("full_gate_concurrency"), int)
+        or isinstance(document.get("full_gate_concurrency"), bool)
+        or not 0 <= document["full_gate_concurrency"] <= document["gate_concurrency_ceiling"]
+        or not isinstance(desired, Mapping)
+        or set(desired) != {"worker", "reviewer", "verifier"}
+        or any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in desired.values())
+        or sum(desired.values()) > document["host_seat_cap"]
+        or not isinstance(seats, list)
+        or not isinstance(actions, list)
+        or not isinstance(document.get("audit"), list)
+        or not isinstance(document.get("findings"), list)
+        or not isinstance(document.get("board_id"), str)
+        or not SAFE_ID.fullmatch(document["board_id"])
+        or not isinstance(document.get("envelope_fingerprint_sha256"), str)
+        or not SHA256.fullmatch(document["envelope_fingerprint_sha256"])
+        or not isinstance(document.get("plan_digest_sha256"), str)
+        or not SHA256.fullmatch(document["plan_digest_sha256"])
+    ):
+        return False
+    try:
+        _parse_time(document.get("confirmed_at"), "confirmed_at")
+    except PolicyError:
+        return False
+    identifiers: set[tuple[str, str]] = set()
+    for seat in seats:
+        if not isinstance(seat, Mapping) or set(seat) != {
+            "seat_id", "identity_id", "state_id", "state_dir_id", "generation",
+            "role", "lifecycle", "work_claim", "review_lease", "transition_at",
+        }:
+            return False
+        if any(
+            not isinstance(seat.get(field), str) or not SAFE_ID.fullmatch(seat[field])
+            for field in ("seat_id", "identity_id", "state_id", "state_dir_id")
+        ):
+            return False
+        for field in ("seat_id", "identity_id", "state_id", "state_dir_id"):
+            key = (field, seat[field])
+            if key in identifiers:
+                return False
+            identifiers.add(key)
+        if (
+            not isinstance(seat.get("generation"), int)
+            or isinstance(seat.get("generation"), bool)
+            or seat["generation"] < 1
+            or seat.get("role") not in {"worker", "reviewer", "verifier"}
+            or seat.get("lifecycle") not in {"ready", "busy", "draining", "paused", "stopped"}
+            or not isinstance(seat.get("work_claim"), bool)
+            or not isinstance(seat.get("review_lease"), bool)
+        ):
+            return False
+        try:
+            _parse_time(seat.get("transition_at"), "transition_at")
+        except PolicyError:
+            return False
+    for action in actions:
+        if not isinstance(action, Mapping) or action.get("kind") not in {
+            "provision", "start", "drain", "pause", "resume", "stop", "remove", "re_role"
+        }:
+            return False
+        required = {"kind", "seat_id", "identity_id", "state_id", "state_dir_id", "generation"}
+        allowed = required | {"target_role", "template_id"}
+        if not required <= set(action) or set(action) - allowed:
+            return False
+        if any(not isinstance(action.get(field), str) or not SAFE_ID.fullmatch(action[field]) for field in ("seat_id", "identity_id", "state_id", "state_dir_id")):
+            return False
+        if not isinstance(action.get("generation"), int) or isinstance(action.get("generation"), bool) or action["generation"] < 1:
+            return False
+        if action["kind"] == "provision" and (
+            not isinstance(action.get("template_id"), str)
+            or not SAFE_ID.fullmatch(action["template_id"])
+            or action.get("target_role") not in {"worker", "reviewer", "verifier"}
+        ):
+            return False
+    return True
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1514,6 +1697,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         FileLeaseProvider(state / "leases.json"),
         FileRegistryReadinessProvider(state / "registry-readiness.json"),
         JsonlReceiptPublisher(state / "receipts.jsonl"),
+        supervisor_control=load_supervisor_control(
+            args.supervisor_roster, args.legacy_supervisor_config
+        ),
     )
     asyncio.run(UnixSocketServer(args.socket, executor).serve())
     return 0

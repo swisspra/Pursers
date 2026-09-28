@@ -240,6 +240,16 @@ document on every cycle. Legacy `ROSTER`, `MAX`, `FULL_ACCESS`, and
 5.0.6 executor rollout is disabled or the document is absent; once a valid
 document exists they are not another control surface.
 
+The normal fleet-observation refresh may carry a `supervisor_observation`.
+Board Butler rejects that input after 180 seconds, derives a new plan from the
+strict autonomous-config schema, CAS-writes the complete seat inventory and
+lifecycle actions under board state key `supervisor_roster`, and submits a
+bounded `set_desired_state` command that names the resulting revision and
+digest. The host executor accepts a mutation only when its board, authorization
+fingerprint, seat generation, approved template, and lifecycle action match
+that canonical document. A malformed canonical document fails closed; legacy
+configuration is consulted only when the canonical document is absent.
+
 The operator grant is the single integer `host_seat_cap`. Setting or changing
 it creates a new authorization whose envelope fingerprint covers the cap,
 approved role templates, host identity, and safety version. Worker, reviewer,
@@ -269,8 +279,10 @@ never reused. A new seat receives a new opaque identity and state directory
 from an approved template. The supervisor only consumes confirmed roster
 state; it never invents these transitions.
 
-Butler may set the active roster size no higher than `host_seat_cap` and may
-set `PURSERS_FULL_GATE_CONCURRENCY` between zero and the confirmed host gate
+Butler may set the active roster size no higher than `host_seat_cap`. Gate
+concurrency is separately bounded by the envelope's immutable
+`max_host_concurrency`; the roster cap cannot raise that ceiling. Butler may
+set `PURSERS_FULL_GATE_CONCURRENCY` between zero and the confirmed gate
 ceiling. It cannot alter credentials, template allowlists, state roots, host
 identity, or the safety version. Each proposal, confirmation, refusal, and
 lifecycle result is appended to the Butler command log and projected as a
