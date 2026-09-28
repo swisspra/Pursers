@@ -45,6 +45,7 @@ Unset means the component applies its documented default or requires an explicit
 | `ONBOARD_TOKEN_FILE` | Wait bridge | unset | Compatibility token-file setting used by seat and registry administration commands. |
 | `PATH` | ACP | operating-system default | Executable search path passed to local ACP child processes. |
 | `PROJECT_REGISTRY_FILE` | Wait bridge | unset | Project-registry JSON file used by the registry seeder. |
+| `PURSERS_ALLOW_ENV_TOKEN` | Wait bridge | unset | Set to `1` to deliberately let an environment credential override a differing configured token file. |
 | `PURSERS_BACKLOG_RESURFACE_INTERVAL_S` | Wait bridge | `600` seconds | Minimum interval before an unchanged backlog cue can resurface. |
 | `PURSERS_BACKLOG_SCAN_INTERVAL_S` | Wait bridge | `30` seconds | Interval between claimable-backlog reconciliation scans while a push wait remains open. |
 | `PURSERS_BOARDS` | Wait bridge | unset | Comma-separated board allowlist for a multi-board wait bridge. |
