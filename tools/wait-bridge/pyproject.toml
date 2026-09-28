@@ -18,6 +18,7 @@ dependencies = [
 [project.scripts]
 pursers-wait-bridge = "pursers_wait_server:main"
 pursers-door = "door_admin:main"
+pursers-registry = "registry_admin:main"
 
 [tool.setuptools]
 py-modules = ["pursers_wait_server", "agent_naming", "backlog", "door_admin", "registry_admin", "registry_doctor", "seat_admin", "door_state", "ticket_lifecycle", "team_lifecycle", "seat_lifecycle"]

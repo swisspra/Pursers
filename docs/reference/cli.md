@@ -615,6 +615,114 @@ options:
   -h, --help   show this help message and exit
 ```
 
+## pursers-registry
+
+### `pursers-registry --help`
+
+```text
+usage: pursers-registry [-h] [--central-url CENTRAL_URL] [--home-board HOME_BOARD] [--agent-name AGENT_NAME]
+                        {show,add,pause,activate,remove,set-repository-url} ...
+
+Safely inspect and edit the Pursers project registry.
+
+positional arguments:
+  {show,add,pause,activate,remove,set-repository-url}
+    show                validate and print the current registry
+    add                 add or replace a project
+    set-repository-url  set exact repository URL routing for a project
+
+options:
+  -h, --help            show this help message and exit
+  --central-url CENTRAL_URL
+                        Central MCP URL (default: ONBOARD_CENTRAL_URL or localhost)
+  --home-board HOME_BOARD
+                        home board containing project_registry (default: ONBOARD_BOARD_ID or pursers)
+  --agent-name AGENT_NAME
+                        board identity used for the operation
+```
+
+### `pursers-registry show --help`
+
+```text
+usage: pursers-registry show [-h]
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### `pursers-registry add --help`
+
+```text
+usage: pursers-registry add [-h] --board-id BOARD_ID --work-dir WORK_DIR [--work-dir-owner {fleet,operator}]
+                            [--fleet-clone-dir FLEET_CLONE_DIR] [--repository-url REPOSITORY_URL]
+                            [--fleet | --operator-only] [--status {active,paused}] [--force]
+                            name
+
+positional arguments:
+  name
+
+options:
+  -h, --help            show this help message and exit
+  --board-id BOARD_ID
+  --work-dir WORK_DIR
+  --work-dir-owner {fleet,operator}
+  --fleet-clone-dir FLEET_CLONE_DIR
+  --repository-url REPOSITORY_URL
+  --fleet
+  --operator-only
+  --status {active,paused}
+  --force               replace an existing project with the same name
+```
+
+### `pursers-registry pause --help`
+
+```text
+usage: pursers-registry pause [-h] name
+
+positional arguments:
+  name
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### `pursers-registry activate --help`
+
+```text
+usage: pursers-registry activate [-h] name
+
+positional arguments:
+  name
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### `pursers-registry remove --help`
+
+```text
+usage: pursers-registry remove [-h] name
+
+positional arguments:
+  name
+
+options:
+  -h, --help  show this help message and exit
+```
+
+### `pursers-registry set-repository-url --help`
+
+```text
+usage: pursers-registry set-repository-url [-h] name repository_url
+
+positional arguments:
+  name
+  repository_url
+
+options:
+  -h, --help      show this help message and exit
+```
+
 ## pursers-acp
 
 ### `pursers-acp --help`

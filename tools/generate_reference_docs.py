@@ -196,6 +196,10 @@ CLI_SPECS: tuple[tuple[str, str, str, tuple[tuple[str, ...], ...]], ...] = (
     ("pursers-door", "tools/wait-bridge:packages/client/src", "door_admin", (
         (), ("issue",), ("rotate",), ("list",), ("revoke-kid",), ("decode",),
     )),
+    ("pursers-registry", "tools/wait-bridge:packages/client/src", "registry_admin", (
+        (), ("show",), ("add",), ("pause",), ("activate",), ("remove",),
+        ("set-repository-url",),
+    )),
     ("pursers-acp", "tools/acp-agent/src:packages/client/src:packages/central/src", "pursers_acp.agent", ((),)),
     ("Fleet dashboard launcher", "tools/fleet-dashboard:packages/client/src", "fleet_dashboard", ((),)),
     ("Board Butler", "tools/board-butler:packages/client/src", "board_butler", ((),)),
@@ -207,6 +211,7 @@ CLI_ENTRY_POINTS = {
     "pursers-personal-import": ("packages/import/pyproject.toml", "pursers_personal_import.personal_import:main"),
     "pursers-wait-bridge": ("tools/wait-bridge/pyproject.toml", "pursers_wait_server:main"),
     "pursers-door": ("tools/wait-bridge/pyproject.toml", "door_admin:main"),
+    "pursers-registry": ("tools/wait-bridge/pyproject.toml", "registry_admin:main"),
     "pursers-acp": ("tools/acp-agent/pyproject.toml", "pursers_acp.agent:main"),
 }
 

@@ -16,7 +16,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-from pursers_client import BoardClient
+from pursers_client import BoardClient, BoardClientError
 
 
 CENTRAL_URL_DEFAULT = "http://127.0.0.1:8766/mcp"
@@ -24,6 +24,7 @@ HOME_BOARD_ID = "pursers"
 CENTRAL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 REGISTRY_KEY = "project_registry"
 SCHEMA_VERSION = 1
+EMPTY_REGISTRY = {"schema_version": SCHEMA_VERSION, "projects": {}}
 VALID_STATUSES = frozenset({"active", "paused"})
 VALID_WORK_DIR_OWNERS = frozenset({"operator", "fleet"})
 
@@ -33,11 +34,15 @@ class RegistryError(RuntimeError):
 
 
 class RegistryClient(Protocol):
+    agent_name: str
+
     async def board_state_get(self, key: str | None = None) -> dict[str, Any]: ...
 
     async def board_state_update(
         self, key: str, value: str, *, expected_sha256: str | None = None
     ) -> dict[str, Any]: ...
+
+    async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]: ...
 
 
 def _require_clean_string(value: Any, label: str) -> str:
@@ -178,13 +183,26 @@ async def write_and_verify(
     expected: dict[str, Any],
     *,
     expected_sha256: str | None = None,
+    expected_absent: bool = False,
 ) -> dict[str, Any]:
     validated = validate_registry(expected)
-    await client.board_state_update(
-        REGISTRY_KEY,
-        json.dumps(validated, separators=(",", ":"), sort_keys=True),
-        expected_sha256=expected_sha256,
-    )
+    encoded = json.dumps(validated, separators=(",", ":"), sort_keys=True)
+    if expected_absent:
+        await client._call(  # noqa: SLF001 - create-only is not in old clients.
+            "board_state_update",
+            {
+                "agent_name": client.agent_name,
+                "key": REGISTRY_KEY,
+                "value": encoded,
+                "expected_absent": True,
+            },
+        )
+    else:
+        await client.board_state_update(
+            REGISTRY_KEY,
+            encoded,
+            expected_sha256=expected_sha256,
+        )
     try:
         actual = await read_registry(client)
     except RegistryError as exc:
@@ -263,13 +281,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def execute(args: argparse.Namespace, client: RegistryClient) -> None:
-    current_result = await client.board_state_get(REGISTRY_KEY)
-    current = _registry_from_result(current_result)
-    state = current_result.get("state", {})
-    raw_value = state.get("value") if isinstance(state, dict) else None
-    if not isinstance(raw_value, str):  # _registry_from_result already guards this.
-        raise RegistryError("project_registry state value must be a JSON string")
-    expected_sha256 = hashlib.sha256(raw_value.encode("utf-8")).hexdigest()
+    expected_absent = False
+    try:
+        current_result = await client.board_state_get(REGISTRY_KEY)
+    except BoardClientError as exc:
+        if args.command != "add" or str(exc) != "state key not found":
+            raise
+        current = copy.deepcopy(EMPTY_REGISTRY)
+        expected_sha256 = None
+        expected_absent = True
+    else:
+        current = _registry_from_result(current_result)
+        state = current_result.get("state", {})
+        raw_value = state.get("value") if isinstance(state, dict) else None
+        if not isinstance(raw_value, str):  # _registry_from_result guards this.
+            raise RegistryError("project_registry state value must be a JSON string")
+        expected_sha256 = hashlib.sha256(raw_value.encode("utf-8")).hexdigest()
     if args.command == "show":
         print(_render(current))
         return
@@ -313,7 +340,10 @@ async def execute(args: argparse.Namespace, client: RegistryClient) -> None:
         elif args.command == "remove":
             removed = projects.pop(name)
             verified = await write_and_verify(
-                client, current, expected_sha256=expected_sha256
+                client,
+                current,
+                expected_sha256=expected_sha256,
+                expected_absent=expected_absent,
             )
             print("Removed entry (save this JSON to restore it by hand):")
             print(_render({name: removed}))
@@ -328,7 +358,10 @@ async def execute(args: argparse.Namespace, client: RegistryClient) -> None:
             raise RegistryError(f"unsupported command {args.command!r}")
 
     verified = await write_and_verify(
-        client, current, expected_sha256=expected_sha256
+        client,
+        current,
+        expected_sha256=expected_sha256,
+        expected_absent=expected_absent,
     )
     print(_render(verified))
 

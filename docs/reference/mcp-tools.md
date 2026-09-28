@@ -784,6 +784,7 @@ Required authorization: `board:write`, or restricted `board:coordinate`/`board:i
 | `value` | `string` | required | — |
 | `expected_generation` | `string | null` | optional | `null` |
 | `expected_sha256` | `string | null` | optional | `null` |
+| `expected_absent` | `boolean` | optional | `false` |
 
 Response fields: `ok, key, state, release_events, implicitly_renewed`.
 
