@@ -10568,6 +10568,15 @@ def make_handler(
                     _json_bytes({"error": str(exc), "central": label}),
                 )
                 return
+            except ProjectLifecycleConflictError as exc:
+                # A lifecycle conflict is a state conflict on every platform; it
+                # must not fall into the worker-support 501 below.
+                self._send(
+                    409,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"error": str(exc), "central": label}),
+                )
+                return
             except RuntimeError as exc:
                 if route in {"/api/config", "/api/intake"}:
                     self._send(
