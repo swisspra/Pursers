@@ -27,6 +27,7 @@ SCHEMA_VERSION = 1
 EMPTY_REGISTRY = {"schema_version": SCHEMA_VERSION, "projects": {}}
 VALID_STATUSES = frozenset({"active", "paused"})
 VALID_WORK_DIR_OWNERS = frozenset({"operator", "fleet"})
+VALID_DOMAINS = frozenset({"personal", "work"})
 
 
 class RegistryError(RuntimeError):
@@ -96,7 +97,13 @@ def validate_registry(document: Any) -> dict[str, Any]:
         _require_clean_string(name, "project name")
         required = {"board_id", "work_dir", "status"}
         optional = {
-            "work_dir_owner", "fleet_clone_dir", "fleet", "repository_url"
+            "work_dir_owner",
+            "fleet_clone_dir",
+            "fleet",
+            "repository_url",
+            "integration_ref",
+            "domain",
+            "public",
         }
         if (
             not isinstance(entry, dict)
@@ -133,6 +140,18 @@ def validate_registry(document: Any) -> dict[str, Any]:
                 )
         if "fleet" in entry and type(entry["fleet"]) is not bool:
             raise RegistryError(f"project {name!r} fleet must be boolean")
+        if "public" in entry and type(entry["public"]) is not bool:
+            raise RegistryError(f"project {name!r} public must be boolean")
+        if "domain" in entry and entry["domain"] not in VALID_DOMAINS:
+            raise RegistryError(f"project {name!r} domain must be personal or work")
+        if "integration_ref" in entry:
+            integration_ref = _require_clean_string(
+                entry["integration_ref"], f"project {name!r} integration_ref"
+            )
+            if integration_ref.startswith("-") or len(integration_ref) > 255:
+                raise RegistryError(
+                    f"project {name!r} integration_ref must be a valid git reference"
+                )
         if "repository_url" in entry:
             _require_repository_url(
                 entry["repository_url"], f"project {name!r} repository_url"
@@ -258,6 +277,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add.add_argument("--fleet-clone-dir")
     add.add_argument("--repository-url")
+    add.add_argument("--integration-ref")
+    add.add_argument("--domain", choices=sorted(VALID_DOMAINS))
     fleet = add.add_mutually_exclusive_group()
     fleet.add_argument("--fleet", dest="fleet", action="store_true")
     fleet.add_argument("--operator-only", dest="fleet", action="store_false")
@@ -328,6 +349,15 @@ async def execute(args: argparse.Namespace, client: RegistryClient) -> None:
             projects[name]["repository_url"] = _require_repository_url(
                 args.repository_url
             )
+        if args.integration_ref is not None:
+            integration_ref = _require_clean_string(
+                args.integration_ref, "integration_ref"
+            )
+            if integration_ref.startswith("-") or len(integration_ref) > 255:
+                raise RegistryError("integration_ref must be a valid git reference")
+            projects[name]["integration_ref"] = integration_ref
+        if args.domain is not None:
+            projects[name]["domain"] = args.domain
         if args.fleet is not None:
             projects[name]["fleet"] = args.fleet
     else:
