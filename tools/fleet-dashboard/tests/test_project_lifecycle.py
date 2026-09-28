@@ -153,6 +153,98 @@ def test_add_plan_previews_registry_board_clone_and_permissions(tmp_path: Path) 
     assert plan["proposed_entry"]["repository_url"] == "https://example.invalid/new.git"
 
 
+@pytest.mark.parametrize(
+    ("source_changes", "request_changes", "changed_field"),
+    [
+        ({"path": "/PATH/TO/replacement"}, {}, "work_dir"),
+        (
+            {"repository_url": "https://example.invalid/replacement.git"},
+            {},
+            "repository_url",
+        ),
+        ({"integration_ref": "release"}, {}, "integration_ref"),
+        ({}, {"board_id": "new-board"}, "board_id"),
+    ],
+)
+def test_add_plan_blocks_existing_name_with_different_persisted_settings(
+    source_changes: dict, request_changes: dict, changed_field: str
+) -> None:
+    source = {
+        "path": "/PATH/TO/demo",
+        "git_mode": "none",
+        "repository_url": None,
+        "integration_ref": "main",
+        "blocked": False,
+        "blockers": [],
+    }
+    source.update(source_changes)
+    request = {
+        "name": "demo",
+        "board_id": "demo-board",
+        "prepare_fleet_clone": False,
+    }
+    request.update(request_changes)
+
+    plan = lifecycle.build_add_plan(
+        request=request,
+        registry=_registry(),
+        registry_expected_sha256="d" * 64,
+        source=source,
+        board_exists=True,
+        actor="dashboard",
+        central="work",
+    )
+
+    assert plan["blocked"] is True
+    assert "already registered" in " ".join(plan["blockers"])
+    registry_operation = next(
+        item for item in plan["operations"] if item["operation_id"] == "registry"
+    )
+    assert registry_operation["effect"] == "blocked_name_collision"
+    assert changed_field in registry_operation["changed_fields"]
+    store = lifecycle.ProjectLifecycleStore()
+    stored = store.add(plan)
+    with pytest.raises(lifecycle.ProjectLifecycleConflictError, match="blocked"):
+        store.reserve(
+            stored["plan_id"],
+            actor="dashboard",
+            central="work",
+            plan_digest=stored["plan_digest"],
+            confirmation="demo",
+        )
+
+
+def test_add_plan_allows_exact_idempotent_rerun() -> None:
+    source = {
+        "path": "/PATH/TO/demo",
+        "git_mode": "none",
+        "repository_url": None,
+        "integration_ref": "main",
+        "blocked": False,
+        "blockers": [],
+    }
+    plan = lifecycle.build_add_plan(
+        request={
+            "name": "demo",
+            "board_id": "demo-board",
+            "prepare_fleet_clone": False,
+        },
+        registry=_registry(),
+        registry_expected_sha256="e" * 64,
+        source=source,
+        board_exists=True,
+        actor="dashboard",
+        central="work",
+    )
+
+    assert plan["blocked"] is False
+    registry_operation = next(
+        item for item in plan["operations"] if item["operation_id"] == "registry"
+    )
+    assert registry_operation["effect"] == "already_present"
+    assert "changed_fields" not in registry_operation
+
+
 def test_remove_plan_requires_paused_quiescent_complete_state() -> None:
     blocked = lifecycle.build_remove_plan(
         request={"action": "remove", "name": "demo"},

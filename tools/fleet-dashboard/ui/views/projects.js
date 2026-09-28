@@ -136,8 +136,27 @@
     </section>`;
   }
 
+  function redactedRegistryEntry(entry) {
+    if (!entry) return 'Not registered';
+    const visible = {};
+    for (const key of Object.keys(entry).sort()) {
+      const value = entry[key];
+      if (key === 'work_dir') visible[key] = '[local folder configured]';
+      else if (key === 'repository_url') visible[key] = '[Git source configured]';
+      else if (key === 'fleet_clone_dir') visible[key] = '[Fleet clone configured]';
+      else if (['board_id', 'integration_ref', 'status'].includes(key) && ['string', 'number', 'boolean'].includes(typeof value)) visible[key] = value;
+      else visible[key] = '[configured]';
+    }
+    return JSON.stringify(visible);
+  }
+
   function operationList(plan) {
-    return (plan.operations || []).map(operation => `<li><b>${esc(operation.effect)}</b> ${esc(operation.target)}<span>${esc(operation.required_permission || '')}</span></li>`).join('');
+    return (plan.operations || []).map(operation => {
+      const registryImpact = operation.operation_id === 'registry'
+        ? `<dl class="projects-operation-impact"><div><dt>Before</dt><dd><code>${esc(redactedRegistryEntry(operation.before))}</code></dd></div><div><dt>After</dt><dd><code>${esc(redactedRegistryEntry(operation.after))}</code></dd></div>${operation.changed_fields?.length ? `<div><dt>Changed fields</dt><dd>${esc(operation.changed_fields.join(', '))}</dd></div>` : ''}</dl>`
+        : '';
+      return `<li><b>${esc(operation.effect)}</b> ${esc(operation.target)}<span>${esc(operation.required_permission || '')}</span>${registryImpact}</li>`;
+    }).join('');
   }
 
   function lifecyclePreview() {

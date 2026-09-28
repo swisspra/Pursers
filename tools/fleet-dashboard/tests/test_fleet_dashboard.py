@@ -10140,6 +10140,189 @@ def test_project_lifecycle_non_git_preview_apply_and_replay(tmp_path: Path) -> N
         thread.join()
 
 
+def test_project_lifecycle_add_collision_is_blocked_and_exact_rerun_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    central = FakeDoorCentral()
+    existing_folder = tmp_path / "existing"
+    replacement_folder = tmp_path / "replacement"
+    existing_folder.mkdir()
+    replacement_folder.mkdir()
+    central.registry_data["projects"]["existing-proj"]["work_dir"] = str(
+        existing_folder
+    )
+    original_registry = copy.deepcopy(central.registry_data)
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+    cache = dashboard.DashboardCache(
+        [dashboard.FleetFetcher(config, client_factory=central.client_factory)], 60
+    )
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, seat_manager=SimpleNamespace()),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post(path: str, payload: dict) -> tuple[int, dict]:
+        request = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            return response.status, json.load(response)
+
+    try:
+        _status, blocked = post(
+            "/api/lifecycle/plan",
+            {
+                "action": "add",
+                "name": "existing-proj",
+                "board_id": "replacement-board",
+                "work_dir": str(replacement_folder),
+                "git_mode": "none",
+                "repository_url": None,
+                "integration_ref": "main",
+                "prepare_fleet_clone": False,
+            },
+        )
+        assert blocked["blocked"] is True
+        assert "already registered" in " ".join(blocked["blockers"])
+        registry_operation = next(
+            item
+            for item in blocked["operations"]
+            if item["operation_id"] == "registry"
+        )
+        assert registry_operation["effect"] == "blocked_name_collision"
+        assert registry_operation["changed_fields"] == ["board_id", "work_dir"]
+
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            post(
+                "/api/lifecycle/apply",
+                {
+                    "plan_id": blocked["plan_id"],
+                    "plan_digest": blocked["plan_digest"],
+                    "confirmation": "existing-proj",
+                },
+            )
+        assert caught.value.code == 409
+        assert central.registry_data == original_registry
+        assert "replacement-board" not in central.created_boards
+
+        _status, rerun = post(
+            "/api/lifecycle/plan",
+            {
+                "action": "add",
+                "name": "existing-proj",
+                "board_id": "existing-board",
+                "work_dir": str(existing_folder),
+                "git_mode": "none",
+                "repository_url": None,
+                "integration_ref": "main",
+                "prepare_fleet_clone": False,
+            },
+        )
+        assert rerun["blocked"] is False
+        assert next(
+            item["effect"]
+            for item in rerun["operations"]
+            if item["operation_id"] == "registry"
+        ) == "already_present"
+        _status, result = post(
+            "/api/lifecycle/apply",
+            {
+                "plan_id": rerun["plan_id"],
+                "plan_digest": rerun["plan_digest"],
+                "confirmation": "existing-proj",
+            },
+        )
+        assert result["ok"] is True
+        assert central.registry_data == original_registry
+        assert next(
+            step["status"]
+            for step in result["steps"]
+            if step["step"] == "registry_admin"
+        ) == "already present"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_projects_lifecycle_renders_redacted_registry_conflict_impact() -> None:
+    source = {
+        "path": "/PATH/TO/replacement",
+        "git_mode": "none",
+        "repository_url": None,
+        "integration_ref": "main",
+        "blocked": False,
+        "blockers": [],
+    }
+    plan = dashboard.build_add_plan(
+        request={
+            "name": "demo",
+            "board_id": "new-board",
+            "prepare_fleet_clone": False,
+        },
+        registry={
+            "schema_version": 1,
+            "projects": {
+                "demo": {
+                    "board_id": "old-board",
+                    "work_dir": "/PATH/TO/original",
+                    "repository_url": "https://example.invalid/private.git",
+                    "status": "active",
+                }
+            },
+        },
+        registry_expected_sha256="f" * 64,
+        source=source,
+        board_exists=False,
+        actor="dashboard",
+        central="work",
+    )
+    projects = dashboard.UI_ASSETS["/ui/views/projects.js"][1].decode("utf-8")
+    instrumented = projects.replace(
+        "  globalThis.FleetViewModules.register({",
+        "  globalThis.__projectOperationListForTest = (plan, escape) => { esc = escape; return operationList(plan); };\n  globalThis.FleetViewModules.register({",
+        1,
+    )
+    program = f"""
+globalThis.FleetViewModules = {{register() {{}}}};
+eval({json.dumps(instrumented)});
+const html = globalThis.__projectOperationListForTest(
+  {json.dumps(plan)},
+  value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;'),
+);
+console.log(JSON.stringify({{html}}));
+"""
+    html = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )["html"]
+
+    assert "blocked_name_collision" in html
+    assert "Before" in html
+    assert "After" in html
+    assert "Changed fields" in html
+    assert "board_id, repository_url, work_dir" in html
+    assert "old-board" in html and "new-board" in html
+    assert "[local folder configured]" in html
+    assert "[Git source configured]" in html
+    assert "/PATH/TO/original" not in html
+    assert "https://example.invalid/private.git" not in html
+
+
 def test_project_lifecycle_remove_requires_pause_and_preserves_every_path(
     tmp_path: Path,
 ) -> None:

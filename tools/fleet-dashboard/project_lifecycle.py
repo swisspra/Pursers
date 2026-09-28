@@ -195,6 +195,14 @@ def _validate_project_identity(name: Any, board_id: Any) -> tuple[str, str]:
     return name.strip(), board_id
 
 
+def _canonical_registry_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize persisted defaults before an idempotence comparison."""
+    canonical = copy.deepcopy(dict(entry))
+    if canonical.get("integration_ref", "main") == "main":
+        canonical.pop("integration_ref", None)
+    return canonical
+
+
 def build_add_plan(
     *,
     request: Mapping[str, Any],
@@ -216,6 +224,8 @@ def build_add_plan(
     if not isinstance(projects, Mapping):
         raise ProjectLifecycleError("project registry has no projects mapping")
     existing = projects.get(name)
+    if name in projects and not isinstance(existing, Mapping):
+        raise ProjectLifecycleError("existing project registry entry is invalid")
     proposed_entry: dict[str, Any] = {
         "board_id": board_id,
         "work_dir": source["path"],
@@ -229,15 +239,44 @@ def build_add_plan(
     if isinstance(existing, Mapping) and existing.get("fleet_clone_dir"):
         proposed_entry["fleet_clone_dir"] = existing["fleet_clone_dir"]
 
+    existing_entry = copy.deepcopy(dict(existing)) if isinstance(existing, Mapping) else None
+    exact_rerun = (
+        existing_entry is not None
+        and _canonical_registry_entry(existing_entry)
+        == _canonical_registry_entry(proposed_entry)
+    )
+    changed_fields: list[str] = []
+    if existing_entry is not None and not exact_rerun:
+        missing = object()
+        changed_fields = sorted(
+            key
+            for key in set(existing_entry) | set(proposed_entry)
+            if existing_entry.get(key, missing) != proposed_entry.get(key, missing)
+        )
+        blockers.append(
+            "project name is already registered with different settings; "
+            "choose a unique name or remove the existing project through the guarded flow"
+        )
+
+    registry_operation = {
+        "operation_id": "registry",
+        "effect": (
+            "already_present"
+            if exact_rerun
+            else "blocked_name_collision"
+            if existing_entry is not None
+            else "create"
+        ),
+        "target": "project_registry",
+        "before": existing_entry,
+        "after": copy.deepcopy(proposed_entry),
+        "required_permission": f"admin on registry board and {board_id}",
+    }
+    if changed_fields:
+        registry_operation["changed_fields"] = changed_fields
+
     operations = [
-        {
-            "operation_id": "registry",
-            "effect": "create_or_update",
-            "target": "project_registry",
-            "before": copy.deepcopy(existing),
-            "after": copy.deepcopy(proposed_entry),
-            "required_permission": f"admin on registry board and {board_id}",
-        },
+        registry_operation,
         {
             "operation_id": "board",
             "effect": "verify" if board_exists else "create",
