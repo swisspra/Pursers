@@ -29,6 +29,8 @@ import os
 import random
 import re
 import runpy
+import shlex
+import shutil
 import socket
 import stat
 import subprocess
@@ -112,6 +114,22 @@ STATE_WRITE_RETRY_BASE_DELAY_S = 0.025
 OBSERVATION_TICKET_LIMIT = 100
 OBSERVATION_HISTORY_DAYS = 7
 OBSERVATION_FINDING_KIND = "butler_observation"
+GATE_QUEUE_NAG_DEPTH = 3
+GATE_QUEUE_ESCALATE_DEPTH = 8
+GATE_QUEUE_NAG_AGE_S = 15 * 60
+GATE_QUEUE_ESCALATE_AGE_S = 60 * 60
+QUESTION_NAG_COUNT = 5
+QUESTION_NAG_AGE_S = 30 * 60
+QUESTION_ESCALATE_COUNT = 20
+QUESTION_ESCALATE_AGE_S = 2 * 60 * 60
+APPROVAL_NAG_AGE_S = 60 * 60
+APPROVAL_ESCALATE_AGE_S = 24 * 60 * 60
+REJECTION_NAG_COUNT = 2
+REJECTION_ESCALATE_COUNT = 3
+ROLE_IMBALANCE_NAG_COUNT = 2
+ROLE_IMBALANCE_ESCALATE_COUNT = 8
+MAX_GATE_QUEUE_ROWS = 200
+MAX_SIGNAL_TICKET_FINDINGS = 3
 PARK_ANNOTATION_MARKER = "board-butler:no-live-candidates"
 REFUSAL_ANNOTATION_MARKER = "board-butler:incapable-target-refusal"
 MIN_AGREEMENT_SAMPLES = 3
@@ -2454,6 +2472,12 @@ class ObservationContext:
     tickets: Mapping[str, Mapping[str, Any]]
     questions: tuple[Mapping[str, Any], ...]
     now: datetime
+    ticket_rows: tuple[Mapping[str, Any], ...] = ()
+    agents: tuple[Mapping[str, Any], ...] = ()
+    gate_queue: Mapping[str, Any] | None = None
+    host_headroom: Mapping[str, Any] | None = None
+    repo: Path | None = None
+    main_ref: str | None = None
     questions_complete: bool = True
     tickets_complete: bool = True
 
@@ -6799,6 +6823,243 @@ def _record_time(record: Mapping[str, Any], *keys: str) -> datetime | None:
     return None
 
 
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _gate_process_rows(process_table: str) -> list[tuple[int, str, str]]:
+    """Return active ci-manifest processes and their admission classes."""
+    rows: list[tuple[int, str, str]] = []
+    defaults = {"run": "release", "approved-batch": "release", "affected": "active-worker"}
+    for line in process_table.splitlines():
+        match = re.match(r"^\s*(\d+)\s+(.+)$", line)
+        if match is None:
+            continue
+        pid = int(match.group(1))
+        command = match.group(2)
+        try:
+            arguments = shlex.split(command)
+        except ValueError:
+            continue
+        script_index = next(
+            (
+                index
+                for index, value in enumerate(arguments)
+                if value == "tools/ci_manifest.py" or value.endswith("/tools/ci_manifest.py")
+            ),
+            None,
+        )
+        # A seat launcher can contain the literal command in its long prompt.
+        # A real invocation has only the interpreter (and at most a couple of
+        # interpreter flags) before the script path.
+        if (
+            script_index is None
+            or script_index > 3
+            or script_index + 1 >= len(arguments)
+        ):
+            continue
+        command_name = arguments[script_index + 1]
+        if command_name not in defaults:
+            continue
+        admission_class = defaults[command_name]
+        if "--admission-class" in arguments:
+            index = arguments.index("--admission-class")
+            if index + 1 >= len(arguments):
+                continue
+            admission_class = arguments[index + 1]
+        rows.append((pid, admission_class, command_name))
+    return rows
+
+
+def read_full_gate_queue(
+    state_dir: Path,
+    now: datetime,
+    *,
+    process_table: str | None = None,
+    process_alive: Callable[[int], bool] = _pid_exists,
+) -> dict[str, Any]:
+    """Inspect the host admission queue without taking a lock or changing it."""
+    queue_dir = state_dir / "queue"
+    try:
+        paths = sorted(queue_dir.glob("*.json"))
+    except OSError as exc:
+        return {"complete": False, "reason": type(exc).__name__}
+    complete = len(paths) <= MAX_GATE_QUEUE_ROWS
+    queued: list[dict[str, Any]] = []
+    malformed = 0
+    for path in paths[:MAX_GATE_QUEUE_ROWS]:
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            malformed += 1
+            complete = False
+            continue
+        valid = (
+            isinstance(row, dict)
+            and row.get("schema") == 1
+            and isinstance(row.get("pid"), int)
+            and not isinstance(row.get("pid"), bool)
+            and isinstance(row.get("requested_ns"), int)
+            and not isinstance(row.get("requested_ns"), bool)
+            and isinstance(row.get("admission_class"), str)
+        )
+        if not valid:
+            malformed += 1
+            complete = False
+            continue
+        if process_alive(int(row["pid"])):
+            queued.append(row)
+    if process_table is None:
+        try:
+            completed = subprocess.run(
+                ["/bin/ps", "-axo", "pid=,command="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            process_table = ""
+            complete = False
+        else:
+            process_table = completed.stdout if completed.returncode == 0 else ""
+            complete = complete and completed.returncode == 0
+    queued_pids = {int(row["pid"]) for row in queued}
+    holders = [
+        row for row in _gate_process_rows(process_table) if row[0] not in queued_pids
+    ]
+    holder_classes = sorted({row[1] for row in holders})
+    requested = [int(row["requested_ns"]) / 1_000_000_000 for row in queued]
+    oldest_wait_s = max(0, int(now.timestamp() - min(requested))) if requested else 0
+    return {
+        "complete": complete,
+        "depth": len(queued),
+        "oldest_wait_s": oldest_wait_s,
+        "holder_class": holder_classes[0] if len(holder_classes) == 1 else (
+            "none" if not holder_classes else "multiple"
+        ),
+        "holder_classes": holder_classes,
+        "malformed": malformed,
+    }
+
+
+def _memory_headroom_bytes() -> tuple[int, int] | None:
+    if sys.platform == "darwin":
+        total_result = subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "hw.memsize"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        pages_result = subprocess.run(
+            ["/usr/bin/vm_stat"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if total_result.returncode != 0 or pages_result.returncode != 0:
+            return None
+        page_match = re.search(r"page size of (\d+) bytes", pages_result.stdout)
+        if page_match is None:
+            return None
+        page_size = int(page_match.group(1))
+        counts: dict[str, int] = {}
+        for line in pages_result.stdout.splitlines():
+            match = re.match(r"^([^:]+):\s+(\d+)\.?$", line.strip())
+            if match is not None:
+                counts[match.group(1)] = int(match.group(2))
+        available_pages = sum(
+            counts.get(name, 0)
+            for name in (
+                "Pages free",
+                "Pages inactive",
+                "Pages speculative",
+                "Pages purgeable",
+            )
+        )
+        return available_pages * page_size, int(total_result.stdout.strip())
+    try:
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        available = int(os.sysconf("SC_AVPHYS_PAGES")) * page_size
+        total = int(os.sysconf("SC_PHYS_PAGES")) * page_size
+    except (OSError, ValueError, TypeError):
+        return None
+    return available, total
+
+
+def read_host_headroom(repo: Path) -> dict[str, Any]:
+    """Return bounded host capacity ratios without changing host state."""
+    cpu_count = os.cpu_count() or 1
+    try:
+        load_ratio = max(0.0, os.getloadavg()[0] / cpu_count)
+        disk = shutil.disk_usage(repo)
+        memory = _memory_headroom_bytes()
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return {"complete": False, "reason": "host-metrics-unavailable"}
+    if memory is None or memory[1] <= 0 or disk.total <= 0:
+        return {"complete": False, "reason": "host-metrics-incomplete"}
+    return {
+        "complete": True,
+        "load_ratio": round(min(1.0, load_ratio), 4),
+        "memory_headroom_ratio": round(min(1.0, memory[0] / memory[1]), 4),
+        "disk_headroom_ratio": round(min(1.0, disk.free / disk.total), 4),
+        "cpu_count": cpu_count,
+    }
+
+
+_STRANDED_APPROVALS_API: dict[str, Any] | None = None
+
+
+def _stranded_approvals_api() -> dict[str, Any]:
+    global _STRANDED_APPROVALS_API
+    if _STRANDED_APPROVALS_API is None:
+        path = Path(__file__).resolve().parents[1] / "stranded_approvals.py"
+        _STRANDED_APPROVALS_API = runpy.run_path(
+            str(path), run_name="board_butler_stranded_approvals"
+        )
+    return _STRANDED_APPROVALS_API
+
+
+def _local_main_ref(repo: Path) -> str | None:
+    for reference in ("refs/remotes/origin/main", "refs/heads/main"):
+        completed = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{reference}^{{commit}}"],
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode == 0:
+            return reference
+    return None
+
+
+def _ticket_row_map(context: ObservationContext) -> dict[str, Mapping[str, Any]]:
+    rows = {
+        str(row.get("ticket_id")): row
+        for row in context.ticket_rows
+        if row.get("ticket_id")
+    }
+    rows.update(context.tickets)
+    return rows
+
+
+def _escalation_fields(escalated: bool, threshold: str) -> dict[str, Any]:
+    return {
+        "escalated": escalated,
+        "human_attention": escalated,
+        "threshold": threshold,
+    }
+
+
 def _ticket_decisions(ticket: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     rows = ticket.get("annotations", [])
     return [
@@ -7117,7 +7378,444 @@ def _observe_decision_scope_drift(
     return observations
 
 
+def _observe_gate_queue(context: ObservationContext) -> list[Mapping[str, Any]]:
+    queue = context.gate_queue
+    if not isinstance(queue, Mapping):
+        return []
+    if queue.get("complete") is not True:
+        return [
+            {
+                "level": "critical",
+                "message": "Full-gate admission queue observation is incomplete.",
+                "evidence": f"reason={queue.get('reason', 'malformed-or-process-scan-failed')}",
+                "next_action": "Human: restore read-only queue/process visibility before trusting gate-flow conclusions.",
+                **_escalation_fields(True, "queue observation must be complete"),
+            }
+        ]
+    depth = int(queue.get("depth", 0) or 0)
+    oldest_wait_s = int(queue.get("oldest_wait_s", 0) or 0)
+    if depth < GATE_QUEUE_NAG_DEPTH and oldest_wait_s < GATE_QUEUE_NAG_AGE_S:
+        return []
+    escalated = (
+        depth >= GATE_QUEUE_ESCALATE_DEPTH
+        or oldest_wait_s >= GATE_QUEUE_ESCALATE_AGE_S
+    )
+    return [
+        {
+            "level": "critical" if escalated else "warn",
+            "message": "The host-wide full-gate admission queue is delaying fleet delivery.",
+            "evidence": (
+                f"depth={depth}; oldest_wait_s={oldest_wait_s}; "
+                f"holder_class={queue.get('holder_class', 'unknown')}"
+            ),
+            "next_action": (
+                "Human: verify release-class priority and cancel only obsolete queued requests; do not kill an active gate."
+                if escalated
+                else "Coordinator: verify admission classes and ask owners to remove obsolete queued requests."
+            ),
+            **_escalation_fields(
+                escalated,
+                f"critical when depth>={GATE_QUEUE_ESCALATE_DEPTH} or oldest_wait_s>={GATE_QUEUE_ESCALATE_AGE_S}",
+            ),
+        }
+    ]
+
+
+def _observe_unanswered_questions(
+    context: ObservationContext,
+) -> list[Mapping[str, Any]]:
+    rows = _ticket_row_map(context)
+    open_questions = [row for row in context.questions if row.get("state") == "open"]
+    if not open_questions:
+        return []
+    terminal = {"closed", "canceled", "terminated", "rejected"}
+    active = {"claimed", "in_progress", "creating_report"}
+    ages = [
+        max(0, int((context.now - stamp).total_seconds()))
+        for row in open_questions
+        if (stamp := _record_time(row, "asked_at")) is not None
+    ]
+    stale_terminal = [
+        row
+        for row in open_questions
+        if rows.get(str(row.get("ticket_id", "")), {}).get("status") in terminal
+    ]
+    blocking = [
+        row
+        for row in open_questions
+        if rows.get(str(row.get("ticket_id", "")), {}).get("status") in active
+        and (stamp := _record_time(row, "asked_at")) is not None
+        and (context.now - stamp).total_seconds() >= QUESTION_ESCALATE_AGE_S
+    ]
+    oldest_age_s = max(ages, default=0)
+    if (
+        len(open_questions) < QUESTION_NAG_COUNT
+        and oldest_age_s < QUESTION_NAG_AGE_S
+        and not stale_terminal
+    ):
+        return []
+    escalated = bool(blocking) or len(open_questions) >= QUESTION_ESCALATE_COUNT
+    return [
+        {
+            "level": "critical" if escalated else "warn",
+            "message": "Coordinator questions are accumulating without a current answer.",
+            "evidence": (
+                f"open={len(open_questions)}; oldest_age_s={oldest_age_s}; "
+                f"blocking_over_2h={len(blocking)}; terminal_ticket_questions={len(stale_terminal)}"
+            ),
+            "next_action": (
+                "Human: resolve the oldest live-work blockers; coordinator should reconcile questions on terminal tickets."
+                if escalated
+                else "Coordinator: answer live questions and reconcile stale questions on terminal tickets."
+            ),
+            **_escalation_fields(
+                escalated,
+                f"critical when open>={QUESTION_ESCALATE_COUNT} or a live-work question is >={QUESTION_ESCALATE_AGE_S}s old",
+            ),
+        }
+    ]
+
+
+def _approved_at(ticket: Mapping[str, Any]) -> datetime | None:
+    verdict = ticket.get("latest_verdict")
+    if isinstance(verdict, Mapping) and verdict.get("verdict") == "approve":
+        stamp = _record_time(verdict, "reviewed_at")
+        if stamp is not None:
+            return stamp
+    history = ticket.get("review_history")
+    if isinstance(history, list):
+        for row in reversed(history):
+            if isinstance(row, Mapping) and row.get("verdict") == "approve":
+                stamp = _record_time(row, "reviewed_at")
+                if stamp is not None:
+                    return stamp
+    return _record_time(ticket, "reviewed_at", "closed_at", "updated_at")
+
+
+def _observe_stranded_approvals(
+    context: ObservationContext,
+) -> list[Mapping[str, Any]]:
+    if context.repo is None or not context.main_ref:
+        return []
+    classify = _stranded_approvals_api()["classify_approval"]
+    ranked: list[tuple[bool, int, Mapping[str, Any]]] = []
+    for ticket_id, ticket in sorted(context.tickets.items()):
+        if ticket.get("review_verdict") != "approve" or ticket.get("status") != "closed":
+            continue
+        try:
+            result = classify(ticket, repo=context.repo, main_ref=context.main_ref)
+        except Exception as exc:
+            ranked.append(
+                (False, 0, {
+                    "level": "warn",
+                    "ticket_id": ticket_id,
+                    "message": "Approved-ticket landing could not be verified from the local repository.",
+                    "evidence": f"state=UNVERIFIABLE; error={type(exc).__name__}",
+                    "next_action": "Coordinator: refresh the read-only repository refs and rerun the ancestry audit.",
+                    **_escalation_fields(False, "verification must be complete before declaring a ticket landed"),
+                })
+            )
+            continue
+        if result.state in {"LANDED_ANCESTOR", "LANDED_CONTENT"}:
+            continue
+        approved_at = _approved_at(ticket)
+        age_s = (
+            max(0, int((context.now - approved_at).total_seconds()))
+            if approved_at is not None
+            else 0
+        )
+        if approved_at is not None and age_s < APPROVAL_NAG_AGE_S:
+            continue
+        escalated = approved_at is None or age_s >= APPROVAL_ESCALATE_AGE_S
+        ranked.append(
+            (escalated, age_s, {
+                "level": "critical" if escalated else "warn",
+                "ticket_id": ticket_id,
+                "message": "An approved closed ticket is not proven present on main by ancestry or equivalent content.",
+                "evidence": (
+                    f"approved_sha={result.approved_sha}; state={result.state}; age_s={age_s}; "
+                    f"content_match={result.matched_lines if result.matched_lines is not None else '-'}"
+                    f"/{result.added_lines if result.added_lines is not None else '-'}"
+                ),
+                "next_action": (
+                    "Human: choose a merge/rebase owner for this approved SHA; Butler will not merge it."
+                    if escalated
+                    else "Coordinator: schedule the approved SHA for merge integration."
+                ),
+                **_escalation_fields(
+                    escalated,
+                    f"critical when approved-but-unlanded age>={APPROVAL_ESCALATE_AGE_S}s or approval time is unknown",
+                ),
+            })
+        )
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    observations = [row for _, _, row in ranked[:MAX_SIGNAL_TICKET_FINDINGS]]
+    omitted = ranked[MAX_SIGNAL_TICKET_FINDINGS:]
+    if omitted:
+        escalated = any(row[0] for row in omitted)
+        observations.append(
+            {
+                "level": "critical" if escalated else "warn",
+                "message": "Additional approved closed tickets remain outside the bounded per-ticket landing report.",
+                "evidence": f"omitted={len(omitted)}; total_stranded_or_unverifiable={len(ranked)}",
+                "next_action": (
+                    "Human: assign an integration owner to the omitted approved-ticket backlog."
+                    if escalated
+                    else "Coordinator: schedule the omitted approved-ticket backlog for landing checks."
+                ),
+                **_escalation_fields(escalated, "bounded detail retains the three highest-severity ticket findings"),
+            }
+        )
+    return observations
+
+
+def _observe_rejection_loops(
+    context: ObservationContext,
+) -> list[Mapping[str, Any]]:
+    ranked: list[tuple[int, Mapping[str, Any]]] = []
+    for ticket_id, ticket in sorted(_ticket_row_map(context).items()):
+        count = ticket.get("rejection_count")
+        if count is None and isinstance(ticket.get("counts"), Mapping):
+            count = ticket["counts"].get("rejections", 0)
+        if not isinstance(count, int) or isinstance(count, bool) or count < REJECTION_NAG_COUNT:
+            continue
+        escalated = count >= REJECTION_ESCALATE_COUNT
+        ranked.append(
+            (count, {
+                "level": "critical" if escalated else "warn",
+                "ticket_id": ticket_id,
+                "message": "A ticket is cycling through repeated independent review rejection.",
+                "evidence": f"rejection_count={count}; status={ticket.get('status', 'unknown')}",
+                "next_action": (
+                    "Human: appoint one fix owner and reconcile all rejection findings before another submission."
+                    if escalated
+                    else "Coordinator: carry the latest rejection instructions into the next work offer."
+                ),
+                **_escalation_fields(
+                    escalated,
+                    f"critical when rejection_count>={REJECTION_ESCALATE_COUNT}",
+                ),
+            })
+        )
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    observations = [row for _, row in ranked[:MAX_SIGNAL_TICKET_FINDINGS]]
+    omitted = ranked[MAX_SIGNAL_TICKET_FINDINGS:]
+    if omitted:
+        worst = omitted[0][0]
+        escalated = worst >= REJECTION_ESCALATE_COUNT
+        observations.append(
+            {
+                "level": "critical" if escalated else "warn",
+                "message": "Additional rejection-loop tickets remain outside the bounded per-ticket report.",
+                "evidence": f"omitted={len(omitted)}; worst_rejection_count={worst}; total_loops={len(ranked)}",
+                "next_action": (
+                    "Human: assign fix owners to the omitted repeated-rejection backlog."
+                    if escalated
+                    else "Coordinator: route the omitted tickets with their latest rejection instructions."
+                ),
+                **_escalation_fields(escalated, "bounded detail retains the three highest-count rejection loops"),
+            }
+        )
+    return observations
+
+
+def _ticket_dispatch_state(ticket: Mapping[str, Any]) -> Mapping[str, Any]:
+    state = ticket.get("dispatch_state")
+    if isinstance(state, Mapping):
+        return state
+    summary = ticket.get("dispatch_summary")
+    if not isinstance(summary, Mapping) or not isinstance(summary.get("last"), list):
+        return {}
+    return next(
+        (row for row in reversed(summary["last"]) if isinstance(row, Mapping)),
+        {},
+    )
+
+
+def _rejection_count(ticket: Mapping[str, Any]) -> int:
+    value = ticket.get("rejection_count")
+    if value is None and isinstance(ticket.get("counts"), Mapping):
+        value = ticket["counts"].get("rejections", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _fleet_demand_snapshot(context: ObservationContext) -> dict[str, Any]:
+    unassignable = {"work": [], "review": []}
+    unassignable_ages = {"work": [], "review": []}
+    rejections: list[int] = []
+    for ticket in context.ticket_rows:
+        count = _rejection_count(ticket)
+        if count:
+            rejections.append(count)
+        dispatch = _ticket_dispatch_state(ticket)
+        if dispatch.get("state") != "unassignable":
+            continue
+        kind = str(dispatch.get("kind", "work"))
+        if kind not in unassignable:
+            continue
+        unassignable[kind].append(ticket)
+        stamp = _record_time(dispatch, "at") or _record_time(
+            ticket, "updated_at", "created_at"
+        )
+        if stamp is not None:
+            unassignable_ages[kind].append(
+                max(0, int((context.now - stamp).total_seconds()))
+            )
+    idle_workers = sum(
+        _available_for(agent, "can_work", context.now) for agent in context.agents
+    )
+    idle_reviewers = sum(
+        _available_for(agent, "can_review", context.now) for agent in context.agents
+    )
+    queue = context.gate_queue if isinstance(context.gate_queue, Mapping) else {}
+    host = (
+        dict(context.host_headroom)
+        if isinstance(context.host_headroom, Mapping)
+        else {"complete": False, "reason": "host-metrics-not-sampled"}
+    )
+    return {
+        "schema_version": 1,
+        "observed_at": context.now.isoformat(),
+        "gate_queue": {
+            key: queue.get(key)
+            for key in ("complete", "depth", "oldest_wait_s", "holder_class")
+            if key in queue
+        },
+        "unassignable": {
+            kind: {
+                "count": len(unassignable[kind]),
+                "oldest_age_s": max(unassignable_ages[kind], default=0),
+            }
+            for kind in ("work", "review")
+        },
+        "idle_seats": {"work": idle_workers, "review": idle_reviewers},
+        "rework": {
+            "tickets": len(rejections),
+            "rejections": sum(rejections),
+            "loops": sum(count >= REJECTION_NAG_COUNT for count in rejections),
+        },
+        "host_headroom": host,
+    }
+
+
+def _observe_fleet_demand_snapshot(
+    context: ObservationContext,
+) -> list[Mapping[str, Any]]:
+    if (
+        not context.ticket_rows
+        and not context.agents
+        and context.gate_queue is None
+        and context.host_headroom is None
+    ):
+        return []
+    snapshot = _fleet_demand_snapshot(context)
+    unassignable = snapshot["unassignable"]
+    idle = snapshot["idle_seats"]
+    rework = snapshot["rework"]
+    queue = snapshot["gate_queue"]
+    return [
+        {
+            "level": "info",
+            "message": "Structured fleet demand snapshot for the seat reconciler.",
+            "evidence": (
+                f"gate_depth={queue.get('depth', 0)}; "
+                f"unassignable_work={unassignable['work']['count']}; "
+                f"unassignable_review={unassignable['review']['count']}; "
+                f"idle_work={idle['work']}; idle_review={idle['review']}; "
+                f"rework_loops={rework['loops']}"
+            ),
+            "next_action": "Reconciler: consume demand_snapshot within operator-set limits; Butler takes no seat action.",
+            "demand_snapshot": snapshot,
+        }
+    ]
+
+
+def _available_for(agent: Mapping[str, Any], capability: str, now: datetime) -> bool:
+    capabilities = agent.get("capabilities")
+    if not isinstance(capabilities, Mapping) or capabilities.get(capability) is not True:
+        return False
+    if (
+        agent.get("capabilities_explicit") is not True
+        or agent.get("lifecycle_status", "active") != "active"
+        or agent.get("role") in {"coordinator", "orchestrator"}
+        or agent.get("status") in {"working", "busy"}
+        or agent.get("lease_expires_at")
+    ):
+        return False
+    readiness = agent.get("readiness")
+    if (
+        isinstance(readiness, Mapping)
+        and readiness.get("reported") is True
+        and readiness.get("dispatch_ready") is not True
+    ):
+        return False
+    seen = parse_time(agent.get("last_activity_at") or agent.get("last_seen"))
+    return seen is not None and (now - seen).total_seconds() <= 300
+
+
+def _observe_role_imbalance(
+    context: ObservationContext,
+) -> list[Mapping[str, Any]]:
+    unassignable = {"work": [], "review": []}
+    for ticket in context.ticket_rows:
+        dispatch = _ticket_dispatch_state(ticket)
+        if dispatch.get("state") != "unassignable":
+            continue
+        kind = str(dispatch.get("kind", "work"))
+        if kind in unassignable:
+            unassignable[kind].append(ticket)
+    idle_workers = sum(
+        _available_for(agent, "can_work", context.now) for agent in context.agents
+    )
+    idle_reviewers = sum(
+        _available_for(agent, "can_review", context.now) for agent in context.agents
+    )
+    directions: list[str] = []
+    if len(unassignable["work"]) >= ROLE_IMBALANCE_NAG_COUNT and idle_reviewers:
+        directions.append("work-starved-reviewers-idle")
+    if unassignable["review"] and idle_workers:
+        directions.append("review-starved-workers-idle")
+    critical_review = any(
+        ticket.get("priority") == "critical" for ticket in unassignable["review"]
+    )
+    if critical_review and not idle_reviewers:
+        directions.append("critical-review-capacity-exhausted")
+    if not directions:
+        return []
+    escalated = (
+        len(unassignable["work"]) >= ROLE_IMBALANCE_ESCALATE_COUNT
+        or len(unassignable["review"]) >= ROLE_IMBALANCE_ESCALATE_COUNT
+        or critical_review
+    )
+    return [
+        {
+            "level": "critical" if escalated else "warn",
+            "message": "Fleet role capacity is imbalanced while tickets remain unassignable.",
+            "evidence": (
+                f"directions={','.join(directions)}; unassignable_work={len(unassignable['work'])}; "
+                f"unassignable_review={len(unassignable['review'])}; idle_workers={idle_workers}; "
+                f"idle_reviewers={idle_reviewers}; critical_review={str(critical_review).lower()}"
+            ),
+            "next_action": (
+                "Human: rebalance seat roles or capacity for the critical queue; Butler will not change seats."
+                if escalated
+                else "Coordinator: compare work/review demand and request a bounded role rebalance."
+            ),
+            **_escalation_fields(
+                escalated,
+                f"critical when either unassignable queue>={ROLE_IMBALANCE_ESCALATE_COUNT} or a critical review is unassignable",
+            ),
+        }
+    ]
+
+
 OBSERVATION_RULES: tuple[ObservationRule, ...] = (
+    ObservationRule("fleet_demand_snapshot", 2, _observe_fleet_demand_snapshot),
+    ObservationRule("full_gate_queue", 2, _observe_gate_queue),
+    ObservationRule("unanswered_questions", 2, _observe_unanswered_questions),
+    ObservationRule("approved_not_landed", 2, _observe_stranded_approvals),
+    ObservationRule("rejection_loop", 2, _observe_rejection_loops),
+    ObservationRule("role_imbalance", 2, _observe_role_imbalance),
     ObservationRule("stale_open_question", 1, _observe_stale_open_questions),
     ObservationRule("held_decision", 0, _observe_held_decisions),
     ObservationRule("standing_decision_repeated", 0, _observe_repeated_standing_decisions),
@@ -7167,6 +7865,15 @@ def derive_board_observations(
                 )
             if isinstance(candidate.get("reconciled"), bool):
                 row["reconciled"] = candidate["reconciled"]
+            for name in ("escalated", "human_attention"):
+                if isinstance(candidate.get(name), bool):
+                    row[name] = candidate[name]
+            if isinstance(candidate.get("threshold"), str):
+                row["threshold"] = candidate["threshold"][:240]
+            if isinstance(candidate.get("demand_snapshot"), Mapping):
+                row["demand_snapshot"] = copy.deepcopy(
+                    dict(candidate["demand_snapshot"])
+                )
             findings.append(row)
     if not context.questions_complete or not context.tickets_complete:
         missing = []
@@ -7452,6 +8159,16 @@ def merge_observation_findings(
 ) -> dict[str, Any]:
     """Replace derived observations without ever evicting a critical alert."""
     result = dict(state)
+    demand_snapshot = next(
+        (
+            item.get("demand_snapshot")
+            for item in findings
+            if isinstance(item, Mapping)
+            and item.get("observer") == "fleet_demand_snapshot"
+            and isinstance(item.get("demand_snapshot"), Mapping)
+        ),
+        None,
+    )
     rows = [
         dict(item)
         for item in state.get("findings", [])
@@ -7461,14 +8178,19 @@ def merge_observation_findings(
     unique = {
         str(item.get("observation_key")): dict(item)
         for item in findings
-        if isinstance(item, Mapping) and item.get("observation_key")
+        if isinstance(item, Mapping)
+        and item.get("observation_key")
+        and item.get("observer") != "fleet_demand_snapshot"
     }
-    # Lower-priority observations are appended first. Bounded removal takes
-    # the oldest non-critical row, so priority 0 observations survive longest.
+    # Lower-priority and lower-severity observations are appended first.
+    # Bounded removal takes the oldest non-critical row, so priority 0 and
+    # warnings survive informational rows when the state reaches its limit.
+    severity = {"info": 0, "warn": 1, "critical": 2}
     observations = sorted(
         unique.values(),
         key=lambda item: (
             -int(item.get("observer_priority", 9)),
+            severity.get(str(item.get("level", "warn")), 1),
             str(item.get("observer", "")),
             str(item.get("observation_key", "")),
         ),
@@ -7485,6 +8207,8 @@ def merge_observation_findings(
     truncation["findings"] = int(truncation.get("findings", 0) or 0) + omitted
     result["truncation"] = truncation
     board_butler = dict(result.get("board_butler", {}))
+    if isinstance(demand_snapshot, Mapping):
+        board_butler["demand_snapshot"] = copy.deepcopy(dict(demand_snapshot))
     board_butler["observations"] = {
         "derived": len(observations),
         "retained": sum(
@@ -8748,7 +9472,7 @@ class CentralBackend:
     async def _observation_context_for_board(
         self, board_id: str, snapshot: Mapping[str, Any], now: datetime
     ) -> ObservationContext:
-        """Read one bounded board projection; no host or filesystem input."""
+        """Read one bounded board projection and read-only host demand sample."""
         from pursers_client import BoardClient
 
         questions: list[Mapping[str, Any]] = []
@@ -8758,6 +9482,14 @@ class CentralBackend:
             snapshot.get("truncated") is True
             and snapshot.get("coordination_tickets_complete") is not True
         )
+        all_compact = snapshot.get(
+            "intake_tickets", snapshot.get("coordination_tickets", snapshot.get("tickets", []))
+        )
+        ticket_rows = tuple(
+            row for row in all_compact if isinstance(row, Mapping)
+        ) if isinstance(all_compact, list) else ()
+        if snapshot.get("intake_tickets_complete") is not True:
+            tickets_complete = False
         async with BoardClient(
             self.args.url,
             self.token,
@@ -8810,11 +9542,35 @@ class CentralBackend:
                     reverse=True,
                 )
                 if row.get("ticket_id")
-                and isinstance(row.get("annotation_count"), int)
-                and not isinstance(row.get("annotation_count"), bool)
-                and row.get("annotation_count", 0) > 0
+                and (
+                    (
+                        isinstance(row.get("annotation_count"), int)
+                        and not isinstance(row.get("annotation_count"), bool)
+                        and row.get("annotation_count", 0) > 0
+                    )
+                    or (
+                        isinstance(row.get("counts"), Mapping)
+                        and isinstance(row["counts"].get("annotations"), int)
+                        and not isinstance(row["counts"].get("annotations"), bool)
+                        and row["counts"].get("annotations", 0) > 0
+                    )
+                )
             ]
-            ordered_ids = list(dict.fromkeys(question_ticket_ids + active_ticket_ids))
+            approved_ticket_ids = [
+                str(row.get("ticket_id"))
+                for row in sorted(
+                    ticket_rows,
+                    key=lambda row: str(row.get("updated_at", "")),
+                    reverse=True,
+                )
+                if row.get("ticket_id")
+                and row.get("status") == "closed"
+            ]
+            ordered_ids = list(
+                dict.fromkeys(
+                    question_ticket_ids + active_ticket_ids + approved_ticket_ids
+                )
+            )
             if len(ordered_ids) > OBSERVATION_TICKET_LIMIT:
                 tickets_complete = False
             for ticket_id in ordered_ids[:OBSERVATION_TICKET_LIMIT]:
@@ -8837,6 +9593,28 @@ class CentralBackend:
             tickets=tickets,
             questions=tuple(questions),
             now=now,
+            ticket_rows=ticket_rows,
+            agents=tuple(
+                row
+                for row in snapshot.get("agents", [])
+                if isinstance(row, Mapping)
+            ) if isinstance(snapshot.get("agents"), list) else (),
+            gate_queue=(
+                read_full_gate_queue(
+                    Path(
+                        os.environ.get(
+                            "PURSERS_FULL_GATE_STATE_DIR",
+                            str(Path.home() / ".cache" / "pursers" / "full-gate"),
+                        )
+                    ).expanduser().resolve(),
+                    now,
+                )
+                if board_id == self.args.home_board
+                else None
+            ),
+            host_headroom=read_host_headroom(self.args.repo),
+            repo=self.args.repo,
+            main_ref=_local_main_ref(self.args.repo),
             questions_complete=questions_complete,
             tickets_complete=tickets_complete,
         )
