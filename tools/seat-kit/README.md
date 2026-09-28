@@ -63,13 +63,17 @@ drift:
 python3 tools/seat-kit/seat_new.py check /PATH/TO/Pursers-Mong1/*
 ```
 
-`check` is read-only. It compares the folder-derived identity with the title,
-identity declaration, and `board_onboard` name in `AGENTS.md`, the connection
-name in `START.md`, and `ONBOARD_AGENT_NAME` in `.codex/config.toml`. It reads
-the configured token's JWT payload without printing the token and reports
-shared `sub` values as information. Identity mismatches, missing seat files,
-and unreadable token metadata produce a non-zero exit. Directories with none of
-the three seat identity files are skipped.
+`check` is read-only. For Codex seats, it compares the folder-derived identity
+with the title, identity declaration, and `board_onboard` name in `AGENTS.md`,
+the connection name in `START.md`, and `ONBOARD_AGENT_NAME` in
+`.codex/config.toml`. It reads the configured token's JWT payload without
+printing the token and reports shared `sub` values as information. Generated
+Goose seats are identified by matching client markers in `AGENTS.md` and
+`bin/board.sh`; their folder identity is checked against the generated title,
+identity declaration, and launcher `ONBOARD_AGENT_NAME` without requiring
+Codex-only files. Identity mismatches, missing required seat files, and
+unreadable token metadata produce a non-zero exit. Directories with none of the
+three seat identity files are skipped.
 
 Use `--upgrade` to regenerate those four managed files in an existing seat.
 Every other file is preserved. An upgrade fetches the repository clone and

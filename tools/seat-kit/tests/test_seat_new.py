@@ -132,16 +132,17 @@ def write_check_seat(
     seat.mkdir(parents=True)
     agents_identity = agents_identity or identity
     start_identity = start_identity or identity
+    role = "reviewer" if "-reviewer-" in identity else "worker"
     if include_agents:
         (seat / "AGENTS.md").write_text(
-            f"# Pursers worker: {agents_identity}\n\n"
+            f"# Pursers {role}: {agents_identity}\n\n"
             f"This folder fixes your identity to `{agents_identity}`.\n\n"
             f"Use board_onboard with agent_name=`{agents_identity}`.\n",
             encoding="utf-8",
         )
     if include_start:
         (seat / "START.md").write_text(
-            f"Read AGENTS.md. Connect to Pursers as {start_identity} with role worker.\n",
+            f"Read AGENTS.md. Connect to Pursers as {start_identity} with role {role}.\n",
             encoding="utf-8",
         )
     if include_config:
@@ -316,14 +317,14 @@ def test_worker_folder_permissions_and_secret_safety(tmp_path: Path) -> None:
     assert "never call ticket_review" in generated
 
 
-def test_check_accepts_consistent_seats_and_reports_shared_principal(
+def test_check_accepts_existing_codex_worker_and_reviewer_seats(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     fleet = tmp_path / "Pursers-Mong1"
     first = fleet / "worker-2"
-    second = fleet / "worker-3"
+    second = fleet / "reviewer-3"
     write_check_seat(first, identity="mong1-worker-2")
-    write_check_seat(second, identity="mong1-worker-3")
+    write_check_seat(second, identity="mong1-reviewer-3")
 
     assert seat_new.main(["check", str(first), str(second)]) == 0
 
@@ -331,12 +332,59 @@ def test_check_accepts_consistent_seats_and_reports_shared_principal(
     assert (first / "seat.jwt").read_text(encoding="utf-8") not in output
     assert (second / "seat.jwt").read_text(encoding="utf-8") not in output
     assert f"OK {first}: identity=mong1-worker-2 principal=PR-shared" in output
-    assert f"OK {second}: identity=mong1-worker-3 principal=PR-shared" in output
+    assert f"OK {second}: identity=mong1-reviewer-3 principal=PR-shared" in output
     assert (
-        "INFO principal PR-shared shared by mong1-worker-2, mong1-worker-3"
+        "INFO principal PR-shared shared by mong1-reviewer-3, mong1-worker-2"
         in output
     )
     assert "CHECK OK: 2 seat(s), 1 shared principal group(s)" in output
+
+
+def test_check_accepts_generated_goose_worker_and_reviewer_kits(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    seats = []
+    for role, name in (
+        ("worker", "goose-worker-1"),
+        ("worker", "goose-worker-2"),
+        ("reviewer", "goose-reviewer-1"),
+        ("reviewer", "goose-reviewer-2"),
+    ):
+        parsed = args(tmp_path, role=role, client="goose")
+        parsed.name = name
+        parsed.dest = str(tmp_path / name)
+        seats.append(seat_new.generate(parsed))
+
+    assert seat_new.main(["check", *(str(seat) for seat in seats)]) == 0
+
+    output = capsys.readouterr().out
+    for seat in seats:
+        assert f"OK {seat}: identity={seat.name} principal=None" in output
+    assert "CHECK OK: 4 seat(s), 0 shared principal group(s)" in output
+
+
+def test_check_flags_generated_goose_launcher_identity_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    parsed = args(tmp_path, client="goose")
+    parsed.name = "goose-worker"
+    parsed.dest = str(tmp_path / parsed.name)
+    seat = seat_new.generate(parsed)
+    board_shell = seat / "bin" / "board.sh"
+    board_shell.write_text(
+        board_shell.read_text(encoding="utf-8").replace(
+            "export ONBOARD_AGENT_NAME=goose-worker",
+            "export ONBOARD_AGENT_NAME=another-worker",
+        ),
+        encoding="utf-8",
+    )
+
+    assert seat_new.main(["check", str(seat)]) == 1
+
+    output = capsys.readouterr().out
+    assert f"ERROR {board_shell}:" in output
+    assert "ONBOARD_AGENT_NAME is 'another-worker', expected 'goose-worker'" in output
+    assert "CHECK FAILED: 1 problem(s) across 1 seat(s)" in output
 
 
 def test_check_flags_agents_file_copied_from_another_seat(

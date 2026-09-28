@@ -2389,6 +2389,22 @@ _AGENTS_IDENTITY_PATTERNS = (
         ),
     ),
 )
+_GOOSE_AGENTS_IDENTITY_PATTERNS = (
+    _AGENTS_IDENTITY_PATTERNS[0],
+    (
+        "identity declaration",
+        re.compile(
+            r"^this folder IS your identity: "
+            r"([A-Za-z0-9][A-Za-z0-9._-]{0,79})\s*$"
+        ),
+    ),
+)
+_CLIENT_RE = re.compile(r"^Client: `([a-z]+)`\s*$")
+_SHELL_AGENT_RE = re.compile(
+    r"^export ONBOARD_AGENT_NAME="
+    r"([A-Za-z0-9][A-Za-z0-9._-]{0,79})\s*$"
+)
+_SHELL_HOST_RE = re.compile(r"^export PURSERS_HOST=([a-z-]+)\s*$")
 _START_IDENTITY_RE = re.compile(
     r"Connect to Pursers as "
     r"([A-Za-z0-9][A-Za-z0-9._-]{0,79})\b"
@@ -2429,6 +2445,21 @@ def _config_line(path: Path, key: str) -> int:
         if pattern.search(line):
             return line_number
     return 1
+
+
+def _is_generated_goose_seat(agents: Path, board_shell: Path) -> bool:
+    """Recognize the two independent client markers written by generate()."""
+
+    if not agents.is_file() or not board_shell.is_file():
+        return False
+    client = _source_line(agents, _CLIENT_RE)
+    host = _source_line(board_shell, _SHELL_HOST_RE)
+    return (
+        client is not None
+        and client[1] == "goose"
+        and host is not None
+        and host[1] == "goose"
+    )
 
 
 def _jwt_subject(path: Path) -> str:
@@ -2504,13 +2535,20 @@ def _check_seat(
     agents = seat_dir / "AGENTS.md"
     start = seat_dir / "START.md"
     config = seat_dir / ".codex" / "config.toml"
+    board_shell = seat_dir / "bin" / "board.sh"
+    generated_goose = _is_generated_goose_seat(agents, board_shell)
 
     if not agents.is_file():
         problems.append(
             _problem(display_dir, "AGENTS.md", 1, "file is missing", expected)
         )
     else:
-        for label, pattern in _AGENTS_IDENTITY_PATTERNS:
+        identity_patterns = (
+            _GOOSE_AGENTS_IDENTITY_PATTERNS
+            if generated_goose
+            else _AGENTS_IDENTITY_PATTERNS
+        )
+        for label, pattern in identity_patterns:
             found = _source_line(agents, pattern)
             if found is None:
                 problems.append(
@@ -2535,7 +2573,31 @@ def _check_seat(
                     )
                 )
 
-    if not start.is_file():
+    if generated_goose:
+        found = _source_line(board_shell, _SHELL_AGENT_RE)
+        if found is None:
+            problems.append(
+                _problem(
+                    display_dir,
+                    "bin/board.sh",
+                    1,
+                    "ONBOARD_AGENT_NAME is missing",
+                    expected,
+                )
+            )
+        else:
+            line, identity = found
+            if identity != expected:
+                problems.append(
+                    _problem(
+                        display_dir,
+                        "bin/board.sh",
+                        line,
+                        f"ONBOARD_AGENT_NAME is {identity!r}, expected {expected!r}",
+                        expected,
+                    )
+                )
+    elif not start.is_file():
         problems.append(
             _problem(display_dir, "START.md", 1, "file is missing", expected)
         )
@@ -2565,6 +2627,8 @@ def _check_seat(
                 )
 
     principal: str | None = None
+    if generated_goose:
+        return problems, expected, principal
     if not config.is_file():
         problems.append(
             _problem(
