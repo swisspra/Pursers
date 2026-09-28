@@ -267,6 +267,12 @@ async def test_live_reader_uses_dedicated_non_takeover_read_only_identity(
     assert args.agent_name == stranded_approvals.DEFAULT_AUDIT_AGENT_NAME
     assert captured["agent_name"] == stranded_approvals.DEFAULT_AUDIT_AGENT_NAME
     assert captured["allow_takeover"] is False
+    assert captured["allow_matching_takeover"] is True
+    assert (
+        captured["agent_platform"]
+        == stranded_approvals.DEFAULT_AUDIT_AGENT_PLATFORM
+    )
+    assert captured["task_focus"] == stranded_approvals.DEFAULT_AUDIT_TASK_FOCUS
     assert captured["capabilities"] == {
         "can_work": False,
         "can_review": False,
@@ -275,13 +281,66 @@ async def test_live_reader_uses_dedicated_non_takeover_read_only_identity(
     }
 
 
-def test_takeover_requires_explicit_flag() -> None:
-    args = stranded_approvals.build_parser().parse_args(
+@pytest.mark.anyio
+async def test_default_identity_is_rerunnable_without_arbitrary_seat_takeover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pursers_central.central as central
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    jwks_path = tmp_path / "jwks.json"
+    jwks_path.write_text('{"keys": []}', encoding="utf-8")
+    for key, value in {
+        "CENTRAL_AUTH_MODE": "jwt",
+        "CENTRAL_JWT_ISSUER": "https://issuer.example",
+        "CENTRAL_JWT_AUDIENCE": "http://localhost:8765/mcp",
+        "CENTRAL_JWKS_PATH": str(jwks_path),
+        "CENTRAL_ADMISSION": "invite",
+        "STORE_BACKEND": "sqlite",
+    }.items():
+        monkeypatch.setenv(key, value)
+    mcp, _service = central.build_server(
+        "localhost", 8765, tmp_path / "central-data"
+    )
+    principal = central.Principal(
+        "PR-audit", "audit", frozenset({"board:read", "board:write"})
+    )
+    monkeypatch.setattr(central, "current_principal", lambda: principal)
+
+    default_args = stranded_approvals.build_parser().parse_args([])
+    default_join = {
+        "board_id": "pursers",
+        **stranded_approvals._client_identity_options(default_args),
+    }
+    first = await mcp.call_tool("board_join", default_join)
+    second = await mcp.call_tool("board_join", default_join)
+    assert first.structured_content["agent_name"] == default_args.agent_name
+    assert second.structured_content["rejoined"] is True
+
+    named_args = stranded_approvals.build_parser().parse_args(
+        ["--agent-name", "coordinator-1"]
+    )
+    named_join = {
+        "board_id": "pursers",
+        **stranded_approvals._client_identity_options(named_args),
+    }
+    await mcp.call_tool("board_join", named_join)
+    with pytest.raises(ToolError, match="seat name already active"):
+        await mcp.call_tool("board_join", named_join)
+
+    takeover_args = stranded_approvals.build_parser().parse_args(
         [
             "--agent-name",
             "coordinator-1",
             "--allow-takeover",
         ]
     )
-    assert args.agent_name == "coordinator-1"
-    assert args.allow_takeover is True
+    takeover_join = {
+        "board_id": "pursers",
+        **stranded_approvals._client_identity_options(takeover_args),
+    }
+    assert takeover_join["allow_matching_takeover"] is False
+    assert takeover_join["allow_takeover"] is True
+    taken_over = await mcp.call_tool("board_join", takeover_join)
+    assert taken_over.structured_content["rejoined"] is True

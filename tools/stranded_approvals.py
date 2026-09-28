@@ -37,6 +37,8 @@ DEFAULT_THRESHOLD = 0.90
 TICKET_BATCH_SIZE = 25
 TICKET_PAGE_LIMIT = 500
 DEFAULT_AUDIT_AGENT_NAME = "stranded-approvals-audit"
+DEFAULT_AUDIT_AGENT_PLATFORM = "stranded-approvals"
+DEFAULT_AUDIT_TASK_FOCUS = "read-only stranded approval audit"
 
 
 class AuditError(RuntimeError):
@@ -416,6 +418,21 @@ def _capabilities(_role: str) -> dict[str, Any]:
     }
 
 
+def _client_identity_options(args: argparse.Namespace) -> dict[str, Any]:
+    reserved_identity = args.agent_name == DEFAULT_AUDIT_AGENT_NAME
+    return {
+        "agent_name": args.agent_name,
+        "role": args.role,
+        "capabilities": _capabilities(args.role),
+        "allow_takeover": args.allow_takeover,
+        "allow_matching_takeover": reserved_identity and not args.allow_takeover,
+        "agent_platform": (
+            DEFAULT_AUDIT_AGENT_PLATFORM if reserved_identity else None
+        ),
+        "task_focus": DEFAULT_AUDIT_TASK_FOCUS if reserved_identity else None,
+    }
+
+
 async def read_live_tickets(args: argparse.Namespace, token: str) -> list[dict[str, Any]]:
     import httpx2
     from pursers_client import BoardClient
@@ -431,10 +448,7 @@ async def read_live_tickets(args: argparse.Namespace, token: str) -> list[dict[s
             args.central_url,
             token,
             args.board,
-            agent_name=args.agent_name,
-            role=args.role,
-            capabilities=_capabilities(args.role),
-            allow_takeover=args.allow_takeover,
+            **_client_identity_options(args),
             http_client=http,
         ) as client:
             return await fetch_all_tickets(client)
