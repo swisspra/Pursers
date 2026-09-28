@@ -2706,6 +2706,8 @@ def test_ticket_activity_has_1440_row_and_400_disclosure_structure() -> None:
     )
     assert ".ticket-activity-event>*{min-width:0;overflow-wrap:anywhere}" in dashboard.HTML
     assert ".ticket-activity-disclosure>summary:focus-visible" in dashboard.HTML
+    assert ".ticket-activity-heading a{" in dashboard.HTML
+    assert "min-width:44px" in dashboard.HTML
 
 
 def test_changes_math_supports_seq_and_default_time_cutoffs() -> None:
@@ -3491,7 +3493,7 @@ def test_global_search_aria_combobox_keyboard_contract() -> None:
             "const help={open:false,showModal(){this.open=true},close(){this.open=false}};",
             "const helpToggle={focused:false,focus(){this.focused=true}};",
             "const body={tagName:'BODY'};",
-            "const input={tagName:'INPUT',focused:false,setAttribute(k,v){attrs[k]=v},removeAttribute(k){delete attrs[k]},focus(){this.focused=true;document.activeElement=this}};",
+            "const input={tagName:'INPUT',value:'needle',focused:false,setAttribute(k,v){attrs[k]=v},removeAttribute(k){delete attrs[k]},focus(){this.focused=true;document.activeElement=this}};",
             "const document={activeElement:body,querySelector(key){if(key==='#search-results')return host;if(key==='#filter')return input;if(key==='#help-overlay')return help;if(key==='#help-toggle')return helpToggle;throw new Error(key)},querySelectorAll(){return[]}};",
             "const location={hash:''};const sectionStates=new Map();",
             "const key=value=>{let prevented=false;handleDashboardKeydown({key:value,preventDefault(){prevented=true}});return prevented};",
@@ -3504,7 +3506,7 @@ def test_global_search_aria_combobox_keyboard_contract() -> None:
             "const escape=key('Escape');",
             "const closed={hidden:host.hidden,expanded:attrs['aria-expanded'],active:attrs['aria-activedescendant']||null,focused:document.activeElement===input};",
             "renderSearchResults();key('ArrowDown');const enter=key('Enter');",
-            "console.log(JSON.stringify({slash,down,up,escape,enter,initial,moved,restored,closed,hash:location.hash}));",
+            "console.log(JSON.stringify({slash,down,up,escape,enter,initial,moved,restored,closed,hash:location.hash,search:{hidden:host.hidden,value:input.value,needle:filterNeedle,count:searchItems.length}}));",
         ]
     )
     completed = subprocess.run(
@@ -3537,6 +3539,54 @@ def test_global_search_aria_combobox_keyboard_contract() -> None:
         result["hash"]
         == "#/central/personal/board/board-one/tickets?ticket=TK-needle"
     )
+    assert result["search"] == {
+        "hidden": True,
+        "value": "",
+        "needle": "",
+        "count": 0,
+    }
+
+
+def test_help_dialog_moves_and_contains_focus_then_restores_trigger() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            source("function openHelp("),
+            source("function closeHelp("),
+            source("function handleDashboardKeydown("),
+            "const results={hidden:true};",
+            "const input={tagName:'INPUT'};",
+            "const help={open:false,showModal(){this.open=true},close(){this.open=false}};",
+            "const helpClose={tagName:'BUTTON',focus(){document.activeElement=this}};",
+            "const helpToggle={tagName:'BUTTON',focus(){document.activeElement=this}};",
+            "const body={tagName:'BODY'};",
+            "const document={activeElement:body,querySelector(key){return {'#search-results':results,'#filter':input,'#help-overlay':help,'#help-close':helpClose,'#help-toggle':helpToggle}[key]}};",
+            "const key=value=>{let prevented=false;handleDashboardKeydown({key:value,preventDefault(){prevented=true}});return prevented};",
+            "const opened=key('?');const initial=document.activeElement===helpClose;const tabbed=key('Tab');const contained=document.activeElement===helpClose;const escaped=key('Escape');",
+            "console.log(JSON.stringify({opened,initial,tabbed,contained,escaped,closed:!help.open,restored:document.activeElement===helpToggle}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "opened": True,
+        "initial": True,
+        "tabbed": True,
+        "contained": True,
+        "escaped": True,
+        "closed": True,
+        "restored": True,
+    }
 
 
 def test_collapsed_state_survives_rebinding_without_local_storage() -> None:
@@ -3673,6 +3723,8 @@ def test_help_theme_density_and_keyboard_controls_render() -> None:
     assert 'id="help-overlay"' in dashboard.HTML
     assert 'id="help-overlay" aria-labelledby="help-title"' in dashboard.HTML
     assert '<h2 id="help-title">Keyboard shortcuts</h2>' in dashboard.HTML
+    assert '<button id="help-close" type="button" autofocus>Close</button>' in dashboard.HTML
+    assert ".app-shell>main .shell-meta a{" in dashboard.HTML
     assert 'id="connection-banner" class="connection-banner" hidden' in dashboard.HTML
     banner_markup = dashboard.HTML.split(
         '<div id="connection-banner"', 1
