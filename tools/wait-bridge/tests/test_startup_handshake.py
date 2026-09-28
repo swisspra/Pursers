@@ -189,7 +189,7 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
             server.server_close()
             thread.join(timeout=TEST_TIMEOUT_S)
 
-    async def test_main_refuses_mismatched_explicit_token_sources(self) -> None:
+    async def test_main_defers_mismatched_explicit_token_sources(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             token_file = Path(raw) / "seat-token"
             token_file.write_text("seat-token\n", encoding="utf-8")
@@ -209,10 +209,11 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
                 redirect_stderr(stderr),
             ):
                 wait_server.main()
-            run.assert_not_called()
-            self.assertIn("FATAL: split identity", stderr.getvalue())
+            run.assert_called_once_with(transport="stdio")
+            self.assertNotIn("inherited-admin-token", stderr.getvalue())
+            self.assertNotIn(raw, stderr.getvalue())
 
-    async def test_main_refuses_empty_token_file_with_stored_door(self) -> None:
+    async def test_main_defers_empty_token_file_with_stored_door(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             state = Path(raw)
             wait_server.door_state.store(state / "doors.json", _door())
@@ -238,11 +239,85 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
                         redirect_stderr(stderr),
                     ):
                         wait_server.main()
-                    run.assert_not_called()
-                    self.assertIn(
-                        "FATAL: ONBOARD_CENTRAL_TOKEN_FILE is empty",
-                        stderr.getvalue(),
+                    run.assert_called_once_with(transport="stdio")
+                    self.assertNotIn(raw, stderr.getvalue())
+
+    async def test_stdio_runtime_config_failures_are_structured(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temporary = Path(raw)
+            mismatch = temporary / "mismatch-token"
+            mismatch.write_text("file-token\n", encoding="utf-8")
+            empty = temporary / "empty-token"
+            empty.write_text("", encoding="utf-8")
+            unreadable = temporary / "missing-token"
+
+            cases = (
+                ("mismatch", mismatch, "inherited-admin-token"),
+                ("empty", empty, "inherited-admin-token"),
+                ("unreadable", unreadable, "inherited-admin-token"),
+            )
+            for label, token_file, direct_token in cases:
+                with self.subTest(label=label):
+                    env = os.environ.copy()
+                    env.update(
+                        {
+                            "ONBOARD_CENTRAL_URL": "http://127.0.0.1:1/mcp",
+                            "ONBOARD_CENTRAL_TOKEN": direct_token,
+                            "ONBOARD_CENTRAL_TOKEN_FILE": str(token_file),
+                            "ONBOARD_BOARD_ID": "pursers",
+                            "ONBOARD_AGENT_NAME": "startup-test",
+                            "PURSERS_BRIDGE_STATE_DIR": str(temporary / "state"),
+                            "PURSERS_BRIDGE_STATS": str(
+                                temporary / f"{label}-bridge-stats.json"
+                            ),
+                            "PURSERS_ROLE": "worker",
+                            "PURSERS_WAIT_MODE": "push",
+                            "PYTHONPATH": os.pathsep.join(
+                                (str(CLIENT_SRC), str(ROOT))
+                            ),
+                        }
                     )
+                    env.pop("PURSERS_ALLOW_ENV_TOKEN", None)
+                    params = StdioServerParameters(
+                        command=sys.executable,
+                        args=[str(ROOT / "pursers_wait_server.py")],
+                        env=env,
+                    )
+                    async with Client(
+                        params,
+                        mode="2026-07-28",
+                        read_timeout_seconds=TEST_TIMEOUT_S,
+                    ) as client:
+                        result = await client.call_tool(
+                            "a2a_wait",
+                            {
+                                "agent_name": "startup-test",
+                                "boards": ["pursers"],
+                                "only_mine": True,
+                                "since_seq": {"pursers": 38_519},
+                                "timeout_s": 1,
+                                "wait_for": "claimable",
+                            },
+                        )
+
+                    self.assertFalse(result.is_error)
+                    payload = dict(result.structured_content or {})
+                    value = dict(payload.get("result", payload))
+                    self.assertEqual(value["new_seq"], {"pursers": 38_519})
+                    self.assertEqual(value["events"], [])
+                    self.assertEqual(value["mode"], "error")
+                    self.assertEqual(value["reason"], "push_unavailable")
+                    self.assertEqual(
+                        value["error"]["cause_class"], "configuration"
+                    )
+                    self.assertFalse(value["error"]["retryable"])
+                    self.assertEqual(
+                        value["error"]["action"],
+                        "repair_configuration_then_rearm_from_unchanged_cursor",
+                    )
+                    rendered = repr(value)
+                    self.assertNotIn(direct_token, rendered)
+                    self.assertNotIn(raw, rendered)
 
     async def test_runtime_config_split_identity_is_a_configuration_failure(
         self,

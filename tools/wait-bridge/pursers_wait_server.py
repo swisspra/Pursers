@@ -7631,10 +7631,13 @@ def main() -> None:
         return
     try:
         _configure_runtime()
-    except (OSError, ValueError) as exc:
-        print(f"FATAL: {exc}", file=sys.stderr)
-        return
-    if not CENTRAL_TOKEN:
+    except (OSError, ValueError):
+        # Keep stdio available so tool calls can report the deferred,
+        # structured configuration failure without advancing a cursor.  The
+        # resolver already stored a bounded, secret-safe explanation in
+        # _RUNTIME_CONFIG_ERROR for DeferredBoardConnection.client().
+        _log("runtime configuration deferred: configuration")
+    if not CENTRAL_TOKEN and not _RUNTIME_CONFIG_ERROR:
         print(
             "FATAL: no Central token; set explicit environment or join a door",
             file=sys.stderr,
