@@ -26,14 +26,10 @@ PYTHONPATH=packages/central/src:packages/client/src \
 python3 -m pytest -q tools/board-butler/tests/test_autonomous_fleet_e2e.py
 ```
 
-Before submission, run the repository manifest too:
-
-```sh
-TMPDIR=/PATH/TO/OWNER-CACHE/tmp \
-TEMP=/PATH/TO/OWNER-CACHE/tmp \
-TMP=/PATH/TO/OWNER-CACHE/tmp \
-python3 tools/ci_manifest.py run
-```
+Before submission, follow the repository's current validation matrix in
+`CONTRIBUTING.md`: run every affected suite, the leak scan, and
+`git diff --check`. The merge operator owns release-artifact refreshes and the
+single strict full gate.
 
 The test uses a real SQLite-backed Central server, real Butler policy and
 reconciliation code, a signed `FleetExecutor` with a persistent operation

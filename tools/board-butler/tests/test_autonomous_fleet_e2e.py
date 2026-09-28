@@ -73,7 +73,14 @@ class CentralScenarioBackend:
         result = await self.mcp.call_tool(name, {"board_id": self.board_id, **arguments})
         return result.structured_content
 
-    async def ticket_get(self, ticket_id: str) -> Mapping[str, Any]:
+    def _assert_board(self, board_id: str) -> None:
+        if board_id != self.board_id:
+            raise AssertionError("proof backend received a cross-board operation")
+
+    async def ticket_get(
+        self, ticket_id: str, *, board_id: str
+    ) -> Mapping[str, Any]:
+        self._assert_board(board_id)
         return await self._call("ticket_get", ticket_id=ticket_id)
 
     async def board_status(self) -> Mapping[str, Any]:
@@ -138,8 +145,13 @@ class CentralScenarioBackend:
         return self.config
 
     async def question(
-        self, ticket_id: str, question_id: str
+        self,
+        ticket_id: str,
+        question_id: str,
+        *,
+        board_id: str,
     ) -> Mapping[str, Any] | None:
+        self._assert_board(board_id)
         result = await self._call(
             "board_question_inbox",
             agent_name=self.identity.agent_name,
@@ -156,8 +168,14 @@ class CentralScenarioBackend:
         )
 
     async def answer_question(
-        self, ticket_id: str, question_id: str, message: str
+        self,
+        ticket_id: str,
+        question_id: str,
+        message: str,
+        *,
+        board_id: str,
     ) -> Mapping[str, Any]:
+        self._assert_board(board_id)
         return await self._call(
             "ticket_question_answer",
             ticket_id=ticket_id,
@@ -169,8 +187,13 @@ class CentralScenarioBackend:
         )
 
     async def release_question(
-        self, ticket_id: str, question_id: str
+        self,
+        ticket_id: str,
+        question_id: str,
+        *,
+        board_id: str,
     ) -> Mapping[str, Any]:
+        self._assert_board(board_id)
         return await self._call(
             "ticket_question_answer",
             ticket_id=ticket_id,
@@ -198,7 +221,7 @@ def _butler_args(board_id: str) -> argparse.Namespace:
     return argparse.Namespace(
         home_board=board_id,
         repo=ROOT,
-        integration_ref="6bc9985efda4360093e7736d283e3218cbcc8ceb",
+        integration_ref="origin/main",
         drafts_per_hour=20,
         drafts_per_ticket=10,
         drafts_per_board=50,
@@ -510,7 +533,9 @@ def test_real_board_arrival_questions_and_independent_review(
             backend, info_question, _butler_args(board_id), now
         )
         assert answered.get("answer_status") == "answered"
-        stored = await backend.question(tickets[0], info_question["question_id"])
+        stored = await backend.question(
+            tickets[0], info_question["question_id"], board_id=board_id
+        )
         assert stored is not None and stored["state"] == "answered"
         assert stored["answer"] == f"{tickets[0]} is claimed."
 
@@ -525,7 +550,7 @@ def test_real_board_arrival_questions_and_independent_review(
         assert escalated["auto_eligible"] is False
         assert escalated["verdict"] in {"ESCALATE", "UNKNOWN"}
         still_open = await backend.question(
-            tickets[0], forbidden_question["question_id"]
+            tickets[0], forbidden_question["question_id"], board_id=board_id
         )
         assert still_open is not None and still_open["state"] == "open"
 
