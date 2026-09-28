@@ -10,6 +10,7 @@ import difflib
 import hashlib
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
@@ -20,6 +21,7 @@ from pursers_client import BoardClient
 
 CENTRAL_URL_DEFAULT = "http://127.0.0.1:8766/mcp"
 HOME_BOARD_ID = "pursers"
+CENTRAL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 REGISTRY_KEY = "project_registry"
 SCHEMA_VERSION = 1
 VALID_STATUSES = frozenset({"active", "paused"})
@@ -43,6 +45,12 @@ def _require_clean_string(value: Any, label: str) -> str:
         raise RegistryError(f"{label} must be a non-empty, trimmed string")
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
         raise RegistryError(f"{label} must not contain control characters")
+    return value
+
+
+def _require_identifier(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not CENTRAL_ID_RE.fullmatch(value):
+        raise RegistryError(f"{label} must match {CENTRAL_ID_RE.pattern}")
     return value
 
 
@@ -208,6 +216,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Central MCP URL (default: ONBOARD_CENTRAL_URL or localhost)",
     )
     parser.add_argument(
+        "--home-board",
+        default=os.environ.get("ONBOARD_BOARD_ID", HOME_BOARD_ID),
+        help="home board containing project_registry "
+        "(default: ONBOARD_BOARD_ID or pursers)",
+    )
+    parser.add_argument(
         "--agent-name",
         default=os.environ.get("ONBOARD_AGENT_NAME", "project-registry-admin"),
         help="board identity used for the operation",
@@ -322,14 +336,19 @@ async def execute(args: argparse.Namespace, client: RegistryClient) -> None:
 ClientFactory = Callable[..., Any]
 
 
-async def run(args: argparse.Namespace, client_factory: ClientFactory = BoardClient) -> None:
+async def run(
+    args: argparse.Namespace,
+    client_factory: ClientFactory | None = None,
+) -> None:
     token = os.environ.get("ONBOARD_CENTRAL_TOKEN", "")
     if not token:
         raise RegistryError("ONBOARD_CENTRAL_TOKEN is not set")
-    async with client_factory(
+    home_board = _require_identifier(args.home_board, "home board id")
+    factory = client_factory or BoardClient
+    async with factory(
         args.central_url,
         token,
-        HOME_BOARD_ID,
+        home_board,
         agent_name=args.agent_name,
         allow_takeover=True,
     ) as client:
