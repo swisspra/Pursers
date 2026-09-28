@@ -26,6 +26,7 @@ import ipaddress
 import json
 import math
 import os
+import random
 import re
 import runpy
 import socket
@@ -106,6 +107,8 @@ MAX_CONNECTOR_AUDIT_DETAIL_CHARS = 1_000
 QUESTION_EVENT = "coordinator_question_asked"
 SUBSCRIPTION_RECONNECT_ATTEMPTS = 3
 SUBSCRIPTION_RECONNECT_BASE_DELAY_S = 0.25
+STATE_WRITE_MAX_ATTEMPTS = 3
+STATE_WRITE_RETRY_BASE_DELAY_S = 0.025
 OBSERVATION_TICKET_LIMIT = 100
 OBSERVATION_HISTORY_DAYS = 7
 OBSERVATION_FINDING_KIND = "butler_observation"
@@ -446,6 +449,15 @@ class FindingCapacityError(ValueError):
     def __init__(self, reason_code: str, message: str) -> None:
         super().__init__(message)
         self.reason_code = reason_code
+
+
+class StateWriteConflict(RuntimeError):
+    """A bounded board-state CAS retry could not make progress."""
+
+    def __init__(self, key: str, attempts: int) -> None:
+        super().__init__(f"state write conflict persisted for {key}")
+        self.key = key
+        self.attempts = attempts
 
 
 class ConnectorError(RuntimeError):
@@ -6560,6 +6572,124 @@ def _decode_evaluation(
     return parsed, value
 
 
+_MISSING = object()
+
+
+def _json_document(value: str | None, *, label: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label} is malformed") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{label} must be an object")
+    return parsed
+
+
+def _reapply_json_delta(expected: Any, desired: Any, current: Any) -> Any:
+    """Apply one JSON change without replacing unrelated concurrent changes."""
+    if desired == expected:
+        return copy.deepcopy(current)
+    if current == expected:
+        return copy.deepcopy(desired)
+    if all(isinstance(value, Mapping) for value in (expected, desired, current)):
+        result = copy.deepcopy(dict(current))
+        for key in set(expected) | set(desired):
+            before = expected.get(key, _MISSING)
+            after = desired.get(key, _MISSING)
+            now = current.get(key, _MISSING)
+            if after is _MISSING:
+                if now == before:
+                    result.pop(key, None)
+                continue
+            if before is _MISSING:
+                if now is _MISSING:
+                    result[key] = copy.deepcopy(after)
+                elif isinstance(after, Mapping) and isinstance(now, Mapping):
+                    result[key] = _reapply_json_delta({}, after, now)
+                continue
+            if now is _MISSING:
+                if after != before:
+                    result[key] = copy.deepcopy(after)
+                continue
+            result[key] = _reapply_json_delta(before, after, now)
+        return result
+    if all(isinstance(value, list) for value in (expected, desired, current)):
+        result = copy.deepcopy(current)
+        for item in expected:
+            if item not in desired and item in result:
+                result.remove(item)
+        for item in desired:
+            if item not in expected and item not in result:
+                result.append(copy.deepcopy(item))
+        return result
+    # Both writers changed the same scalar. Preserve the already committed value;
+    # the pending question will be replayed with that value as its new base.
+    return copy.deepcopy(current)
+
+
+def _reapply_evaluation_value(
+    current_value: str | None,
+    expected_value: str | None,
+    desired_value: str,
+) -> str:
+    current = _json_document(current_value, label="current evaluation state")
+    expected = _json_document(expected_value, label="expected evaluation state")
+    desired = _json_document(desired_value, label="desired evaluation state")
+    merged = _reapply_json_delta(expected, desired, current)
+    return json.dumps(merged, sort_keys=True, separators=(",", ":"))
+
+
+def _reapply_findings_value(
+    current_value: str | None,
+    expected_value: str | None,
+    desired_value: str,
+) -> str:
+    current, _ = _decode_state(
+        {"state": {"value": current_value}} if current_value is not None else {}
+    )
+    expected, _ = _decode_state(
+        {"state": {"value": expected_value}} if expected_value is not None else {}
+    )
+    desired, _ = _decode_state({"state": {"value": desired_value}})
+
+    def question_rows(document: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+        return {
+            str(item["question_id"]): item
+            for item in document.get("findings", [])
+            if isinstance(item, Mapping)
+            and isinstance(item.get("question_id"), str)
+            and item.get("question_id")
+        }
+
+    before_rows = question_rows(expected)
+    changed = [
+        item
+        for item in desired.get("findings", [])
+        if isinstance(item, Mapping)
+        and isinstance(item.get("question_id"), str)
+        and before_rows.get(str(item["question_id"])) != item
+    ]
+    current_rows = question_rows(current)
+    if len(changed) == 1:
+        finding = changed[0]
+        question_id = str(finding["question_id"])
+        if current_rows.get(question_id) == finding:
+            return json.dumps(current, sort_keys=True, separators=(",", ":"))
+        expected_without = {**expected, "findings": []}
+        desired_without = {**desired, "findings": []}
+        current_without = {**current, "findings": current.get("findings", [])}
+        reapplied = _reapply_json_delta(
+            expected_without, desired_without, current_without
+        )
+        observed_at = parse_time(finding.get("observed_at")) or utc_now()
+        merged = merge_finding(reapplied, finding, observed_at)
+    else:
+        merged = _reapply_json_delta(expected, desired, current)
+    return json.dumps(merged, sort_keys=True, separators=(",", ":"))
+
+
 def retrospective_evaluation_document(
     specification: Mapping[str, Any], identity: Any, now: datetime
 ) -> dict[str, Any]:
@@ -8302,28 +8432,70 @@ class CentralBackend:
                 return {}
             raise
 
+    async def _write_state_with_retry(
+        self,
+        key: str,
+        value: str,
+        expected_value: str | None,
+        reapply: Callable[[str | None, str | None, str], str],
+    ) -> Mapping[str, Any]:
+        from pursers_client import BoardClientError
+
+        candidate = value
+        expected = expected_value
+        for attempt in range(STATE_WRITE_MAX_ATTEMPTS):
+            expected_digest = (
+                hashlib.sha256(expected.encode("utf-8")).hexdigest()
+                if expected is not None
+                else None
+            )
+            try:
+                return await self.client.board_state_update(
+                    key, candidate, expected_sha256=expected_digest
+                )
+            except BoardClientError as exc:
+                if "state precondition failed" not in str(exc).casefold():
+                    raise
+                if attempt + 1 >= STATE_WRITE_MAX_ATTEMPTS:
+                    raise StateWriteConflict(key, STATE_WRITE_MAX_ATTEMPTS) from exc
+                try:
+                    raw = await self.client.board_state_get(key)
+                except BoardClientError as read_exc:
+                    if "state key not found" not in str(read_exc).casefold():
+                        raise
+                    current = None
+                else:
+                    state = raw.get("state", {})
+                    current = state.get("value") if isinstance(state, Mapping) else None
+                    if current is not None and not isinstance(current, str):
+                        raise RuntimeError(f"{key} state value is malformed")
+                candidate = reapply(current, expected, candidate)
+                if candidate == current:
+                    return {"ok": True, "duplicate": True}
+                expected = current
+                delay = STATE_WRITE_RETRY_BASE_DELAY_S * (2**attempt)
+                delay += random.uniform(0.0, STATE_WRITE_RETRY_BASE_DELAY_S)
+                await asyncio.sleep(delay)
+        raise AssertionError("unreachable state write retry")
+
     async def write_findings(
         self, value: str, expected_value: str | None
     ) -> Mapping[str, Any]:
-        expected = (
-            hashlib.sha256(expected_value.encode("utf-8")).hexdigest()
-            if expected_value is not None
-            else None
-        )
-        return await self.client.board_state_update(
-            STATE_KEY, value, expected_sha256=expected
+        return await self._write_state_with_retry(
+            STATE_KEY,
+            value,
+            expected_value,
+            _reapply_findings_value,
         )
 
     async def write_evaluation(
         self, question_id: str, value: str, expected_value: str | None
     ) -> Mapping[str, Any]:
-        expected = (
-            hashlib.sha256(expected_value.encode("utf-8")).hexdigest()
-            if expected_value is not None
-            else None
-        )
-        return await self.client.board_state_update(
-            evaluation_state_key(question_id), value, expected_sha256=expected
+        return await self._write_state_with_retry(
+            evaluation_state_key(question_id),
+            value,
+            expected_value,
+            _reapply_evaluation_value,
         )
 
     async def _subscription_membership_current(self) -> bool:
@@ -9465,6 +9637,30 @@ async def apply_control_action(
     )
 
 
+def report_state_write_conflict(
+    runtime: RuntimeStatus,
+    question: Mapping[str, Any],
+    conflict: StateWriteConflict,
+    *,
+    phase: str,
+) -> None:
+    warning = {
+        "event": "state_write_conflict",
+        "phase": phase,
+        "board_id": str(question.get("board_id", "unknown"))[:160],
+        "ticket_id": str(question.get("ticket_id", ""))[:160],
+        "question_id": str(question.get("question_id", ""))[:160],
+        "state_key": conflict.key,
+        "attempts": conflict.attempts,
+        "action": "deferred_for_replay",
+    }
+    print(
+        "board-butler: " + json.dumps(warning, sort_keys=True, separators=(",", ":")),
+        file=sys.stderr,
+    )
+    runtime.mark("state_write_conflict")
+
+
 async def run(
     args: argparse.Namespace,
     *,
@@ -9520,7 +9716,12 @@ async def run(
                         # replay closes the crash window without polling: it is
                         # tied to the existing bounded registry refresh cycle.
                         for pending in await pending_reader():
-                            await process_question(backend, pending, args, utc_now())
+                            try:
+                                await process_question(backend, pending, args, utc_now())
+                            except StateWriteConflict as exc:
+                                report_state_write_conflict(
+                                    runtime, pending, exc, phase="pending_replay"
+                                )
                     timeout = (
                         float(args.wait_timeout)
                         if args.once
@@ -9536,12 +9737,20 @@ async def run(
                     cursor, question = await backend.wait_for_question(cursor, timeout)
                     if not getattr(backend, "subscription_healthy", True):
                         runtime.mark("subscription_failed_closed")
+                    processed = True
                     if question is not None:
-                        await process_question(backend, question, args, utc_now())
-                        runtime.mark("question_processed")
+                        try:
+                            await process_question(backend, question, args, utc_now())
+                        except StateWriteConflict as exc:
+                            processed = False
+                            report_state_write_conflict(
+                                runtime, question, exc, phase="subscription_event"
+                            )
+                        else:
+                            runtime.mark("question_processed")
                     # Printing a proposed draft is not durable processing. Keep
                     # dry-run questions replayable by leaving the cursor alone.
-                    if not args.dry_run:
+                    if not args.dry_run and processed:
                         save_cursor(args.cursor_file, cursor)
                     if args.once:
                         return

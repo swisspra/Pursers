@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import contextlib
 import importlib.util
 import json
@@ -2825,6 +2826,311 @@ def test_cursor_is_not_committed_before_finding_write(tmp_path: Path) -> None:
         asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
 
     assert not options.cursor_file.exists()
+
+
+def test_findings_cas_conflict_rereads_and_preserves_concurrent_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pursers_client import BoardClientError
+
+    options = args(tmp_path)
+    initial = {
+        "schema_version": 2,
+        "generated_at": NOW.isoformat(),
+        "effective_mode": "shadow",
+        "findings": [],
+        "truncation": {"findings": 0},
+    }
+    replayed = {
+        "kind": "would_answer",
+        "question_id": "CQ-replayed",
+        "ticket_id": "TK-replayed",
+        "verdict": "MECHANICAL",
+        "observed_at": NOW.isoformat(),
+    }
+    refreshed = {
+        "kind": butler.OBSERVATION_FINDING_KIND,
+        "observation_key": "refresh-row",
+        "level": "info",
+        "observed_at": NOW.isoformat(),
+    }
+    desired = butler.merge_finding(initial, replayed, NOW)
+    concurrent = butler.merge_observation_findings(initial, [refreshed], NOW)
+
+    class Client:
+        def __init__(self) -> None:
+            self.value = json.dumps(initial, sort_keys=True, separators=(",", ":"))
+            self.calls = 0
+
+        async def board_state_update(
+            self, key: str, value: str, *, expected_sha256: str | None
+        ) -> Mapping[str, Any]:
+            assert key == butler.STATE_KEY
+            self.calls += 1
+            if self.calls == 1:
+                self.value = json.dumps(
+                    concurrent, sort_keys=True, separators=(",", ":")
+                )
+                raise BoardClientError("state precondition failed")
+            assert expected_sha256 == butler.hashlib.sha256(
+                self.value.encode("utf-8")
+            ).hexdigest()
+            self.value = value
+            return {"ok": True}
+
+        async def board_state_get(self, key: str) -> Mapping[str, Any]:
+            assert key == butler.STATE_KEY
+            return {"state": {"value": self.value}}
+
+    monkeypatch.setattr(butler, "STATE_WRITE_RETRY_BASE_DELAY_S", 0)
+    backend = butler.CentralBackend(options, "opaque")
+    client = Client()
+    backend.client = client
+    asyncio.run(
+        backend.write_findings(
+            json.dumps(desired, sort_keys=True, separators=(",", ":")),
+            json.dumps(initial, sort_keys=True, separators=(",", ":")),
+        )
+    )
+
+    rows = json.loads(client.value)["findings"]
+    assert client.calls == 2
+    assert sum(row.get("question_id") == "CQ-replayed" for row in rows) == 1
+    assert sum(row.get("observation_key") == "refresh-row" for row in rows) == 1
+
+
+def test_evaluation_cas_conflict_preserves_concurrent_mark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pursers_client import BoardClientError
+
+    options = args(tmp_path)
+    expected = {
+        "schema_version": 1,
+        "evaluation": {
+            "question_id": "CQ-replayed",
+            "ticket_id": "TK-replayed",
+            "draft_status": "produced",
+            "mark": None,
+        },
+    }
+    desired = json.loads(json.dumps(expected))
+    desired["evaluation"]["answer_audit"] = {"status": "pending"}
+    concurrent = json.loads(json.dumps(expected))
+    concurrent["evaluation"]["mark"] = "send_as_is"
+
+    class Client:
+        def __init__(self) -> None:
+            self.value = json.dumps(expected, sort_keys=True, separators=(",", ":"))
+            self.calls = 0
+
+        async def board_state_update(
+            self, key: str, value: str, *, expected_sha256: str | None
+        ) -> Mapping[str, Any]:
+            assert key == butler.evaluation_state_key("CQ-replayed")
+            self.calls += 1
+            if self.calls == 1:
+                self.value = json.dumps(
+                    concurrent, sort_keys=True, separators=(",", ":")
+                )
+                raise BoardClientError("state precondition failed")
+            assert expected_sha256 == butler.hashlib.sha256(
+                self.value.encode("utf-8")
+            ).hexdigest()
+            self.value = value
+            return {"ok": True}
+
+        async def board_state_get(self, _key: str) -> Mapping[str, Any]:
+            return {"state": {"value": self.value}}
+
+    monkeypatch.setattr(butler, "STATE_WRITE_RETRY_BASE_DELAY_S", 0)
+    backend = butler.CentralBackend(options, "opaque")
+    client = Client()
+    backend.client = client
+    asyncio.run(
+        backend.write_evaluation(
+            "CQ-replayed",
+            json.dumps(desired, sort_keys=True, separators=(",", ":")),
+            json.dumps(expected, sort_keys=True, separators=(",", ":")),
+        )
+    )
+
+    evaluation = json.loads(client.value)["evaluation"]
+    assert client.calls == 2
+    assert evaluation["mark"] == "send_as_is"
+    assert evaluation["answer_audit"] == {"status": "pending"}
+
+
+def test_state_write_conflict_is_bounded_to_three_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pursers_client import BoardClientError
+
+    options = args(tmp_path)
+    expected = {
+        "schema_version": 1,
+        "evaluation": {
+            "question_id": "CQ-replayed",
+            "ticket_id": "TK-replayed",
+            "draft_status": "produced",
+        },
+    }
+    desired = copy.deepcopy(expected)
+    desired["evaluation"]["answer_audit"] = {"status": "pending"}
+    expected_value = json.dumps(expected, sort_keys=True, separators=(",", ":"))
+    desired_value = json.dumps(desired, sort_keys=True, separators=(",", ":"))
+
+    class Client:
+        calls = 0
+
+        async def board_state_update(self, *_args: Any, **_kwargs: Any) -> None:
+            self.calls += 1
+            raise BoardClientError("state precondition failed")
+
+        async def board_state_get(self, _key: str) -> Mapping[str, Any]:
+            current = copy.deepcopy(expected)
+            current["evaluation"]["concurrent_revision"] = self.calls
+            return {
+                "state": {
+                    "value": json.dumps(
+                        current, sort_keys=True, separators=(",", ":")
+                    )
+                }
+            }
+
+    monkeypatch.setattr(butler, "STATE_WRITE_RETRY_BASE_DELAY_S", 0)
+    backend = butler.CentralBackend(options, "opaque")
+    client = Client()
+    backend.client = client
+
+    with pytest.raises(butler.StateWriteConflict) as raised:
+        asyncio.run(
+            backend.write_evaluation(
+                "CQ-replayed", desired_value, expected_value
+            )
+        )
+
+    assert raised.value.key == butler.evaluation_state_key("CQ-replayed")
+    assert raised.value.attempts == 3
+    assert client.calls == 3
+
+
+def test_persistent_state_conflict_keeps_question_replayable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = args(tmp_path)
+    options.runtime_status_file = tmp_path / "runtime.json"
+
+    class Backend(Source):
+        latest_seq = 10
+
+        async def __aenter__(self) -> "Backend":
+            self.tickets["TK-123"] = {"status": "closed"}
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def wait_for_question(
+            self, cursor: int, _timeout: float
+        ) -> tuple[int, Mapping[str, Any]]:
+            assert cursor == 10
+            return 11, question("What is the status of TK-123?")
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            return {}
+
+        async def write_evaluation(self, *_args: Any) -> None:
+            raise butler.StateWriteConflict(
+                butler.evaluation_state_key("CQ-source"),
+                butler.STATE_WRITE_MAX_ATTEMPTS,
+            )
+
+    asyncio.run(butler.run(options, backend_factory=lambda *_args: Backend()))
+
+    assert not options.cursor_file.exists()
+    warning = capsys.readouterr().err
+    assert '"action":"deferred_for_replay"' in warning
+    assert '"phase":"subscription_event"' in warning
+    status = json.loads(options.runtime_status_file.read_text(encoding="utf-8"))
+    assert status["running"] is False
+
+
+def test_restart_replays_pending_question_after_concurrent_refresh_conflict(
+    tmp_path: Path,
+) -> None:
+    options = args(tmp_path)
+    options.refresh_seconds = 60
+    pending = question("What is the status of TK-123?")
+    initial = {
+        "schema_version": 2,
+        "generated_at": NOW.isoformat(),
+        "effective_mode": "shadow",
+        "findings": [],
+        "truncation": {"findings": 0},
+    }
+    refreshed = {
+        "kind": butler.OBSERVATION_FINDING_KIND,
+        "observation_key": "concurrent-refresh",
+        "level": "info",
+        "observed_at": NOW.isoformat(),
+    }
+
+    class Backend(Source):
+        latest_seq = 10
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.tickets["TK-123"] = {"status": "closed"}
+            self.findings_value = json.dumps(initial)
+            self.findings_writes = 0
+
+        async def __aenter__(self) -> "Backend":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def refresh_registry_findings(self, _now: Any) -> Mapping[str, Any]:
+            return {"active_boards": ["pursers"]}
+
+        async def pending_questions(self) -> list[Mapping[str, Any]]:
+            return [pending]
+
+        async def wait_for_question(
+            self, cursor: int, _timeout: float
+        ) -> tuple[int, None]:
+            return cursor, None
+
+        async def findings(self) -> Mapping[str, Any]:
+            return {"state": {"value": self.findings_value}}
+
+        async def coordinator_config(self) -> Mapping[str, Any]:
+            return {}
+
+        async def write_findings(self, value: str, _expected: str | None) -> None:
+            self.findings_writes += 1
+            if self.findings_writes == 1:
+                concurrent = butler.merge_observation_findings(
+                    json.loads(self.findings_value), [refreshed], NOW
+                )
+                self.findings_value = json.dumps(concurrent)
+                raise butler.StateWriteConflict(
+                    butler.STATE_KEY, butler.STATE_WRITE_MAX_ATTEMPTS
+                )
+            self.findings_value = value
+
+    backend = Backend()
+    asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
+    asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
+
+    rows = json.loads(backend.findings_value)["findings"]
+    assert backend.findings_writes == 2
+    assert sum(row.get("question_id") == "CQ-source" for row in rows) == 1
+    assert sum(row.get("observation_key") == "concurrent-refresh" for row in rows) == 1
 
 
 def test_rate_limits_are_configurable_and_reported() -> None:
