@@ -145,6 +145,9 @@ def test_version_endpoint_returns_injected_running_revision() -> None:
 def test_launcher_keeps_runtime_and_state_outside_checkout(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
     state = tmp_path / "state"
+    butler_state = tmp_path / "butler-state"
+    butler_secrets = tmp_path / "butler-secrets"
+    butler_entrypoint = MODULE_PATH.parents[1] / "board-butler" / "board_butler.py"
     token = tmp_path / "token"
     token.write_text("fixture", encoding="utf-8")
     capture = tmp_path / "capture.json"
@@ -166,6 +169,9 @@ def test_launcher_keeps_runtime_and_state_outside_checkout(tmp_path: Path) -> No
         "PURSERS_FLEET_REPO": str(MODULE_PATH.parents[2]),
         "PURSERS_FLEET_RUNTIME_DIR": str(runtime),
         "PURSERS_FLEET_STATE_DIR": str(state),
+        "PURSERS_BUTLER_STATE_DIR": str(butler_state),
+        "PURSERS_BUTLER_ENTRYPOINT": str(butler_entrypoint),
+        "PURSERS_BUTLER_PROVIDER_SECRETS_DIR": str(butler_secrets),
         "PURSERS_FLEET_URL": "http://127.0.0.1:8766/mcp",
         "PURSERS_FLEET_TOKEN_PATH": str(token),
     }
@@ -176,6 +182,18 @@ def test_launcher_keeps_runtime_and_state_outside_checkout(tmp_path: Path) -> No
     assert result["args"][0] == str(MODULE_PATH)
     assert ["--workers-dir", str(state / "workers")] == result["args"][
         result["args"].index("--workers-dir") : result["args"].index("--workers-dir") + 2
+    ]
+    assert ["--butler-state-dir", str(butler_state)] == result["args"][
+        result["args"].index("--butler-state-dir") :
+        result["args"].index("--butler-state-dir") + 2
+    ]
+    assert ["--butler-entrypoint", str(butler_entrypoint)] == result["args"][
+        result["args"].index("--butler-entrypoint") :
+        result["args"].index("--butler-entrypoint") + 2
+    ]
+    assert ["--butler-secrets-dir", str(butler_secrets)] == result["args"][
+        result["args"].index("--butler-secrets-dir") :
+        result["args"].index("--butler-secrets-dir") + 2
     ]
 
 
@@ -281,3 +299,10 @@ def test_launchagent_template_uses_repository_launcher_and_external_paths() -> N
     environment = document["EnvironmentVariables"]
     assert environment["PURSERS_FLEET_RUNTIME_DIR"].startswith("/PATH/TO/private/")
     assert environment["PURSERS_FLEET_STATE_DIR"].startswith("/PATH/TO/private/")
+    assert environment["PURSERS_BUTLER_STATE_DIR"].startswith("/PATH/TO/private/")
+    assert environment["PURSERS_BUTLER_ENTRYPOINT"].endswith(
+        "tools/board-butler/board_butler.py"
+    )
+    assert environment["PURSERS_BUTLER_PROVIDER_SECRETS_DIR"].startswith(
+        "/PATH/TO/private/"
+    )

@@ -1194,6 +1194,7 @@ class ButlerSettingsManager:
         kill_path: str | Path | None = None,
         pid_path: str | Path | None = None,
         expected_process_path: str | Path | None = None,
+        expected_process_arguments: Mapping[str, str | Path] | None = None,
         process_inspector: Callable[[int], bool] | None = None,
         process_probe: Callable[[int], bool] | None = None,
         signaler: Callable[[int, int], None] | None = None,
@@ -1221,6 +1222,10 @@ class ButlerSettingsManager:
             if expected_process_path
             else Path(__file__).parents[1] / "board-butler" / "board_butler.py"
         ).resolve()
+        self.expected_process_arguments = {
+            name: str(Path(value).expanduser().resolve())
+            for name, value in (expected_process_arguments or {}).items()
+        }
         if process_inspector is not None and process_probe is not None:
             raise ValueError("provide only one process identity verifier")
         # process_probe remains as a compatibility alias for focused tests. The
@@ -1288,9 +1293,35 @@ class ButlerSettingsManager:
                 matches_entrypoint = False
             if matches_entrypoint:
                 break
+        matches_contract = matches_entrypoint
+        for option, expected_value in self.expected_process_arguments.items():
+            # argparse accepts both "--option value" and "--option=value" and
+            # uses the last duplicate. Reject every duplicate so Fleet cannot
+            # validate one path while the resident uses another.
+            option_prefix = f"{option}="
+            values: list[str] = []
+            for index, argument in enumerate(arguments):
+                if argument == option:
+                    if index + 1 >= len(arguments):
+                        values = []
+                        break
+                    values.append(arguments[index + 1])
+                elif argument.startswith(option_prefix):
+                    values.append(argument[len(option_prefix) :])
+            if len(values) != 1 or not values[0]:
+                matches_contract = False
+                break
+            try:
+                actual_value = str(Path(values[0]).expanduser().resolve())
+            except (OSError, RuntimeError):
+                matches_contract = False
+                break
+            if actual_value != expected_value:
+                matches_contract = False
+                break
         # Recheck the lock after reading process metadata. If the resident
         # exited or the PID was reused during inspection, fail closed.
-        return matches_entrypoint and self._pid_lock_held_by(pid)
+        return matches_contract and self._pid_lock_held_by(pid)
 
     @staticmethod
     def _private_file(path: Path) -> bool:
@@ -1318,14 +1349,14 @@ class ButlerSettingsManager:
                 document = candidate
         pid = document.get("pid")
         mode = document.get("mode")
-        alive = bool(
+        claims_running = bool(
             document.get("running") is True
             and isinstance(pid, int)
             and not isinstance(pid, bool)
             and pid > 1
             and mode in {"shadow", "active"}
-            and self.process_inspector(pid)
         )
+        alive = claims_running and self.process_inspector(pid)
         if alive:
             state = f"running_{mode}"
         elif configured:
@@ -1361,6 +1392,9 @@ class ButlerSettingsManager:
             "last_activity_at": timestamp("last_activity_at"),
             "last_activity": last_activity,
             "kill_switch_engaged": self._private_file(self.kill_path),
+            "diagnostic": (
+                "process_contract_mismatch" if claims_running and not alive else None
+            ),
         }
 
     @staticmethod
