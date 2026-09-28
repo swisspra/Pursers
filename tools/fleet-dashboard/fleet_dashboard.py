@@ -78,6 +78,7 @@ from release_ops import ReleaseOpsManager
 import runtime_environment
 from warm_home import apply_warm_guided_home
 from result_visibility import project_ticket_result
+from case_study import aggregate_case_studies
 from evidence_trace import CORRELATION_HEADERS, EvidenceTrace, EvidenceTraceConfigError
 from butler_settings import (
     ButlerSettingsError,
@@ -984,6 +985,7 @@ class Config:
     overhead_path: Path | None = None
     doors_keys_dir: Path | None = None
     jwks_path: Path | None = None
+    case_study_manifests: tuple[dict[str, Any], ...] = ()
 
 
 def _worker_text(value: Any, label: str, *, limit: int = 500) -> str:
@@ -3772,6 +3774,7 @@ def aggregate_fleet(
     now: datetime | None = None,
     seat_definitions: dict[str, dict[str, Any]] | None = None,
     active_registry_boards: list[str] | None = None,
+    case_study_manifests: tuple[dict[str, Any], ...] | list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the bounded API projection from already-bounded board reads."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -4244,6 +4247,14 @@ def aggregate_fleet(
             key=lambda item: (item["project"], item["agent_name"]),
         )[:MAX_AGENT_ROWS],
         "boards": boards,
+        "case_studies": aggregate_case_studies(
+            board_rows
+            + (
+                [{"case_study_manifests": list(case_study_manifests)}]
+                if case_study_manifests
+                else []
+            )
+        ),
         "bounds": {
             "boards": MAX_BOARDS,
             "snapshot_items_per_collection": SNAPSHOT_LIMIT,
@@ -4945,6 +4956,7 @@ class FleetFetcher:
             now=self.now_factory(),
             seat_definitions=self._seat_definitions,
             active_registry_boards=self._active_registry_boards,
+            case_study_manifests=self.config.case_study_manifests,
         )
         covered = {
             row.get("board_id")
@@ -9421,6 +9433,21 @@ def _read_mode_0600(path: Path, description: str) -> str:
         raise SystemExit(f"cannot read {description}: {path}") from exc
 
 
+def _load_case_study_manifests(paths: list[str] | None) -> tuple[dict[str, Any], ...]:
+    manifests: list[dict[str, Any]] = []
+    for raw_path in paths or []:
+        path = Path(raw_path).expanduser().resolve()
+        raw = _read_mode_0600(path, "case-study manifest")
+        try:
+            manifest = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"case-study manifest is not valid JSON: {path}") from exc
+        if not isinstance(manifest, dict):
+            raise SystemExit(f"case-study manifest must be a JSON object: {path}")
+        manifests.append(manifest)
+    return tuple(manifests)
+
+
 def load_central_configs(args: argparse.Namespace) -> list[Config]:
     """Load ordered multi-central config without exposing token material."""
     cli_keys_dir = (
@@ -9433,6 +9460,9 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
         if getattr(args, "jwks_path", None)
         else None
     )
+    case_study_manifests = _load_case_study_manifests(
+        getattr(args, "case_study_manifest", None)
+    )
     if not args.centrals:
         return [
             Config(
@@ -9444,6 +9474,7 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
                 cache_seconds=args.cache_seconds,
                 doors_keys_dir=cli_keys_dir,
                 jwks_path=cli_jwks,
+                case_study_manifests=case_study_manifests,
             )
         ]
     source = Path(args.centrals).expanduser().resolve()
@@ -9532,6 +9563,7 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
                 overhead_path=stats_path,
                 doors_keys_dir=keys_dir,
                 jwks_path=jwks_path,
+                case_study_manifests=case_study_manifests,
             )
         )
         seen.add(label)
@@ -9590,6 +9622,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--evidence-trace-config",
         help="Verifier-owned 0600 config for bounded Fleet evidence tracing",
+    )
+    parser.add_argument(
+        "--case-study-manifest",
+        action="append",
+        default=[],
+        help=(
+            "Private 0600 preregistered case-study manifest; repeat for multiple studies"
+        ),
     )
     args = parser.parse_args(argv)
     if args.host != "127.0.0.1":

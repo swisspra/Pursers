@@ -22,6 +22,55 @@
 .activity-scope p { line-height: 1.6; }
 .activity-scope p b { font-size: inherit; }
 
+.case-studies {
+  display: grid;
+  gap: 18px;
+  max-width: 1180px;
+  margin: 0 0 36px;
+}
+
+.case-study-heading,
+.case-study > header,
+.case-study-lane-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+}
+
+.case-study-heading > p { max-width: 560px; color: var(--muted); }
+.case-study {
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--panel);
+}
+.case-study[data-comparison-state="incomparable"] { border-style: dashed; }
+.case-study > .warning { margin: 12px 0; }
+.case-study-lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 18px 0 12px; }
+.case-study-lane { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel2); }
+.case-study-lane[data-state="incomplete"] { border-style: dashed; }
+.case-study-lane h4 { margin-top: 3px; overflow-wrap: anywhere; }
+.case-study-run-metrics,
+.case-study-ticket-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin: 14px 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--line); }
+.case-study-run-metrics div,
+.case-study-ticket-metrics div { min-width: 0; padding: 9px; background: var(--panel); }
+.case-study-run-metrics dt,
+.case-study-ticket-metrics dt { color: var(--muted); font-size: 10px; font-weight: 700; }
+.case-study-run-metrics dd,
+.case-study-ticket-metrics dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 12px; font-weight: 700; }
+.case-study-tickets { display: grid; gap: 8px; }
+.case-study-ticket { border-top: 1px solid var(--line); padding-top: 9px; }
+.case-study-ticket summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; }
+.case-study-phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(115px, 1fr)); gap: 8px; margin: 12px 0; padding: 0; list-style: none; }
+.case-study-phases li { min-width: 0; padding: 9px; border-left: 2px solid var(--accent); background: var(--panel); }
+.case-study-phases span,
+.case-study-phases time,
+.case-study-phases small { display: block; overflow-wrap: anywhere; }
+.case-study-phases span { font-weight: 700; }
+.case-study-phases time,
+.case-study-phases small { margin-top: 3px; color: var(--muted); font-size: 10px; }
+
 .activity-ledger {
   --activity-rail: color-mix(in srgb, var(--accent) 34%, var(--line));
   display: grid;
@@ -196,6 +245,7 @@
   .activity-scope p { grid-column: 1 / -1; }
   .activity-day { grid-template-columns: 1fr; gap: 10px; }
   .activity-day > h3 { position: static; padding: 0 0 0 36px; }
+  .case-study-lanes { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 640px) {
@@ -206,6 +256,11 @@
   .activity-outcome-row { align-items: flex-start; }
   .activity-time { flex-basis: 100%; }
   .activity-provenance { grid-template-columns: 1fr 1fr; }
+  .case-study-heading,
+  .case-study > header,
+  .case-study-lane-head { display: grid; }
+  .case-study-run-metrics,
+  .case-study-ticket-metrics { grid-template-columns: 1fr 1fr; }
 }
 
 @media (forced-colors: active) {
