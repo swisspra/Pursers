@@ -7184,9 +7184,11 @@ class SeatConfigManager:
             "skills": connector_skill_suggestions(adapter_for(desired).inspect()),
         }
 
-    def apply(self, plan_id: Any, digest: Any = None) -> dict[str, Any]:
+    def apply(self, plan_id: Any, digest: Any) -> dict[str, Any]:
         if not isinstance(plan_id, str):
             raise ValueError("plan_id is required")  # noqa: TRY004 - API contract.
+        if not isinstance(digest, str):
+            raise ValueError("seat plan digest is required")
         with self._lock:
             pending = self._plans.pop(plan_id, None)
         if pending is None:
@@ -7194,10 +7196,7 @@ class SeatConfigManager:
         desired = pending["desired"]
         changes = pending["changes"]
         expected_digest = pending["digest"]
-        if digest is not None and (
-            not isinstance(digest, str)
-            or not hmac.compare_digest(digest, expected_digest)
-        ):
+        if not hmac.compare_digest(digest, expected_digest):
             raise ValueError("seat plan digest mismatch")
         if pending["expires_at"] <= time.monotonic():
             raise RuntimeError("seat plan expired; generate a new plan")
@@ -9076,14 +9075,11 @@ def make_handler(
                 elif route == "/api/config/apply":
                     if (
                         not isinstance(request, dict)
-                        or "plan_id" not in request
-                        or not set(request) <= {"plan_id", "digest"}
+                        or set(request) != {"plan_id", "digest"}
                     ):
-                        raise ValueError("request must contain plan_id and optional digest")
+                        raise ValueError("request must contain only plan_id and digest")
                     body = _json_bytes(
-                        seats.apply(request["plan_id"], request.get("digest"))
-                        if "digest" in request
-                        else seats.apply(request["plan_id"])
+                        seats.apply(request["plan_id"], request["digest"])
                     )
                 elif route == "/api/config/prompt":
                     body = _json_bytes(seats.prompt(request))
