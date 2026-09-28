@@ -11160,6 +11160,51 @@ def test_doors_ui_rendering() -> None:
     assert 'name="integration_ref"' in html
 
 
+def test_doors_ui_private_file_targets_configured_inactive_seat_for_issue_and_rotate() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    section = "let doorsData" + script.split("let doorsData", 1)[1].split(
+        "function addProjectPanel", 1
+    )[0]
+    esc_source = next(line for line in script.splitlines() if line.startswith("const esc="))
+    program = "\n".join(
+        [
+            esc_source,
+            "const relativeAge=()=>'';",
+            "let hubSeatInventory={seats:[",
+            "{name:'configured-worker',role:'worker',boards:'home',home_board:'existing-board'},",
+            "{name:'wrong-role',role:'reviewer',boards:'home',home_board:'existing-board'},",
+            "{name:'wrong-board',role:'worker',boards:'home',home_board:'other-board'}",
+            "]};",
+            section,
+            "doorsData={doors:[{project:'Existing',board_id:'existing-board',role:'worker',kid:'kid',exp:null,seats:[]}]};",
+            "console.log(doorsPanel());",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    rendered = completed.stdout
+    assert "None active" in rendered
+    assert rendered.count('data-door-seat="configured-worker"') == 2
+    assert (
+        'data-door-action="issue" data-door-delivery="private_file" '
+        'data-door-seat="configured-worker"'
+    ) in rendered
+    assert (
+        'data-door-action="rotate" data-door-delivery="private_file" '
+        'data-door-seat="configured-worker"'
+    ) in rendered
+    assert 'data-door-seat="wrong-role"' not in rendered
+    assert 'data-door-seat="wrong-board"' not in rendered
+
+
 def test_add_project_denied_before_any_durable_mutation(tmp_path: Path) -> None:
     central = FakeDoorCentral(is_admin=False)
     config = dashboard.Config(

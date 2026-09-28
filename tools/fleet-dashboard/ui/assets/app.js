@@ -306,6 +306,22 @@ if(navKind()==='overview')renderHub();
 /*__FLEET_SCRIPT_BOUNDARY__*/
 
 let doorsData = {doors: []}, doorRotateOutcome = '';
+function doorEligibleSeats(door) {
+  return (hubSeatInventory.seats || []).filter(seat => {
+    if (seat.role !== door.role) return false;
+    if (seat.boards === 'registry') return true;
+    if (seat.boards === 'home') return seat.home_board === door.board_id;
+    const boards = Array.isArray(seat.boards)
+      ? seat.boards
+      : String(seat.boards || '').split(',').map(board => board.trim()).filter(Boolean);
+    return boards.includes(door.board_id);
+  }).sort((left, right) => String(left.name).localeCompare(String(right.name)));
+}
+function doorPrivateFileActions(door) {
+  return doorEligibleSeats(door).map(seat => ['issue', 'rotate'].map(action =>
+    `<button type="button" data-door-action="${action}" data-door-delivery="private_file" data-door-seat="${esc(seat.name)}" data-board="${esc(door.board_id)}" data-role="${esc(door.role)}">${action === 'issue' ? 'Issue' : 'Rotate'} to ${esc(seat.name)}</button>`
+  ).join('')).join('');
+}
 function doorsPanel() {
   const doors = doorsData.doors || [];
   return `<section class="card pool" id="doors-panel">
@@ -339,7 +355,7 @@ function doorsPanel() {
             <td>
               <div class="worker-actions">
                 <button type="button" data-door-action="issue" data-door-delivery="reveal_once" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}">Issue · reveal once</button>
-                ${(d.seats || []).map(s => `<button type="button" data-door-action="issue" data-door-delivery="private_file" data-door-seat="${esc(s.agent_name)}" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}">Issue to ${esc(s.agent_name)}</button>`).join('')}
+                ${doorPrivateFileActions(d)}
                 <button type="button" data-door-action="rotate" data-door-delivery="reveal_once" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}">Rotate · reveal once</button>
                 <button type="button" class="danger-action" data-door-action="revoke" data-door-delivery="none" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}" ${d.kid ? '' : 'disabled'}>Revoke</button>
               </div>
@@ -382,7 +398,12 @@ refreshSeats = async function() {
   try {
     const central = centralLabels[0];
     if (central) {
-      doorsData = await fetchJson('/api/doors?' + apiCentral(central));
+      const [doors, inventory] = await Promise.all([
+        fetchJson('/api/doors?' + apiCentral(central)),
+        fetchJson('/api/team/seats'),
+      ]);
+      doorsData = doors;
+      hubSeatInventory = inventory;
     }
   } catch (e) {
     doorsData = { doors: [] };
