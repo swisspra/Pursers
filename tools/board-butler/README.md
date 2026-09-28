@@ -31,11 +31,11 @@ seat capability row.
 ## Board-state observations
 
 Every registry refresh also runs one bounded observation engine over Central
-state the butler already reads. `ObservationContext` contains only the current
-question inbox plus full projections of inbox-linked tickets and active tickets
-that have annotations;
-it has no filesystem, process, or host input. `OBSERVATION_RULES` is the rule
-registry. Adding another condition means registering another read-only
+state the butler already reads. `ObservationContext` contains the current
+question inbox, compact ticket and agent rows, and at most 100 full ticket
+projections. On the home board it also receives a read-only snapshot of the
+host-wide full-gate request directory and process table. `OBSERVATION_RULES` is
+the rule registry. Adding another condition means registering another read-only
 predicate, not adding another action path. `derive_board_observations` gives
 every result a stable key, and `merge_observation_findings` replaces the prior
 derived set with a CAS-protected update to `coordinator_findings`.
@@ -80,6 +80,30 @@ The current duties are directly traceable:
 6. `coverage_gap` names an incomplete question or ticket-detail projection and
    prevents an absence from being reported as proof. Test:
    `test_observation_coverage_gap_refuses_negative_claim`.
+7. `full_gate_queue` reports queue depth, oldest wait, and the inferred active
+   holder class at depth 3 or age 15 minutes; depth 8 or age 60 minutes requests
+   human attention. Dead request PIDs are ignored and Butler never removes a
+   request or kills a process.
+8. `unanswered_questions` reports five open questions or a 30-minute oldest
+   wait, including questions attached to terminal tickets. Twenty open
+   questions or a live-work blocker older than two hours requests human
+   attention.
+9. `approved_not_landed` reuses `tools/stranded_approvals.py`, including its
+   equivalent-content check. An approval not proven landed after one hour is
+   reported; 24 hours, or an unknown approval time, requests human attention.
+10. `rejection_loop` reports two review rejections and requests human attention
+    at three. `role_imbalance` compares unassignable work/review demand with
+    idle opposite-role capacity, escalating at eight tickets or any critical
+    unassignable review. Per-ticket detail is capped at three rows per signal;
+    an aggregate row records any omitted backlog.
+
+`fleet_demand_snapshot` is the machine-readable companion to those nags. On
+every refresh it replaces `board_butler.demand_snapshot` in the same
+CAS-protected state document with current gate depth,
+oldest queue wait and holder class; unassignable work/review counts and ages;
+idle role capacity; rejection/rework load; and normalized host load, memory,
+and disk headroom. The future reconciler may consume this structure within its
+operator-set ceiling; this observer never starts, stops, or changes a seat.
 
 Shadow and active runtime modes observe and report identically. Active mode
 adds the two existing, separately authorized mechanical actions and is also a

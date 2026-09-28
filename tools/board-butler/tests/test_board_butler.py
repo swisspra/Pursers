@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import urllib.error
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -4100,6 +4101,541 @@ def test_observation_coverage_gap_refuses_negative_claim() -> None:
     assert findings[0]["evidence"] == "missing=question_inbox,ticket_details"
 
 
+def test_full_gate_queue_observer_reports_depth_age_holder_and_stable_dedup_key(
+    tmp_path: Path,
+) -> None:
+    queue = tmp_path / "queue"
+    queue.mkdir()
+    requested_ns = int((NOW - butler.timedelta(seconds=4_000)).timestamp() * 1_000_000_000)
+    for index in range(10):
+        (queue / f"request-{index}.json").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "request_id": f"request-{index}",
+                    "pid": 100 + index,
+                    "requested_ns": requested_ns + index,
+                    "admission_class": "active-worker",
+                    "lease_id": f"TK-{index}",
+                }
+            ),
+            encoding="utf-8",
+        )
+    snapshot = butler.read_full_gate_queue(
+        tmp_path,
+        NOW,
+        process_table=(
+            "998 codex exec prompt says python3 tools/ci_manifest.py affected "
+            "--admission-class active-worker\n"
+            "999 python3 tools/ci_manifest.py run --admission-class release"
+        ),
+        process_alive=lambda _pid: True,
+    )
+    assert snapshot == {
+        "complete": True,
+        "depth": 10,
+        "oldest_wait_s": 4_000,
+        "holder_class": "release",
+        "holder_classes": ["release"],
+        "malformed": 0,
+    }
+    first = butler.derive_board_observations(
+        butler.ObservationContext(
+            board_id="pursers", tickets={}, questions=(), now=NOW, gate_queue=snapshot
+        )
+    )
+    second = butler.derive_board_observations(
+        butler.ObservationContext(
+            board_id="pursers",
+            tickets={},
+            questions=(),
+            now=NOW + butler.timedelta(minutes=1),
+            gate_queue={**snapshot, "oldest_wait_s": 4_060},
+        )
+    )
+    gate = next(row for row in first if row["observer"] == "full_gate_queue")
+    replay = next(row for row in second if row["observer"] == "full_gate_queue")
+    assert gate["level"] == "critical"
+    assert gate["human_attention"] is True
+    assert "depth=10" in gate["evidence"]
+    assert "holder_class=release" in gate["evidence"]
+    assert gate["observation_key"] == replay["observation_key"]
+
+
+def test_unanswered_question_observer_aggregates_blocking_and_terminal_backlog() -> None:
+    questions = tuple(
+        {
+            "ticket_id": f"TK-question-{index}",
+            "question_id": f"CQ-{index}",
+            "state": "open",
+            "asked_at": (NOW - butler.timedelta(hours=3)).isoformat(),
+        }
+        for index in range(29)
+    )
+    tickets = tuple(
+        {
+            "ticket_id": f"TK-question-{index}",
+            "status": "claimed" if index < 2 else "closed",
+        }
+        for index in range(29)
+    )
+    findings = butler.derive_board_observations(
+        butler.ObservationContext(
+            board_id="pursers",
+            tickets={},
+            questions=questions,
+            ticket_rows=tickets,
+            now=NOW,
+        )
+    )
+    backlog = next(row for row in findings if row["observer"] == "unanswered_questions")
+    assert backlog["level"] == "critical"
+    assert "open=29" in backlog["evidence"]
+    assert "blocking_over_2h=2" in backlog["evidence"]
+    assert "terminal_ticket_questions=27" in backlog["evidence"]
+    replay = next(
+        row
+        for row in butler.derive_board_observations(
+            butler.ObservationContext(
+                board_id="pursers",
+                tickets={},
+                questions=questions,
+                ticket_rows=tickets,
+                now=NOW + butler.timedelta(minutes=1),
+            )
+        )
+        if row["observer"] == "unanswered_questions"
+    )
+    assert backlog["observation_key"] == replay["observation_key"]
+
+
+def test_approved_not_landed_observer_reuses_equivalent_content_check(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=repo, check=True)
+    base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    def candidate(branch: str, path: str, value: str) -> str:
+        subprocess.run(["git", "switch", "-q", "-c", branch, base], cwd=repo, check=True)
+        (repo / path).write_text(value, encoding="utf-8")
+        subprocess.run(["git", "add", path], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", branch], cwd=repo, check=True)
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    stranded_sha = candidate("stranded", "stranded.txt", "missing\n")
+    equivalent_sha = candidate("equivalent", "equivalent.txt", "landed\n")
+    subprocess.run(["git", "switch", "-q", "main"], cwd=repo, check=True)
+    (repo / "equivalent.txt").write_text("landed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "equivalent.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "equivalent content"], cwd=repo, check=True)
+
+    def approved(ticket_id: str, branch: str, commit: str) -> dict[str, Any]:
+        return {
+            "ticket_id": ticket_id,
+            "title": ticket_id,
+            "status": "closed",
+            "review_verdict": "approve",
+            "updated_at": (NOW - butler.timedelta(days=2)).isoformat(),
+            "latest_verdict": {
+                "verdict": "approve",
+                "reviewed_at": (NOW - butler.timedelta(days=2)).isoformat(),
+            },
+            "submission_history": [
+                {"notes": f"branch_and_commit: {branch}@{commit}"}
+            ],
+        }
+
+    context = butler.ObservationContext(
+        board_id="pursers",
+        tickets={
+            "TK-stranded": approved("TK-stranded", "worker/stranded", stranded_sha),
+            "TK-equivalent": approved("TK-equivalent", "worker/equivalent", equivalent_sha),
+        },
+        questions=(),
+        now=NOW,
+        repo=repo,
+        main_ref="refs/heads/main",
+    )
+    findings = butler.derive_board_observations(context)
+    stranded = [row for row in findings if row["observer"] == "approved_not_landed"]
+    assert [row["ticket_id"] for row in stranded] == ["TK-stranded"]
+    assert stranded[0]["level"] == "critical"
+    assert "state=STRANDED" in stranded[0]["evidence"]
+    replay = butler.derive_board_observations(context)
+    assert stranded[0]["observation_key"] == next(
+        row["observation_key"]
+        for row in replay
+        if row.get("ticket_id") == "TK-stranded"
+    )
+
+
+def test_mature_board_hydrates_closed_approval_without_intake_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pursers_client
+
+    options = args(tmp_path)
+    options.repo = REPOSITORY_ROOT
+    backend = butler.CentralBackend(options, "opaque")
+    approved = {
+        "ticket_id": "TK-approved-closed",
+        "title": "Approved but not landed",
+        "status": "closed",
+        "review_verdict": "approve",
+        "updated_at": (NOW - butler.timedelta(days=2)).isoformat(),
+        "latest_verdict": {
+            "verdict": "approve",
+            "reviewed_at": (NOW - butler.timedelta(days=2)).isoformat(),
+        },
+        "submission_history": [
+            {"notes": "branch_and_commit: worker/TK-approved@" + "a" * 40}
+        ],
+    }
+    open_tickets = [
+        {
+            "ticket_id": f"TK-open-{index:03d}",
+            "title": "Open",
+            "status": "open",
+            "updated_at": NOW.isoformat(),
+            "annotation_count": 0,
+        }
+        for index in range(500)
+    ]
+    by_id = {
+        str(row["ticket_id"]): row for row in [*open_tickets, approved]
+    }
+
+    class Client:
+        async def __aenter__(self) -> "Client":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def ticket_list(self, **arguments: Any) -> Mapping[str, Any]:
+            if "ticket_ids" in arguments:
+                rows = [by_id[ticket_id] for ticket_id in arguments["ticket_ids"]]
+            elif "status" in arguments:
+                rows = (
+                    open_tickets
+                    if arguments["status"] == "open"
+                    else [approved]
+                    if arguments["status"] == "closed"
+                    else []
+                )
+            else:
+                rows = [open_tickets[0]]
+                return {"tickets": rows, "count": 1, "total_matching": 501}
+            return {
+                "tickets": rows,
+                "count": len(rows),
+                "total_matching": len(rows),
+            }
+
+        async def board_question_inbox(
+            self, **_arguments: Any
+        ) -> Mapping[str, Any]:
+            return {"questions": [], "total": 0}
+
+        async def ticket_get(
+            self, ticket_id: str, **_arguments: Any
+        ) -> Mapping[str, Any]:
+            return {"ticket": by_id[ticket_id]}
+
+    monkeypatch.setattr(pursers_client, "BoardClient", lambda *_args, **_kwargs: Client())
+    api = butler._stranded_approvals_api()
+    monkeypatch.setitem(
+        api,
+        "classify_approval",
+        lambda ticket, **_kwargs: SimpleNamespace(
+            ticket_id=ticket["ticket_id"],
+            approved_sha="a" * 40,
+            state="STRANDED",
+            matched_lines=0,
+            added_lines=1,
+        ),
+    )
+    snapshot = {
+        "truncated": True,
+        "coordination_tickets_complete": True,
+        "coordination_tickets": [
+            {
+                "ticket_id": "TK-open-000",
+                "status": "open",
+                "updated_at": NOW.isoformat(),
+                "annotation_count": 0,
+            }
+        ],
+        "agents": [],
+    }
+
+    context = asyncio.run(
+        backend._observation_context_for_board("mature-board", snapshot, NOW)
+    )
+    findings = butler.derive_board_observations(context)
+
+    assert "TK-approved-closed" in context.tickets
+    assert context.tickets_complete is False
+    stranded = [
+        row for row in findings if row.get("observer") == "approved_not_landed"
+    ]
+    assert [row["ticket_id"] for row in stranded] == ["TK-approved-closed"]
+    assert "state=STRANDED" in stranded[0]["evidence"]
+    assert any(
+        row.get("observer") == "coverage_gap" for row in findings
+    )
+
+
+def test_approved_not_landed_accepts_future_proven_landed_states(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = butler.ObservationContext(
+        board_id="pursers",
+        tickets={
+            "TK-reference": {
+                "ticket_id": "TK-reference",
+                "status": "closed",
+                "review_verdict": "approve",
+            }
+        },
+        questions=(),
+        now=NOW,
+        repo=REPOSITORY_ROOT,
+        main_ref="refs/heads/main",
+    )
+    monkeypatch.setitem(
+        butler._stranded_approvals_api(),
+        "classify_approval",
+        lambda *_args, **_kwargs: SimpleNamespace(state="LANDED_BY_REFERENCE"),
+    )
+
+    assert butler._observe_stranded_approvals(context) == []
+
+
+@pytest.mark.parametrize(
+    ("count", "level", "human_attention"),
+    [(2, "warn", False), (3, "critical", True)],
+)
+def test_rejection_loop_observer_threshold(
+    count: int, level: str, human_attention: bool
+) -> None:
+    findings = butler.derive_board_observations(
+        butler.ObservationContext(
+            board_id="pursers",
+            tickets={},
+            questions=(),
+            now=NOW,
+            ticket_rows=(
+                {
+                    "ticket_id": "TK-loop",
+                    "status": "open",
+                    "counts": {"rejections": count},
+                },
+            ),
+        )
+    )
+    loop = next(row for row in findings if row["observer"] == "rejection_loop")
+    assert loop["level"] == level
+    assert loop["human_attention"] is human_attention
+
+
+def test_rejection_loop_observer_bounds_per_ticket_detail() -> None:
+    findings = butler.derive_board_observations(
+        butler.ObservationContext(
+            board_id="pursers",
+            tickets={},
+            questions=(),
+            now=NOW,
+            ticket_rows=tuple(
+                {
+                    "ticket_id": f"TK-loop-{index}",
+                    "status": "submitted",
+                    "counts": {"rejections": index + 3},
+                }
+                for index in range(9)
+            ),
+        )
+    )
+    loops = [row for row in findings if row["observer"] == "rejection_loop"]
+    assert len(loops) == butler.MAX_SIGNAL_TICKET_FINDINGS + 1
+    assert sum("ticket_id" in row for row in loops) == butler.MAX_SIGNAL_TICKET_FINDINGS
+    assert "omitted=6" in loops[-1]["evidence"]
+
+
+def test_role_imbalance_observer_surfaces_critical_work_queue() -> None:
+    tickets = tuple(
+        {
+            "ticket_id": f"TK-work-{index}",
+            "status": "open",
+            "dispatch_summary": {
+                "last": [{"state": "unassignable", "kind": "work"}]
+            },
+        }
+        for index in range(8)
+    )
+    agents = (
+        {
+            "agent_id": "AI-reviewer",
+            "role": "reviewer",
+            "lifecycle_status": "active",
+            "capabilities_explicit": True,
+            "capabilities": {"can_work": False, "can_review": True},
+            "last_activity_at": NOW.isoformat(),
+            "readiness": {"reported": True, "dispatch_ready": True},
+        },
+    )
+    findings = butler.derive_board_observations(
+        butler.ObservationContext(
+            board_id="pursers",
+            tickets={},
+            questions=(),
+            now=NOW,
+            ticket_rows=tickets,
+            agents=agents,
+        )
+    )
+    imbalance = next(row for row in findings if row["observer"] == "role_imbalance")
+    assert imbalance["level"] == "critical"
+    assert imbalance["human_attention"] is True
+    assert "unassignable_work=8" in imbalance["evidence"]
+    assert "idle_reviewers=1" in imbalance["evidence"]
+
+
+def test_role_imbalance_observer_escalates_unassignable_critical_review() -> None:
+    findings = butler.derive_board_observations(
+        butler.ObservationContext(
+            board_id="pursers",
+            tickets={},
+            questions=(),
+            now=NOW,
+            ticket_rows=(
+                {
+                    "ticket_id": "TK-critical-review",
+                    "status": "submitted",
+                    "priority": "critical",
+                    "dispatch_summary": {
+                        "last": [
+                            {"state": "unassignable", "kind": "review"}
+                        ]
+                    },
+                },
+            ),
+        )
+    )
+    imbalance = next(row for row in findings if row["observer"] == "role_imbalance")
+    assert imbalance["level"] == "critical"
+    assert "critical-review-capacity-exhausted" in imbalance["evidence"]
+
+
+def test_fleet_demand_snapshot_is_structured_complete_and_deduplicated() -> None:
+    tickets = (
+        {
+            "ticket_id": "TK-work",
+            "status": "open",
+            "counts": {"rejections": 3},
+            "dispatch_summary": {
+                "last": [
+                    {
+                        "state": "unassignable",
+                        "kind": "work",
+                        "at": (NOW - butler.timedelta(minutes=10)).isoformat(),
+                    }
+                ]
+            },
+        },
+        {
+            "ticket_id": "TK-review",
+            "status": "submitted",
+            "counts": {"rejections": 1},
+            "dispatch_summary": {
+                "last": [
+                    {
+                        "state": "unassignable",
+                        "kind": "review",
+                        "at": (NOW - butler.timedelta(minutes=5)).isoformat(),
+                    }
+                ]
+            },
+        },
+    )
+    agents = (
+        {
+            "agent_id": "AI-worker",
+            "role": "worker",
+            "lifecycle_status": "active",
+            "capabilities_explicit": True,
+            "capabilities": {"can_work": True, "can_review": False},
+            "last_activity_at": NOW.isoformat(),
+            "readiness": {"reported": True, "dispatch_ready": True},
+        },
+        {
+            "agent_id": "AI-reviewer",
+            "role": "reviewer",
+            "lifecycle_status": "active",
+            "capabilities_explicit": True,
+            "capabilities": {"can_work": False, "can_review": True},
+            "last_activity_at": NOW.isoformat(),
+            "readiness": {"reported": True, "dispatch_ready": True},
+        },
+    )
+    context = butler.ObservationContext(
+        board_id="pursers",
+        tickets={},
+        questions=(),
+        ticket_rows=tickets,
+        agents=agents,
+        gate_queue={
+            "complete": True,
+            "depth": 4,
+            "oldest_wait_s": 900,
+            "holder_class": "release",
+        },
+        host_headroom={
+            "complete": True,
+            "load_ratio": 0.5,
+            "memory_headroom_ratio": 0.4,
+            "disk_headroom_ratio": 0.3,
+            "cpu_count": 8,
+        },
+        now=NOW,
+    )
+    finding = next(
+        row
+        for row in butler.derive_board_observations(context)
+        if row["observer"] == "fleet_demand_snapshot"
+    )
+    snapshot = finding["demand_snapshot"]
+    assert snapshot["gate_queue"] == context.gate_queue
+    assert snapshot["unassignable"] == {
+        "work": {"count": 1, "oldest_age_s": 600},
+        "review": {"count": 1, "oldest_age_s": 300},
+    }
+    assert snapshot["idle_seats"] == {"work": 1, "review": 1}
+    assert snapshot["rework"] == {"tickets": 2, "rejections": 4, "loops": 1}
+    assert snapshot["host_headroom"] == context.host_headroom
+    replay = next(
+        row
+        for row in butler.derive_board_observations(
+            replace(context, now=NOW + butler.timedelta(seconds=30))
+        )
+        if row["observer"] == "fleet_demand_snapshot"
+    )
+    assert finding["observation_key"] == replay["observation_key"]
+    merged = butler.merge_observation_findings({}, [finding], NOW)
+    assert merged["board_butler"]["demand_snapshot"] == snapshot
+    assert all(
+        row.get("observer") != "fleet_demand_snapshot"
+        for row in merged["findings"]
+    )
+
+
 def test_observation_flood_never_evicts_critical_alert() -> None:
     critical = {
         "kind": "privacy-leak-suspect",
@@ -4131,6 +4667,32 @@ def test_observation_flood_never_evicts_critical_alert() -> None:
     assert len(merged["findings"]) <= butler.MAX_FINDINGS
     assert len(json.dumps(merged, sort_keys=True, separators=(",", ":"))) <= butler.MAX_STATE_CHARS
     assert merged["truncation"]["findings"] > 0
+
+
+def test_observation_compaction_retains_warning_before_information() -> None:
+    observations = [
+        {
+            "kind": butler.OBSERVATION_FINDING_KIND,
+            "level": "info",
+            "observer": "stale_open_question",
+            "observer_priority": 1,
+            "observation_key": f"info-{index}",
+            "message": "i" * 500,
+        }
+        for index in range(12)
+    ]
+    warning = {
+        "kind": butler.OBSERVATION_FINDING_KIND,
+        "level": "warn",
+        "observer": "stale_open_question",
+        "observer_priority": 1,
+        "observation_key": "warning",
+        "message": "retain warning",
+    }
+    merged = butler.merge_observation_findings({}, [*observations, warning], NOW)
+    assert any(
+        row.get("observation_key") == "warning" for row in merged["findings"]
+    )
 
 
 def test_module_has_only_bounded_question_answer_ticket_mutation() -> None:
