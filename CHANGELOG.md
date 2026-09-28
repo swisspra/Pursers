@@ -43,6 +43,26 @@ This release includes `pursers-central==0.1.4`,
   study, plus a documented 5.0.5 visual baseline.
 - Workers can persist bounded progress assessments with a completion range,
   confidence, evidence, and revision fencing without renewing their lease.
+- Fleet Seats can generate digest-bound cross-board role configurations and a
+  copyable setup bundle for applying them safely.
+- Fleet Work shows bounded progress, lease time remaining, and assessment
+  freshness from source-backed ticket state.
+- Fleet Team reports source-backed model usage and cost attribution, while
+  unsafe aggregate inputs fail closed.
+- Fleet public display mode exposes a read-only, privacy-bounded projection
+  with safe aliases and suppresses mixed-cohort alias collisions.
+- Board Butler observes Fleet flow signals, including mature-board approval
+  state.
+- The autonomous Fleet path has an end-to-end acceptance proof across the
+  current board scope.
+- A validated, redaction-audited Fleet public media pack provides screenshots,
+  a storyboard, and a machine-readable manifest.
+- The `pursers-registry` command bootstraps `project_registry` on a fresh
+  installation.
+- Fleet Projects supports guarded project add and remove operations.
+- Fleet credentials guides door credential issue, rotation, and revocation.
+- The 5.0.6 rollout runbook includes a read-only rollout doctor and explicit
+  post-rollout verification checks.
 
 ### Changed
 
@@ -50,6 +70,7 @@ This release includes `pursers-central==0.1.4`,
   integration manifest tracks the new route assets.
 - The Fleet autonomous view no longer labels a desired or authorized
   configuration as active until a fresh, matching runtime state is observed.
+- The Butler Active control accepts the guarded `answering_mode` setting.
 
 ### Fixed
 
@@ -76,6 +97,11 @@ This release includes `pursers-central==0.1.4`,
   question is deferred and replayed with fresh state.
 - Fleet and Board Butler launch templates share explicit runtime, PID, kill,
   and provider-secret paths so their process controls use the same contract.
+- The stranded-approvals audit pages oversized ticket statuses safely and
+  reuses its reserved audit identity without taking over a live seat.
+- Explicit token files take precedence over inherited environment tokens;
+  empty explicit files are rejected and startup configuration failures remain
+  visible for recovery.
 
 ### Security
 
@@ -85,6 +111,8 @@ This release includes `pursers-central==0.1.4`,
 - Approved-merge automation fails closed when the ticket is unreadable, the
   approved commit is unavailable, or the configuration does not grant merge
   authority. Production and pull-request merge rules remain escalation-first.
+- Strict review rechecks that reviewer and submitter principals are independent
+  when a review lease is renewed.
 
 ## [5.0.5] - 2026-09-25
 
