@@ -1240,6 +1240,101 @@ def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
     }
 
 
+def test_private_ticket_projections_preserve_progress_freshness_and_lease_time() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    fresh_progress = {
+        "schema_version": 1,
+        "attempt": 1,
+        "revision": 2,
+        "low_percent": 35,
+        "high_percent": 55,
+        "confidence": "medium",
+        "evidence": "Focused tests pass.",
+        "assessment_source": "model_checkpoint",
+        "assessed_at": "2030-01-02T11:58:00+00:00",
+        "fresh_until": "2030-01-02T12:43:00+00:00",
+        "assessed_by": {
+            "agent_id": "AI-worker",
+            "agent_name": "worker-1",
+            "principal_id": "PR-worker",
+        },
+    }
+    stale_progress = {
+        **fresh_progress,
+        "revision": 3,
+        "low_percent": 70,
+        "high_percent": 70,
+        "confidence": "high",
+        "evidence": "Last checkpoint predates the current lease.",
+        "assessed_at": "2030-01-02T10:00:00+00:00",
+        "fresh_until": "2030-01-02T10:45:00+00:00",
+    }
+    rows = [
+        {
+            "label": "Private board",
+            "board_id": "private-board",
+            "snapshot": {
+                "agents": [],
+                "tickets": [
+                    {
+                        "ticket_id": "TK-fresh",
+                        "title": "Fresh estimate",
+                        "status": "in_progress",
+                        "lease_expires_at": "2030-01-02T12:15:00+00:00",
+                        "progress": fresh_progress,
+                        "progress_freshness": "fresh",
+                        "updated_at": "2030-01-02T11:58:00+00:00",
+                    },
+                    {
+                        "ticket_id": "TK-stale",
+                        "title": "Stale estimate",
+                        "status": "claimed",
+                        "lease_expires_at": "2030-01-02T11:55:00+00:00",
+                        "progress": stale_progress,
+                        "progress_freshness": "stale",
+                        "updated_at": "2030-01-02T11:59:00+00:00",
+                    },
+                    {
+                        "ticket_id": "TK-unknown",
+                        "title": "No estimate",
+                        "status": "claimed",
+                        "updated_at": "2030-01-02T11:57:00+00:00",
+                    },
+                ],
+            },
+            "events": [],
+        }
+    ]
+
+    tickets = {
+        item["id"]: item
+        for item in dashboard.aggregate_fleet(
+            rows, stale_seconds=300, now=now
+        )["boards"][0]["tickets"]
+    }
+
+    assert tickets["TK-fresh"]["progress"] == fresh_progress
+    assert tickets["TK-fresh"]["progress_freshness"] == "fresh"
+    assert (
+        tickets["TK-fresh"]["lease_expires_at"]
+        == "2030-01-02T12:15:00+00:00"
+    )
+    assert tickets["TK-stale"]["progress"] == stale_progress
+    assert tickets["TK-stale"]["progress_freshness"] == "stale"
+    assert (
+        tickets["TK-stale"]["lease_expires_at"]
+        == "2030-01-02T11:55:00+00:00"
+    )
+    assert tickets["TK-unknown"]["progress"] is None
+    assert tickets["TK-unknown"]["progress_freshness"] == "unknown"
+    assert tickets["TK-unknown"]["lease_expires_at"] is None
+
+    detail = dashboard._detail_ticket(rows[0]["snapshot"]["tickets"][0])
+    assert detail["progress"] == fresh_progress
+    assert detail["progress_freshness"] == "fresh"
+    assert detail["lease_expires_at"] == "2030-01-02T12:15:00+00:00"
+
+
 def test_agent_scope_uses_durable_registry_mode_and_observed_coverage() -> None:
     now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
 

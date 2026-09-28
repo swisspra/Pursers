@@ -57,10 +57,83 @@
     return 'Unassigned';
   }
 
+  function durationLabel(milliseconds) {
+    const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.ceil(seconds / 60);
+    if (minutes < 60) return `${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    const remainder = minutes % 60;
+    return remainder ? `${hours} hr ${remainder} min` : `${hours} hr`;
+  }
+
   function leaseLabel(ticket) {
     if (!['claimed', 'in_progress', 'creating_report'].includes(ticket.status)) return 'No active work lease';
-    if (ticket.ttl_s === null || ticket.ttl_s === undefined) return 'Lease timing not supplied';
-    return `Lease window ${ticket.ttl_s}s`;
+    const expiresAt = Date.parse(ticket.lease_expires_at || '');
+    if (!Number.isFinite(expiresAt)) return 'Lease time not supplied';
+    const remaining = expiresAt - Date.now();
+    if (remaining <= 0) return 'Lease expired';
+    return `Lease · ${durationLabel(remaining)} remaining`;
+  }
+
+  function progressRecord(ticket) {
+    if (!['claimed', 'in_progress', 'creating_report'].includes(ticket.status)) return null;
+    const progress = ticket.progress;
+    if (!progress || typeof progress !== 'object') return null;
+    const {low_percent: low, high_percent: high, confidence} = progress;
+    if (!Number.isInteger(low) || !Number.isInteger(high) || low < 0 || high > 99 || low > high) return null;
+    if (!['low', 'medium', 'high'].includes(confidence)) return null;
+    return {progress, low, high, confidence};
+  }
+
+  function progressEmptyLabel(ticket) {
+    if (ticket.status === 'rejected') return 'Rework not assessed';
+    if (['submitted', 'reviewing', 'in_review'].includes(ticket.status)) return 'Review state · no active estimate';
+    if (ticket.status === 'closed') return 'Complete by workflow state';
+    if (['canceled', 'terminated'].includes(ticket.status)) return 'Ended · no active estimate';
+    return 'Progress not assessed';
+  }
+
+  function progressCell(ticket, context) {
+    const {esc, fmt, relativeAge} = context;
+    const record = progressRecord(ticket);
+    if (!record) {
+      return `<div class="work-progress-cell" data-progress-state="unknown">
+        <span class="work-cell-label">Agent estimate</span>
+        <strong>${esc(progressEmptyLabel(ticket))}</strong>
+        <span>No percentage inferred from time or lease</span>
+      </div>`;
+    }
+    const {progress, low, high, confidence} = record;
+    const estimate = low === high ? `About ${low}%` : `${low}–${high}%`;
+    const freshness = ['fresh', 'stale'].includes(ticket.progress_freshness)
+      ? ticket.progress_freshness
+      : 'unknown';
+    const assessedAt = typeof progress.assessed_at === 'string' ? progress.assessed_at : '';
+    const assessedLabel = assessedAt
+      ? `assessed ${relativeAge(assessedAt)}`
+      : 'assessment time not supplied';
+    const freshnessLabel = freshness === 'stale'
+      ? `Stale · ${assessedLabel}`
+      : freshness === 'fresh'
+      ? `Current · ${assessedLabel}`
+      : `Freshness unknown · ${assessedLabel}`;
+    const evidence = typeof progress.evidence === 'string' && progress.evidence.trim()
+      ? progress.evidence.trim()
+      : '';
+    const rangeLabel = low === high
+      ? `Agent-estimated progress ${low} percent`
+      : `Agent-estimated progress between ${low} and ${high} percent`;
+    return `<div class="work-progress-cell" data-progress-state="${esc(freshness)}">
+      <span class="work-cell-label">Agent estimate</span>
+      <strong>${esc(estimate)} · ${esc(confidence)} confidence</strong>
+      <span class="work-progress-track" role="img" aria-label="${esc(rangeLabel)}">
+        <span class="work-progress-range" style="--progress-low:${low};--progress-high:${high}"></span>
+      </span>
+      <span class="work-progress-freshness">${esc(freshnessLabel)}</span>
+      ${assessedAt ? `<time class="sr-only" datetime="${esc(assessedAt)}">${esc(fmt(assessedAt))}</time>` : ''}
+      ${evidence ? `<details class="work-progress-evidence"><summary>Assessment evidence</summary><p>${esc(evidence)}</p></details>` : ''}
+    </div>`;
   }
 
   function statusLabel(ticket) {
@@ -84,6 +157,7 @@
         <span class="work-ticket-id">${esc(ticket.id)}</span>
         <span class="work-project">${esc(board.label)} · ${esc(central)}</span>
       </div>
+      ${progressCell(ticket, context)}
       <div class="work-owner-cell">
         <span class="work-cell-label">Owner</span>
         <strong>${esc(ownerLabel(ticket))}</strong>
@@ -140,7 +214,7 @@
     const ledger = visible.length
       ? `<section class="work-ledger" aria-labelledby="work-ledger-title">
           <div class="work-ledger-head" aria-hidden="true">
-            <span>State</span><span>Work item</span><span>Owner and lease</span><span>Next action</span><span>Open</span>
+            <span>State</span><span>Work item</span><span>Progress</span><span>Owner and lease</span><span>Next action</span><span>Open</span>
           </div>
           <div class="work-ledger-body">${visible.map(item => ticketRow(item, context)).join('')}</div>
         </section>`
