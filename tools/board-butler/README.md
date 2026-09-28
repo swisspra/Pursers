@@ -135,7 +135,67 @@ newline frames and HTTP JSON/SSE frames are byte-bounded before the MCP parser
 or model construction runs. HTTP requests require identity encoding, and any
 response that declares another content encoding is rejected before its body is
 consumed. Unsupported transports and protocol revisions fail validation before
-connection.
+connection. The MCP v2 streamable HTTP client supports a stateless server that
+does not issue a session ID while preserving the exact `2026-07-28` revision
+check.
+
+The optional `--connector-config /PATH/TO/connectors.json` runtime file must be
+an owned, non-symlink, mode-0600 JSON file. Secret files referenced by it must
+also be absolute, owned, non-symlink mode-0600 files. The config binds endpoint
+and secret references to declarations, but construction still rejects every
+connector ID outside `approved_connector_ids` (or
+`envelope.approved_connector_ids`). Streamable HTTP endpoints may carry bounded
+non-secret `static_headers` and multiple `secret_headers`; every secret header
+has its own `secret_ref` (resolved through the top-level `secrets` map) or
+absolute `file`, plus its own optional `prefix`. A header may set
+`"optional": true` and list exact tool names or bounded prefix globs in
+`unlocks`; an absent optional secret omits that header and its tool family from
+probe expectations instead of failing the connector. The legacy declaration
+`secret_ref` with endpoint `secret_header`/`secret_prefix` remains supported.
+
+```json
+{
+  "schema_version": 1,
+  "approved_connector_ids": ["connector:example"],
+  "connectors": [{
+    "connector_id": "connector:example",
+    "protocol_revision": "2026-07-28",
+    "endpoint_ref": "endpoint:example",
+    "tools_read_only": ["example_search"],
+    "tools_risky_mutating": ["example_change"],
+    "tools_denied": ["example_admin"]
+  }],
+  "endpoints": {
+    "endpoint:example": {
+      "transport": "streamable_http",
+      "url": "https://mcp.example.invalid/mcp",
+      "secret_headers": {
+        "Authorization": {"file": "/PATH/TO/auth.secret", "prefix": "Bearer"},
+        "X-Service-Token": {
+          "file": "/PATH/TO/service.secret",
+          "prefix": "",
+          "unlocks": ["service_*"],
+          "optional": true
+        }
+      },
+      "static_headers": {"X-Project-Key": "default-project"}
+    }
+  }
+}
+```
+
+`--connector-probe` is a one-shot, token-free check. It connects, lists tools,
+prints secret-free JSON, and exits non-zero when an enabled classified tool is
+missing, an unclassified tool appears, or connection/protocol validation fails.
+Classified denied tools are reported separately when advertised, but are never
+added to the callable allowlist. Optional-secret families are included in the
+comparison only when their header resolved successfully.
+
+```sh
+python3 tools/board-butler/board_butler.py \
+  --connector-config /PATH/TO/connectors.json \
+  --connector-probe
+```
 
 Discovery is filtered against the exact declared tool and resource allowlists
 before it is returned to a planner. Tool calls are validated against the
