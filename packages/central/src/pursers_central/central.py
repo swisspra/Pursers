@@ -11514,6 +11514,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         or review_lease.get("reviewer_agent_id") == member["agent_id"]
                     )
                 ):
+                    reviewer = member or {
+                        "agent_id": review_lease.get("reviewer_agent_id")
+                    }
+                    validate_review_independence(
+                        board_review_policy(document), ticket, reviewer, principal
+                    )
                     renew_review_lease(
                         review_lease,
                         now,

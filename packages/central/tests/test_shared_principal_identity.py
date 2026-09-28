@@ -218,6 +218,12 @@ class SharedPrincipalIdentityTests(unittest.IsolatedAsyncioTestCase):
             agent_name="reviewer-b",
             ticket_id="TK-cross-principal",
         )
+        renewed = await self.call(
+            "lease_renew",
+            agent_name="reviewer-b",
+            ticket_id="TK-cross-principal",
+        )
+        self.assertEqual(renewed.structured_content["lease_kind"], "review")
         reviewed = await self.call(
             "ticket_review",
             agent_name="reviewer-b",
@@ -258,6 +264,51 @@ class SharedPrincipalIdentityTests(unittest.IsolatedAsyncioTestCase):
             status.structured_content["review_policy_effective"],
             "independent-seat",
         )
+
+    async def test_review_lease_renew_rechecks_strict_principal_independence(
+        self,
+    ) -> None:
+        self.principal = self.admin
+        await self.call(
+            "board_review_policy_set",
+            agent_name="admin-agent",
+            review_policy="workflow",
+        )
+        await self.create_for("TK-review-renew-policy-change", "review-worker")
+        self.principal = self.shared_reviewer
+        await self.call(
+            "ticket_claim",
+            agent_name="review-worker",
+            ticket_id="TK-review-renew-policy-change",
+        )
+        await self.call(
+            "ticket_submit",
+            agent_name="review-worker",
+            ticket_id="TK-review-renew-policy-change",
+        )
+        await self.call(
+            "ticket_review_claim",
+            agent_name="reviewer-b",
+            ticket_id="TK-review-renew-policy-change",
+        )
+
+        self.principal = self.admin
+        await self.call(
+            "board_review_policy_set",
+            agent_name="admin-agent",
+            review_policy="strict",
+        )
+        self.principal = self.shared_reviewer
+        with self.assertRaisesRegex(
+            ToolError,
+            "independent-principal review denied: submitter principal "
+            "PR-shared-re matches reviewer principal PR-shared-re",
+        ):
+            await self.call(
+                "lease_renew",
+                agent_name="reviewer-b",
+                ticket_id="TK-review-renew-policy-change",
+            )
 
     async def test_private_memories_are_isolated_by_agent_id_with_legacy_fallback(self) -> None:
         self.principal = self.shared_worker
