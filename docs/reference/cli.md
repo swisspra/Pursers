@@ -620,7 +620,7 @@ options:
 ### `pursers-registry --help`
 
 ```text
-usage: pursers-registry [-h] [--central-url CENTRAL_URL] [--agent-name AGENT_NAME]
+usage: pursers-registry [-h] [--central-url CENTRAL_URL] [--home-board HOME_BOARD] [--agent-name AGENT_NAME]
                         {show,add,pause,activate,remove,set-repository-url} ...
 
 Safely inspect and edit the Pursers project registry.
@@ -635,6 +635,8 @@ options:
   -h, --help            show this help message and exit
   --central-url CENTRAL_URL
                         Central MCP URL (default: ONBOARD_CENTRAL_URL or localhost)
+  --home-board HOME_BOARD
+                        home board containing project_registry (default: ONBOARD_BOARD_ID or pursers)
   --agent-name AGENT_NAME
                         board identity used for the operation
 ```
