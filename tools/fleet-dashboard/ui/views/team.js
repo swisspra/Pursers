@@ -36,6 +36,7 @@ function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d]
     if (usage.cost_status !== 'known') {
       const reasonLabels = {
         cost_not_reported: 'no reported amount',
+        aggregate_exceeds_safe_integer: 'aggregate exceeds browser exact-integer range',
         multiple_currencies: 'multiple currencies cannot be summed',
         partial_cost_records: 'provider marked partial',
         usage_without_cost: 'some usage has no cost record',

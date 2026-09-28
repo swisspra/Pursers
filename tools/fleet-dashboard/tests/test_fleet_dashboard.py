@@ -1527,6 +1527,90 @@ def test_agent_projection_uses_only_verified_exact_seat_cost_evidence() -> None:
     assert "must-not-override" not in rendered
 
 
+def test_team_cost_aggregate_over_browser_safe_integer_fails_closed_end_to_end() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    amount = 999_999_999_999_999
+    tickets = []
+    for index in range(11):
+        ticket_id = f"TK-cost-{index}"
+        tickets.append(
+            {
+                "ticket_id": ticket_id,
+                "status": "approved",
+                "submission_history": [
+                    {"runtime_model_usage": {"agent_id": "AI-cost"}}
+                ],
+                "model_usage": {
+                    "cost_records": [
+                        {
+                            "schema_version": 1,
+                            "source": "provider",
+                            "verified": True,
+                            "agent_id": "AI-cost",
+                            "currency": "USD",
+                            "cost_microunits": amount,
+                            "complete": True,
+                            "scope": {
+                                "ticket_id": ticket_id,
+                                "board_id": "board",
+                                "window_start": "2030-01-02T10:00:00Z",
+                                "window_end": "2030-01-02T11:00:00Z",
+                            },
+                        }
+                    ]
+                },
+            }
+        )
+
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-cost",
+                            "agent_name": "cost-seat",
+                            "agent_id": "AI-cost",
+                            "last_activity_at": now.isoformat(),
+                            "capabilities": {
+                                "tier_max": 2,
+                                "model": "model-current",
+                                "provider": "provider-current",
+                            },
+                        }
+                    ],
+                    "tickets": tickets,
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    agent = result["agents"][0]
+    attribution = agent["usage_attribution"]
+    assert 11 * amount == 10_999_999_999_999_989
+    assert attribution["cost_status"] == "unknown"
+    assert attribution["cost_microunits"] is None
+    assert attribution["currency"] is None
+    assert attribution["complete"] is False
+    assert attribution["incomplete_reasons"] == [
+        "aggregate_exceeds_safe_integer"
+    ]
+
+    rendered = _render_team_lifecycle(
+        agents=[agent], workers=[], inventory=[]
+    )
+    assert 'data-team-cost-status="unknown"' in rendered
+    assert "Cost unknown" in rendered
+    assert "aggregate exceeds browser exact-integer range" in rendered
+    assert "10999999999.999988" not in rendered
+    assert "10999999999.999989" not in rendered
+
+
 def test_agent_projection_never_estimates_cost_from_tokens_or_model() -> None:
     now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
     result = dashboard.aggregate_fleet(

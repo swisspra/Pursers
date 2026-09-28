@@ -3871,6 +3871,17 @@ def _seat_usage_attribution(group: dict[str, Any]) -> dict[str, Any]:
     if not cost_records:
         reasons.add("cost_not_reported")
     known = bool(cost_records) and len(currencies) == 1
+    total_cost = (
+        sum(record["cost_microunits"] for record in cost_records)
+        if known
+        else None
+    )
+    # Browser JSON consumers represent integers as IEEE-754 doubles. Fail
+    # closed rather than silently rounding a source-backed financial amount.
+    if total_cost is not None and total_cost > 9_007_199_254_740_991:
+        reasons.add("aggregate_exceeds_safe_integer")
+        known = False
+        total_cost = None
     starts = [record["window_start"] for record in cost_records]
     ends = [record["window_end"] for record in cost_records]
     return {
@@ -3880,11 +3891,7 @@ def _seat_usage_attribution(group: dict[str, Any]) -> dict[str, Any]:
         "window_start": min(starts).isoformat() if starts else None,
         "window_end": max(ends).isoformat() if ends else None,
         "cost_status": "known" if known else "unknown",
-        "cost_microunits": (
-            sum(record["cost_microunits"] for record in cost_records)
-            if known
-            else None
-        ),
+        "cost_microunits": total_cost,
         "currency": currencies[0] if known else None,
         "sources": sorted({record["source"] for record in cost_records}),
         "complete": known and not reasons,
