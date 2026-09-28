@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing stable tag to publish (must be v5.0.5)
+        description: Existing stable tag to publish (must be v5.0.6)
         required: true
         type: string
 
@@ -47,7 +47,7 @@ jobs:
           TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          test "$TAG" = "v5.0.5"
+          test "$TAG" = "v5.0.6"
           python tools/release_publish.py "$TAG" verify-checkout
 
       - uses: actions/setup-python@v7
@@ -141,7 +141,7 @@ jobs:
           TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          test "$TAG" = "v5.0.5"
+          test "$TAG" = "v5.0.6"
           python tools/release_publish.py "$TAG" verify-checkout
 
       - uses: actions/setup-python@v7

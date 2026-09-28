@@ -1,5 +1,5 @@
 1db3820d4d91f656cc4c175f6c3a40c4ccc0d2fc00f6665a992413f4abb01ce9  .github/workflows/ci.yml
-6934b0befa13c696cd9379c8280a52eeb42d833aa032482ba43f01da945dfac4  .github/workflows/publish-pypi.yml
+37ad146708a9940954ef9e8a245afc5bb62bca36aa8bd1e55d240c030accd777  .github/workflows/publish-pypi.yml
 d8ef31d415ea1fa18f510ea3a399eb56ac1b4b92b1833182b93026147c471efd  .github/workflows/release.yml
 596a946492c113d5328a1b3b4743bc81e57edf1efcb7f2c658ec3bad89f3e969  .superdesign/components/fleet-sidebar-nav.html
 5c3963f41036925cef3791525ba9a9f806f18c8d29a4f8cb3a1512b10e9ed4e7  .superdesign/components/personal-app-header.html
