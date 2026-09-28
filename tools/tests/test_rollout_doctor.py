@@ -345,6 +345,16 @@ def test_release_inputs_are_required() -> None:
         doctor.parse_args(["--release-sha", "a" * 40])
 
 
+def test_runbook_pins_reviewed_butler_fix_and_authoritative_suite() -> None:
+    runbook = (MODULE_PATH.parents[1] / "docs/releases/RUNBOOK-v5.0.6.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ee5c9e436ce35fd906c0ac943559482046e9186a" in runbook
+    assert "if git -C \"$FLEET_REPO\" merge-base --is-ancestor" in runbook
+    assert "tools/board-butler/tests/test_board_butler.py" in runbook
+
+
 def test_main_writes_only_when_output_is_explicit(tmp_path: Path, capsys) -> None:
     args, _active, stale, release_sha = _fixture(tmp_path)
     argv = [

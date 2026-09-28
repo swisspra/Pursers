@@ -35,7 +35,7 @@ export COORDINATOR_PYTHON=/PATH/TO/coordinator-python
 export BUTLER_PLIST=/PATH/TO/Library/LaunchAgents/com.pursers.board-butler.plist
 export BUTLER_RUNTIME_STATUS=/PATH/TO/private/board-butler-state/runtime.json
 export BUTLER_LOG=/PATH/TO/private/logs/board-butler.log
-export BUTLER_FIX_SHA=${BUTLER_FIX_SHA:-NONE}
+export BUTLER_FIX_SHA=${BUTLER_FIX_SHA:-ee5c9e436ce35fd906c0ac943559482046e9186a}
 export BUTLER_HOTFIX_BACKUP=board_butler.py.bak-hotfix-precondition-20260928163252
 export ROLLOUT_STATE="$PURSERS_HOME/rollout/v5.0.6"
 export RELEASE_SHORT="$(printf %.8s "$RELEASE_SHA")"
@@ -263,8 +263,11 @@ test "$(git -C "$COORDINATOR_REPO" rev-parse --verify 'HEAD^{commit}')" = "$RELE
 ```
 
 Decide whether the release contains the reviewed permanent TK-164fb22b fix.
-`BUTLER_FIX_SHA` must be the coordinator-approved full fix commit, or the
-literal `NONE`. A matching comment or ticket string is not proof of ancestry.
+The coordinator-approved source commit is
+`ee5c9e436ce35fd906c0ac943559482046e9186a` (landed on main at `1f2f3895`;
+the Board Butler suite passed 268 tests). `BUTLER_FIX_SHA` defaults to that
+commit; use the literal `NONE` only under a later coordinator decision. A
+matching comment or ticket string is not proof of ancestry.
 
 ```sh
 RELEASE_HAS_BUTLER_FIX=false
@@ -273,8 +276,9 @@ if test "$BUTLER_FIX_SHA" != NONE; then
     *[!0-9a-f]*|'') echo "BUTLER_FIX_SHA must be full lowercase hex or NONE" >&2; exit 64 ;;
   esac
   test "${#BUTLER_FIX_SHA}" -eq 40
-  git -C "$FLEET_REPO" merge-base --is-ancestor "$BUTLER_FIX_SHA" "$RELEASE_SHA"
-  RELEASE_HAS_BUTLER_FIX=true
+  if git -C "$FLEET_REPO" merge-base --is-ancestor "$BUTLER_FIX_SHA" "$RELEASE_SHA"; then
+    RELEASE_HAS_BUTLER_FIX=true
+  fi
 fi
 ```
 
@@ -559,8 +563,16 @@ Do not construct expected values and present them as observations.
 For conflict evidence, the doctor inspects the running source for the
 `_is_state_precondition_conflict` guard at both `process_question` call sites.
 Retain the post-restart refresh log and prove it contains no `state precondition
-failed` traceback. When TK-164fb22b lands, replace this temporary source/log
-evidence with its authoritative focused test ID in the rollout record.
+failed` traceback. If `RELEASE_HAS_BUTLER_FIX=true`, also run the permanent
+fix's authoritative test file at the clean `RELEASE_SHA` checkout and record
+the exact command/output alongside the approved fix SHA:
+
+```sh
+python3 -m pytest -q tools/board-butler/tests/test_board_butler.py
+```
+
+The approved `ee5c9e436ce35fd906c0ac943559482046e9186a` source evidence was
+`268 passed`; the execution-time release checkout must independently pass.
 
 At the clean `RELEASE_SHA` checkout, run the release gates:
 
