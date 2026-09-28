@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "source_run": "public-display-05864cec-eef5fe5f",
+  "source_commit": "05864cec15ddf116829548151d7c27440c224f76",
+  "public_projection_sha256": "eef5fe5f1849c5323864fccac0472da8a07acb44af5d16ede2792dba1cbd7ea4",
+  "capture_date": "2026-09-28",
+  "viewport": {
+    "width": 1440,
+    "height": 900,
+    "device_scale_factor": 1
+  },
+  "source_snapshot_persisted": false,
+  "screens": [
+    {
+      "route": "home",
+      "file": "01-home.png",
+      "bytes": 37205,
+      "sha256": "286838b6ca2ba65d82b5098de5acf66e18ad1574525460d8349459a47f10a64e"
+    },
+    {
+      "route": "projects",
+      "file": "02-projects.png",
+      "bytes": 45034,
+      "sha256": "6fa2e49e7de1e9c8992ab2e993cd73929378a6d12bbe2c9f77f8ec8c7bd69612"
+    },
+    {
+      "route": "work",
+      "file": "03-work.png",
+      "bytes": 70921,
+      "sha256": "57ab73b111b5b2248c36eadf8655f86debf0e3f325d6f8b8985d2b08dd4a7b00"
+    },
+    {
+      "route": "team",
+      "file": "04-team.png",
+      "bytes": 32568,
+      "sha256": "ed6cad1feaf7efa6dfaed49ebe386ddff97186b052390ade4a5d183c7a46cf90"
+    },
+    {
+      "route": "approvals",
+      "file": "05-approvals.png",
+      "bytes": 38279,
+      "sha256": "baa6580dcc4b9a361460117e501fd622d77e9558a085f2975f6c5cb0b34a0ffe"
+    },
+    {
+      "route": "activity",
+      "file": "06-activity.png",
+      "bytes": 32568,
+      "sha256": "ed6cad1feaf7efa6dfaed49ebe386ddff97186b052390ade4a5d183c7a46cf90"
+    }
+  ],
+  "omissions": [
+    {
+      "screen": "settings",
+      "reason": "not exposed by the read-only public projection"
+    }
+  ]
+}
