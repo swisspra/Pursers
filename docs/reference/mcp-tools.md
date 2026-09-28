@@ -768,7 +768,7 @@ Required authorization: `board:read`.
 | `board_id` | `string` | required | — |
 | `include_retired` | `boolean` | optional | `false` |
 
-Response fields: `ok, board_id, agents, claim_ttl_s, stale_after_days, journal_retention_days, journal_row_cap, retired_or_stale_count, scrub_profile, review_policy, response_view, dispatch_enabled, dispatch_policy, unassignable_tickets, unclaimed_tickets, review_label_counts, scrub_allow_counts, ticket_status_counts, memory_type_counts, visible_memory_count, latest_seq, rendered`.
+Response fields: `ok, board_id, agents, claim_ttl_s, stale_after_days, journal_retention_days, journal_row_cap, retired_or_stale_count, scrub_profile, review_policy, review_policy_effective, response_view, dispatch_enabled, dispatch_policy, unassignable_tickets, unclaimed_tickets, review_label_counts, scrub_allow_counts, ticket_status_counts, memory_type_counts, visible_memory_count, latest_seq, rendered`.
 
 ### `board_state_update`
 

@@ -3986,8 +3986,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if member.get("agent_id") == ticket.get("submitted_by_agent_id"):
                 return False
             if (
-                board_review_policy(document) == "workflow"
-                and member.get("agent_id") == ticket.get("submitted_by_agent_id")
+                board_review_policy(document) == "strict"
+                and member.get("principal_id")
+                == ticket.get("submitted_by_principal_id")
             ):
                 return False
         return True
@@ -4070,6 +4071,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 failures.append("membership_role_cannot_review")
             if member.get("agent_id") == ticket.get("submitted_by_agent_id"):
                 failures.append("self_review")
+            if (
+                board_review_policy(document) == "strict"
+                and member.get("principal_id")
+                == ticket.get("submitted_by_principal_id")
+            ):
+                failures.append("same_principal_review")
         busy_conflicts = agent_busy_conflicts(
             document,
             str(member["agent_id"]),
@@ -5779,6 +5786,39 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if review_policy == "workflow":
             return "workflow-review"
         raise ValueError("board review policy is invalid")
+
+    @staticmethod
+    def effective_review_policy(review_policy: str) -> str:
+        if review_policy == "strict":
+            return "independent-principal-and-seat"
+        if review_policy == "workflow":
+            return "independent-seat"
+        raise ValueError("board review policy is invalid")
+
+    def validate_review_independence(
+        review_policy: str,
+        ticket: Mapping[str, Any],
+        actor: Mapping[str, Any],
+        principal: Principal,
+    ) -> tuple[str, str]:
+        submitted_by_agent_id = ticket.get("submitted_by_agent_id")
+        submitted_by_principal_id = ticket.get("submitted_by_principal_id")
+        if submitted_by_agent_id == actor["agent_id"]:
+            raise PermissionError(
+                "self-review denied: authenticated seat submitted this work"
+            )
+        if not submitted_by_agent_id or not submitted_by_principal_id:
+            raise ValueError("submitted ticket is missing review provenance")
+        if (
+            review_policy == "strict"
+            and submitted_by_principal_id == principal.principal_id
+        ):
+            raise PermissionError(
+                "independent-principal review denied: submitter principal "
+                f"{str(submitted_by_principal_id)[:12]} matches reviewer principal "
+                f"{principal.principal_id[:12]}"
+            )
+        return str(submitted_by_agent_id), str(submitted_by_principal_id)
 
     def record_scrub_allows(
         document: dict[str, Any],
@@ -11474,6 +11514,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         or review_lease.get("reviewer_agent_id") == member["agent_id"]
                     )
                 ):
+                    reviewer = member or {
+                        "agent_id": review_lease.get("reviewer_agent_id")
+                    }
+                    validate_review_independence(
+                        board_review_policy(document), ticket, reviewer, principal
+                    )
                     renew_review_lease(
                         review_lease,
                         now,
@@ -11843,10 +11889,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 raise PermissionError(
                     "reviewing agent lacks reviewer board role and board:review authorization"
                 )
-            if ticket.get("submitted_by_agent_id") == actor["agent_id"]:
-                raise PermissionError(
-                    "self-review denied: authenticated seat submitted this work"
-                )
+            validate_review_independence(
+                board_review_policy(document), ticket, actor, principal
+            )
             if ticket.get("parked") is True and not operator_override:
                 return refuse("ticket is parked by the board owner")
             existing = ticket.get("review_lease")
@@ -12122,15 +12167,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if ticket["status"] != "submitted":
                 raise ValueError(f"ticket is {ticket['status']}")
             policy = board_review_policy(document)
-            submitted_by_agent_id = ticket.get("submitted_by_agent_id")
-            submitted_by_principal_id = ticket.get("submitted_by_principal_id")
-            if submitted_by_agent_id == actor["agent_id"]:
-                raise PermissionError(
-                    "self-review denied: authenticated seat submitted this work"
-                )
-            if policy == "workflow":
-                if not submitted_by_agent_id or not submitted_by_principal_id:
-                    raise ValueError("submitted ticket is missing review provenance")
+            submitted_by_agent_id, submitted_by_principal_id = (
+                validate_review_independence(policy, ticket, actor, principal)
+            )
             if not board_role_allows_review(document, principal):
                 if policy == "strict":
                     raise PermissionError(
@@ -14382,6 +14421,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "retired_or_stale_count": hidden_lifecycle_count,
             "scrub_profile": board_scrub_profile(document),
             "review_policy": current_review_policy,
+            "review_policy_effective": effective_review_policy(
+                current_review_policy
+            ),
             "response_view": str(
                 document["config"].get("response_view", DEFAULT_RESPONSE_VIEW)
             ),

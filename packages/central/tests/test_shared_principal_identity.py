@@ -137,37 +137,178 @@ class SharedPrincipalIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(canceled.structured_content["ticket"]["status"], "canceled")
         self.assertEqual(canceled.structured_content["permission"], "creator principal")
 
-    async def test_reviewers_share_principal_but_not_submitter_identity(self) -> None:
-        await self.create_for("TK-shared-review", "review-worker")
+    async def test_strict_review_refuses_same_principal_different_seats(self) -> None:
+        await self.create_for("TK-same-principal", "review-worker")
         self.principal = self.shared_reviewer
         await self.call(
-            "ticket_claim", agent_name="review-worker", ticket_id="TK-shared-review"
+            "ticket_claim", agent_name="review-worker", ticket_id="TK-same-principal"
         )
         submitted = await self.call(
-            "ticket_submit", agent_name="review-worker", ticket_id="TK-shared-review"
+            "ticket_submit", agent_name="review-worker", ticket_id="TK-same-principal"
         )
+        ticket = submitted.structured_content["ticket"]
+        self.assertNotIn("review_offer", ticket)
         self.assertEqual(
-            submitted.structured_content["ticket"]["review_offer"]["agent_name"],
-            "reviewer-b",
+            ticket["dispatch_state"],
+            {
+                "state": "unassignable",
+                "kind": "review",
+                "reason": "no_eligible_reviewer",
+            },
+        )
+        with self.assertRaisesRegex(
+            ToolError,
+            "independent-principal review denied: submitter principal "
+            "PR-shared-re matches reviewer principal PR-shared-re",
+        ):
+            await self.call(
+                "ticket_review_claim",
+                agent_name="reviewer-b",
+                ticket_id="TK-same-principal",
+            )
+        with self.assertRaisesRegex(
+            ToolError,
+            "independent-principal review denied: submitter principal "
+            "PR-shared-re matches reviewer principal PR-shared-re",
+        ):
+            await self.call(
+                "ticket_review",
+                agent_name="reviewer-b",
+                ticket_id="TK-same-principal",
+                verdict="approve",
+            )
+        status = await self.call("board_status", agent_name="reviewer-b")
+        self.assertEqual(
+            status.structured_content["review_policy_effective"],
+            "independent-principal-and-seat",
+        )
+
+    async def test_strict_review_keeps_same_seat_refusal(self) -> None:
+        await self.create_for("TK-self-review", "review-worker")
+        self.principal = self.shared_reviewer
+        await self.call(
+            "ticket_claim", agent_name="review-worker", ticket_id="TK-self-review"
+        )
+        await self.call(
+            "ticket_submit", agent_name="review-worker", ticket_id="TK-self-review"
         )
         with self.assertRaisesRegex(ToolError, "self-review denied"):
             await self.call(
                 "ticket_review_claim",
                 agent_name="review-worker",
-                ticket_id="TK-shared-review",
+                ticket_id="TK-self-review",
             )
+
+    async def test_strict_review_allows_different_principals(self) -> None:
+        await self.create_for("TK-cross-principal")
+        self.principal = self.shared_worker
+        await self.call(
+            "ticket_claim", agent_name="worker-a", ticket_id="TK-cross-principal"
+        )
+        submitted = await self.call(
+            "ticket_submit", agent_name="worker-a", ticket_id="TK-cross-principal"
+        )
+        self.assertEqual(
+            submitted.structured_content["ticket"]["review_offer"]["agent_name"],
+            "reviewer-b",
+        )
+        self.principal = self.shared_reviewer
         await self.call(
             "ticket_review_claim",
             agent_name="reviewer-b",
-            ticket_id="TK-shared-review",
+            ticket_id="TK-cross-principal",
+        )
+        renewed = await self.call(
+            "lease_renew",
+            agent_name="reviewer-b",
+            ticket_id="TK-cross-principal",
+        )
+        self.assertEqual(renewed.structured_content["lease_kind"], "review")
+        reviewed = await self.call(
+            "ticket_review",
+            agent_name="reviewer-b",
+            ticket_id="TK-cross-principal",
+            verdict="approve",
+        )
+        self.assertEqual(reviewed.structured_content["ticket"]["status"], "closed")
+
+    async def test_workflow_review_allows_same_principal_different_seats(self) -> None:
+        self.principal = self.admin
+        await self.call(
+            "board_review_policy_set",
+            agent_name="admin-agent",
+            review_policy="workflow",
+        )
+        await self.create_for("TK-workflow-review", "review-worker")
+        self.principal = self.shared_reviewer
+        await self.call(
+            "ticket_claim", agent_name="review-worker", ticket_id="TK-workflow-review"
+        )
+        await self.call(
+            "ticket_submit", agent_name="review-worker", ticket_id="TK-workflow-review"
+        )
+        await self.call(
+            "ticket_review_claim",
+            agent_name="reviewer-b",
+            ticket_id="TK-workflow-review",
         )
         reviewed = await self.call(
             "ticket_review",
             agent_name="reviewer-b",
-            ticket_id="TK-shared-review",
+            ticket_id="TK-workflow-review",
             verdict="approve",
         )
         self.assertEqual(reviewed.structured_content["ticket"]["status"], "closed")
+        status = await self.call("board_status", agent_name="reviewer-b")
+        self.assertEqual(
+            status.structured_content["review_policy_effective"],
+            "independent-seat",
+        )
+
+    async def test_review_lease_renew_rechecks_strict_principal_independence(
+        self,
+    ) -> None:
+        self.principal = self.admin
+        await self.call(
+            "board_review_policy_set",
+            agent_name="admin-agent",
+            review_policy="workflow",
+        )
+        await self.create_for("TK-review-renew-policy-change", "review-worker")
+        self.principal = self.shared_reviewer
+        await self.call(
+            "ticket_claim",
+            agent_name="review-worker",
+            ticket_id="TK-review-renew-policy-change",
+        )
+        await self.call(
+            "ticket_submit",
+            agent_name="review-worker",
+            ticket_id="TK-review-renew-policy-change",
+        )
+        await self.call(
+            "ticket_review_claim",
+            agent_name="reviewer-b",
+            ticket_id="TK-review-renew-policy-change",
+        )
+
+        self.principal = self.admin
+        await self.call(
+            "board_review_policy_set",
+            agent_name="admin-agent",
+            review_policy="strict",
+        )
+        self.principal = self.shared_reviewer
+        with self.assertRaisesRegex(
+            ToolError,
+            "independent-principal review denied: submitter principal "
+            "PR-shared-re matches reviewer principal PR-shared-re",
+        ):
+            await self.call(
+                "lease_renew",
+                agent_name="reviewer-b",
+                ticket_id="TK-review-renew-policy-change",
+            )
 
     async def test_private_memories_are_isolated_by_agent_id_with_legacy_fallback(self) -> None:
         self.principal = self.shared_worker
