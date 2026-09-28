@@ -251,6 +251,35 @@ def test_public_projection_uses_only_safe_aliases_and_coarse_aggregates() -> Non
         assert forbidden not in encoded
 
 
+def test_public_projection_omits_ticket_level_progress() -> None:
+    private = case_study.aggregate_case_study(_rows(), _manifest())
+    source_ticket = private["runs"][0]["tickets"][0]
+    source_ticket["lease_expires_at"] = "2030-01-02T12:15:00Z"
+    source_ticket["progress_freshness"] = "fresh"
+    source_ticket["progress"] = {
+        "low_percent": 35,
+        "high_percent": 55,
+        "confidence": "medium",
+        "assessed_at": "2030-01-02T12:00:00Z",
+        "evidence": "PRIVATE-PROGRESS-EVIDENCE",
+    }
+
+    public = case_study.project_public_case_study(private, b"x" * 32)
+    encoded = json.dumps(public, sort_keys=True)
+
+    for forbidden in (
+        "progress",
+        "progress_freshness",
+        "lease_expires_at",
+        "low_percent",
+        "high_percent",
+        "confidence",
+        "assessed_at",
+        "PRIVATE-PROGRESS-EVIDENCE",
+    ):
+        assert forbidden not in encoded
+
+
 def test_manifest_rejects_non_source_ticket_references() -> None:
     manifest = _manifest()
     manifest["runs"][0]["tickets"] = ["TK-S-1"]

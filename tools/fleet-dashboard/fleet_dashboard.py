@@ -3170,6 +3170,17 @@ def _detail_ticket(
             ticket.get("lease_keepalive_only_age_s")
         ),
         "ttl_s": _nonnegative_int(ticket.get("ttl_s")),
+        "lease_expires_at": _clip(ticket.get("lease_expires_at"), 40) or None,
+        "progress": (
+            copy.deepcopy(ticket.get("progress"))
+            if isinstance(ticket.get("progress"), dict)
+            else None
+        ),
+        "progress_freshness": (
+            ticket.get("progress_freshness")
+            if ticket.get("progress_freshness") in {"fresh", "stale", "unknown"}
+            else "unknown"
+        ),
         "rejection_count": _nonnegative_int(ticket.get("rejection_count")),
         "review_wait_started_at": (
             _clip(
@@ -4021,6 +4032,20 @@ def aggregate_fleet(
                             ticket.get("lease_keepalive_only_age_s")
                         ),
                         "ttl_s": _nonnegative_int(ticket.get("ttl_s")),
+                        "lease_expires_at": (
+                            _clip(ticket.get("lease_expires_at"), 40) or None
+                        ),
+                        "progress": (
+                            copy.deepcopy(ticket.get("progress"))
+                            if isinstance(ticket.get("progress"), dict)
+                            else None
+                        ),
+                        "progress_freshness": (
+                            ticket.get("progress_freshness")
+                            if ticket.get("progress_freshness")
+                            in {"fresh", "stale", "unknown"}
+                            else "unknown"
+                        ),
                         "updated_at": _clip(ticket.get("updated_at"), 40) or None,
                         "abandoned_count": max(
                             0, int(ticket.get("abandoned_count", 0) or 0)
