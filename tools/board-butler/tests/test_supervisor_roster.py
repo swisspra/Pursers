@@ -79,6 +79,7 @@ def test_review_backlog_drains_worker_then_re_roles_after_fresh_observation() ->
             "state_dir_id": "state-dir-worker-1",
             "generation": 1,
             "target_role": "reviewer",
+            "template_id": "template:reviewer:direct",
         }
     ]
 

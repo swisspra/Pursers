@@ -72,6 +72,13 @@ REQUEST_FIELDS = frozenset(
         "template_digest_sha256",
         "expected_seat_generation",
         "authorization_fingerprint_sha256",
+        "identity_id",
+        "state_id",
+        "state_dir_id",
+        "supervisor_roster_revision",
+        "supervisor_roster_digest_sha256",
+        "target_template_id",
+        "target_template_digest_sha256",
         "deadline",
         "caller_auth",
     }
@@ -291,6 +298,10 @@ class ServiceAdapter(Protocol):
     def drain(self, seat_id: str, template: SeatTemplate) -> None: ...
 
     def stop(self, seat_id: str, template: SeatTemplate) -> None: ...
+
+    def replace(
+        self, seat_id: str, source: SeatTemplate, target: SeatTemplate
+    ) -> None: ...
 
 
 class LeaseProvider(Protocol):
@@ -528,12 +539,20 @@ class ExecutorStore:
             CREATE TABLE IF NOT EXISTS seats (
               seat_id TEXT PRIMARY KEY, board_id TEXT NOT NULL,
               template_id TEXT NOT NULL, template_digest TEXT NOT NULL,
-              principal_id TEXT NOT NULL, generation INTEGER NOT NULL,
+              principal_id TEXT NOT NULL, identity_id TEXT, state_id TEXT,
+              state_dir_id TEXT, generation INTEGER NOT NULL,
               lifecycle TEXT NOT NULL, process_ref TEXT,
               last_mutation REAL NOT NULL, last_failure REAL
             );
             """
         )
+        existing = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(seats)").fetchall()
+        }
+        for column in ("identity_id", "state_id", "state_dir_id"):
+            if column not in existing:
+                self.connection.execute(f"ALTER TABLE seats ADD COLUMN {column} TEXT")
 
     def operation(self, operation_id: str) -> tuple[str, str, str | None] | None:
         row = self.connection.execute(
@@ -578,14 +597,16 @@ class ExecutorStore:
 
     def seat(self, seat_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
-            "SELECT board_id, template_id, template_digest, principal_id, generation, "
+            "SELECT board_id, template_id, template_digest, principal_id, "
+            "identity_id, state_id, state_dir_id, generation, "
             "lifecycle, process_ref, last_mutation, last_failure FROM seats WHERE seat_id = ?",
             (seat_id,),
         ).fetchone()
         if not row:
             return None
         keys = (
-            "board_id", "template_id", "template_digest", "principal_id", "generation",
+            "board_id", "template_id", "template_digest", "principal_id",
+            "identity_id", "state_id", "state_dir_id", "generation",
             "lifecycle", "process_ref", "last_mutation", "last_failure",
         )
         return dict(zip(keys, row, strict=True))
@@ -610,12 +631,31 @@ class ExecutorStore:
         ).fetchone()
         return row is not None
 
+    def binding_used_elsewhere(
+        self,
+        seat_id: str,
+        identity_id: str | None,
+        state_id: str | None,
+        state_dir_id: str | None,
+    ) -> bool:
+        if any(value is None for value in (identity_id, state_id, state_dir_id)):
+            return False
+        row = self.connection.execute(
+            "SELECT 1 FROM seats WHERE seat_id <> ? AND "
+            "(identity_id = ? OR state_id = ? OR state_dir_id = ?) LIMIT 1",
+            (seat_id, identity_id, state_id, state_dir_id),
+        ).fetchone()
+        return row is not None
+
     def save_seat(
         self,
         *,
         seat_id: str,
         board_id: str,
         template: SeatTemplate,
+        identity_id: str | None,
+        state_id: str | None,
+        state_dir_id: str | None,
         generation: int,
         lifecycle: str,
         process_ref: str | None,
@@ -624,10 +664,15 @@ class ExecutorStore:
     ) -> None:
         with self.connection:
             self.connection.execute(
-                "INSERT INTO seats VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "INSERT INTO seats (seat_id, board_id, template_id, template_digest, "
+                "principal_id, identity_id, state_id, state_dir_id, generation, lifecycle, "
+                "process_ref, last_mutation, last_failure) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(seat_id) DO UPDATE SET board_id=excluded.board_id, "
                 "template_id=excluded.template_id, template_digest=excluded.template_digest, "
-                "principal_id=excluded.principal_id, generation=excluded.generation, "
+                "principal_id=excluded.principal_id, identity_id=excluded.identity_id, "
+                "state_id=excluded.state_id, state_dir_id=excluded.state_dir_id, "
+                "generation=excluded.generation, "
                 "lifecycle=excluded.lifecycle, process_ref=excluded.process_ref, "
                 "last_mutation=excluded.last_mutation, "
                 "last_failure=CASE WHEN ? THEN excluded.last_failure ELSE seats.last_failure END",
@@ -637,6 +682,9 @@ class ExecutorStore:
                     template.template_id,
                     template.digest_sha256,
                     template.principal_id,
+                    identity_id,
+                    state_id,
+                    state_dir_id,
                     generation,
                     lifecycle,
                     process_ref,
@@ -883,6 +931,11 @@ class SystemdUserAdapter:
         if result.returncode != 0:
             raise RuntimeError("systemd_stop_failed")
 
+    def replace(
+        self, seat_id: str, source: SeatTemplate, target: SeatTemplate
+    ) -> None:
+        self.instantiate(seat_id, target)
+
 
 class LaunchdUserAdapter:
     """Narrow per-user ``launchctl`` adapter with no shell command surface."""
@@ -1074,6 +1127,16 @@ class LaunchdUserAdapter:
         if result.returncode != 0:
             raise RuntimeError("launchd_stop_failed")
 
+    def replace(
+        self, seat_id: str, source: SeatTemplate, target: SeatTemplate
+    ) -> None:
+        path = self._plist_path(seat_id)
+        result = self._run("bootout", self._target(seat_id))
+        if result.returncode != 0:
+            raise RuntimeError("launchd_bootout_failed")
+        path.unlink()
+        self.instantiate(seat_id, target)
+
 
 def service_adapter(
     policy: ExecutorPolicy,
@@ -1115,7 +1178,11 @@ class FleetExecutor:
         readiness: RegistryReadinessProvider,
         publisher: ReceiptPublisher,
         *,
-        supervisor_control: Mapping[str, Any] | None = None,
+        supervisor_control: (
+            Mapping[str, Any]
+            | Callable[[], Mapping[str, Any] | None]
+            | None
+        ) = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.policy = policy
@@ -1128,22 +1195,46 @@ class FleetExecutor:
         self.clock = clock
 
     def _authorize_supervisor_roster(self, request: Mapping[str, Any]) -> None:
-        control = self.supervisor_control
-        if not isinstance(control, Mapping) or control.get("source") != "canonical":
+        control = (
+            self.supervisor_control()
+            if callable(self.supervisor_control)
+            else self.supervisor_control
+        )
+        has_canonical_binding = any(
+            request.get(field) is not None
+            for field in (
+                "identity_id", "state_id", "state_dir_id",
+                "supervisor_roster_revision",
+                "supervisor_roster_digest_sha256",
+            )
+        )
+        if not isinstance(control, Mapping):
+            if has_canonical_binding:
+                raise PolicyError("canonical_supervisor_roster_unavailable")
+            return
+        if control.get("source") != "canonical":
+            if has_canonical_binding:
+                raise PolicyError("canonical_supervisor_roster_unavailable")
             return
         roster = control.get("document")
-        if not isinstance(roster, Mapping):
+        if not isinstance(roster, Mapping) or not _valid_supervisor_roster(roster):
             raise PolicyError("supervisor_roster_invalid")
+        roster_digest = hashlib.sha256(canonical_json(roster)).hexdigest()
         if (
             roster.get("board_id") != request.get("board_id")
             or roster.get("envelope_fingerprint_sha256")
             != request.get("authorization_fingerprint_sha256")
+            or roster.get("revision") != request.get("supervisor_roster_revision")
+            or not hmac.compare_digest(
+                roster_digest, str(request.get("supervisor_roster_digest_sha256"))
+            )
         ):
             raise PolicyError("supervisor_roster_authorization_mismatch")
         aliases = {
             "start": {"provision", "start", "resume"},
             "drain": {"drain"},
             "stop": {"pause", "stop", "remove"},
+            "re_role": {"re_role"},
             "inspect": set(),
         }
         if request.get("action") == "inspect":
@@ -1155,9 +1246,17 @@ class FleetExecutor:
             and row.get("seat_id") == request.get("seat_id")
             and row.get("kind") in aliases.get(str(request.get("action")), set())
             and row.get("generation") == request.get("expected_seat_generation")
+            and row.get("identity_id") == request.get("identity_id")
+            and row.get("state_id") == request.get("state_id")
+            and row.get("state_dir_id") == request.get("state_dir_id")
             and (
                 row.get("template_id") is None
-                or row.get("template_id") == request.get("template_id")
+                or row.get("template_id")
+                == (
+                    request.get("target_template_id")
+                    if row.get("kind") == "re_role"
+                    else request.get("template_id")
+                )
             )
         ]
         if len(matches) != 1:
@@ -1172,7 +1271,7 @@ class FleetExecutor:
             raise PolicyError("message_type_invalid")
         for field in ("operation_id", "board_id", "seat_id", "template_id"):
             _require_id(request.get(field), field)
-        if request.get("action") not in {"inspect", "start", "drain", "stop"}:
+        if request.get("action") not in {"inspect", "start", "drain", "stop", "re_role"}:
             raise PolicyError("action_invalid")
         if not isinstance(request.get("expected_seat_generation"), int) or isinstance(
             request.get("expected_seat_generation"), bool
@@ -1183,6 +1282,30 @@ class FleetExecutor:
                 request[field]
             ):
                 raise PolicyError(f"{field}_invalid")
+        for field in ("identity_id", "state_id", "state_dir_id"):
+            value = request.get(field)
+            if value is not None:
+                _require_id(value, field)
+        roster_revision = request.get("supervisor_roster_revision")
+        if roster_revision is not None and (
+            not isinstance(roster_revision, int)
+            or isinstance(roster_revision, bool)
+            or roster_revision < 1
+        ):
+            raise PolicyError("supervisor_roster_revision_invalid")
+        roster_digest = request.get("supervisor_roster_digest_sha256")
+        if roster_digest is not None and (
+            not isinstance(roster_digest, str) or not SHA256.fullmatch(roster_digest)
+        ):
+            raise PolicyError("supervisor_roster_digest_sha256_invalid")
+        target_id = request.get("target_template_id")
+        target_digest = request.get("target_template_digest_sha256")
+        if request.get("action") == "re_role":
+            _require_id(target_id, "target_template_id")
+            if not isinstance(target_digest, str) or not SHA256.fullmatch(target_digest):
+                raise PolicyError("target_template_digest_sha256_invalid")
+        elif target_id is not None or target_digest is not None:
+            raise PolicyError("target_template_invalid")
         now = self.clock()
         if _parse_time(request.get("deadline"), "deadline").timestamp() < now:
             raise PolicyError("deadline_expired")
@@ -1264,6 +1387,19 @@ class FleetExecutor:
         _inside(template.seat_root, self.policy.seat_roots, "seat_root")
         return template
 
+    def _target_template(self, request: Mapping[str, Any]) -> SeatTemplate:
+        template = self.policy.templates.get(str(request.get("target_template_id")))
+        if template is None:
+            raise PolicyError("target_template_not_approved")
+        if not hmac.compare_digest(
+            template.digest_sha256,
+            str(request.get("target_template_digest_sha256")),
+        ):
+            raise PolicyError("target_template_digest_mismatch")
+        _inside(template.repository_root, self.policy.repository_roots, "repository_root")
+        _inside(template.seat_root, self.policy.seat_roots, "seat_root")
+        return template
+
     def _check_generation(
         self, request: Mapping[str, Any], seat: Mapping[str, Any] | None
     ) -> int:
@@ -1293,7 +1429,6 @@ class FleetExecutor:
 
     def handle(self, request: Mapping[str, Any]) -> dict[str, Any]:
         digest, key_id = self._authenticate(request)
-        self._authorize_supervisor_roster(request)
         operation_id = str(request["operation_id"])
         previous = self.store.operation(operation_id)
         if previous:
@@ -1306,6 +1441,7 @@ class FleetExecutor:
                 self.publisher.publish(result)
                 return result
             raise PolicyError("operation_outcome_unknown")
+        self._authorize_supervisor_roster(request)
         auth = request["caller_auth"]
         self.store.reserve(key_id, auth["nonce"], digest, operation_id, self.clock())
         try:
@@ -1327,6 +1463,9 @@ class FleetExecutor:
         seat_id = str(request["seat_id"])
         board_id = str(request["board_id"])
         action = str(request["action"])
+        identity_id = request.get("identity_id")
+        state_id = request.get("state_id")
+        state_dir_id = request.get("state_dir_id")
         now = self.clock()
         seat = self.store.seat(seat_id)
         generation = self._check_generation(request, seat)
@@ -1337,6 +1476,15 @@ class FleetExecutor:
             or seat["principal_id"] != template.principal_id
         ):
             raise PolicyError("seat_identity_or_template_drift")
+        if seat:
+            binding_fields = ("identity_id", "state_id", "state_dir_id")
+            stored_binding = tuple(seat.get(field) for field in binding_fields)
+            requested_binding = tuple(request.get(field) for field in binding_fields)
+            adopting_legacy = all(value is None for value in stored_binding) and all(
+                isinstance(value, str) for value in requested_binding
+            )
+            if stored_binding != requested_binding and not adopting_legacy:
+                raise PolicyError("seat_identity_or_state_drift")
         observation = self.adapter.inspect(seat_id, template)
         if (
             seat
@@ -1378,8 +1526,13 @@ class FleetExecutor:
                 raise PolicyError("board_concurrency_cap")
             if self.store.principal_active_elsewhere(template.principal_id, seat_id):
                 raise PolicyError("principal_not_independent")
+            if self.store.binding_used_elsewhere(
+                seat_id, identity_id, state_id, state_dir_id
+            ):
+                raise PolicyError("identity_or_state_reused")
             self.store.save_seat(
                 seat_id=seat_id, board_id=board_id, template=template,
+                identity_id=identity_id, state_id=state_id, state_dir_id=state_dir_id,
                 generation=generation, lifecycle="starting", process_ref=None, now=now,
             )
             try:
@@ -1400,6 +1553,7 @@ class FleetExecutor:
                     rollback_ok = False
                 self.store.save_seat(
                     seat_id=seat_id, board_id=board_id, template=template,
+                    identity_id=identity_id, state_id=state_id, state_dir_id=state_dir_id,
                     generation=generation,
                     lifecycle="stopped" if rollback_ok else "unhealthy",
                     process_ref=None, now=self.clock(), failed=True,
@@ -1407,6 +1561,7 @@ class FleetExecutor:
                 raise
             self.store.save_seat(
                 seat_id=seat_id, board_id=board_id, template=template,
+                identity_id=identity_id, state_id=state_id, state_dir_id=state_dir_id,
                 generation=generation, lifecycle="ready",
                 process_ref=observation.process_ref, now=self.clock(),
             )
@@ -1424,6 +1579,7 @@ class FleetExecutor:
             self.adapter.drain(seat_id, template)
             self.store.save_seat(
                 seat_id=seat_id, board_id=board_id, template=template,
+                identity_id=identity_id, state_id=state_id, state_dir_id=state_dir_id,
                 generation=generation, lifecycle="draining",
                 process_ref=observation.process_ref, now=now,
             )
@@ -1436,17 +1592,56 @@ class FleetExecutor:
             raise PolicyError("lease_state_unknown")
         if lease.live:
             raise PolicyError("live_lease")
+        if action == "re_role":
+            if seat.get("lifecycle") != "draining":
+                raise PolicyError("seat_not_drained")
+            target = self._target_template(request)
+            if target.template_id == template.template_id:
+                raise PolicyError("target_template_unchanged")
+            self.adapter.stop(seat_id, template)
+            stopped = self.adapter.inspect(seat_id, template)
+            if stopped.running:
+                raise RuntimeError("seat_still_running")
+            try:
+                self.adapter.replace(seat_id, template, target)
+                self.adapter.start(seat_id, target)
+                changed = self.adapter.inspect(seat_id, target)
+                if not changed.ready or not changed.identity_verified:
+                    raise RuntimeError("seat_readiness_failed")
+                registry = self.readiness.observe(board_id, seat_id, target)
+                if not registry.known or not registry.ready:
+                    raise RuntimeError("registry_readiness_failed")
+            except Exception:
+                self.store.save_seat(
+                    seat_id=seat_id, board_id=board_id, template=target,
+                    identity_id=identity_id, state_id=state_id,
+                    state_dir_id=state_dir_id, generation=generation + 1,
+                    lifecycle="unhealthy", process_ref=None, now=self.clock(), failed=True,
+                )
+                raise
+            self.store.save_seat(
+                seat_id=seat_id, board_id=board_id, template=target,
+                identity_id=identity_id, state_id=state_id, state_dir_id=state_dir_id,
+                generation=generation + 1, lifecycle="ready",
+                process_ref=changed.process_ref, now=self.clock(),
+            )
+            return self._result(
+                request, digest, "succeeded", committed=True,
+                process_ref=changed.process_ref,
+            )
         self.adapter.stop(seat_id, template)
         stopped = self.adapter.inspect(seat_id, template)
         if stopped.running:
             self.store.save_seat(
                 seat_id=seat_id, board_id=board_id, template=template,
+                identity_id=identity_id, state_id=state_id, state_dir_id=state_dir_id,
                 generation=generation, lifecycle="unhealthy",
                 process_ref=stopped.process_ref, now=self.clock(), failed=True,
             )
             raise RuntimeError("seat_still_running")
         self.store.save_seat(
             seat_id=seat_id, board_id=board_id, template=template,
+            identity_id=identity_id, state_id=state_id, state_dir_id=state_dir_id,
             generation=generation + 1, lifecycle="stopped", process_ref=None, now=self.clock(),
         )
         return self._result(request, digest, "succeeded", committed=True)
@@ -1573,6 +1768,15 @@ def load_supervisor_control(
         return None
     if roster_path.exists():
         try:
+            info = roster_path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_nlink != 1
+                or info.st_mode & 0o077
+                or info.st_size > 2 * 1024 * 1024
+            ):
+                raise PolicyError("supervisor_roster_invalid")
             document = json.loads(roster_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise PolicyError("supervisor_roster_invalid") from exc
@@ -1582,6 +1786,15 @@ def load_supervisor_control(
     if legacy_path is None or not legacy_path.is_file():
         raise PolicyError("supervisor_roster_unavailable")
     try:
+        info = legacy_path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o077
+            or info.st_size > 1024 * 1024
+        ):
+            raise PolicyError("legacy_supervisor_config_invalid")
         legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise PolicyError("legacy_supervisor_config_invalid") from exc
@@ -1664,6 +1877,7 @@ def _valid_supervisor_roster(document: Any) -> bool:
             return False
         project_ids.add(project_id)
     identifiers: set[tuple[str, str]] = set()
+    seats_by_id: dict[str, Mapping[str, Any]] = {}
     for seat in seats:
         if not isinstance(seat, Mapping) or set(seat) != {
             "seat_id", "identity_id", "state_id", "state_dir_id", "generation",
@@ -1694,14 +1908,22 @@ def _valid_supervisor_roster(document: Any) -> bool:
             _parse_time(seat.get("transition_at"), "transition_at")
         except PolicyError:
             return False
+        seats_by_id[str(seat["seat_id"])] = seat
+    provisioned_identifiers = set(identifiers)
     for action in actions:
         if not isinstance(action, Mapping) or action.get("kind") not in {
             "provision", "start", "drain", "pause", "resume", "stop", "remove", "re_role"
         }:
             return False
         required = {"kind", "seat_id", "identity_id", "state_id", "state_dir_id", "generation"}
-        allowed = required | {"target_role", "template_id"}
-        if not required <= set(action) or set(action) - allowed:
+        expected = set(required)
+        if action["kind"] == "provision":
+            expected.update({"target_role", "template_id"})
+        elif action["kind"] == "re_role":
+            expected.update({"target_role", "template_id"})
+        elif action["kind"] == "drain" and "target_role" in action:
+            expected.add("target_role")
+        if set(action) != expected:
             return False
         if any(not isinstance(action.get(field), str) or not SAFE_ID.fullmatch(action[field]) for field in ("seat_id", "identity_id", "state_id", "state_dir_id")):
             return False
@@ -1711,6 +1933,33 @@ def _valid_supervisor_roster(document: Any) -> bool:
             not isinstance(action.get("template_id"), str)
             or not SAFE_ID.fullmatch(action["template_id"])
             or action.get("target_role") not in {"worker", "reviewer", "verifier"}
+        ):
+            return False
+        if action["kind"] == "provision":
+            for field in ("seat_id", "identity_id", "state_id", "state_dir_id"):
+                key = (field, str(action[field]))
+                if key in provisioned_identifiers:
+                    return False
+                provisioned_identifiers.add(key)
+        if action["kind"] != "provision":
+            seat = seats_by_id.get(str(action["seat_id"]))
+            if seat is None or any(
+                action.get(field) != seat.get(field)
+                for field in (
+                    "identity_id", "state_id", "state_dir_id", "generation"
+                )
+            ):
+                return False
+            if action["kind"] in {"pause", "stop", "remove", "re_role"} and (
+                seat.get("lifecycle") != "draining"
+                or seat.get("work_claim") is True
+                or seat.get("review_lease") is True
+            ):
+                return False
+        if action["kind"] == "re_role" and (
+            action.get("target_role") not in {"worker", "reviewer", "verifier"}
+            or not isinstance(action.get("template_id"), str)
+            or not SAFE_ID.fullmatch(str(action["template_id"]))
         ):
             return False
     return True
@@ -1727,7 +1976,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         FileLeaseProvider(state / "leases.json"),
         FileRegistryReadinessProvider(state / "registry-readiness.json"),
         JsonlReceiptPublisher(state / "receipts.jsonl"),
-        supervisor_control=load_supervisor_control(
+        supervisor_control=lambda: load_supervisor_control(
             args.supervisor_roster, args.legacy_supervisor_config
         ),
     )

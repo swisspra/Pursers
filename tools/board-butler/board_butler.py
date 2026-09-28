@@ -731,9 +731,16 @@ class FleetOperation:
     template_digest_sha256: str
     expected_seat_generation: int
     authorization_fingerprint_sha256: str
+    identity_id: str | None = None
+    state_id: str | None = None
+    state_dir_id: str | None = None
+    supervisor_roster_revision: int | None = None
+    supervisor_roster_digest_sha256: str | None = None
+    target_template_id: str | None = None
+    target_template_digest_sha256: str | None = None
 
     def __post_init__(self) -> None:
-        if self.action not in {"start", "drain", "stop"}:
+        if self.action not in {"start", "drain", "stop", "re_role"}:
             raise ValueError("fleet operation action is invalid")
 
 
@@ -833,6 +840,17 @@ class UnixFleetExecutorClient:
             "expected_seat_generation": operation.expected_seat_generation,
             "authorization_fingerprint_sha256": (
                 operation.authorization_fingerprint_sha256
+            ),
+            "identity_id": operation.identity_id,
+            "state_id": operation.state_id,
+            "state_dir_id": operation.state_dir_id,
+            "supervisor_roster_revision": operation.supervisor_roster_revision,
+            "supervisor_roster_digest_sha256": (
+                operation.supervisor_roster_digest_sha256
+            ),
+            "target_template_id": operation.target_template_id,
+            "target_template_digest_sha256": (
+                operation.target_template_digest_sha256
             ),
             "deadline": (now + timedelta(seconds=self.timeout_s)).isoformat(),
             "caller_auth": {},
@@ -942,6 +960,13 @@ def _execute_fleet_operation(
         "template_digest_sha256": operation.template_digest_sha256,
         "expected_seat_generation": operation.expected_seat_generation,
         "authorization_fingerprint_sha256": operation.authorization_fingerprint_sha256,
+        "identity_id": operation.identity_id,
+        "state_id": operation.state_id,
+        "state_dir_id": operation.state_dir_id,
+        "supervisor_roster_revision": operation.supervisor_roster_revision,
+        "supervisor_roster_digest_sha256": operation.supervisor_roster_digest_sha256,
+        "target_template_id": operation.target_template_id,
+        "target_template_digest_sha256": operation.target_template_digest_sha256,
         "status": "pending",
     }
     if (
@@ -1279,6 +1304,142 @@ def supervisor_roster_api() -> dict[str, Any]:
             str(path), run_name="board_butler_supervisor_roster"
         )
     return _SUPERVISOR_ROSTER_API
+
+
+def _canonical_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def executor_template_digests(path: Path) -> dict[str, str]:
+    """Read only the approved public template records from an owner-only config."""
+    if not path.is_absolute() or path.is_symlink():
+        raise RuntimeError("fleet executor config is untrusted")
+    try:
+        info = path.stat()
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("fleet executor config is unavailable") from exc
+    templates = document.get("templates") if isinstance(document, Mapping) else None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+        or info.st_mode & 0o077
+        or not isinstance(templates, Mapping)
+        or not templates
+    ):
+        raise RuntimeError("fleet executor config is untrusted")
+    result: dict[str, str] = {}
+    for template_id, record in templates.items():
+        if (
+            not isinstance(template_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}", template_id)
+            or not isinstance(record, Mapping)
+        ):
+            raise RuntimeError("fleet executor template catalog is invalid")
+        result[template_id] = _canonical_digest(record)
+    return result
+
+
+def canonical_supervisor_operations(
+    roster: Mapping[str, Any],
+    executor_seats: Sequence[Mapping[str, Any]],
+    template_digests: Mapping[str, str],
+) -> tuple[FleetOperation, ...]:
+    """Translate exact canonical actions into signed executor operations."""
+    api = supervisor_roster_api()
+    roster_digest = api["digest"](roster)
+    revision = roster.get("revision")
+    fingerprint = roster.get("envelope_fingerprint_sha256")
+    board_id = roster.get("board_id")
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 1
+        or not isinstance(fingerprint, str)
+        or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+        or not isinstance(board_id, str)
+    ):
+        raise RuntimeError("canonical supervisor roster binding is invalid")
+    seats = {
+        str(row.get("seat_id")): row
+        for row in executor_seats
+        if isinstance(row, Mapping) and isinstance(row.get("seat_id"), str)
+    }
+    aliases = {
+        "provision": "start",
+        "start": "start",
+        "resume": "start",
+        "drain": "drain",
+        "pause": "stop",
+        "stop": "stop",
+        "remove": "stop",
+        "re_role": "re_role",
+    }
+    operations: list[FleetOperation] = []
+    for action in roster.get("actions", []):
+        if not isinstance(action, Mapping) or action.get("kind") not in aliases:
+            raise RuntimeError("canonical supervisor action is invalid")
+        kind = str(action["kind"])
+        seat_id = str(action.get("seat_id"))
+        current = seats.get(seat_id)
+        if kind == "provision":
+            source_template_id = str(action.get("template_id"))
+            source_digest = template_digests.get(source_template_id)
+        else:
+            if not isinstance(current, Mapping):
+                raise RuntimeError("canonical supervisor seat is absent from executor state")
+            source_template_id = str(current.get("template_id"))
+            source_digest = current.get("template_digest_sha256")
+        target_template_id = (
+            str(action.get("template_id")) if kind == "re_role" else None
+        )
+        target_digest = (
+            template_digests.get(target_template_id)
+            if target_template_id is not None
+            else None
+        )
+        if (
+            not isinstance(source_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
+            or (target_template_id is not None and (
+                not isinstance(target_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", target_digest) is None
+            ))
+        ):
+            raise RuntimeError("canonical supervisor template is unavailable")
+        operation_material = {
+            "roster_digest_sha256": roster_digest,
+            "action": dict(action),
+        }
+        operations.append(
+            FleetOperation(
+                operation_id="supervisor:" + _canonical_digest(operation_material),
+                board_id=board_id,
+                action=aliases[kind],
+                seat_id=seat_id,
+                template_id=source_template_id,
+                template_digest_sha256=source_digest,
+                expected_seat_generation=int(action.get("generation")),
+                authorization_fingerprint_sha256=fingerprint,
+                identity_id=str(action.get("identity_id")),
+                state_id=str(action.get("state_id")),
+                state_dir_id=str(action.get("state_dir_id")),
+                supervisor_roster_revision=revision,
+                supervisor_roster_digest_sha256=roster_digest,
+                target_template_id=target_template_id,
+                target_template_digest_sha256=target_digest,
+            )
+        )
+    return tuple(operations)
 
 
 def _fleet_operation_id(
@@ -2320,6 +2481,17 @@ class FleetReconciler:
                     "expected_seat_generation": operation.expected_seat_generation,
                     "authorization_fingerprint_sha256": (
                         operation.authorization_fingerprint_sha256
+                    ),
+                    "identity_id": operation.identity_id,
+                    "state_id": operation.state_id,
+                    "state_dir_id": operation.state_dir_id,
+                    "supervisor_roster_revision": operation.supervisor_roster_revision,
+                    "supervisor_roster_digest_sha256": (
+                        operation.supervisor_roster_digest_sha256
+                    ),
+                    "target_template_id": operation.target_template_id,
+                    "target_template_digest_sha256": (
+                        operation.target_template_digest_sha256
                     ),
                     "status": "pending",
                     "attempts": int(row.get("attempts", 0) or 0),
@@ -11035,10 +11207,15 @@ class CentralBackend:
                 observation,
                 now=now,
             )
+        roster_path = getattr(self.args, "supervisor_roster_file", None)
+        if roster_path is None:
+            raise RuntimeError("canonical supervisor roster file is not configured")
+        save_supervisor_roster(roster_path, roster)
         return {
             "revision": roster["revision"],
             "digest_sha256": api["digest"](roster),
             "command_id": command.get("command_id"),
+            "document": copy.deepcopy(roster),
         }
 
     async def _reconcile_fleet(
@@ -11071,6 +11248,11 @@ class CentralBackend:
         supervisor_report: Mapping[str, Any] | None = None
         raw_supervisor = observation.get("supervisor_observation")
         if isinstance(raw_supervisor, Mapping):
+            if (
+                getattr(self.args, "fleet_executor_config", None) is None
+                or getattr(self.args, "supervisor_roster_file", None) is None
+            ):
+                raise RuntimeError("canonical supervisor runtime configuration is incomplete")
             if set(raw_supervisor) == {"control_board_id", "observation"}:
                 control_board = raw_supervisor.get("control_board_id")
                 raw_supervisor = raw_supervisor.get("observation")
@@ -11090,6 +11272,34 @@ class CentralBackend:
                 raw_supervisor,
                 now,
             )
+            roster = supervisor_report.get("document")
+            if not isinstance(roster, Mapping):
+                raise RuntimeError("canonical supervisor roster was not retained")
+            operations = canonical_supervisor_operations(
+                roster,
+                observation["executor_seats"],
+                executor_template_digests(self.args.fleet_executor_config),
+            )
+            executor_client = UnixFleetExecutorClient(
+                self.args.fleet_executor_socket,
+                self.args.fleet_executor_key_id,
+                self.args.fleet_executor_private_key,
+            )
+            receipts = [dict(executor_client.execute(item)) for item in operations]
+            public_report = {
+                key: copy.deepcopy(value)
+                for key, value in supervisor_report.items()
+                if key != "document"
+            }
+            return {
+                "status": "reconciled",
+                "boards": sorted(configs),
+                "operations": len(operations),
+                "receipt_outcomes": [
+                    str(item.get("outcome", "unknown")) for item in receipts
+                ],
+                "supervisor_roster": public_report,
+            }
         provider_maximums_raw = observation["provider_maximums"]
         provider_maximums: dict[str, dict[str, int]] = {}
         for board_id in configs:
@@ -12075,6 +12285,40 @@ def save_cursor(path: Path, cursor: int) -> None:
     temporary.replace(path)
 
 
+def save_supervisor_roster(path: Path, roster: Mapping[str, Any]) -> None:
+    """Atomically sync the accepted canonical document to the local executor."""
+    if not path.is_absolute() or path.is_symlink():
+        raise RuntimeError("canonical supervisor roster path is untrusted")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent = path.parent.stat()
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or parent.st_mode & 0o077
+    ):
+        raise RuntimeError("canonical supervisor roster directory is untrusted")
+    descriptor, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(raw)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(
+                json.dumps(
+                    roster,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o600)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _answer_audit_document(
     evaluation_state: Mapping[str, Any], **updates: Any
 ) -> dict[str, Any]:
@@ -12760,6 +13004,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--fleet-executor-config",
+        type=Path,
+        default=(
+            Path(os.environ["PURSERS_BUTLER_FLEET_EXECUTOR_CONFIG"]).expanduser()
+            if os.environ.get("PURSERS_BUTLER_FLEET_EXECUTOR_CONFIG")
+            else None
+        ),
+    )
+    parser.add_argument(
+        "--supervisor-roster-file",
+        type=Path,
+        default=(
+            Path(os.environ["PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE"]).expanduser()
+            if os.environ.get("PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE")
+            else None
+        ),
+    )
+    parser.add_argument(
         "--provider-secrets-dir",
         type=Path,
         default=(
@@ -12859,6 +13121,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "fleet_state_file",
         "fleet_executor_socket",
         "fleet_executor_private_key",
+        "fleet_executor_config",
+        "supervisor_roster_file",
         "intake_onboarding_config",
     ):
         value = getattr(args, name)

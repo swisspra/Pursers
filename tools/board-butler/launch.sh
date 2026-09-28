@@ -32,6 +32,8 @@ case "$runtime_mode" in
     : "${PURSERS_BUTLER_FLEET_EXECUTOR_SOCKET:?set PURSERS_BUTLER_FLEET_EXECUTOR_SOCKET}"
     : "${PURSERS_BUTLER_FLEET_EXECUTOR_KEY_ID:?set PURSERS_BUTLER_FLEET_EXECUTOR_KEY_ID}"
     : "${PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY:?set PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY}"
+    : "${PURSERS_BUTLER_FLEET_EXECUTOR_CONFIG:?set PURSERS_BUTLER_FLEET_EXECUTOR_CONFIG}"
+    : "${PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE:?set PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE}"
     set -- --runtime-mode active \
       --active-authorization-file "$PURSERS_BUTLER_ACTIVE_AUTHORIZATION_FILE" \
       --act-on-board "$PURSERS_BUTLER_ACTIVE_BOARD" \
@@ -39,7 +41,9 @@ case "$runtime_mode" in
       --fleet-state-file "$PURSERS_BUTLER_FLEET_STATE_FILE" \
       --fleet-executor-socket "$PURSERS_BUTLER_FLEET_EXECUTOR_SOCKET" \
       --fleet-executor-key-id "$PURSERS_BUTLER_FLEET_EXECUTOR_KEY_ID" \
-      --fleet-executor-private-key "$PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY"
+      --fleet-executor-private-key "$PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY" \
+      --fleet-executor-config "$PURSERS_BUTLER_FLEET_EXECUTOR_CONFIG" \
+      --supervisor-roster-file "$PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE"
     ;;
   *)
     echo "PURSERS_BUTLER_RUNTIME_MODE must be shadow or active" >&2

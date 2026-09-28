@@ -279,6 +279,7 @@ def test_active_config_derives_only_human_authorized_bounds() -> None:
 
 def test_runtime_persists_and_commands_canonical_supervisor_roster(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     raw = json.loads(
         (
@@ -322,6 +323,7 @@ def test_runtime_persists_and_commands_canonical_supervisor_roster(
             url="https://central.invalid/mcp",
             home_board="pursers",
             agent_name="board-butler-test",
+            supervisor_roster_file=tmp_path / "state" / "supervisor-roster.json",
         ),
         "opaque",
     )
@@ -338,11 +340,59 @@ def test_runtime_persists_and_commands_canonical_supervisor_roster(
     assert client.state is not None
     persisted = json.loads(client.state)
     assert persisted["schema"] == "pursers_supervisor_roster_v1"
+    assert json.loads(backend.args.supervisor_roster_file.read_text()) == persisted
     assert client.command is not None
     assert client.command["parameters"] == {
         "desired_revision": 1,
         "desired_digest_sha256": report["digest_sha256"],
     }
+
+
+def test_canonical_re_role_translates_to_fully_bound_executor_operation() -> None:
+    api = butler.supervisor_roster_api()
+    raw = json.loads(
+        (
+            Path(__file__).with_name("fixtures")
+            / "supervisor_demand_shift.json"
+        ).read_text(encoding="utf-8")
+    )
+    raw["observed_at"] = NOW.isoformat()
+    raw["seats"][0]["lifecycle"] = "draining"
+    raw["seats"][0]["transition_at"] = (
+        NOW - timedelta(minutes=10)
+    ).isoformat()
+    config = active_config()
+    config["authorization"]["expires_at"] = (NOW + timedelta(hours=1)).isoformat()
+    grant = api["grant_from_config"](config, NOW)
+    observation = api["observation_from_fixture"](raw)
+    plan = api["create_plan"](grant, observation, now=NOW)
+    roster = api["confirm_plan"](plan, grant, observation, now=NOW)
+
+    operations = butler.canonical_supervisor_operations(
+        roster,
+        [
+            {
+                "seat_id": "seat-worker-1",
+                "template_id": "template:worker:direct",
+                "template_digest_sha256": "b" * 64,
+            }
+        ],
+        {
+            "template:worker:direct": "b" * 64,
+            "template:reviewer:direct": "c" * 64,
+            "template:acp_worker:direct": "d" * 64,
+        },
+    )
+
+    operation = next(item for item in operations if item.action == "re_role")
+    assert operation.action == "re_role"
+    assert operation.identity_id == "agent-worker-1"
+    assert operation.state_id == "state-worker-1"
+    assert operation.state_dir_id == "state-dir-worker-1"
+    assert operation.target_template_id == "template:reviewer:direct"
+    assert operation.target_template_digest_sha256 == "c" * 64
+    assert operation.supervisor_roster_revision == roster["revision"]
+    assert operation.supervisor_roster_digest_sha256 == api["digest"](roster)
 
 
 def test_product_snapshot_selector_consumes_real_board_shaped_state() -> None:

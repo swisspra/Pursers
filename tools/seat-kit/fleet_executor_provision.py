@@ -127,7 +127,7 @@ def _validate_spec(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(plist, dict) or not isinstance(plist.get("EnvironmentVariables"), dict):
         raise ProvisionError("board_butler_launch_agent_invalid")
     host_cap = policy.get("host_cap")
-    if not isinstance(host_cap, int) or isinstance(host_cap, bool) or not 1 <= host_cap <= 12:
+    if not isinstance(host_cap, int) or isinstance(host_cap, bool) or not 1 <= host_cap <= 100:
         raise ProvisionError("host_cap_invalid")
     fingerprint = policy.get("authorization_fingerprint_sha256")
     if not isinstance(fingerprint, str) or executor.SHA256.fullmatch(fingerprint) is None:
@@ -305,12 +305,15 @@ def confirm_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
         raise ProvisionError("board_butler_launch_agent_changed")
     lease_path = state_dir / "leases.json"
     readiness_path = state_dir / "registry-readiness.json"
+    roster_path = state_dir / "supervisor-roster.json"
+    legacy_path = state_dir / "supervisor-legacy.json"
     for target in (
         config_path,
         executor_plist_path,
         private_key_path,
         lease_path,
         readiness_path,
+        legacy_path,
     ):
         if target.exists() or target.is_symlink():
             raise ProvisionError(f"target_exists:{target.name}")
@@ -353,6 +356,10 @@ def confirm_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
         readiness_path,
         b'{"schema":"pursers_registry_readiness_v1","stale_after":"1970-01-01T00:00:00+00:00","selected_active_boards":[],"boards":{}}\n',
     )
+    _atomic_private(
+        legacy_path,
+        b'{"schema":"pursers_legacy_supervisor_config_v1"}\n',
+    )
     executor_plist = {
         "Label": "com.pursers.fleet-executor",
         "ProgramArguments": [
@@ -361,6 +368,8 @@ def confirm_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
             "--config", str(config_path),
             "--state-dir", str(state_dir),
             "--socket", str(socket_path),
+            "--supervisor-roster", str(roster_path),
+            "--legacy-supervisor-config", str(legacy_path),
             "--service-manager", "launchd",
         ],
         "RunAtLoad": True,
@@ -385,6 +394,8 @@ def confirm_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
             "PURSERS_BUTLER_FLEET_EXECUTOR_SOCKET": str(socket_path),
             "PURSERS_BUTLER_FLEET_EXECUTOR_KEY_ID": caller["key_id"],
             "PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY": str(private_key_path),
+            "PURSERS_BUTLER_FLEET_EXECUTOR_CONFIG": str(config_path),
+            "PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE": str(roster_path),
         }
     )
     _atomic_private(
@@ -399,6 +410,7 @@ def confirm_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
         "staged": [
             str(config_path), str(private_key_path), str(executor_plist_path),
             str(butler_plist_path), str(lease_path), str(readiness_path),
+            str(legacy_path),
         ],
     }
 

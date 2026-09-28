@@ -245,10 +245,14 @@ Board Butler rejects that input after 180 seconds, derives a new plan from the
 strict autonomous-config schema, CAS-writes the complete seat inventory and
 lifecycle actions under board state key `supervisor_roster`, and submits a
 bounded `set_desired_state` command that names the resulting revision and
-digest. The host executor accepts a mutation only when its board, authorization
-fingerprint, seat generation, approved template, and lifecycle action match
-that canonical document. A malformed canonical document fails closed; legacy
-configuration is consulted only when the canonical document is absent.
+digest. After that command is accepted, Butler atomically syncs the exact
+canonical bytes to an owner-only host file. Both launchd and systemd executor
+startup pass that path explicitly and reload it at every signed mutation; the
+legacy path is consulted only while the canonical file is absent. The host
+executor accepts a mutation only when its board, authorization fingerprint,
+roster revision and digest, seat generation, identity ID, state ID,
+state-directory ID, approved template, and lifecycle action all match that
+canonical document. A malformed or altered canonical document fails closed.
 
 The planner and roster are executor-agnostic. They identify opaque seats,
 approved templates, generations, state-directory IDs, lifecycle actions, and
@@ -258,6 +262,11 @@ host may use its supervisor adapter, while a Linux deployment can use seat-kit
 Goose CLI/ACP templates through the existing systemd `ServiceAdapter`. Other
 MCP-capable IDE/provider adapters use the same typed roster and executor
 boundary; adding one does not change demand planning or authorization.
+Re-role is a first-class signed executor action: it requires an already drained
+seat with no work or review lease, stops the source template, replaces the
+launchd plist or systemd unit with the exact approved target template, starts
+and verifies registry readiness, preserves the opaque identity/state bindings,
+and advances the seat generation.
 
 The operator grant is the single integer `host_seat_cap`. Setting or changing
 it creates a new authorization whose envelope fingerprint covers the cap,

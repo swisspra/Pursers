@@ -180,6 +180,13 @@ def executor_request() -> dict:
         "template_digest_sha256": SHA,
         "expected_seat_generation": 1,
         "authorization_fingerprint_sha256": SHA,
+        "identity_id": None,
+        "state_id": None,
+        "state_dir_id": None,
+        "supervisor_roster_revision": None,
+        "supervisor_roster_digest_sha256": None,
+        "target_template_id": None,
+        "target_template_digest_sha256": None,
         "deadline": "2026-09-23T00:01:00Z",
         "caller_auth": {
             "scheme": "local_ed25519_v1",

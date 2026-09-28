@@ -515,7 +515,11 @@ def _provision_action(
 
 
 def _action(
-    kind: str, seat: SupervisorSeat | None, *, target_role: str | None = None
+    kind: str,
+    seat: SupervisorSeat | None,
+    *,
+    target_role: str | None = None,
+    template_id: str | None = None,
 ) -> dict[str, Any]:
     if kind not in MUTATING_ACTIONS:
         raise SupervisorPlanError("action_invalid")
@@ -534,6 +538,8 @@ def _action(
         if target_role not in ROLES:
             raise SupervisorPlanError("target_role_invalid")
         row["target_role"] = target_role
+    if template_id is not None:
+        row["template_id"] = _identifier(template_id, "template_id")
     return row
 
 
@@ -585,7 +591,14 @@ def create_plan(
             surpluses.remove(seat)
             cooled = (now - seat.transition_at).total_seconds() >= grant.cooldown_s
             if seat.lifecycle == "draining" and not seat.leased and cooled:
-                actions.append(_action("re_role", seat, target_role=target_role))
+                actions.append(
+                    _action(
+                        "re_role",
+                        seat,
+                        target_role=target_role,
+                        template_id=_template_for_role(grant, target_role),
+                    )
+                )
                 deficits[target_role] -= 1
             elif seat.lifecycle != "draining" and cooled:
                 actions.append(_action("drain", seat, target_role=target_role))
@@ -715,8 +728,10 @@ def confirm_plan(
         }
         if action["kind"] == "provision":
             expected_fields.update({"target_role", "template_id"})
-        if action["kind"] in {"drain", "re_role"} and "target_role" in action:
+        if action["kind"] == "drain" and "target_role" in action:
             expected_fields.add("target_role")
+        if action["kind"] == "re_role":
+            expected_fields.update({"target_role", "template_id"})
         if set(action) != expected_fields:
             raise SupervisorPlanError("action_fields_invalid")
         if action["kind"] != "provision":
@@ -729,6 +744,12 @@ def confirm_plan(
                 or action.get("generation") != seat.generation
             ):
                 raise SupervisorPlanError("seat_identity_changed")
+            if action["kind"] == "re_role" and (
+                action.get("template_id") not in grant.approved_template_ids
+                or action.get("template_id")
+                != _template_for_role(grant, str(action.get("target_role")))
+            ):
+                raise SupervisorPlanError("re_role_template_not_approved")
         else:
             if action.get("template_id") not in grant.approved_template_ids:
                 raise SupervisorPlanError("provision_template_not_approved")
