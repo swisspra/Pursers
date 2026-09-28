@@ -242,8 +242,16 @@ def approved_merge_ticket(candidate: str) -> dict[str, Any]:
     }
 
 
-def commit_fixture(repo: Path, content: str = "approved\n") -> str:
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+def commit_fixture(
+    repo: Path,
+    content: str = "approved\n",
+    *,
+    initial_branch: str | None = None,
+) -> str:
+    command = ["git", "init", "-q"]
+    if initial_branch is not None:
+        command.extend(["-b", initial_branch])
+    subprocess.run([*command, str(repo)], check=True)
     tools = repo / "tools"
     tools.mkdir(exist_ok=True)
     (tools / "ci_manifest.py").symlink_to(
@@ -4282,7 +4290,7 @@ def test_mature_board_hydrates_closed_approval_without_intake_snapshot(
     import pursers_client
 
     options = args(tmp_path)
-    options.repo = REPOSITORY_ROOT
+    commit_fixture(options.repo, initial_branch="main")
     backend = butler.CentralBackend(options, "opaque")
     approved = {
         "ticket_id": "TK-approved-closed",
@@ -4391,6 +4399,40 @@ def test_mature_board_hydrates_closed_approval_without_intake_snapshot(
     assert any(
         row.get("observer") == "coverage_gap" for row in findings
     )
+
+
+def test_approved_not_landed_fails_closed_without_local_main_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    commit_fixture(repo, initial_branch="pr-checkout")
+    subprocess.run(["git", "switch", "--detach", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "branch", "-D", "pr-checkout"], cwd=repo, check=True)
+    main_ref = butler._local_main_ref(repo)
+    context = butler.ObservationContext(
+        board_id="pursers",
+        tickets={
+            "TK-approved": {
+                "ticket_id": "TK-approved",
+                "status": "closed",
+                "review_verdict": "approve",
+            }
+        },
+        questions=(),
+        now=NOW,
+        repo=repo,
+        main_ref=main_ref,
+    )
+    monkeypatch.setitem(
+        butler._stranded_approvals_api(),
+        "classify_approval",
+        lambda *_args, **_kwargs: pytest.fail(
+            "classification must not run without a local main ref"
+        ),
+    )
+
+    assert main_ref is None
+    assert butler._observe_stranded_approvals(context) == []
 
 
 def test_approved_not_landed_accepts_future_proven_landed_states(
