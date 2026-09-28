@@ -104,6 +104,7 @@ def test_primary_route_modules_own_renderers_and_receive_shared_context() -> Non
             assert renderer not in app
 
     assert "view.render(context)" in registry
+    assert "view.bind(context, root)" in registry
     assert "FleetViewModules.render(kind,fleetViewContext())" in app
 
 
@@ -495,7 +496,7 @@ console.log(JSON.stringify({{html,empty}}));
 
     assert "3 projects" in html
     assert "2 coordinators" in html
-    assert html.count("Coordinator") == 2
+    assert html.count('projects-detail-label">Coordinator') == 2
     assert "In progress</dt><dd>3" in html
     assert "Review ready</dt><dd>3" in html
     for state in ("open", "claimed", "in progress", "submitted", "closed", "reviewing"):
@@ -505,9 +506,11 @@ console.log(JSON.stringify({{html,empty}}));
     assert 'class="board-card" data-board-id="alpha" data-projects-card' in html
     assert "needs attention" in html
     assert "offline &lt;retry>" in html
-    assert 'href="#/seats">+ Add project</a>' in html
-    assert 'href="#/seats">Add project</a>' in result["empty"]
+    assert 'data-project-add-open>+ Add project</button>' in html
+    assert 'data-project-add-open>Add project</button>' in result["empty"]
     assert "existing guarded Connections flow" in result["empty"]
+    assert 'id="project-lifecycle-form"' in html
+    assert 'data-project-remove="Alpha"' in html
 
 
 def test_projects_route_styles_cover_responsive_and_density_modes() -> None:
@@ -10513,6 +10516,402 @@ def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Pat
                 for path in tmp_path.rglob("*")
                 if path.is_file() and (path == jwks_path or keys_dir in path.parents)
             }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_project_lifecycle_non_git_preview_apply_and_replay(tmp_path: Path) -> None:
+    central = FakeDoorCentral()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    cache = dashboard.DashboardCache([fetcher], 60)
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, seat_manager=SimpleNamespace()),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    folder = tmp_path / "plain-folder"
+    folder.mkdir()
+    marker = folder / "keep.txt"
+    marker.write_text("preserve", encoding="utf-8")
+
+    def post(path: str, payload: dict) -> tuple[int, dict]:
+        request = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            return response.status, json.load(response)
+
+    try:
+        status, plan = post(
+            "/api/lifecycle/plan",
+            {
+                "action": "add",
+                "name": "plain",
+                "board_id": "plain-board",
+                "work_dir": str(folder),
+                "git_mode": "none",
+                "repository_url": None,
+                "integration_ref": "main",
+                "prepare_fleet_clone": False,
+            },
+        )
+        assert status == 200
+        assert plan["blocked"] is False
+        assert plan["source"]["git_mode"] == "none"
+        assert "plain" not in central.registry_data["projects"]
+        assert "plain-board" not in central.created_boards
+
+        status, result = post(
+            "/api/lifecycle/apply",
+            {
+                "plan_id": plan["plan_id"],
+                "plan_digest": plan["plan_digest"],
+                "confirmation": "plain",
+            },
+        )
+        assert status == 200
+        assert result["ok"] is True
+        assert result["doors"] is None
+        assert result["replayed"] is False
+        assert central.registry_data["projects"]["plain"] == {
+            "board_id": "plain-board",
+            "work_dir": str(folder),
+            "status": "active",
+        }
+        assert marker.read_text(encoding="utf-8") == "preserve"
+        assert not (folder / ".git").exists()
+
+        _status, replay = post(
+            "/api/lifecycle/apply",
+            {
+                "plan_id": plan["plan_id"],
+                "plan_digest": plan["plan_digest"],
+                "confirmation": "plain",
+            },
+        )
+        assert replay["replayed"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_project_lifecycle_add_collision_is_blocked_and_exact_rerun_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    central = FakeDoorCentral()
+    existing_folder = tmp_path / "existing"
+    replacement_folder = tmp_path / "replacement"
+    existing_folder.mkdir()
+    replacement_folder.mkdir()
+    central.registry_data["projects"]["existing-proj"]["work_dir"] = str(
+        existing_folder
+    )
+    central.registry_data["projects"]["existing-proj"].update(
+        {
+            "repository_url": "https://example.invalid/PRIVATE-REPO-CANARY.git",
+            "fleet_clone_dir": "/PRIVATE/FLEET/CLONE",
+            "api_token": "TOKEN-CANARY",
+            "private_note": "NOTE-CANARY",
+        }
+    )
+    original_registry = copy.deepcopy(central.registry_data)
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+    cache = dashboard.DashboardCache(
+        [dashboard.FleetFetcher(config, client_factory=central.client_factory)], 60
+    )
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, seat_manager=SimpleNamespace()),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post(path: str, payload: dict) -> tuple[int, dict]:
+        request = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            return response.status, json.load(response)
+
+    try:
+        _status, blocked = post(
+            "/api/lifecycle/plan",
+            {
+                "action": "add",
+                "name": "existing-proj",
+                "board_id": "replacement-board",
+                "work_dir": str(replacement_folder),
+                "git_mode": "none",
+                "repository_url": None,
+                "integration_ref": "main",
+                "prepare_fleet_clone": False,
+            },
+        )
+        assert blocked["blocked"] is True
+        assert "already registered" in " ".join(blocked["blockers"])
+        registry_operation = next(
+            item
+            for item in blocked["operations"]
+            if item["operation_id"] == "registry"
+        )
+        assert registry_operation["effect"] == "blocked_name_collision"
+        assert registry_operation["changed_fields"] == [
+            "board_id",
+            "repository_url",
+            "work_dir",
+            "other_configured_fields",
+        ]
+        serialized = json.dumps(blocked, sort_keys=True)
+        for canary in (
+            str(existing_folder),
+            str(replacement_folder),
+            "/PRIVATE/FLEET/CLONE",
+            "PRIVATE-REPO-CANARY",
+            "TOKEN-CANARY",
+            "NOTE-CANARY",
+        ):
+            assert canary not in serialized
+        assert registry_operation["before"] == {
+            "board_id": "existing-board",
+            "status": "active",
+            "work_dir": "[local folder configured]",
+            "repository_url": "[Git source configured]",
+            "fleet_clone_dir": "[Fleet clone configured]",
+            "other_configured_fields": 2,
+        }
+
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            post(
+                "/api/lifecycle/apply",
+                {
+                    "plan_id": blocked["plan_id"],
+                    "plan_digest": blocked["plan_digest"],
+                    "confirmation": "existing-proj",
+                },
+            )
+        assert caught.value.code == 409
+        assert central.registry_data == original_registry
+        assert "replacement-board" not in central.created_boards
+
+        for key in (
+            "repository_url",
+            "fleet_clone_dir",
+            "api_token",
+            "private_note",
+        ):
+            central.registry_data["projects"]["existing-proj"].pop(key)
+        original_registry = copy.deepcopy(central.registry_data)
+
+        _status, rerun = post(
+            "/api/lifecycle/plan",
+            {
+                "action": "add",
+                "name": "existing-proj",
+                "board_id": "existing-board",
+                "work_dir": str(existing_folder),
+                "git_mode": "none",
+                "repository_url": None,
+                "integration_ref": "main",
+                "prepare_fleet_clone": False,
+            },
+        )
+        assert rerun["blocked"] is False
+        assert next(
+            item["effect"]
+            for item in rerun["operations"]
+            if item["operation_id"] == "registry"
+        ) == "already_present"
+        _status, result = post(
+            "/api/lifecycle/apply",
+            {
+                "plan_id": rerun["plan_id"],
+                "plan_digest": rerun["plan_digest"],
+                "confirmation": "existing-proj",
+            },
+        )
+        assert result["ok"] is True
+        assert central.registry_data == original_registry
+        assert next(
+            step["status"]
+            for step in result["steps"]
+            if step["step"] == "registry_admin"
+        ) == "already present"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_projects_lifecycle_renders_redacted_registry_conflict_impact() -> None:
+    source = {
+        "path": "/PATH/TO/replacement",
+        "git_mode": "none",
+        "repository_url": None,
+        "integration_ref": "main",
+        "blocked": False,
+        "blockers": [],
+    }
+    plan = dashboard.build_add_plan(
+        request={
+            "name": "demo",
+            "board_id": "new-board",
+            "prepare_fleet_clone": False,
+        },
+        registry={
+            "schema_version": 1,
+            "projects": {
+                "demo": {
+                    "board_id": "old-board",
+                    "work_dir": "/PATH/TO/original",
+                    "repository_url": "https://example.invalid/private.git",
+                    "status": "active",
+                }
+            },
+        },
+        registry_expected_sha256="f" * 64,
+        source=source,
+        board_exists=False,
+        actor="dashboard",
+        central="work",
+    )
+    projects = dashboard.UI_ASSETS["/ui/views/projects.js"][1].decode("utf-8")
+    instrumented = projects.replace(
+        "  globalThis.FleetViewModules.register({",
+        "  globalThis.__projectOperationListForTest = (plan, escape) => { esc = escape; return operationList(plan); };\n  globalThis.FleetViewModules.register({",
+        1,
+    )
+    program = f"""
+globalThis.FleetViewModules = {{register() {{}}}};
+eval({json.dumps(instrumented)});
+const html = globalThis.__projectOperationListForTest(
+  {json.dumps(plan)},
+  value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;'),
+);
+console.log(JSON.stringify({{html}}));
+"""
+    html = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )["html"]
+
+    assert "blocked_name_collision" in html
+    assert "Before" in html
+    assert "After" in html
+    assert "Changed fields" in html
+    assert "board_id, repository_url, work_dir" in html
+    assert "old-board" in html and "new-board" in html
+    assert "[local folder configured]" in html
+    assert "[Git source configured]" in html
+    assert "/PATH/TO/original" not in html
+    assert "https://example.invalid/private.git" not in html
+
+
+def test_project_lifecycle_remove_requires_pause_and_preserves_every_path(
+    tmp_path: Path,
+) -> None:
+    central = FakeDoorCentral()
+    folder = tmp_path / "existing"
+    folder.mkdir()
+    marker = folder / "repository.data"
+    marker.write_text("never delete", encoding="utf-8")
+    central.registry_data["projects"]["existing-proj"]["work_dir"] = str(folder)
+    board = central.client_factory("unused", "unused", "existing-board")
+
+    async def board_snapshot(**_kwargs: object) -> dict:
+        return {
+            "tickets": [],
+            "latest_seq": 12,
+            "truncated": False,
+            "omitted_counts": {"tickets": 0},
+        }
+
+    async def ticket_list(**_kwargs: object) -> dict:
+        return {"tickets": [], "total_matching": 0}
+
+    board.board_snapshot = board_snapshot
+    board.ticket_list = ticket_list
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+    cache = dashboard.DashboardCache(
+        [dashboard.FleetFetcher(config, client_factory=central.client_factory)], 60
+    )
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, seat_manager=SimpleNamespace()),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post(path: str, payload: dict) -> dict:
+        request = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            return json.load(response)
+
+    try:
+        blocked = post(
+            "/api/lifecycle/plan", {"action": "remove", "name": "existing-proj"}
+        )
+        assert blocked["blocked"] is True
+        assert any("paused" in item for item in blocked["blockers"])
+
+        central.registry_data["projects"]["existing-proj"]["status"] = "paused"
+        plan = post(
+            "/api/lifecycle/plan", {"action": "remove", "name": "existing-proj"}
+        )
+        assert plan["blocked"] is False
+        result = post(
+            "/api/lifecycle/apply",
+            {
+                "plan_id": plan["plan_id"],
+                "plan_digest": plan["plan_digest"],
+                "confirmation": "existing-proj",
+            },
+        )
+        assert result["removed_reference"] is True
+        assert "existing-proj" not in central.registry_data["projects"]
+        assert marker.read_text(encoding="utf-8") == "never delete"
+        assert "Central board and durable board history" in result["preserved"]
+        assert "existing-board" in central.created_boards
     finally:
         server.shutdown()
         server.server_close()
