@@ -64,6 +64,10 @@ class Response:
         return self.payload[:limit]
 
 
+class VerifierHTTPServer(dashboard.ThreadingHTTPServer):
+    request_queue_size = 64
+
+
 def provider_request(**overrides: Any) -> dict[str, Any]:
     request = {
         "endpoint": "https://provider.example.invalid/v1",
@@ -957,10 +961,7 @@ def test_config_http_reproduces_invalid_400_and_round_trips_answering_mode() -> 
             return self.get_config()
 
     cache = Cache()
-    class BrowserServer(dashboard.ThreadingHTTPServer):
-        request_queue_size = 64
-
-    server = BrowserServer(
+    server = VerifierHTTPServer(
         ("127.0.0.1", 0), dashboard.make_handler(cache)
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1211,7 +1212,7 @@ def test_active_answering_browser_save_and_clean_refresh(tmp_path: Path) -> None
             {"data": [{"id": "Model/Exact-1"}]}
         ),
     )
-    server = dashboard.ThreadingHTTPServer(
+    server = VerifierHTTPServer(
         ("127.0.0.1", 0),
         dashboard.make_handler(cache, seat_manager=Seats(), butler_manager=manager),
     )
