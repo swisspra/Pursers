@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -243,6 +244,84 @@ def test_add_plan_allows_exact_idempotent_rerun() -> None:
     )
     assert registry_operation["effect"] == "already_present"
     assert "changed_fields" not in registry_operation
+
+
+def test_browser_plan_projection_omits_server_held_registry_values() -> None:
+    raw = lifecycle.build_add_plan(
+        request={
+            "name": "demo",
+            "board_id": "new-board",
+            "prepare_fleet_clone": False,
+        },
+        registry={
+            "schema_version": 1,
+            "projects": {
+                "demo": {
+                    "board_id": "old-board",
+                    "status": "active",
+                    "work_dir": "/PRIVATE/old",
+                    "repository_url": "https://user:secret@example.invalid/private.git",
+                    "fleet_clone_dir": "/PRIVATE/clone",
+                    "api_token": "TOKEN-CANARY",
+                    "private_note": "NOTE-CANARY",
+                }
+            },
+        },
+        registry_expected_sha256="f" * 64,
+        source={
+            "path": "/PRIVATE/new",
+            "git_mode": "none",
+            "repository_url": "https://example.invalid/new.git",
+            "observed_origin": "https://example.invalid/observed.git",
+            "integration_ref": "main",
+            "blocked": False,
+            "blockers": [],
+        },
+        board_exists=False,
+        actor="dashboard-private-agent",
+        central="work",
+    )
+    stored = lifecycle.ProjectLifecycleStore().add(raw)
+
+    public = lifecycle.public_project_lifecycle_plan(stored)
+    encoded = json.dumps(public, sort_keys=True)
+
+    for canary in (
+        "/PRIVATE/old",
+        "/PRIVATE/new",
+        "/PRIVATE/clone",
+        "user:secret",
+        "TOKEN-CANARY",
+        "NOTE-CANARY",
+        "dashboard-private-agent",
+    ):
+        assert canary not in encoded
+    operation = next(
+        item for item in public["operations"] if item["operation_id"] == "registry"
+    )
+    assert operation["before"] == {
+        "board_id": "old-board",
+        "status": "active",
+        "work_dir": "[local folder configured]",
+        "repository_url": "[Git source configured]",
+        "fleet_clone_dir": "[Fleet clone configured]",
+        "other_configured_fields": 2,
+    }
+    assert "other_configured_fields" in operation["changed_fields"]
+    assert public["source"] == {
+        "git_mode": "none",
+        "integration_ref": "main",
+        "blocked": False,
+        "blockers": [],
+        "path_configured": True,
+        "repository_configured": True,
+        "origin_observed": True,
+    }
+    receipt = lifecycle.public_project_lifecycle_receipt(
+        {"ok": True, "removed_entry": raw["operations"][0]["before"]}
+    )
+    assert "TOKEN-CANARY" not in json.dumps(receipt, sort_keys=True)
+    assert receipt["removed_entry"] == operation["before"]
 
 
 def test_remove_plan_requires_paused_quiescent_complete_state() -> None:

@@ -29,6 +29,12 @@ GIT_TIMEOUT_SECONDS = 30
 PROJECT_NAME_RE = re.compile(r"^[^\x00-\x1f/\\]{1,120}$")
 BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 GIT_MODES = frozenset({"none", "existing", "clone"})
+PUBLIC_REGISTRY_FIELDS = frozenset({"board_id", "integration_ref", "status"})
+PUBLIC_REGISTRY_MARKERS = {
+    "work_dir": "[local folder configured]",
+    "repository_url": "[Git source configured]",
+    "fleet_clone_dir": "[Fleet clone configured]",
+}
 
 
 class ProjectLifecycleError(ValueError):
@@ -201,6 +207,149 @@ def _canonical_registry_entry(entry: Mapping[str, Any]) -> dict[str, Any]:
     if canonical.get("integration_ref", "main") == "main":
         canonical.pop("integration_ref", None)
     return canonical
+
+
+def _public_registry_entry(entry: Any) -> dict[str, Any] | None:
+    """Project one registry entry without disclosing server-held values."""
+    if entry is None:
+        return None
+    if not isinstance(entry, Mapping):
+        return {"other_configured_fields": 1}
+    visible: dict[str, Any] = {}
+    for key in sorted(PUBLIC_REGISTRY_FIELDS):
+        value = entry.get(key)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            if key in entry:
+                visible[key] = value
+    for key, marker in PUBLIC_REGISTRY_MARKERS.items():
+        if entry.get(key) not in (None, ""):
+            visible[key] = marker
+    known = PUBLIC_REGISTRY_FIELDS | PUBLIC_REGISTRY_MARKERS.keys()
+    other_count = sum(1 for key in entry if key not in known)
+    if other_count:
+        visible["other_configured_fields"] = other_count
+    return visible
+
+
+def _public_changed_fields(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    visible = sorted(
+        {
+            field
+            for field in value
+            if isinstance(field, str)
+            and field in PUBLIC_REGISTRY_FIELDS | PUBLIC_REGISTRY_MARKERS.keys()
+        }
+    )
+    if any(
+        not isinstance(field, str)
+        or field not in PUBLIC_REGISTRY_FIELDS | PUBLIC_REGISTRY_MARKERS.keys()
+        for field in value
+    ):
+        visible.append("other_configured_fields")
+    return visible
+
+
+def _public_source(source: Any) -> dict[str, Any] | None:
+    if not isinstance(source, Mapping):
+        return None
+    visible = {
+        key: copy.deepcopy(source[key])
+        for key in (
+            "git_mode",
+            "exists",
+            "kind",
+            "clean",
+            "integration_ref",
+            "blocked",
+            "blockers",
+        )
+        if key in source
+    }
+    visible["path_configured"] = bool(source.get("path"))
+    visible["repository_configured"] = bool(source.get("repository_url"))
+    visible["origin_observed"] = bool(source.get("observed_origin"))
+    return visible
+
+
+def public_project_lifecycle_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the bounded lifecycle plan that may cross into the browser."""
+    public = {
+        key: copy.deepcopy(plan[key])
+        for key in (
+            "schema_version",
+            "kind",
+            "created_at",
+            "expires_at",
+            "central",
+            "project",
+            "board_id",
+            "prepare_fleet_clone",
+            "rollback",
+            "warnings",
+            "preserved",
+            "confirmation",
+            "blocked",
+            "blockers",
+            "plan_id",
+            "plan_digest",
+            "state",
+            "failure",
+        )
+        if key in plan
+    }
+    if "source" in plan:
+        public["source"] = _public_source(plan.get("source"))
+    if "proposed_entry" in plan:
+        public["proposed_entry"] = _public_registry_entry(
+            plan.get("proposed_entry")
+        )
+    if "existing_entry" in plan:
+        public["existing_entry"] = _public_registry_entry(plan.get("existing_entry"))
+    observation = plan.get("board_observation")
+    if isinstance(observation, Mapping):
+        active = observation.get("active_tickets")
+        offers = observation.get("pending_offers")
+        public["board_observation"] = {
+            "complete": bool(observation.get("complete")),
+            "active_ticket_count": len(active) if isinstance(active, list) else 0,
+            "pending_offer_count": len(offers) if isinstance(offers, list) else 0,
+            "ticket_count": observation.get("ticket_count"),
+            "snapshot_latest_seq": observation.get("snapshot_latest_seq"),
+        }
+
+    operations: list[dict[str, Any]] = []
+    raw_operations = plan.get("operations")
+    for raw in raw_operations if isinstance(raw_operations, list) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        operation = {
+            key: copy.deepcopy(value)
+            for key, value in raw.items()
+            if key not in {"before", "after", "changed_fields"}
+        }
+        operation_id = operation.get("operation_id")
+        if operation_id in {"registry", "registry-remove"}:
+            operation["before"] = _public_registry_entry(raw.get("before"))
+            operation["after"] = _public_registry_entry(raw.get("after"))
+            if "changed_fields" in raw:
+                operation["changed_fields"] = _public_changed_fields(
+                    raw.get("changed_fields")
+                )
+        elif operation_id == "source-clone":
+            operation["target"] = "[local folder configured]"
+        operations.append(operation)
+    public["operations"] = operations
+    return public
+
+
+def public_project_lifecycle_receipt(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Bound an apply receipt before it crosses into the browser."""
+    public = copy.deepcopy(dict(receipt))
+    if "removed_entry" in public:
+        public["removed_entry"] = _public_registry_entry(public["removed_entry"])
+    return public
 
 
 def build_add_plan(

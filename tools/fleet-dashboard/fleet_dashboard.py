@@ -96,6 +96,8 @@ from project_lifecycle import (
     build_remove_plan,
     clone_project_source,
     inspect_project_source,
+    public_project_lifecycle_plan,
+    public_project_lifecycle_receipt,
 )
 
 
@@ -8371,19 +8373,18 @@ class DashboardCache:
         plan = self._async_runner.run(
             self.fetchers[label].build_project_lifecycle_plan(request)
         )
-        return self._labeled(self.project_lifecycle.add(plan), label)
+        stored = self.project_lifecycle.add(plan)
+        return self._labeled(public_project_lifecycle_plan(stored), label)
 
     def get_project_lifecycle_plan(
         self, plan_id: str, central: str | None = None
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
         fetcher = self.fetchers[label]
-        return self._labeled(
-            self.project_lifecycle.get(
-                plan_id, actor=fetcher.config.agent_name, central=label
-            ),
-            label,
+        plan = self.project_lifecycle.get(
+            plan_id, actor=fetcher.config.agent_name, central=label
         )
+        return self._labeled(public_project_lifecycle_plan(plan), label)
 
     def apply_project_lifecycle(
         self,
@@ -8401,7 +8402,10 @@ class DashboardCache:
             confirmation=request.get("confirmation"),
         )
         if previous is not None:
-            return self._labeled({**previous, "replayed": True}, label)
+            return self._labeled(
+                public_project_lifecycle_receipt({**previous, "replayed": True}),
+                label,
+            )
         plan_id = str(plan["plan_id"])
         try:
             result = self._async_runner.run(
@@ -8417,7 +8421,7 @@ class DashboardCache:
             "replayed": False,
         }
         self.project_lifecycle.complete(plan_id, receipt)
-        return self._labeled(receipt, label)
+        return self._labeled(public_project_lifecycle_receipt(receipt), label)
 
     def close(self) -> None:
         for fetcher in self.fetchers.values():

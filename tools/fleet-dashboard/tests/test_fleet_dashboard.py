@@ -10151,6 +10151,14 @@ def test_project_lifecycle_add_collision_is_blocked_and_exact_rerun_is_idempoten
     central.registry_data["projects"]["existing-proj"]["work_dir"] = str(
         existing_folder
     )
+    central.registry_data["projects"]["existing-proj"].update(
+        {
+            "repository_url": "https://example.invalid/PRIVATE-REPO-CANARY.git",
+            "fleet_clone_dir": "/PRIVATE/FLEET/CLONE",
+            "api_token": "TOKEN-CANARY",
+            "private_note": "NOTE-CANARY",
+        }
+    )
     original_registry = copy.deepcopy(central.registry_data)
     config = dashboard.Config(
         url="http://127.0.0.1:8766/mcp",
@@ -10203,7 +10211,30 @@ def test_project_lifecycle_add_collision_is_blocked_and_exact_rerun_is_idempoten
             if item["operation_id"] == "registry"
         )
         assert registry_operation["effect"] == "blocked_name_collision"
-        assert registry_operation["changed_fields"] == ["board_id", "work_dir"]
+        assert registry_operation["changed_fields"] == [
+            "board_id",
+            "repository_url",
+            "work_dir",
+            "other_configured_fields",
+        ]
+        serialized = json.dumps(blocked, sort_keys=True)
+        for canary in (
+            str(existing_folder),
+            str(replacement_folder),
+            "/PRIVATE/FLEET/CLONE",
+            "PRIVATE-REPO-CANARY",
+            "TOKEN-CANARY",
+            "NOTE-CANARY",
+        ):
+            assert canary not in serialized
+        assert registry_operation["before"] == {
+            "board_id": "existing-board",
+            "status": "active",
+            "work_dir": "[local folder configured]",
+            "repository_url": "[Git source configured]",
+            "fleet_clone_dir": "[Fleet clone configured]",
+            "other_configured_fields": 2,
+        }
 
         with pytest.raises(urllib.error.HTTPError) as caught:
             post(
@@ -10217,6 +10248,15 @@ def test_project_lifecycle_add_collision_is_blocked_and_exact_rerun_is_idempoten
         assert caught.value.code == 409
         assert central.registry_data == original_registry
         assert "replacement-board" not in central.created_boards
+
+        for key in (
+            "repository_url",
+            "fleet_clone_dir",
+            "api_token",
+            "private_note",
+        ):
+            central.registry_data["projects"]["existing-proj"].pop(key)
+        original_registry = copy.deepcopy(central.registry_data)
 
         _status, rerun = post(
             "/api/lifecycle/plan",
