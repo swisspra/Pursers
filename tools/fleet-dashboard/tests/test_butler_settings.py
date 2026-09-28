@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import contextlib
 import importlib.util
 import json
 import os
 import shlex
+import shutil
 import signal
 import socket
 import stat
@@ -62,6 +64,10 @@ class Response:
         return self.payload[:limit]
 
 
+class VerifierHTTPServer(dashboard.ThreadingHTTPServer):
+    request_queue_size = 64
+
+
 def provider_request(**overrides: Any) -> dict[str, Any]:
     request = {
         "endpoint": "https://provider.example.invalid/v1",
@@ -73,6 +79,7 @@ def provider_request(**overrides: Any) -> dict[str, Any]:
         "validation_path": "models",
         "draft_path": "draft",
         "draft_protocol": "pursers_json_v1",
+        "answering_mode": "assist",
         "expected_sha256": "a" * 64,
     }
     request.update(overrides)
@@ -865,6 +872,433 @@ def test_openai_chat_protocol_requires_explicit_selection_and_preserves_legacy_d
         butler_settings.validate_request(
             provider_request(draft_protocol="implicit-or-unknown")
         )
+
+
+@pytest.mark.parametrize("answering_mode", ["off", "assist", "autonomous"])
+def test_dashboard_config_accepts_exact_runtime_answering_modes(
+    answering_mode: str,
+) -> None:
+    document = {
+        "schema_version": 1,
+        "global": {"answering_mode": answering_mode},
+    }
+
+    assert butler_settings.validate_board_butler_document(document) == document
+
+
+@pytest.mark.parametrize(
+    "answering_mode", ["", "active", "AUTO", None, True, 1, [], {}]
+)
+def test_dashboard_config_rejects_invalid_answering_modes_fail_closed(
+    answering_mode: Any,
+) -> None:
+    with pytest.raises(
+        butler_settings.ButlerSettingsError,
+        match="board_butler.global.answering_mode is invalid",
+    ):
+        butler_settings.validate_board_butler_document(
+            {
+                "schema_version": 1,
+                "global": {"answering_mode": answering_mode},
+            }
+        )
+
+
+def guarded_answering_settings() -> dict[str, Any]:
+    return {
+        "answer_scope": {
+            "ticket_status": "auto",
+            "scope_change": "escalate",
+            "gate_waiver": "escalate",
+            "release": "escalate",
+            "membership": "escalate",
+            "registry": "escalate",
+        },
+        "required_evidence_kinds": ["ticket_status"],
+        "ceilings": {"per_hour": 5, "per_ticket": 2, "per_board": 20},
+        "active_windows": [
+            {
+                "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+                "start": "00:00",
+                "end": "23:59",
+                "timezone": "UTC",
+            }
+        ],
+        "auto_demote": {"veto_count": 3, "failure_count": 3, "window_s": 3600},
+    }
+
+
+def test_config_http_reproduces_invalid_400_and_round_trips_answering_mode() -> None:
+    class Cache:
+        def __init__(self) -> None:
+            self.config = coordinator_config()
+            self.digest = "a" * 64
+
+        def resolve_central(self, value: str | None) -> str:
+            if value not in {None, "default"}:
+                raise KeyError(value)
+            return "default"
+
+        def get_config(self, _central: str | None = None) -> dict[str, Any]:
+            return {
+                "config": self.config,
+                "expected_sha256": self.digest,
+                "central": "default",
+            }
+
+        def save_config(
+            self, value: dict[str, Any], expected: str | None, _central: str | None = None
+        ) -> dict[str, Any]:
+            if expected != self.digest:
+                raise ValueError("configuration changed; reload before saving")
+            clean = copy.deepcopy(value)
+            if "board_butler" in clean:
+                clean["board_butler"] = butler_settings.validate_board_butler_document(
+                    clean["board_butler"]
+                )
+            self.config = clean
+            self.digest = "b" * 64
+            return self.get_config()
+
+    cache = Cache()
+    server = VerifierHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post_config(config: dict[str, Any], expected: str) -> dict[str, Any]:
+        request = urllib.request.Request(
+            base + "/api/config?central=default",
+            data=json.dumps(
+                {"config": config, "expected_sha256": expected}
+            ).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json", "Origin": base},
+        )
+        with urllib.request.urlopen(request) as response:
+            return json.loads(response.read())
+
+    invalid = coordinator_config()
+    invalid["board_butler"] = {
+        "schema_version": 1,
+        "global": {"answering_mode": "active"},
+    }
+    try:
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            post_config(invalid, "a" * 64)
+        assert caught.value.code == 400
+        assert json.loads(caught.value.read())["error"] == (
+            "board_butler.global.answering_mode is invalid"
+        )
+
+        valid = coordinator_config()
+        valid["board_butler"] = {
+            "schema_version": 1,
+            "global": {
+                **guarded_answering_settings(),
+                "mode": "active",
+                "answering_mode": "autonomous",
+                "kill_switch": False,
+            },
+            "projects": {},
+            "boards": {},
+        }
+        saved = post_config(valid, "a" * 64)
+        loaded = json.loads(
+            urllib.request.urlopen(base + "/api/config?central=default").read()
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert saved["expected_sha256"] == "b" * 64
+    assert loaded["config"]["board_butler"]["global"]["answering_mode"] == (
+        "autonomous"
+    )
+
+
+def test_active_answering_round_trips_and_projects_on_next_cycle(tmp_path: Path) -> None:
+    config = coordinator_config()
+    config["board_butler"] = {
+        "schema_version": 1,
+        "global": guarded_answering_settings(),
+        "projects": {},
+        "boards": {},
+    }
+    saved: dict[str, Any] = {}
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "private-keys",
+        opener=lambda *_args, **_kwargs: Response(
+            {"data": [{"id": "Model/Exact-1"}]}
+        ),
+    )
+
+    result = manager.save(
+        {"config": config, "expected_sha256": "a" * 64},
+        provider_request(answering_mode="autonomous"),
+        "sandbox",
+        lambda value, expected: saved.update(config=value, expected=expected)
+        or {"config": value, "expected_sha256": "b" * 64},
+    )
+
+    global_settings = saved["config"]["board_butler"]["global"]
+    assert saved["expected"] == "a" * 64
+    assert result["answering_mode"] == "autonomous"
+    assert result["reload"] == "next_cycle"
+    assert global_settings["mode"] == "active"
+    assert global_settings["answering_mode"] == "autonomous"
+    assert global_settings["kill_switch"] is False
+    assert all(
+        global_settings["answer_scope"][name] == "escalate"
+        for name in ("scope_change", "gate_waiver", "release", "membership", "registry")
+    )
+
+    effective = board_butler.resolve_config(
+        saved["config"],
+        SimpleNamespace(
+            drafts_per_hour=5,
+            drafts_per_ticket=2,
+            drafts_per_board=20,
+            home_board="sandbox",
+            project=None,
+            runtime_mode="active",
+            act_on_board=["sandbox"],
+        ),
+        {},
+        datetime(2026, 9, 21, 12, tzinfo=timezone.utc),
+    )
+    assert effective.answering_mode == "autonomous"
+    assert effective.effective_answering_mode == "autonomous"
+    assert effective.future_active_state == "eligible"
+
+
+def test_active_answering_rejects_missing_guards_before_provider_or_save(
+    tmp_path: Path,
+) -> None:
+    opener_calls = 0
+    save_calls = 0
+
+    def opener(*_args: object, **_kwargs: object) -> Response:
+        nonlocal opener_calls
+        opener_calls += 1
+        return Response({"data": [{"id": "Model/Exact-1"}]})
+
+    def save_config(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        nonlocal save_calls
+        save_calls += 1
+        return {}
+
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "private-keys", opener=opener
+    )
+    with pytest.raises(
+        butler_settings.ButlerSettingsError,
+        match="Active answering requires at least one safe auto answer scope",
+    ):
+        manager.save(
+            {"config": coordinator_config(), "expected_sha256": "a" * 64},
+            provider_request(answering_mode="autonomous"),
+            "sandbox",
+            save_config,
+        )
+
+    assert opener_calls == 0
+    assert save_calls == 0
+
+
+def test_active_answering_browser_save_and_clean_refresh(tmp_path: Path) -> None:
+    """Exercise the Settings module in verifier-owned Chromium when available."""
+    task_space_id = os.environ.get("PURSERS_EGO_TASK_SPACE_ID")
+    ego_browser = shutil.which("ego-browser")
+    if not task_space_id or not ego_browser:
+        pytest.skip("requires PURSERS_EGO_TASK_SPACE_ID and ego-browser")
+
+    class Cache:
+        def __init__(self) -> None:
+            self.config = coordinator_config()
+            self.config["board_butler"] = {
+                "schema_version": 1,
+                "global": {
+                    **guarded_answering_settings(),
+                    "answering_mode": "assist",
+                    "mode": "shadow",
+                    "kill_switch": False,
+                    "drafting": {
+                        "endpoint_ref": "https://provider.example.invalid/v1",
+                        "model": "Model/Exact-1",
+                    },
+                },
+                "projects": {},
+                "boards": {},
+            }
+            self.digest = "a" * 64
+
+        @staticmethod
+        def labels() -> list[str]:
+            return ["fixture"]
+
+        @staticmethod
+        def resolve_central(value: str | None) -> str:
+            if value not in {None, "fixture"}:
+                raise KeyError(value)
+            return "fixture"
+
+        def get(self, central: str | None = None) -> dict[str, Any]:
+            self.resolve_central(central)
+            return {
+                "central": "fixture",
+                "generated_at": "2030-01-01T00:00:00Z",
+                "boards": [],
+                "agents": [],
+                "pool_summary": {},
+            }
+
+        def get_config(self, central: str | None = None) -> dict[str, Any]:
+            self.resolve_central(central)
+            return {
+                "config": copy.deepcopy(self.config),
+                "expected_sha256": self.digest,
+                "central": "fixture",
+            }
+
+        def save_config(
+            self,
+            value: dict[str, Any],
+            expected: str | None,
+            central: str | None = None,
+        ) -> dict[str, Any]:
+            self.resolve_central(central)
+            if expected != self.digest:
+                raise ValueError("configuration changed; reload before saving")
+            self.config = copy.deepcopy(value)
+            self.digest = "b" * 64
+            return self.get_config(central)
+
+        def get_project_registry(self, central: str | None = None) -> dict[str, Any]:
+            self.resolve_central(central)
+            return {
+                "registry": {"schema_version": 1, "projects": {}},
+                "expected_sha256": "c" * 64,
+            }
+
+    class Seats:
+        @staticmethod
+        def registry(_fleet: dict[str, Any], _registry: dict[str, Any]) -> dict[str, Any]:
+            return {"boards": [], "projects": [], "seats": {}}
+
+        @staticmethod
+        def seats() -> dict[str, Any]:
+            return {"schema_version": 1, "seats": [], "discovered_configs": []}
+
+        @staticmethod
+        def team_seats() -> dict[str, Any]:
+            return {"schema_version": 1, "seats": []}
+
+        @staticmethod
+        def bridge() -> dict[str, Any]:
+            return {}
+
+        @staticmethod
+        def release_status() -> dict[str, Any]:
+            return {}
+
+    cache = Cache()
+    manager = butler_settings.ButlerSettingsManager(
+        tmp_path / "private-keys",
+        opener=lambda *_args, **_kwargs: Response(
+            {"data": [{"id": "Model/Exact-1"}]}
+        ),
+    )
+    server = VerifierHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, seat_manager=Seats(), butler_manager=manager),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/#/settings"
+    try:
+        script = f"""
+const task = await taskSpace({int(task_space_id)});
+const page = task.page('p1');
+await page.cdp('Runtime.enable');
+await page.cdp('Network.enable');
+let startupError;
+for (let attempt = 0; attempt < 3; attempt += 1) {{
+  if (attempt === 0) await page.goto({json.dumps(url)});
+  else await page.reload();
+  try {{
+    await page.waitForSelector('[data-pursers-field="answering-mode"]', {{state:'visible',timeout:10000}});
+    startupError = undefined;
+    break;
+  }} catch (error) {{
+    startupError = error;
+  }}
+}}
+if (startupError) {{
+  const diagnostics = await page.evaluate(() => ({{
+    hash: location.hash,
+    state: document.querySelector('#state')?.textContent,
+    butlerState: document.querySelector('.butler-settings')?.dataset.pursersState,
+    butlerText: document.querySelector('.butler-settings')?.textContent,
+    globals: {{
+      registry: typeof globalThis.FleetViewModules,
+      loadCentrals: typeof globalThis.loadCentrals,
+      syncHub: typeof globalThis.syncHub,
+    }},
+    resources: performance.getEntriesByType('resource').map(row => row.name),
+  }}));
+  const events = (await page.events()).filter(row =>
+    ['Runtime.exceptionThrown', 'Runtime.consoleAPICalled', 'Network.loadingFailed'].includes(row.method)
+  );
+  console.error(JSON.stringify({{diagnostics, events}}));
+  throw startupError;
+}}
+await page.evaluate(() => {{
+  const field = document.querySelector('[data-pursers-field="answering-mode"]');
+  field.value = 'autonomous';
+  field.dispatchEvent(new Event('change', {{bubbles:true}}));
+  field.form.requestSubmit();
+}});
+await page.waitForFunction(
+  () => document.querySelector('[data-pursers-field="answering-mode"]')?.value === 'autonomous'
+    && document.querySelector('.butler-result')?.dataset.pursersValidation === 'reachable',
+  undefined,
+  {{timeout:10000}},
+);
+await page.reload();
+await page.waitForSelector('[data-pursers-field="answering-mode"]', {{state:'visible',timeout:30000}});
+const evidence = await page.evaluate(() => ({{
+  answeringMode: document.querySelector('[data-pursers-field="answering-mode"]')?.value,
+  nextCycleCopy: document.querySelector('.settings-safety-note')?.textContent.includes("Saved changes apply on the butler's next question cycle."),
+  guardedCopy: document.querySelector('.settings-safety-note')?.textContent.includes('safe scopes, evidence, ceilings, bounded active windows, and auto-demotion'),
+}}));
+console.log(JSON.stringify(evidence));
+"""
+        completed = subprocess.run(
+            [ego_browser, "nodejs", "-e", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert completed.returncode == 0, completed.stderr
+    evidence = json.loads(completed.stderr.strip().splitlines()[-1])
+    assert evidence == {
+        "answeringMode": "autonomous",
+        "nextCycleCopy": True,
+        "guardedCopy": True,
+    }
+    assert cache.config["board_butler"]["global"]["answering_mode"] == "autonomous"
+    assert cache.config["board_butler"]["global"]["mode"] == "active"
+    assert cache.config["board_butler"]["global"]["kill_switch"] is False
 
 
 def test_save_persists_openai_chat_protocol_for_next_resident_cycle(
@@ -1893,6 +2327,7 @@ def test_existing_key_cannot_be_duplicated_into_readable_settings(tmp_path: Path
 
 def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
     html = dashboard.HTML
+    settings = dashboard.UI_ASSETS["/ui/views/settings.js"][1].decode("utf-8")
 
     assert 'data-pursers-panel="butler-settings"' in html
     assert 'data-pursers-field="endpoint"' in html
@@ -1902,10 +2337,16 @@ def test_butler_panel_has_write_only_key_and_selector_contract() -> None:
     assert 'data-pursers-action="save-butler"' in html
     assert 'data-pursers-field="draft-path"' in html
     assert 'data-pursers-field="draft-protocol"' in html
+    assert 'data-pursers-field="answering-mode"' in html
+    assert 'value="autonomous"' in html
+    assert "Active · guarded autonomous answers" in html
+    assert "safe scopes, evidence, ceilings, bounded active windows" in html
     assert '<select name="draft_protocol"' in html
     assert 'value="openai_chat_completions_v1"' in html
     assert "body.saved===false" in html
     assert "form.elements.api_key.value=''" in html
+    assert "answering_mode: form.elements.answering_mode.value" in settings
+    assert "document.addEventListener('submit'" in settings
     assert "Saved changes apply on the butler's next question cycle." in html
     assert "Not configured" in html
     assert "Configured · not running" in html

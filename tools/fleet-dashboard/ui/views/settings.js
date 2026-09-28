@@ -24,6 +24,81 @@
       butlerError, butlerData, defaultCentral} = context);
   }
 
+  function replaceButlerData(next) {
+    for (const key of Object.keys(butlerData)) delete butlerData[key];
+    Object.assign(butlerData, next);
+  }
+
+  async function saveButlerSettings(event) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const form = event.target;
+    const status = form.querySelector('.butler-result');
+    const button = form.querySelector('[data-pursers-action="save-butler"]');
+    let extraHeaders;
+    try {
+      extraHeaders = JSON.parse(form.elements.extra_headers.value.trim() || '{}');
+      if (!extraHeaders || Array.isArray(extraHeaders) || typeof extraHeaders !== 'object') {
+        throw new Error('must be an object');
+      }
+    } catch (_error) {
+      status.dataset.pursersValidation = 'invalid';
+      status.className = 'butler-span butler-result error';
+      status.textContent = 'Extra headers must be a JSON object.';
+      return;
+    }
+    const payload = {
+      endpoint: form.elements.endpoint.value.trim(),
+      model: form.elements.model.value.trim(),
+      api_key: form.elements.api_key.value,
+      extra_headers: extraHeaders,
+      key_header: form.elements.key_header.value.trim(),
+      key_prefix: form.elements.key_prefix.value.trim(),
+      validation_path: form.elements.validation_path.value.trim(),
+      draft_path: form.elements.draft_path.value.trim(),
+      draft_protocol: form.elements.draft_protocol.value,
+      answering_mode: form.elements.answering_mode.value,
+      expected_sha256: butlerData?.expected_sha256 ?? null,
+    };
+    const central = butlerData?.central || defaultCentral;
+    const requestBody = JSON.stringify(payload);
+    payload.api_key = '';
+    form.elements.api_key.value = '';
+    button.disabled = true;
+    status.className = 'butler-span butler-result muted';
+    status.textContent = 'Validating one bounded provider request…';
+    try {
+      const response = await fetch(`/api/butler?central=${encodeURIComponent(central)}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: requestBody,
+      });
+      let body = {};
+      try { body = await response.json(); } catch (_error) {}
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      const next = body.saved === false ? {
+        ...body,
+        endpoint: payload.endpoint,
+        model: payload.model,
+        extra_headers: payload.extra_headers,
+        key_header: payload.key_header,
+        key_prefix: payload.key_prefix,
+        validation_path: payload.validation_path,
+        draft_path: payload.draft_path,
+        draft_protocol: payload.draft_protocol,
+        answering_mode: payload.answering_mode,
+      } : body;
+      replaceButlerData(next);
+      renderHub();
+    } catch (error) {
+      status.dataset.pursersValidation = 'unreachable';
+      status.className = 'butler-span butler-result error';
+      status.textContent = `Save failed: ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   function roleInputs(role, counts = {}, ceiling = 100) {
     return `<fieldset><legend>${esc(role.replace('_', ' '))}</legend><div class="autonomous-fields">${['min', 'target', 'max'].map(name => `<label>${name}<input name="${esc(role)}_${name}" type="number" min="0" max="${esc(ceiling)}" required value="${esc(counts[name] ?? 0)}"></label>`).join('')}</div></fieldset>`;
   }
@@ -73,8 +148,9 @@
     const activity = r.last_activity_at ? `${relativeAge(r.last_activity_at)} · ${r.last_activity || 'activity'}` : 'No activity observed';
     const tone = state === 'running_active' ? 'danger' : state === 'running_shadow' ? 'ready' : state === 'configured_not_running' ? 'warning' : 'empty';
     const protocol = d.draft_protocol || 'pursers_json_v1';
+    const answering = d.answering_mode || 'assist';
 
-    return `<article class="card settings-group butler-settings" data-pursers-panel="butler-settings" data-pursers-state="${esc(state)}" data-pursers-validation="${esc(outcome)}"><div class="section-title"><div><p class="eyebrow">Board Butler · ${esc(d.central || defaultCentral)}</p><h3>Model provider and runtime</h3></div><span class="status" data-tone="${tone}" data-pursers-field="runtime-state">${esc(labels[state] || state)}</span></div><p class="muted" data-pursers-field="last-activity">Last activity: ${esc(activity)}${r.kill_switch_engaged ? ' · kill switch engaged' : ''}</p><div class="settings-safety-note"><b>What changes here</b><p>Validate & save checks the provider, then stores coordinator configuration. The write-only key goes to a private 0600 file and is never returned to this page. Saving does not start or activate Butler. Saved changes apply on the butler's next question cycle.</p></div><form id="butler-settings-form" class="butler-form"><label class="butler-span">Endpoint URL<input name="endpoint" data-pursers-field="endpoint" type="url" required maxlength="300" placeholder="https://provider.example.invalid/v1" value="${esc(d.endpoint || '')}"></label><label>Model id<input name="model" data-pursers-field="model" required maxlength="200" placeholder="model-id" value="${esc(d.model || '')}"></label><label>API key (write-only)<input name="api_key" data-pursers-field="api-key" type="password" maxlength="8192" autocomplete="new-password" placeholder="${d.key_present ? 'Leave blank to keep existing key' : 'Enter a key if required'}" value=""></label><label>Credential header<input name="key_header" data-pursers-field="key-header" required maxlength="128" value="${esc(d.key_header || 'Authorization')}"></label><label>Credential prefix<input name="key_prefix" data-pursers-field="key-prefix" maxlength="80" value="${esc(d.key_prefix ?? 'Bearer')}"></label><label>Validation path<input name="validation_path" data-pursers-field="validation-path" maxlength="500" value="${esc(d.validation_path || 'models')}"></label><label>Draft path<input name="draft_path" data-pursers-field="draft-path" maxlength="500" value="${esc(d.draft_path || 'draft')}"></label><label class="butler-span">Draft protocol<select name="draft_protocol" data-pursers-field="draft-protocol"><option value="pursers_json_v1" ${protocol === 'pursers_json_v1' ? 'selected' : ''}>Pursers JSON v1</option><option value="openai_chat_completions_v1" ${protocol === 'openai_chat_completions_v1' ? 'selected' : ''}>OpenAI chat completions v1</option></select></label><label class="butler-span">Extra headers (JSON; non-secret only)<textarea name="extra_headers" data-pursers-field="extra-headers">${esc(JSON.stringify(d.extra_headers || {}, null, 2))}</textarea></label><div class="butler-span butler-secret-status" data-pursers-field="key-status"><b>${d.key_present ? 'Key present' : 'No key stored'}</b>${d.key_location ? ` · ${esc(d.key_location)}` : ''}</div><div class="butler-span settings-command-row"><div class="card-actions"><button class="primary-action" type="submit" data-pursers-action="save-butler">Validate & save</button></div><p class="settings-next">Next: review the validation result below. Start and activation remain separate operations.</p></div><p class="butler-span butler-result" role="status" aria-live="polite" data-pursers-validation="${esc(outcome)}">${validation.message ? esc(validation.message) : 'Validation runs once when you save.'}</p></form><div class="settings-danger-zone"><div><b>Emergency stop</b><p class="muted">Stops the resident and leaves the local kill switch engaged. It does not erase provider settings.</p></div><button type="button" data-pursers-action="kill-butler" ${r.running && !r.kill_switch_engaged ? '' : 'disabled'}>Stop Butler now</button></div></article>`;
+    return `<article class="card settings-group butler-settings" data-pursers-panel="butler-settings" data-pursers-state="${esc(state)}" data-pursers-validation="${esc(outcome)}"><div class="section-title"><div><p class="eyebrow">Board Butler · ${esc(d.central || defaultCentral)}</p><h3>Model provider and runtime</h3></div><span class="status" data-tone="${tone}" data-pursers-field="runtime-state">${esc(labels[state] || state)}</span></div><p class="muted" data-pursers-field="last-activity">Last activity: ${esc(activity)}${r.kill_switch_engaged ? ' · kill switch engaged' : ''}</p><div class="settings-safety-note"><b>What changes here</b><p>Validate & save checks the provider, then stores coordinator configuration. The write-only key goes to a private 0600 file and is never returned to this page. Saving does not start Butler. Active answering is accepted only when safe scopes, evidence, ceilings, bounded active windows, and auto-demotion are configured. Saved changes apply on the butler's next question cycle.</p></div><form id="butler-settings-form" class="butler-form"><label class="butler-span">Answering mode<select name="answering_mode" data-pursers-field="answering-mode"><option value="off" ${answering === 'off' ? 'selected' : ''}>Off</option><option value="assist" ${answering === 'assist' ? 'selected' : ''}>Shadow · draft only</option><option value="autonomous" ${answering === 'autonomous' ? 'selected' : ''}>Active · guarded autonomous answers</option></select></label><label class="butler-span">Endpoint URL<input name="endpoint" data-pursers-field="endpoint" type="url" required maxlength="300" placeholder="https://provider.example.invalid/v1" value="${esc(d.endpoint || '')}"></label><label>Model id<input name="model" data-pursers-field="model" required maxlength="200" placeholder="model-id" value="${esc(d.model || '')}"></label><label>API key (write-only)<input name="api_key" data-pursers-field="api-key" type="password" maxlength="8192" autocomplete="new-password" placeholder="${d.key_present ? 'Leave blank to keep existing key' : 'Enter a key if required'}" value=""></label><label>Credential header<input name="key_header" data-pursers-field="key-header" required maxlength="128" value="${esc(d.key_header || 'Authorization')}"></label><label>Credential prefix<input name="key_prefix" data-pursers-field="key-prefix" maxlength="80" value="${esc(d.key_prefix ?? 'Bearer')}"></label><label>Validation path<input name="validation_path" data-pursers-field="validation-path" maxlength="500" value="${esc(d.validation_path || 'models')}"></label><label>Draft path<input name="draft_path" data-pursers-field="draft-path" maxlength="500" value="${esc(d.draft_path || 'draft')}"></label><label class="butler-span">Draft protocol<select name="draft_protocol" data-pursers-field="draft-protocol"><option value="pursers_json_v1" ${protocol === 'pursers_json_v1' ? 'selected' : ''}>Pursers JSON v1</option><option value="openai_chat_completions_v1" ${protocol === 'openai_chat_completions_v1' ? 'selected' : ''}>OpenAI chat completions v1</option></select></label><label class="butler-span">Extra headers (JSON; non-secret only)<textarea name="extra_headers" data-pursers-field="extra-headers">${esc(JSON.stringify(d.extra_headers || {}, null, 2))}</textarea></label><div class="butler-span butler-secret-status" data-pursers-field="key-status"><b>${d.key_present ? 'Key present' : 'No key stored'}</b>${d.key_location ? ` · ${esc(d.key_location)}` : ''}</div><div class="butler-span settings-command-row"><div class="card-actions"><button class="primary-action" type="submit" data-pursers-action="save-butler">Validate & save</button></div><p class="settings-next">Next: review the validation result below. Start and activation remain separate operations.</p></div><p class="butler-span butler-result" role="status" aria-live="polite" data-pursers-validation="${esc(outcome)}">${validation.message ? esc(validation.message) : 'Validation runs once when you save.'}</p></form><div class="settings-danger-zone"><div><b>Emergency stop</b><p class="muted">Stops the resident and leaves the local kill switch engaged. It does not erase provider settings.</p></div><button type="button" data-pursers-action="kill-butler" ${r.running && !r.kill_switch_engaged ? '' : 'disabled'}>Stop Butler now</button></div></article>`;
   }
 
   function renderDiagnostics() {
@@ -97,6 +173,11 @@
   };
 
   loadStyles();
+  if (typeof document !== 'undefined') {
+    document.addEventListener('submit', event => {
+      if (event.target?.id === 'butler-settings-form') void saveButlerSettings(event);
+    }, true);
+  }
   globalThis.FleetViewModules.register({
     id: 'settings',
     owns: [
