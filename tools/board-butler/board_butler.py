@@ -5889,6 +5889,56 @@ async def decide_intake_with_provider(
     return decision
 
 
+class IntakeDecisionCache:
+    """Reuse model decisions while decision inputs are unchanged, not their timestamps."""
+
+    def __init__(self) -> None:
+        self._runtime: ProviderRuntime | None = None
+        self._context: bytes | None = None
+        self._decision: dict[str, Any] | None = None
+        self._retry_after: datetime | None = None
+        self._lock = asyncio.Lock()
+        self.model_called = False
+
+    async def decide(
+        self, runtime: ProviderRuntime, context: Mapping[str, Any], now: datetime
+    ) -> Mapping[str, Any]:
+        stable = copy.deepcopy(dict(context))
+        for source in stable.get("sources", []):
+            if isinstance(source, dict):
+                source.pop("observed_at", None)
+        encoded = _canonical_json(stable)
+        async with self._lock:
+            self.model_called = False
+            same_provider = runtime == self._runtime
+            if same_provider and self._retry_after is not None and now < self._retry_after:
+                raise ButlerConfigError("intake provider retry is deferred")
+            if same_provider and encoded == self._context and self._decision is not None:
+                return copy.deepcopy(self._decision)
+            self._runtime = runtime
+            self._context = None
+            self._decision = None
+            self.model_called = True
+            try:
+                decision = await decide_intake_with_provider(runtime, context)
+                pull = decision.get("pull")
+                order = decision.get("source_ids")
+                if type(pull) is not int or pull < 0 or (
+                    order is not None and (
+                        not isinstance(order, list)
+                        or any(not isinstance(item, str) for item in order)
+                    )
+                ):
+                    raise ValueError("invalid intake decision")
+            except Exception:
+                self._retry_after = now + timedelta(minutes=15)
+                raise
+            self._context = encoded
+            self._decision = copy.deepcopy(dict(decision))
+            self._retry_after = None
+            return copy.deepcopy(self._decision)
+
+
 class SourceIntakePoller:
     """Fair, bounded connector-to-intake bridge with injected Central writes."""
 
@@ -6180,8 +6230,10 @@ class SourceIntakePoller:
         pull, order, reason = clamp_intake_decision(
             decision, ceiling=ceiling, source_ids=source_ids
         )
-        return pull, order, {"mode": "decided", "ceiling": ceiling, "pull": pull,
-                             "reason": reason}
+        metadata = {"mode": "decided", "ceiling": ceiling, "pull": pull, "reason": reason}
+        if type(decision.get("model_called")) is bool:
+            metadata["model_called"] = decision["model_called"]
+        return pull, order, metadata
 
     async def run_cycle(self, now: datetime) -> dict[str, Any]:
         if not self.sources:
@@ -11548,6 +11600,7 @@ class CentralBackend:
         self._subscription_failure_active = False
         self._source_registry_projects: dict[str, str] = {}
         self._source_board_load: dict[str, dict[str, int]] = {}
+        self._intake_decision_cache = IntakeDecisionCache()
         connector_runtimes = tuple(
             getattr(args, "_connector_runtimes", ()) or ()
         )
@@ -11749,9 +11802,10 @@ class CentralBackend:
         )
         if runtime is None:
             raise ButlerConfigError("no Butler model is configured for intake decisions")
-        return await decide_intake_with_provider(
-            runtime, {**context, "board_load": self._source_board_load}
+        decision = await self._intake_decision_cache.decide(
+            runtime, {**context, "board_load": self._source_board_load}, utc_now()
         )
+        return {**decision, "model_called": self._intake_decision_cache.model_called}
 
     async def _source_project_reader(self, board_id: str) -> Mapping[str, Any] | None:
         from pursers_client.project_registry import parse_project_registry

@@ -223,10 +223,16 @@ the same configuration or connection failure.
 
 With `--source-intake-index-file /PATH/TO/private/source-intake-index.json`
 the resident runs Butler-managed intake. The configured Butler model (the
-`drafting` provider) decides each cycle whether to pull, how many items, and
+`drafting` provider) decides when inputs change whether to pull, how many items, and
 from which sources, given the ceiling (`envelope.host_seat_cap` minus intake
 work in flight) and the board load; code clamps the answer to that ceiling and
-pulls nothing when the model is unavailable. A source may set `page_arg` and
+pulls nothing when the model is unavailable. The resident reuses the decision
+while source observations, board load, in-flight work, ceiling, and provider
+settings are unchanged; source `observed_at` timestamps alone do not trigger
+another model call. The cache lasts for the resident process, so a restart
+makes one fresh decision. Provider failures defer retries for 15 minutes
+unless provider settings change. Decision logs include `model_called` to
+distinguish new requests from reused decisions. A source may set `page_arg` and
 `max_pages` so already-taken items (tracked in the 0600 index, not in Central)
 are paged past cheaply. Writeback runs as a separate pass once a ticket is
 closed with an approval, so delivery never waits for a pull. Its

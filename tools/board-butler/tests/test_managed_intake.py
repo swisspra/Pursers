@@ -426,3 +426,83 @@ def test_intake_board_load_counts_only_fresh_dispatchable_capacity():
         "open": 1, "review": 1, "idle_workers": 1, "idle_reviewers": 1}
     assert butler.source_intake_board_load({}, NOW) == {
         "idle_workers": 0, "idle_reviewers": 0}
+
+
+def test_intake_decision_cache_ignores_observation_time_but_tracks_work_changes(monkeypatch):
+    async def scenario():
+        import copy
+        cache = butler.IntakeDecisionCache()
+        runtime = butler.ProviderRuntime("https://model.invalid", "model-a", "secret")
+        calls = []
+        async def decide(_runtime, context):
+            calls.append(copy.deepcopy(context))
+            return {"pull": 0, "source_ids": [], "reason": "No work"}
+        monkeypatch.setattr(butler, "decide_intake_with_provider", decide)
+        context = {"ceiling": 15, "in_flight_by_source": {},
+                   "board_load": {"board": {"idle_workers": 1, "idle_reviewers": 1}},
+                   "sources": [{"source_id": "sonar", "open_issue_count": 0,
+                                "observed_at": NOW.isoformat()}]}
+        first = await cache.decide(runtime, context, NOW)
+        first["pull"] = 99  # A caller cannot corrupt the cached response.
+        for minute in range(1, 61):
+            context["sources"][0]["observed_at"] = (NOW + timedelta(minutes=minute)).isoformat()
+            assert (await cache.decide(runtime, context, NOW + timedelta(minutes=minute)))["pull"] == 0
+        assert len(calls) == 1
+        context["sources"][0]["open_issue_count"] = 2
+        await cache.decide(runtime, context, NOW + timedelta(minutes=61))
+        context["board_load"]["board"]["idle_workers"] = 2
+        await cache.decide(runtime, context, NOW + timedelta(minutes=62))
+        context["in_flight_by_source"]["sonar"] = 1
+        await cache.decide(runtime, context, NOW + timedelta(minutes=63))
+        context["ceiling"] = 14
+        await cache.decide(runtime, context, NOW + timedelta(minutes=64))
+        changed = butler.ProviderRuntime("https://model.invalid", "model-b", "secret")
+        await cache.decide(changed, context, NOW + timedelta(minutes=65))
+        assert len(calls) == 6
+    asyncio.run(scenario())
+
+
+def test_intake_decision_cache_backs_off_provider_failures(monkeypatch):
+    async def scenario():
+        cache = butler.IntakeDecisionCache()
+        runtime = butler.ProviderRuntime("https://model.invalid", "model-a", "secret")
+        calls = []
+        async def decide(_runtime, context):
+            calls.append(context)
+            if len(calls) == 1:
+                raise TimeoutError("provider unavailable")
+            return {"pull": 1}
+        monkeypatch.setattr(butler, "decide_intake_with_provider", decide)
+        with pytest.raises(TimeoutError):
+            await cache.decide(runtime, {"ceiling": 15}, NOW)
+        with pytest.raises(butler.ButlerConfigError, match="retry is deferred"):
+            await cache.decide(runtime, {"ceiling": 14}, NOW + timedelta(minutes=1))
+        assert len(calls) == 1
+        assert await cache.decide(runtime, {"ceiling": 14}, NOW + timedelta(minutes=15)) == {"pull": 1}
+        assert len(calls) == 2
+    asyncio.run(scenario())
+
+
+def test_resident_reuses_intake_decisions_and_reports_model_calls(monkeypatch):
+    async def scenario():
+        backend = butler.CentralBackend(SimpleNamespace(), "opaque")
+        calls = []
+        async def config():
+            return {}
+        async def decide(_runtime, context):
+            calls.append(context)
+            return {"pull": 0, "reason": "No work"}
+        monkeypatch.setattr(backend, "coordinator_config", config)
+        monkeypatch.setattr(butler, "resolve_config", lambda *_a, **_kw: None)
+        runtime = butler.ProviderRuntime("https://model.invalid", "model-a", "secret")
+        monkeypatch.setattr(butler, "resolve_provider_runtime", lambda *_a, **_kw: runtime)
+        monkeypatch.setattr(butler, "decide_intake_with_provider", decide)
+        first = await backend._source_intake_decide({"ceiling": 15})
+        second = await backend._source_intake_decide({"ceiling": 15})
+        assert first["model_called"] is True
+        assert second["model_called"] is False
+        assert len(calls) == 1
+        backend._source_board_load = {"board": {"idle_workers": 2}}
+        assert (await backend._source_intake_decide({"ceiling": 15}))["model_called"] is True
+        assert len(calls) == 2
+    asyncio.run(scenario())
