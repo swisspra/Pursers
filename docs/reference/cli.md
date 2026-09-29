@@ -655,7 +655,8 @@ options:
 ```text
 usage: pursers-registry add [-h] --board-id BOARD_ID --work-dir WORK_DIR [--work-dir-owner {fleet,operator}]
                             [--fleet-clone-dir FLEET_CLONE_DIR] [--repository-url REPOSITORY_URL]
-                            [--fleet | --operator-only] [--status {active,paused}] [--force]
+                            [--integration-ref INTEGRATION_REF] [--domain {personal,work}] [--fleet | --operator-only]
+                            [--status {active,paused}] [--force]
                             name
 
 positional arguments:
@@ -668,6 +669,8 @@ options:
   --work-dir-owner {fleet,operator}
   --fleet-clone-dir FLEET_CLONE_DIR
   --repository-url REPOSITORY_URL
+  --integration-ref INTEGRATION_REF
+  --domain {personal,work}
   --fleet
   --operator-only
   --status {active,paused}
@@ -795,14 +798,16 @@ options:
 ### `python3 tools/board-butler/board_butler.py --help`
 
 ```text
-usage: board_butler.py [-h] [--url URL] --token-path TOKEN_PATH [--home-board HOME_BOARD] [--agent-name AGENT_NAME]
-                       --repo REPO [--integration-ref INTEGRATION_REF] --pid-file PID_FILE --cursor-file CURSOR_FILE
+usage: board_butler.py [-h] [--url URL] [--token-path TOKEN_PATH] [--home-board HOME_BOARD] [--agent-name AGENT_NAME]
+                       [--repo REPO] [--integration-ref INTEGRATION_REF] [--pid-file PID_FILE]
+                       [--cursor-file CURSOR_FILE] [--connector-config CONNECTOR_CONFIG] [--connector-probe]
                        [--runtime-status-file RUNTIME_STATUS_FILE] [--local-kill-file LOCAL_KILL_FILE]
                        [--runtime-mode {shadow,active}] [--active-authorization-file ACTIVE_AUTHORIZATION_FILE]
                        [--fleet-observation-file FLEET_OBSERVATION_FILE] [--fleet-state-file FLEET_STATE_FILE]
                        [--fleet-executor-socket FLEET_EXECUTOR_SOCKET] [--fleet-executor-key-id FLEET_EXECUTOR_KEY_ID]
                        [--fleet-executor-private-key FLEET_EXECUTOR_PRIVATE_KEY]
-                       [--provider-secrets-dir PROVIDER_SECRETS_DIR] [--drafts-per-hour DRAFTS_PER_HOUR]
+                       [--provider-secrets-dir PROVIDER_SECRETS_DIR]
+                       [--intake-onboarding-config INTAKE_ONBOARDING_CONFIG] [--drafts-per-hour DRAFTS_PER_HOUR]
                        [--drafts-per-ticket DRAFTS_PER_TICKET] [--drafts-per-board DRAFTS_PER_BOARD]
                        [--project PROJECT] [--wait-timeout WAIT_TIMEOUT] [--refresh-seconds REFRESH_SECONDS]
                        [--act-on-board BOARD_ID] [--no-live-candidates-cycles NO_LIVE_CANDIDATES_CYCLES]
@@ -828,6 +833,9 @@ options:
   --integration-ref INTEGRATION_REF
   --pid-file PID_FILE
   --cursor-file CURSOR_FILE
+  --connector-config CONNECTOR_CONFIG
+                        owned mode-0600 JSON runtime connector bindings
+  --connector-probe     connect once, verify the declared tool set, print JSON, and exit
   --runtime-status-file RUNTIME_STATUS_FILE
   --local-kill-file LOCAL_KILL_FILE
   --runtime-mode {shadow,active}
@@ -839,6 +847,8 @@ options:
   --fleet-executor-key-id FLEET_EXECUTOR_KEY_ID
   --fleet-executor-private-key FLEET_EXECUTOR_PRIVATE_KEY
   --provider-secrets-dir PROVIDER_SECRETS_DIR
+  --intake-onboarding-config INTAKE_ONBOARDING_CONFIG
+                        private operator JSON declaring per-source repository resolution and limits
   --drafts-per-hour DRAFTS_PER_HOUR
   --drafts-per-ticket DRAFTS_PER_TICKET
   --drafts-per-board DRAFTS_PER_BOARD
