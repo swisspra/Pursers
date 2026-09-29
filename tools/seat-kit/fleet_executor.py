@@ -854,6 +854,21 @@ class SystemdUserAdapter:
             properties = self._show_properties(result.stdout)
         except ValueError:
             return ServiceObservation(True, False, False, False)
+        # systemd omits ExecStart for units that have never been created.
+        # Treat only a proven inactive, absent unit as available to instantiate.
+        if (
+            not unit_exists
+            and not unit_path.is_symlink()
+            and properties.get("LoadState") == "not-found"
+            and properties.get("ActiveState") == "inactive"
+            and properties.get("SubState") == "dead"
+            and properties.get("MainPID") == "0"
+            and not properties.get("FragmentPath")
+            and not properties.get("DropInPaths")
+            and not properties.get("ExecStart")
+            and not properties.get("ControlGroup")
+        ):
+            return ServiceObservation(False, False, False, False)
         if set(properties) != set(property_names):
             return ServiceObservation(True, False, False, False)
         load = properties["LoadState"]

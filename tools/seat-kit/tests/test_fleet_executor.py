@@ -2328,3 +2328,21 @@ def test_real_disposable_systemd_user_service_when_available(tmp_path: Path) -> 
         _exercise_disposable_systemd_user_service(adapter, seat_id, template, unit_dir)
     except _SystemdUserEnvironmentUnavailable as exc:
         pytest.skip(str(exc))
+
+
+def test_systemd_missing_unit_without_execstart_is_absent(tmp_path: Path) -> None:
+    def runner(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0,
+            'MainPID=0\nControlGroup=\nLoadState=not-found\nActiveState=inactive\n'
+            'SubState=dead\nFragmentPath=\nDropInPaths=\n', '')
+    template = executor.SeatTemplate.from_record(
+        'worker-standard', template_record(tmp_path / 'repo', tmp_path / 'seat')
+    )
+    adapter = executor.SystemdUserAdapter(tmp_path / 'units', tmp_path / 'drain', {'credential.worker-a': tmp_path / 'worker.env'}, runner=runner)
+    observed = adapter.inspect('worker-a', template)
+    assert observed.exists is False
+    assert observed.running is False
+    # An on-disk unit still requires identity verification even if not loaded.
+    adapter.unit_dir.mkdir()
+    adapter._unit_path('worker-a').write_text('untrusted unit')
+    assert adapter.inspect('worker-a', template).exists is True
