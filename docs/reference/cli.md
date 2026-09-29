@@ -803,8 +803,10 @@ usage: board_butler.py [-h] [--url URL] [--token-path TOKEN_PATH] [--home-board 
                        [--cursor-file CURSOR_FILE] [--connector-config CONNECTOR_CONFIG] [--connector-probe]
                        [--runtime-status-file RUNTIME_STATUS_FILE] [--local-kill-file LOCAL_KILL_FILE]
                        [--runtime-mode {shadow,active}] [--active-authorization-file ACTIVE_AUTHORIZATION_FILE]
-                       [--fleet-observation-file FLEET_OBSERVATION_FILE] [--fleet-state-file FLEET_STATE_FILE]
-                       [--fleet-executor-socket FLEET_EXECUTOR_SOCKET] [--fleet-executor-key-id FLEET_EXECUTOR_KEY_ID]
+                       [--fleet-observation-mode {file,local}] [--fleet-local-config FLEET_LOCAL_CONFIG]
+                       [--fleet-executor-state FLEET_EXECUTOR_STATE] [--fleet-observation-file FLEET_OBSERVATION_FILE]
+                       [--fleet-state-file FLEET_STATE_FILE] [--fleet-executor-socket FLEET_EXECUTOR_SOCKET]
+                       [--fleet-executor-key-id FLEET_EXECUTOR_KEY_ID]
                        [--fleet-executor-private-key FLEET_EXECUTOR_PRIVATE_KEY]
                        [--fleet-executor-config FLEET_EXECUTOR_CONFIG]
                        [--supervisor-roster-file SUPERVISOR_ROSTER_FILE] [--provider-secrets-dir PROVIDER_SECRETS_DIR]
@@ -844,6 +846,9 @@ options:
   --runtime-mode {shadow,active}
                         local service mode; active additionally requires an authorization file
   --active-authorization-file ACTIVE_AUTHORIZATION_FILE
+  --fleet-observation-mode {file,local}
+  --fleet-local-config FLEET_LOCAL_CONFIG
+  --fleet-executor-state FLEET_EXECUTOR_STATE
   --fleet-observation-file FLEET_OBSERVATION_FILE
   --fleet-state-file FLEET_STATE_FILE
   --fleet-executor-socket FLEET_EXECUTOR_SOCKET

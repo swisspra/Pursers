@@ -654,3 +654,46 @@ def test_delivery_preflight_accepts_exact_approved_head(tmp_path):
         assert (await poller.run_cycle(NOW))['writebacks'] == 1
         assert [name for name, _ in calls].count('pr_create') == 1
     asyncio.run(scenario())
+
+
+def test_intake_audit_correlates_real_provider_id_without_prompt_or_secret(monkeypatch):
+    async def scenario():
+        backend=butler.CentralBackend(SimpleNamespace(),'opaque')
+        runtime=butler.ProviderRuntime('https://model.invalid','model-a','private-test-key',draft_protocol='openai_chat_completions_v1')
+        async def config():return {}
+        async def post(*args,**kwargs):
+            return {'id':'chatcmpl-fixture-123','usage':{'prompt_tokens':212,'completion_tokens':46},
+                    'choices':[{'message':{'content':'{"pull":0,"reason":"wait"}'}}]}
+        monkeypatch.setattr(backend,'coordinator_config',config)
+        monkeypatch.setattr(butler,'resolve_config',lambda *a,**k:None)
+        monkeypatch.setattr(butler,'resolve_provider_runtime',lambda *a,**k:runtime)
+        monkeypatch.setattr(butler,'_post_provider_json',post)
+        first=await backend._source_intake_decide({'ceiling':15})
+        second=await backend._source_intake_decide({'ceiling':15})
+        assert first['provider_response_id']=='chatcmpl-fixture-123'
+        assert first['model_called'] and not first['cache_reused']
+        assert not second['model_called'] and second['cache_reused']
+        assert 'provider_response_id' not in second
+        assert 'private-test-key' not in json.dumps([first,second])
+    asyncio.run(scenario())
+
+
+def test_preflight_rejects_same_named_repository_in_another_organization(tmp_path):
+    from dataclasses import replace
+    async def scenario():
+        poller,calls=_delivery_setup(tmp_path)
+        source=poller.sources[0]
+        policy={**source.writeback.preflight,'repository_url_path':'repository.remoteUrl'}
+        poller.sources=(replace(source,writeback=replace(source.writeback,preflight=policy)),)
+        runtime=poller.runtimes[source.connector_id]
+        original=runtime.call_tool
+        async def call(operation,tool,arguments):
+            if tool=='refs':
+                return SimpleNamespace(payload={'structured_content':{'repository':{'remoteUrl':'https://dev.azure.com/another/example-project/_git/example-repo'},
+                    'value':[{'name':'refs/heads/pursers/TK-test','objectId':'b'*40}]}})
+            return await original(operation,tool,arguments)
+        runtime.call_tool=call
+        result=await poller.run_cycle(NOW)
+        assert not [name for name,_ in calls if name=='pr_create']
+        assert result['findings']
+    asyncio.run(scenario())

@@ -815,3 +815,30 @@ path = "packages/personal/README.md"
 version_key = "product"
 prefix = "# Pursers Personal "
 reject_other_product_versions = true
+
+[[artifacts]]
+id = "operator-tool:tools/board-butler/deployment.py"
+kind = "operator-tool"
+source = "tools/board-butler/deployment.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["docs/managed-intake.md"]
+evidence_contains = ["tools/board-butler/deployment.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/seat-kit/event_seat.py"
+kind = "operator-tool"
+source = "tools/seat-kit/event_seat.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["docs/managed-intake.md"]
+evidence_contains = ["tools/seat-kit/event_seat.py"]
+
+[[artifacts]]
+id = "operator-tool:tools/ado-connector/git_credential.py"
+kind = "operator-tool"
+source = "tools/ado-connector/git_credential.py"
+state = "delivered"
+channel = "documented source command"
+evidence = ["docs/managed-intake.md"]
+evidence_contains = ["tools/ado-connector/git_credential.py"]

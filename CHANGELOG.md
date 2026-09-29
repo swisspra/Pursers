@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Native managed source counts: confirmed empty sources skip model calls, unchanged
+  inputs reuse decisions, and provider failures back off for 15 minutes.
+- Configurable local fleet observations, scoped Azure DevOps Git credentials,
+  service rendering and bounded event-driven Goose seats. See
+  [the configuration and migration guide](docs/managed-intake.md).
+- Intake audit fields for model calls, cached decisions, response IDs and retry time.
+
+### Fixed
+
+- Approved source delivery shares a durable attempt guard across refresh and revision
+  paths, checks the configured remote branch SHA before Azure DevOps PR creation,
+  and reads Central's actual submission history.
+- Intake-only ADO connector principals join as non-working coordinators.
+
+
 ## [5.0.8] - 2026-09-29
 
 This release includes `pursers-central==0.1.5`,

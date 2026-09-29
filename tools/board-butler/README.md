@@ -607,3 +607,9 @@ existing sources remain supported with unknown counts. Unchanged semantic inputs
 reuse the model's previous successful decision; provider failures back off for
 15 minutes. Board refreshes and read-only source checks can continue during that
 interval. Approval writeback runs independently of the intake decision.
+
+## Managed intake runtime
+
+See [configuration, feature behavior, migration and rollback](../../docs/managed-intake.md)
+for `tools/board-butler/deployment.py`, `tools/seat-kit/event_seat.py` and
+`tools/ado-connector/git_credential.py`.

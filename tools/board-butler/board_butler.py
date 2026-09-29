@@ -3546,12 +3546,14 @@ class SourceWriteback:
         preflight = value.get("preflight")
         if preflight is not None:
             keys = {"read_tool", "arg_template", "refs_path", "name_path", "sha_path"}
-            if not isinstance(preflight, Mapping) or set(preflight) != keys:
+            if not isinstance(preflight, Mapping) or not keys <= set(preflight) or set(preflight) - keys - {"repository_url_path"}:
                 raise ConnectorConfigError(f"{path}.preflight is malformed")
             if not any(t.name == preflight["read_tool"] and t.effect == "read_only" for t in connector.tools):
                 raise ConnectorConfigError(f"{path}.preflight.read_tool must be declared read_only")
             if not isinstance(preflight["arg_template"], Mapping) or _source_config_size(preflight, path) > 16384:
                 raise ConnectorConfigError(f"{path}.preflight arguments are malformed")
+            if "repository_url_path" in preflight:
+                _source_path(preflight["repository_url_path"], f"{path}.preflight.repository_url_path")
             for name in ("refs_path", "name_path", "sha_path"):
                 _source_path(preflight[name], f"{path}.preflight.{name}")
         return cls(on, tool, copy.deepcopy(dict(template)), copy.deepcopy(preflight))
@@ -5794,6 +5796,9 @@ _ADO_REPOSITORY_RE = re.compile(
 def _approved_submission(ticket: Mapping[str, Any]) -> tuple[str, str]:
     """Return the (branch, sha) of the latest submission, or empty strings."""
     submission = ticket.get("latest_submission")
+    if not isinstance(submission, Mapping):
+        history = ticket.get("submission_history")
+        submission = history[-1] if isinstance(history, list) and history else None
     notes = str(submission.get("notes", "")) if isinstance(submission, Mapping) else ""
     match = _BRANCH_AND_COMMIT_RE.search(notes)
     if match is None:
@@ -5910,6 +5915,11 @@ async def decide_intake_with_provider(
     decision = json.loads(text)
     if not isinstance(decision, Mapping):
         raise ValueError("intake decision must be a JSON object")
+    decision = dict(decision)
+    decision.pop("_provider_evidence", None)
+    response_id = document.get("id") if isinstance(document, Mapping) else None
+    if isinstance(response_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,120}", response_id):
+        decision["_provider_evidence"] = {"provider_response_id": response_id}
     return decision
 
 
@@ -5923,6 +5933,8 @@ class IntakeDecisionCache:
         self._retry_after: datetime | None = None
         self._lock = asyncio.Lock()
         self.model_called = False
+        self.cache_reused = False
+        self.evidence: dict[str, Any] = {}
 
     def forget_decision(self) -> None:
         """Invalidate a decision after an empty-source observation, retaining backoff."""
@@ -5939,17 +5951,23 @@ class IntakeDecisionCache:
         encoded = _canonical_json(stable)
         async with self._lock:
             self.model_called = False
+            self.cache_reused = False
+            self.evidence = {}
             same_provider = runtime == self._runtime
             if same_provider and self._retry_after is not None and now < self._retry_after:
                 raise ButlerConfigError("intake provider retry is deferred")
             if same_provider and encoded == self._context and self._decision is not None:
+                self.cache_reused = True
                 return copy.deepcopy(self._decision)
             self._runtime = runtime
             self._context = None
             self._decision = None
             self.model_called = True
             try:
-                decision = await decide_intake_with_provider(runtime, context)
+                started = time.monotonic()
+                decision = dict(await decide_intake_with_provider(runtime, context))
+                self.evidence = decision.pop("_provider_evidence", {})
+                self.evidence["elapsed_ms"] = int((time.monotonic() - started) * 1000)
                 pull = decision.get("pull")
                 order = decision.get("source_ids")
                 if type(pull) is not int or pull < 0 or (
@@ -6133,7 +6151,15 @@ class SourceIntakePoller:
             raise ConnectorDenied("remote-ref lookup must target the registered project and repository")
         result = await runtime.call_tool("source-preflight-" + hashlib.sha256(_canonical_json(read_args)).hexdigest()[:32],
                                          policy["read_tool"], read_args)
-        rows = _source_value(_source_payload_document(result.payload), policy["refs_path"])
+        document = _source_payload_document(result.payload)
+        repository_path = policy.get("repository_url_path")
+        if policy["read_tool"] == "ado_repository_details_get" and repository_path is None:
+            raise ConnectorDenied("repository-details preflight requires repository_url_path")
+        if repository_path is not None:
+            observed_url = _source_value(document, repository_path)
+            if not isinstance(observed_url, str) or urllib.parse.unquote(observed_url).rstrip("/") != urllib.parse.unquote(fields["repository_url"]).rstrip("/"):
+                raise ConnectorDenied("remote repository identity does not match the registered project")
+        rows = _source_value(document, policy["refs_path"])
         if not isinstance(rows, list):
             raise ConnectorDenied("remote-ref response is unavailable")
         matches = [row for row in rows if isinstance(row, Mapping)
@@ -6163,6 +6189,10 @@ class SourceIntakePoller:
         ).hexdigest()
         marker = f"source-writeback-sha256:{marker_digest}"
         if marker in _ticket_text(ticket):
+            key = self.index.key(source.source_id, item["external_id"])
+            if key in self.index.entries:
+                self.index.set_status(key, "delivered")
+                self.index.save()
             return False
         fields = await self._writeback_fields(source, board_id, ticket_id, ticket, item)
         arguments = _render_source_template(writeback.arg_template, fields)
@@ -6302,8 +6332,9 @@ class SourceIntakePoller:
             decision, ceiling=ceiling, source_ids=source_ids
         )
         metadata = {"mode": "decided", "ceiling": ceiling, "pull": pull, "reason": reason}
-        if type(decision.get("model_called")) is bool:
-            metadata["model_called"] = decision["model_called"]
+        for key in ("model_called", "cache_reused", "retry_after", "provider_response_id", "elapsed_ms", "model"):
+            if key in decision:
+                metadata[key] = decision[key]
         return pull, order, metadata
 
     async def run_cycle(self, now: datetime) -> dict[str, Any]:
@@ -11891,10 +11922,16 @@ class CentralBackend:
         )
         if runtime is None:
             raise ButlerConfigError("no Butler model is configured for intake decisions")
-        decision = await self._intake_decision_cache.decide(
-            runtime, {**context, "board_load": self._source_board_load}, utc_now()
-        )
-        return {**decision, "model_called": self._intake_decision_cache.model_called}
+        cache = self._intake_decision_cache
+        try:
+            decision = await cache.decide(runtime, {**context, "board_load": self._source_board_load}, utc_now())
+        except Exception:
+            return {"pull": 0, "source_ids": [], "reason": "provider_unavailable",
+                    "model_called": cache.model_called, "cache_reused": False,
+                    "retry_after": cache._retry_after.isoformat() if cache._retry_after else None}
+        evidence = cache.evidence if cache.model_called else {}
+        return {**decision, "model_called": cache.model_called, "cache_reused": cache.cache_reused,
+                "model": runtime.model[:120], **evidence}
 
     async def _source_project_reader(self, board_id: str) -> Mapping[str, Any] | None:
         from pursers_client.project_registry import parse_project_registry
