@@ -27,6 +27,7 @@ SPEC.loader.exec_module(butler)
 
 SHA = "a" * 64
 SECRET = "fixture-connector-secret"
+SECOND_SECRET = "fixture-sonarqube-secret"
 PRIVATE_PATH = "/Users/synthetic-user/private/project"
 
 
@@ -231,7 +232,7 @@ def test_declaration_rejects_unknown_transport_protocol_and_replay_shape() -> No
         "connector_id": "connector:test",
         "enabled": True,
         "transport": "websocket",
-        "protocol_revision": "2025-11-25",
+        "protocol_revision": "2026-07-28",
         "endpoint_ref": "endpoint:test",
         "secret_ref": None,
         "tools": [],
@@ -247,16 +248,130 @@ def test_declaration_rejects_unknown_transport_protocol_and_replay_shape() -> No
     with pytest.raises(butler.ConnectorConfigError, match="transport"):
         butler.ConnectorDeclaration.from_mapping(value)
     value["transport"] = "stdio"
+    value["protocol_revision"] = "2024-11-05"
     with pytest.raises(butler.ConnectorConfigError, match="protocol_revision"):
         butler.ConnectorDeclaration.from_mapping(value)
 
 
-def test_http_endpoint_rejects_cleartext_non_loopback_and_embedded_credentials() -> None:
+def test_connector_probe_cli_requires_only_private_config_path(tmp_path: Path) -> None:
+    parsed = butler.parse_args(
+        ["--connector-config", str(tmp_path / "connector.json"), "--connector-probe"]
+    )
+    assert parsed.connector_probe is True
+    assert parsed.token_path is None
+    assert parsed.repo is None
+
+
+def test_http_endpoint_rejects_cleartext_non_loopback_and_embedded_credentials() -> (
+    None
+):
     with pytest.raises(butler.ConnectorConfigError, match="requires TLS"):
         butler.HttpConnectorEndpoint("http://example.invalid/mcp")
     with pytest.raises(butler.ConnectorConfigError, match="invalid"):
         butler.HttpConnectorEndpoint("https://user:pass@example.invalid/mcp")
     butler.HttpConnectorEndpoint("http://127.0.0.1:8123/mcp")
+
+
+def test_http_endpoint_supports_multiple_secret_and_static_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx2
+    import mcp
+    import mcp.client.streamable_http as sdk_http
+
+    captured: dict[str, Any] = {}
+
+    class FakeHttpClient:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    @contextlib.asynccontextmanager
+    async def fake_transport(*_args: Any, **_kwargs: Any):
+        yield object()
+
+    class FakeSdkClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self):
+            return SimpleNamespace(protocol_version="2026-07-28")
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    monkeypatch.setattr(httpx2, "AsyncClient", FakeHttpClient)
+    monkeypatch.setattr(sdk_http, "streamable_http_client", fake_transport)
+    monkeypatch.setattr(mcp, "Client", FakeSdkClient)
+
+    value = declaration(transport="streamable_http")
+    declared = butler.ConnectorDeclaration(
+        value.connector_id,
+        value.enabled,
+        value.transport,
+        "2026-07-28",
+        value.endpoint_ref,
+        None,
+        value.tools,
+        value.resources,
+        value.risky_tools,
+        value.limits,
+    )
+    endpoint = butler.HttpConnectorEndpoint(
+        "https://connector.example/mcp",
+        secret_headers={
+            "Authorization": {"secret_ref": "secret:auth", "prefix": "Bearer"},
+            "X-SonarQube-Token": {
+                "secret_ref": "secret:sonar",
+                "prefix": "",
+            },
+            "X-Azure-DevOps-PAT": {
+                "secret_ref": "secret:ado",
+                "prefix": "Bearer ",
+                "unlocks": ["ado_*"],
+                "optional": True,
+            },
+        },
+        static_headers={"X-SonarQube-Project-Key": "default-project"},
+    )
+    secrets = {"secret:auth": SECRET, "secret:sonar": SECOND_SECRET}
+    connector = butler.ConnectorRuntime(
+        board_id="board-http",
+        project_id="project-one",
+        actor_id="butler-one",
+        policy_digest_sha256=SHA,
+        declaration=declared,
+        approved_connector_ids=["connector:test"],
+        endpoint_resolver=lambda _ref: endpoint,
+        secret_resolver=secrets.__getitem__,
+        persistence=butler.InMemoryConnectorPersistence(),
+    )
+
+    async def scenario() -> None:
+        monkeypatch.setattr(
+            connector,
+            "_pin_http_endpoint",
+            lambda _endpoint: asyncio.sleep(0, result="93.184.216.34"),
+        )
+        resolved_endpoint, resolved = connector._resolve_private()
+        async with connector._default_client(declared, resolved_endpoint, resolved):
+            pass
+        clean = butler._redact_untrusted(
+            {"echo": f"{SECRET} {SECOND_SECRET}"}, resolved
+        )
+        assert SECRET not in json.dumps(clean)
+        assert SECOND_SECRET not in json.dumps(clean)
+
+    asyncio.run(scenario())
+    assert captured["headers"]["Authorization"] == f"Bearer {SECRET}"
+    assert captured["headers"]["X-SonarQube-Token"] == SECOND_SECRET
+    assert "X-Azure-DevOps-PAT" not in captured["headers"]
+    assert captured["headers"]["X-SonarQube-Project-Key"] == "default-project"
 
 
 def test_runtime_rejects_connector_outside_immutable_envelope() -> None:
@@ -554,6 +669,252 @@ def test_secret_resolution_failure_does_not_disclose_value_or_path() -> None:
         assert PRIVATE_PATH not in json.dumps(persistence.audit_records)
 
     asyncio.run(scenario())
+
+
+def test_private_runtime_config_permissions_and_probe_drift(tmp_path: Path) -> None:
+    auth_secret = tmp_path / "auth.secret"
+    sonar_secret = tmp_path / "sonar.secret"
+    auth_secret.write_text(SECRET, encoding="utf-8")
+    sonar_secret.write_text(SECOND_SECRET, encoding="utf-8")
+    auth_secret.chmod(0o600)
+    sonar_secret.chmod(0o600)
+    config = tmp_path / "connector.json"
+    config.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "approved_connector_ids": ["connector:test"],
+                "connectors": [
+                    {
+                        "connector_id": "connector:test",
+                        "protocol_revision": "2026-07-28",
+                        "endpoint_ref": "endpoint:test",
+                        "tools_read_only": ["lookup", "missing", "ado_search"],
+                        "tools_risky_mutating": [],
+                        "tools_denied": ["dangerous"],
+                    }
+                ],
+                "endpoints": {
+                    "endpoint:test": {
+                        "transport": "streamable_http",
+                        "url": "http://127.0.0.1:8123/mcp",
+                        "secret_headers": {
+                            "Authorization": {
+                                "file": str(auth_secret),
+                                "prefix": "Bearer",
+                            },
+                            "X-SonarQube-Token": {
+                                "file": str(sonar_secret),
+                                "prefix": "",
+                            },
+                            "X-Azure-DevOps-PAT": {
+                                "file": str(tmp_path / "absent-ado.secret"),
+                                "prefix": "Bearer ",
+                                "unlocks": ["ado_*"],
+                                "optional": True,
+                            },
+                        },
+                        "static_headers": {"X-SonarQube-Project-Key": "default"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config.chmod(0o644)
+    with pytest.raises(butler.ConnectorConfigError, match="0600"):
+        butler.load_connector_runtimes(
+            config,
+            default_board_id="pursers",
+            default_project_id="pursers",
+            default_actor_id="board-butler-1",
+        )
+
+    config.chmod(0o600)
+    (connector,) = butler.load_connector_runtimes(
+        config,
+        default_board_id="pursers",
+        default_project_id="pursers",
+        default_actor_id="board-butler-1",
+    )
+    fake = FakeClient()
+    fake.protocol_version = "2026-07-28"
+    factory, _calls = factory_for([fake])
+    connector.client_factory = factory
+    result = asyncio.run(connector.probe())
+    assert result == {
+        "connector_id": "connector:test",
+        "declared_tool_count": 2,
+        "denied_tools_present": ["dangerous"],
+        "missing_tools": ["missing"],
+        "observed_tool_count": 3,
+        "ok": False,
+        "protocol_revision": "2026-07-28",
+        "undeclared_tools": ["mutate"],
+    }
+    with pytest.raises(butler.ConnectorDenied, match="allowlisted"):
+        asyncio.run(connector.call_tool("operation-denied", "dangerous", {}))
+
+
+@pytest.mark.parametrize(
+    "invalid_kind",
+    ["mode", "symlink", "empty", "oversized", "invalid_utf8"],
+)
+def test_optional_secret_only_absence_disables_family(
+    tmp_path: Path, invalid_kind: str
+) -> None:
+    auth_secret = tmp_path / "auth.secret"
+    auth_secret.write_text(SECRET, encoding="utf-8")
+    auth_secret.chmod(0o600)
+    optional_secret = tmp_path / "ado.secret"
+    config = tmp_path / "connector.json"
+
+    def write_config() -> None:
+        config.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "approved_connector_ids": ["connector:test"],
+                    "connectors": [
+                        {
+                            "connector_id": "connector:test",
+                            "protocol_revision": "2026-07-28",
+                            "endpoint_ref": "endpoint:test",
+                            "tools_read_only": ["lookup", "ado_search"],
+                            "tools_risky_mutating": [],
+                            "tools_denied": [],
+                        }
+                    ],
+                    "endpoints": {
+                        "endpoint:test": {
+                            "transport": "streamable_http",
+                            "url": "http://127.0.0.1:8123/mcp",
+                            "secret_headers": {
+                                "Authorization": {
+                                    "file": str(auth_secret),
+                                    "prefix": "Bearer",
+                                },
+                                "X-Azure-DevOps-PAT": {
+                                    "file": str(optional_secret),
+                                    "prefix": "",
+                                    "unlocks": ["ado_*"],
+                                    "optional": True,
+                                },
+                            },
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        config.chmod(0o600)
+
+    write_config()
+    (connector,) = butler.load_connector_runtimes(
+        config,
+        default_board_id="pursers",
+        default_project_id="pursers",
+        default_actor_id="board-butler-1",
+    )
+    _endpoint, resolved = connector._resolve_private()
+    assert resolved.unavailable_unlocks == ("ado_*",)
+
+    if invalid_kind == "mode":
+        optional_secret.write_text(SECOND_SECRET, encoding="utf-8")
+        optional_secret.chmod(0o644)
+    elif invalid_kind == "symlink":
+        target = tmp_path / "ado-target.secret"
+        target.write_text(SECOND_SECRET, encoding="utf-8")
+        target.chmod(0o600)
+        optional_secret.symlink_to(target)
+    elif invalid_kind == "empty":
+        optional_secret.write_text("", encoding="utf-8")
+        optional_secret.chmod(0o600)
+    elif invalid_kind == "oversized":
+        optional_secret.write_text("x" * 8_193, encoding="utf-8")
+        optional_secret.chmod(0o600)
+    else:
+        optional_secret.write_bytes(b"\xff")
+        optional_secret.chmod(0o600)
+
+    with pytest.raises(butler.ConnectorConfigError) as caught:
+        connector._resolve_private()
+    assert str(optional_secret) not in str(caught.value)
+
+
+def test_optional_secret_resolver_failure_is_not_treated_as_absent() -> None:
+    current = _transport_declaration("streamable_http")
+    endpoint = butler.HttpConnectorEndpoint(
+        "https://connector.example/mcp",
+        secret_headers={
+            "X-Azure-DevOps-PAT": {
+                "secret_ref": "secret:ado",
+                "unlocks": ["ado_*"],
+                "optional": True,
+            }
+        },
+    )
+
+    def fail(_ref: str) -> str:
+        raise RuntimeError(f"{SECRET} {PRIVATE_PATH}/credential")
+
+    connector = butler.ConnectorRuntime(
+        board_id="board-http",
+        project_id="project-one",
+        actor_id="butler-one",
+        policy_digest_sha256=SHA,
+        declaration=current,
+        approved_connector_ids=["connector:test"],
+        endpoint_resolver=lambda _ref: endpoint,
+        secret_resolver=fail,
+        persistence=butler.InMemoryConnectorPersistence(),
+    )
+    with pytest.raises(butler.ConnectorConfigError) as caught:
+        connector._resolve_private()
+    assert SECRET not in str(caught.value)
+    assert PRIVATE_PATH not in str(caught.value)
+
+
+def test_probe_accepts_classified_denied_tools_but_never_calls_them() -> None:
+    class ClassifiedClient(FakeClient):
+        async def list_tools(self, **_kwargs: Any) -> Model:
+            return Model(
+                tools=[
+                    SimpleNamespace(
+                        name="lookup",
+                        description="read",
+                        input_schema={"type": "object"},
+                    ),
+                    SimpleNamespace(
+                        name="dangerous",
+                        description="classified but denied",
+                        input_schema={"type": "object"},
+                    ),
+                ],
+                next_cursor=None,
+            )
+
+    current = _transport_declaration("stdio")
+    declared = butler.ConnectorDeclaration(
+        current.connector_id,
+        current.enabled,
+        current.transport,
+        current.protocol_revision,
+        current.endpoint_ref,
+        current.secret_ref,
+        current.tools,
+        current.resources,
+        current.risky_tools,
+        current.limits,
+        frozenset({"dangerous"}),
+    )
+    connector, _persistence, calls = runtime([ClassifiedClient()], declared=declared)
+    result = asyncio.run(connector.probe())
+    assert result["ok"] is True
+    assert result["denied_tools_present"] == ["dangerous"]
+    with pytest.raises(butler.ConnectorDenied, match="allowlisted"):
+        asyncio.run(connector.call_tool("operation-denied", "dangerous", {}))
+    assert calls["count"] == 1
 
 
 def _server_script(path: Path, *, transport: str, port: int | None = None) -> None:

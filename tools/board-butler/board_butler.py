@@ -100,9 +100,7 @@ MAX_PROVIDER_PROMPT_CHARS = 12_000
 MAX_AUTONOMOUS_ANSWER_CHARS = 2_000
 PROVIDER_TIMEOUT_S = 30.0
 MAX_MODEL_RUN_SECONDS = 600.0
-PROVIDER_DRAFT_PROTOCOLS = frozenset(
-    {"pursers_json_v1", "openai_chat_completions_v1"}
-)
+PROVIDER_DRAFT_PROTOCOLS = frozenset({"pursers_json_v1", "openai_chat_completions_v1"})
 SUPPORTED_MCP_PROTOCOL_REVISIONS = frozenset({"2026-07-28"})
 SUPPORTED_MCP_TRANSPORTS = frozenset({"stdio", "streamable_http"})
 MAX_CONNECTOR_AUDIT_DETAIL_CHARS = 1_000
@@ -487,6 +485,10 @@ class ConnectorError(RuntimeError):
 
 class ConnectorConfigError(ConnectorError, ValueError):
     """A connector declaration or resolved endpoint is invalid."""
+
+
+class _ConnectorSecretUnavailable(ConnectorConfigError):
+    """A referenced optional connector secret is genuinely absent."""
 
 
 class ConnectorDenied(ConnectorError):
@@ -2899,15 +2901,11 @@ class ConnectorToolDeclaration:
         if replay not in {"safe_with_stable_call_id", "never"}:
             raise ConnectorConfigError(f"{path}.replay is invalid")
         if replay == "safe_with_stable_call_id":
-            stable_field = _connector_id(
-                stable_field, f"{path}.stable_call_id_field"
-            )
+            stable_field = _connector_id(stable_field, f"{path}.stable_call_id_field")
         elif stable_field is not None:
             raise ConnectorConfigError(
                 f"{path}.stable_call_id_field must be null when replay is never"
             )
-        if effect == "read_only" and replay != "safe_with_stable_call_id":
-            raise ConnectorConfigError(f"{path} read-only tools must be safely replayable")
         return cls(name, effect, replay, stable_field)
 
 
@@ -2963,6 +2961,7 @@ class ConnectorDeclaration:
     resources: tuple[str, ...]
     risky_tools: frozenset[str]
     limits: ConnectorLimits
+    denied_tools: frozenset[str] = frozenset()
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "ConnectorDeclaration":
@@ -2977,7 +2976,7 @@ class ConnectorDeclaration:
             "resources",
             "limits",
         }
-        _connector_keys(value, required | {"risky_tools"}, "connector")
+        _connector_keys(value, required | {"risky_tools", "denied_tools"}, "connector")
         if not required.issubset(value):
             raise ConnectorConfigError("connector is missing required fields")
         connector_id = _connector_id(value["connector_id"], "connector.connector_id")
@@ -2996,17 +2995,22 @@ class ConnectorDeclaration:
         raw_tools = value["tools"]
         raw_resources = value["resources"]
         raw_risky = value.get("risky_tools", [])
+        raw_denied = value.get("denied_tools", [])
         if not isinstance(raw_tools, list) or len(raw_tools) > 100:
             raise ConnectorConfigError("connector.tools must be a bounded array")
         if not isinstance(raw_resources, list) or len(raw_resources) > 100:
             raise ConnectorConfigError("connector.resources must be a bounded array")
         if not isinstance(raw_risky, list) or len(raw_risky) > 100:
             raise ConnectorConfigError("connector.risky_tools must be a bounded array")
+        if not isinstance(raw_denied, list) or len(raw_denied) > 100:
+            raise ConnectorConfigError("connector.denied_tools must be a bounded array")
         tools = tuple(
-            ConnectorToolDeclaration.from_mapping(item, f"connector.tools[{index}]")
-            if isinstance(item, Mapping)
-            else (_ for _ in ()).throw(
-                ConnectorConfigError(f"connector.tools[{index}] must be an object")
+            (
+                ConnectorToolDeclaration.from_mapping(item, f"connector.tools[{index}]")
+                if isinstance(item, Mapping)
+                else (_ for _ in ()).throw(
+                    ConnectorConfigError(f"connector.tools[{index}] must be an object")
+                )
             )
             for index, item in enumerate(raw_tools)
         )
@@ -3030,6 +3034,14 @@ class ConnectorDeclaration:
             raise ConnectorConfigError("connector.risky_tools must name declared tools")
         if any(tool.effect != "mutating" for tool in tools if tool.name in risky):
             raise ConnectorConfigError("connector.risky_tools must be mutating tools")
+        denied = frozenset(
+            _connector_id(item, f"connector.denied_tools[{index}]")
+            for index, item in enumerate(raw_denied)
+        )
+        if len(denied) != len(raw_denied) or denied.intersection(tool_names):
+            raise ConnectorConfigError(
+                "connector.denied_tools must be unique and disjoint from declared tools"
+            )
         raw_limits = value["limits"]
         if not isinstance(raw_limits, Mapping):
             raise ConnectorConfigError("connector.limits must be an object")
@@ -3044,6 +3056,7 @@ class ConnectorDeclaration:
             tuple(resources),
             risky,
             ConnectorLimits.from_mapping(raw_limits, "connector.limits"),
+            denied,
         )
 
 
@@ -3064,12 +3077,51 @@ class StdioConnectorEndpoint:
 
 
 @dataclass(frozen=True)
+class HttpConnectorSecretHeader:
+    name: str
+    secret_ref: str
+    prefix: str = ""
+    unlocks: tuple[str, ...] = ()
+    optional: bool = False
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,79}", self.name):
+            raise ConnectorConfigError("resolved HTTP secret header is invalid")
+        _connector_id(self.secret_ref, "resolved HTTP secret reference")
+        if (
+            not isinstance(self.prefix, str)
+            or len(self.prefix) > 200
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in self.prefix)
+        ):
+            raise ConnectorConfigError("resolved HTTP secret prefix is invalid")
+        if type(self.optional) is not bool:
+            raise ConnectorConfigError("resolved HTTP secret optional flag is invalid")
+        if not isinstance(self.unlocks, (tuple, list)) or len(self.unlocks) > 100:
+            raise ConnectorConfigError("resolved HTTP secret unlocks are invalid")
+        normalized_unlocks: list[str] = []
+        for item in self.unlocks:
+            if not isinstance(item, str):
+                raise ConnectorConfigError("resolved HTTP secret unlock is invalid")
+            candidate = item[:-1] if item.endswith("*") else item
+            _connector_id(candidate, "resolved HTTP secret unlock")
+            normalized_unlocks.append(item)
+        object.__setattr__(self, "prefix", self.prefix.strip())
+        object.__setattr__(self, "unlocks", tuple(normalized_unlocks))
+
+
+@dataclass(frozen=True)
 class HttpConnectorEndpoint:
     url: str = field(repr=False)
     secret_header: str = "Authorization"
     secret_prefix: str = "Bearer"
+    secret_headers: tuple[HttpConnectorSecretHeader, ...] = field(
+        default=(), repr=False
+    )
+    static_headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.url, str):
+            raise ConnectorConfigError("resolved HTTP endpoint is invalid")
         parsed = urllib.parse.urlsplit(self.url)
         if (
             parsed.scheme not in {"https", "http"}
@@ -3084,9 +3136,123 @@ class HttpConnectorEndpoint:
             raise ConnectorConfigError("resolved HTTP endpoint requires TLS")
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,79}", self.secret_header):
             raise ConnectorConfigError("resolved HTTP secret header is invalid")
+        if (
+            not isinstance(self.secret_prefix, str)
+            or len(self.secret_prefix) > 200
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in self.secret_prefix)
+        ):
+            raise ConnectorConfigError("resolved HTTP secret prefix is invalid")
+        object.__setattr__(self, "secret_prefix", self.secret_prefix.strip())
+        raw_secret_headers: Any = self.secret_headers
+        normalized_secrets: list[HttpConnectorSecretHeader] = []
+        if isinstance(raw_secret_headers, Mapping):
+            if len(raw_secret_headers) > 32:
+                raise ConnectorConfigError("resolved HTTP secret headers are unbounded")
+            for name, raw in raw_secret_headers.items():
+                if isinstance(raw, HttpConnectorSecretHeader):
+                    item = HttpConnectorSecretHeader(
+                        str(name),
+                        raw.secret_ref,
+                        raw.prefix,
+                        raw.unlocks,
+                        raw.optional,
+                    )
+                elif isinstance(raw, Mapping):
+                    _connector_keys(
+                        raw,
+                        {"secret_ref", "prefix", "unlocks", "optional"},
+                        "resolved HTTP secret header",
+                    )
+                    if "secret_ref" not in raw:
+                        raise ConnectorConfigError(
+                            "resolved HTTP secret header is missing secret_ref"
+                        )
+                    item = HttpConnectorSecretHeader(
+                        str(name),
+                        raw["secret_ref"],
+                        raw.get("prefix", ""),
+                        raw.get("unlocks", ()),
+                        raw.get("optional", False),
+                    )
+                else:
+                    raise ConnectorConfigError(
+                        "resolved HTTP secret header declaration is invalid"
+                    )
+                normalized_secrets.append(item)
+        elif isinstance(raw_secret_headers, (tuple, list)):
+            if len(raw_secret_headers) > 32 or any(
+                not isinstance(item, HttpConnectorSecretHeader)
+                for item in raw_secret_headers
+            ):
+                raise ConnectorConfigError("resolved HTTP secret headers are invalid")
+            normalized_secrets.extend(raw_secret_headers)
+        else:
+            raise ConnectorConfigError("resolved HTTP secret headers are invalid")
+
+        raw_static_headers: Any = self.static_headers
+        if isinstance(raw_static_headers, Mapping):
+            static_items = list(raw_static_headers.items())
+        elif isinstance(raw_static_headers, (tuple, list)):
+            static_items = list(raw_static_headers)
+        else:
+            raise ConnectorConfigError("resolved HTTP static headers are invalid")
+        if len(static_items) > 32:
+            raise ConnectorConfigError("resolved HTTP static headers are unbounded")
+        normalized_static: list[tuple[str, str]] = []
+        reserved = {"accept-encoding", "content-length", "host"}
+        for item in static_items:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                raise ConnectorConfigError("resolved HTTP static header is invalid")
+            name, value = item
+            if (
+                not isinstance(name, str)
+                or not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,79}", name)
+                or name.casefold() in reserved
+                or _SENSITIVE_FIELD_RE.search(name) is not None
+                or not isinstance(value, str)
+                or len(value) > 2_000
+                or value != value.strip()
+                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+            ):
+                raise ConnectorConfigError("resolved HTTP static header is invalid")
+            normalized_static.append((name, value))
+        secret_names = [item.name.casefold() for item in normalized_secrets]
+        static_names = [name.casefold() for name, _value in normalized_static]
+        if (
+            len(set(secret_names)) != len(secret_names)
+            or len(set(static_names)) != len(static_names)
+            or set(secret_names).intersection(static_names)
+        ):
+            raise ConnectorConfigError("resolved HTTP headers must be unique")
+        object.__setattr__(self, "secret_headers", tuple(normalized_secrets))
+        object.__setattr__(self, "static_headers", tuple(normalized_static))
 
 
 ConnectorEndpoint = StdioConnectorEndpoint | HttpConnectorEndpoint
+
+
+@dataclass(frozen=True, repr=False)
+class ResolvedConnectorSecrets:
+    legacy: str
+    by_ref: tuple[tuple[str, str], ...]
+    unavailable_unlocks: tuple[str, ...] = ()
+
+    @property
+    def values(self) -> tuple[str, ...]:
+        ordered = (self.legacy,) + tuple(value for _ref, value in self.by_ref)
+        return tuple(dict.fromkeys(value for value in ordered if value))
+
+    def get(self, secret_ref: str) -> str:
+        for candidate, value in self.by_ref:
+            if candidate == secret_ref:
+                return value
+        raise ConnectorConfigError("connector secret reference is unavailable")
+
+    def has(self, secret_ref: str) -> bool:
+        return any(candidate == secret_ref for candidate, _value in self.by_ref)
+
+
+ConnectorSecretMaterial = str | ResolvedConnectorSecrets
 
 
 @dataclass(frozen=True)
@@ -3173,7 +3339,8 @@ SecretResolver = Callable[[str], str]
 EndpointResolver = Callable[[str], ConnectorEndpoint]
 PolicyGate = Callable[[ConnectorPolicyRequest], Awaitable[ConnectorPolicyDecision]]
 ConnectorClientFactory = Callable[
-    [ConnectorDeclaration, ConnectorEndpoint, str], AsyncContextManager[Any]
+    [ConnectorDeclaration, ConnectorEndpoint, ConnectorSecretMaterial],
+    AsyncContextManager[Any],
 ]
 
 
@@ -3199,7 +3366,15 @@ def _canonical_json(value: Any) -> bytes:
         raise ConnectorResultError("connector data is not canonical JSON") from exc
 
 
-def _redact_untrusted(value: Any, secret: str, depth: int = 0) -> Any:
+def _secret_values(secret: ConnectorSecretMaterial) -> tuple[str, ...]:
+    if isinstance(secret, ResolvedConnectorSecrets):
+        return secret.values
+    return (secret,) if secret else ()
+
+
+def _redact_untrusted(
+    value: Any, secret: ConnectorSecretMaterial, depth: int = 0
+) -> Any:
     if depth > 20:
         raise ConnectorResultError("connector result nesting exceeded the safe bound")
     if isinstance(value, Mapping):
@@ -3208,7 +3383,9 @@ def _redact_untrusted(value: Any, secret: str, depth: int = 0) -> Any:
             key = str(raw_key)
             if key == "_meta":
                 continue
-            if (secret and secret in key) or _PRIVATE_PATH_RE.search(key):
+            if any(
+                item in key for item in _secret_values(secret)
+            ) or _PRIVATE_PATH_RE.search(key):
                 key = "[REDACTED_KEY]"
             if _SENSITIVE_FIELD_RE.search(key):
                 redacted[key] = "[REDACTED]"
@@ -3218,14 +3395,18 @@ def _redact_untrusted(value: Any, secret: str, depth: int = 0) -> Any:
     if isinstance(value, list):
         return [_redact_untrusted(item, secret, depth + 1) for item in value]
     if isinstance(value, str):
-        text = value.replace(secret, "[REDACTED]") if secret else value
+        text = value
+        for item in _secret_values(secret):
+            text = text.replace(item, "[REDACTED]")
         return _PRIVATE_PATH_RE.sub("[REDACTED_PATH]", text)
     if value is None or isinstance(value, (bool, int, float)):
         return value
     raise ConnectorResultError("connector result contains unsupported data")
 
 
-def _model_payload(value: Any, limit: int, secret: str) -> tuple[Any, str]:
+def _model_payload(
+    value: Any, limit: int, secret: ConnectorSecretMaterial
+) -> tuple[Any, str]:
     try:
         dumped = value.model_dump(mode="json", by_alias=True, exclude_none=True)
     except Exception as exc:
@@ -3562,7 +3743,32 @@ class ConnectorRuntime:
     def health(self) -> ConnectorHealth:
         return self._health
 
-    def _resolve_private(self) -> tuple[ConnectorEndpoint, str]:
+    def _resolve_secret(self, secret_ref: str) -> str:
+        try:
+            secret = self.secret_resolver(secret_ref)
+        except _ConnectorSecretUnavailable:
+            raise
+        except (FileNotFoundError, KeyError):
+            raise _ConnectorSecretUnavailable(
+                "connector secret reference is unavailable"
+            ) from None
+        except Exception:
+            raise ConnectorConfigError(
+                "connector secret reference is unavailable"
+            ) from None
+        if (
+            not isinstance(secret, str)
+            or not secret
+            or len(secret.encode("utf-8")) > 8_192
+            or secret != secret.strip()
+            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in secret)
+        ):
+            raise ConnectorConfigError("connector secret reference is invalid")
+        return secret
+
+    def _resolve_private(
+        self,
+    ) -> tuple[ConnectorEndpoint, ConnectorSecretMaterial]:
         endpoint = self.endpoint_resolver(self.declaration.endpoint_ref)
         if self.declaration.transport == "stdio" and not isinstance(
             endpoint, StdioConnectorEndpoint
@@ -3572,22 +3778,32 @@ class ConnectorRuntime:
             endpoint, HttpConnectorEndpoint
         ):
             raise ConnectorConfigError("resolved endpoint transport mismatch")
+        if isinstance(endpoint, HttpConnectorEndpoint) and self.declaration.secret_ref:
+            legacy_header = endpoint.secret_header.casefold()
+            if legacy_header in {
+                item.name.casefold() for item in endpoint.secret_headers
+            } or legacy_header in {
+                name.casefold() for name, _value in endpoint.static_headers
+            }:
+                raise ConnectorConfigError("resolved HTTP headers must be unique")
         secret = ""
         if self.declaration.secret_ref is not None:
-            try:
-                secret = self.secret_resolver(self.declaration.secret_ref)
-            except Exception:
-                raise ConnectorConfigError(
-                    "connector secret reference is unavailable"
-                ) from None
-            if (
-                not isinstance(secret, str)
-                or not secret
-                or len(secret.encode("utf-8")) > 8_192
-                or secret != secret.strip()
-                or any(ord(char) < 0x20 or ord(char) == 0x7F for char in secret)
-            ):
-                raise ConnectorConfigError("connector secret reference is invalid")
+            secret = self._resolve_secret(self.declaration.secret_ref)
+        if isinstance(endpoint, HttpConnectorEndpoint) and endpoint.secret_headers:
+            resolved: list[tuple[str, str]] = []
+            unavailable_unlocks: list[str] = []
+            for item in endpoint.secret_headers:
+                try:
+                    value = self._resolve_secret(item.secret_ref)
+                except _ConnectorSecretUnavailable:
+                    if not item.optional:
+                        raise
+                    unavailable_unlocks.extend(item.unlocks)
+                    continue
+                resolved.append((item.secret_ref, value))
+            return endpoint, ResolvedConnectorSecrets(
+                secret, tuple(resolved), tuple(unavailable_unlocks)
+            )
         return endpoint, secret
 
     async def _pin_http_endpoint(self, endpoint: HttpConnectorEndpoint) -> str:
@@ -3605,7 +3821,7 @@ class ConnectorRuntime:
         self,
         declaration: ConnectorDeclaration,
         endpoint: ConnectorEndpoint,
-        secret: str,
+        secret: ConnectorSecretMaterial,
     ) -> AsyncIterator[Any]:
         try:
             from mcp import Client, StdioServerParameters
@@ -3614,8 +3830,15 @@ class ConnectorRuntime:
         timeout_s = declaration.limits.timeout_ms / 1_000
         async with AsyncExitStack() as stack:
             if isinstance(endpoint, StdioConnectorEndpoint):
+                legacy_secret = (
+                    secret.legacy
+                    if isinstance(secret, ResolvedConnectorSecrets)
+                    else secret
+                )
                 environment = (
-                    {endpoint.secret_env_name: secret} if declaration.secret_ref else None
+                    {endpoint.secret_env_name: legacy_secret}
+                    if declaration.secret_ref
+                    else None
                 )
                 server = StdioServerParameters(
                     command=endpoint.executable,
@@ -3644,11 +3867,29 @@ class ConnectorRuntime:
                     raise ConnectorProtocolError(
                         "MCP v2 HTTP transport is unavailable"
                     ) from exc
-                headers = {"Accept-Encoding": "identity"}
+                headers = {
+                    "Accept-Encoding": "identity",
+                    **dict(endpoint.static_headers),
+                }
                 if declaration.secret_ref:
-                    headers[endpoint.secret_header] = (
-                        f"{endpoint.secret_prefix} {secret}".strip()
+                    legacy_secret = (
+                        secret.legacy
+                        if isinstance(secret, ResolvedConnectorSecrets)
+                        else secret
                     )
+                    headers[endpoint.secret_header] = (
+                        f"{endpoint.secret_prefix} {legacy_secret}".strip()
+                    )
+                if endpoint.secret_headers:
+                    if not isinstance(secret, ResolvedConnectorSecrets):
+                        raise ConnectorConfigError(
+                            "connector secret headers were not resolved"
+                        )
+                    for item in endpoint.secret_headers:
+                        if item.optional and not secret.has(item.secret_ref):
+                            continue
+                        value = secret.get(item.secret_ref)
+                        headers[item.name] = f"{item.prefix} {value}".strip()
                 pinned_address = await self._pin_http_endpoint(endpoint)
                 http_client = await stack.enter_async_context(
                     httpx2.AsyncClient(
@@ -3673,7 +3914,8 @@ class ConnectorRuntime:
                     read_timeout_seconds=timeout_s,
                 )
             connected = await stack.enter_async_context(client)
-            if connected.protocol_version != declaration.protocol_revision:
+            negotiated_revision = getattr(connected, "protocol_version", None)
+            if negotiated_revision != declaration.protocol_revision:
                 raise ConnectorProtocolError("connector protocol revision mismatch")
             yield connected
 
@@ -3790,7 +4032,7 @@ class ConnectorRuntime:
         raise ConnectorResultError("connector discovery exceeded the page limit")
 
     async def _discover_on_client(
-        self, client: Any, secret: str
+        self, client: Any, secret: ConnectorSecretMaterial
     ) -> tuple[ConnectorDiscovery, dict[str, Any]]:
         listed_tools = await self._all_listed(client, "list_tools")
         listed_resources = await self._all_listed(client, "list_resources")
@@ -3836,8 +4078,90 @@ class ConnectorRuntime:
             {"tools": discovery.tools, "resources": discovery.resources}
         )
         if len(raw) > self.declaration.limits.max_output_bytes:
-            raise ConnectorResultError("filtered discovery exceeded the output byte limit")
+            raise ConnectorResultError(
+                "filtered discovery exceeded the output byte limit"
+            )
         return discovery, schemas
+
+    async def probe(self) -> dict[str, Any]:
+        """Connect once and report exact tool-set drift without exposing secrets."""
+        if not self.declaration.enabled:
+            raise ConnectorDenied("connector is disabled")
+        await self._rate_limit()
+        timeout_s = self.declaration.limits.timeout_ms / 1_000
+        async with self._slots:
+            endpoint, secret = self._resolve_private()
+            try:
+                async with asyncio.timeout(timeout_s):
+                    async with self.client_factory(
+                        self.declaration, endpoint, secret
+                    ) as client:
+                        negotiated_revision = getattr(
+                            client,
+                            "protocol_version",
+                            self.declaration.protocol_revision,
+                        )
+                        if negotiated_revision != self.declaration.protocol_revision:
+                            raise ConnectorProtocolError(
+                                "connector protocol revision mismatch"
+                            )
+                        listed = await self._all_listed(client, "list_tools")
+            except (ConnectorConfigError, ConnectorResultError, ConnectorDenied):
+                raise
+            except Exception:
+                raise ConnectorProtocolError("connector probe failed") from None
+        observed: list[str] = []
+        for item in listed:
+            name = getattr(item, "name", None)
+            if not isinstance(name, str) or _CONNECTOR_ID_RE.fullmatch(name) is None:
+                raise ConnectorProtocolError(
+                    "connector probe returned an invalid tool name"
+                )
+            observed.append(name)
+        if len(set(observed)) != len(observed):
+            raise ConnectorProtocolError(
+                "connector probe returned duplicate tool names"
+            )
+        observed_set = set(observed)
+        declared = {item.name for item in self.declaration.tools}
+        denied = set(self.declaration.denied_tools)
+        unavailable_unlocks = (
+            secret.unavailable_unlocks
+            if isinstance(secret, ResolvedConnectorSecrets)
+            else ()
+        )
+        disabled = {
+            name
+            for name in declared | denied
+            if any(
+                (
+                    name.startswith(unlock[:-1])
+                    if unlock.endswith("*")
+                    else name == unlock or name.startswith(unlock + "_")
+                )
+                for unlock in unavailable_unlocks
+            )
+        }
+        declared -= disabled
+        denied -= disabled
+        missing = sorted((declared | denied) - observed_set)
+        denied_present = sorted(denied.intersection(observed_set))
+        undeclared = sorted(observed_set - declared - denied)
+        clean = _redact_untrusted(
+            {
+                "connector_id": self.declaration.connector_id,
+                "protocol_revision": negotiated_revision,
+                "ok": not (missing or undeclared),
+                "declared_tool_count": len(declared),
+                "observed_tool_count": len(observed_set),
+                "missing_tools": missing,
+                "undeclared_tools": undeclared,
+                "denied_tools_present": denied_present,
+            },
+            secret,
+        )
+        _canonical_json(clean)
+        return clean
 
     async def discover(self, operation_id: str) -> ConnectorDiscovery:
         operation_id = _connector_id(operation_id, "operation_id")
@@ -4185,8 +4509,381 @@ class ConnectorRuntime:
                         reason_code="connection_failed",
                         call_id=call_id,
                     )
-                    raise ConnectorProtocolError("connector resource read failed") from None
+                    raise ConnectorProtocolError(
+                        "connector resource read failed"
+                    ) from None
         raise AssertionError("unreachable")
+
+
+def _read_connector_private_file(path: Path, label: str, limit: int) -> bytes:
+    if not path.is_absolute() or not _private_regular_file(path):
+        raise ConnectorConfigError(
+            f"{label} must be an absolute owned mode-0600 regular file"
+        )
+    try:
+        if path.stat().st_size > limit:
+            raise ConnectorConfigError(f"{label} exceeded the byte limit")
+        value = path.read_bytes()
+    except ConnectorConfigError:
+        raise
+    except OSError:
+        raise ConnectorConfigError(f"{label} is unreadable") from None
+    if len(value) > limit:
+        raise ConnectorConfigError(f"{label} exceeded the byte limit")
+    return value
+
+
+def _connector_secret_file(path: Path) -> str:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        raise _ConnectorSecretUnavailable("connector secret is unavailable") from None
+    except OSError:
+        raise ConnectorConfigError("connector secret is unreadable") from None
+    raw = _read_connector_private_file(path, "connector secret", 8_192)
+    try:
+        value = raw.decode("utf-8")
+    except UnicodeError:
+        raise ConnectorConfigError("connector secret is invalid") from None
+    if value.endswith("\n"):
+        value = value[:-1]
+    if (
+        not value
+        or value != value.strip()
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+    ):
+        raise ConnectorConfigError("connector secret is invalid")
+    return value
+
+
+def _runtime_tool_list(
+    value: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    if "tools" in value:
+        tools = value["tools"]
+        risky = value.get("risky_tools", [])
+        denied = value.get("denied_tools", value.get("tools_denied", []))
+        return tools, risky, denied
+    read_only = value.get("tools_read_only", [])
+    risky_mutating = value.get("tools_risky_mutating", [])
+    denied = value.get("tools_denied", [])
+    for name, items in (
+        ("tools_read_only", read_only),
+        ("tools_risky_mutating", risky_mutating),
+        ("tools_denied", denied),
+    ):
+        if not isinstance(items, list) or len(items) > 100:
+            raise ConnectorConfigError(f"connector.{name} must be a bounded array")
+    tools = [
+        {
+            "name": item,
+            "effect": "read_only",
+            "replay": "never",
+            "stable_call_id_field": None,
+        }
+        for item in read_only
+    ] + [
+        {
+            "name": item,
+            "effect": "mutating",
+            "replay": "never",
+            "stable_call_id_field": None,
+        }
+        for item in risky_mutating
+    ]
+    return tools, list(risky_mutating), list(denied)
+
+
+def _runtime_declaration(value: Mapping[str, Any]) -> ConnectorDeclaration:
+    tools, risky, denied = _runtime_tool_list(value)
+    default_limits = {
+        "timeout_ms": 30_000,
+        "max_input_bytes": 65_536,
+        "max_output_bytes": 1_000_000,
+        "max_concurrency": 2,
+        "calls_per_minute": 60,
+    }
+    normalized = {
+        "connector_id": value.get("connector_id"),
+        "enabled": value.get("enabled", True),
+        "transport": value.get("transport", "streamable_http"),
+        "protocol_revision": value.get("protocol_revision"),
+        "endpoint_ref": value.get("endpoint_ref", value.get("connector_id")),
+        "secret_ref": value.get("secret_ref"),
+        "tools": tools,
+        "resources": value.get("resources", []),
+        "risky_tools": risky,
+        "denied_tools": denied,
+        "limits": value.get("limits", default_limits),
+    }
+    return ConnectorDeclaration.from_mapping(normalized)
+
+
+def _runtime_http_endpoint(
+    value: Mapping[str, Any],
+    secret_paths: dict[str, Path],
+    path: str,
+) -> HttpConnectorEndpoint:
+    allowed = {
+        "transport",
+        "url",
+        "secret_header",
+        "secret_prefix",
+        "secret_headers",
+        "static_headers",
+    }
+    _connector_keys(value, allowed, path)
+    raw_headers = value.get("secret_headers", {})
+    if not isinstance(raw_headers, Mapping) or len(raw_headers) > 32:
+        raise ConnectorConfigError(f"{path}.secret_headers must be a bounded object")
+    headers: dict[str, dict[str, Any]] = {}
+    for index, (name, raw) in enumerate(raw_headers.items()):
+        if not isinstance(raw, Mapping):
+            raise ConnectorConfigError(f"{path}.secret_headers entry is invalid")
+        _connector_keys(
+            raw,
+            {"secret_ref", "file", "prefix", "unlocks", "optional"},
+            path,
+        )
+        secret_ref = raw.get("secret_ref")
+        secret_file = raw.get("file")
+        if (secret_ref is None) == (secret_file is None):
+            raise ConnectorConfigError(
+                f"{path}.secret_headers entry needs exactly one secret_ref or file"
+            )
+        if secret_file is not None:
+            if not isinstance(secret_file, str) or not Path(secret_file).is_absolute():
+                raise ConnectorConfigError(
+                    f"{path}.secret_headers file must be absolute"
+                )
+            secret_ref = (
+                "header-secret-"
+                + hashlib.sha256(f"{path}:{index}".encode("utf-8")).hexdigest()[:24]
+            )
+            secret_paths[secret_ref] = Path(secret_file)
+        elif isinstance(secret_ref, str) and Path(secret_ref).is_absolute():
+            secret_path = Path(secret_ref)
+            secret_ref = (
+                "header-secret-"
+                + hashlib.sha256(f"{path}:{index}".encode("utf-8")).hexdigest()[:24]
+            )
+            secret_paths[secret_ref] = secret_path
+        headers[str(name)] = {
+            "secret_ref": secret_ref,
+            "prefix": raw.get("prefix", ""),
+            "unlocks": raw.get("unlocks", []),
+            "optional": raw.get("optional", False),
+        }
+    static_headers = value.get("static_headers", {})
+    return HttpConnectorEndpoint(
+        value.get("url"),
+        value.get("secret_header", "Authorization"),
+        value.get("secret_prefix", "Bearer"),
+        headers,
+        static_headers,
+    )
+
+
+def _runtime_stdio_endpoint(
+    value: Mapping[str, Any], path: str
+) -> StdioConnectorEndpoint:
+    allowed = {"transport", "executable", "args", "cwd", "secret_env_name"}
+    _connector_keys(value, allowed, path)
+    args = value.get("args", [])
+    if not isinstance(args, list) or len(args) > 100:
+        raise ConnectorConfigError(f"{path}.args must be a bounded array")
+    return StdioConnectorEndpoint(
+        value.get("executable"),
+        tuple(args),
+        value.get("cwd"),
+        value.get("secret_env_name", "PURSERS_CONNECTOR_SECRET"),
+    )
+
+
+def load_connector_runtimes(
+    path: Path,
+    *,
+    default_board_id: str,
+    default_project_id: str,
+    default_actor_id: str,
+) -> tuple[ConnectorRuntime, ...]:
+    """Load private runtime bindings without copying endpoints or keys to results."""
+    raw = _read_connector_private_file(path, "connector config", 1_048_576)
+    try:
+        document = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError):
+        raise ConnectorConfigError("connector config is invalid JSON") from None
+    if not isinstance(document, Mapping) or document.get("schema_version") != 1:
+        raise ConnectorConfigError("connector config schema is invalid")
+    declarations = document.get("declarations", document.get("connectors"))
+    if declarations is None:
+        singular = document.get("declaration", document.get("connector"))
+        if singular is not None:
+            declarations = [singular]
+        elif "connector_id" in document:
+            declarations = [document]
+    if not isinstance(declarations, list) or not 1 <= len(declarations) <= 32:
+        raise ConnectorConfigError("connector config declarations are invalid")
+    endpoints = document.get("endpoints")
+    if endpoints is None:
+        singular_endpoint = document.get("endpoint")
+        if (
+            isinstance(singular_endpoint, Mapping)
+            and len(declarations) == 1
+            and isinstance(declarations[0], Mapping)
+        ):
+            raw_ref = declarations[0].get(
+                "endpoint_ref", declarations[0].get("connector_id")
+            )
+            endpoints = {raw_ref: singular_endpoint}
+        elif "url" in document and len(declarations) == 1:
+            raw_ref = document.get("endpoint_ref", document.get("connector_id"))
+            endpoint_keys = {
+                "transport",
+                "url",
+                "secret_header",
+                "secret_prefix",
+                "secret_headers",
+                "static_headers",
+            }
+            endpoints = {
+                raw_ref: {key: document[key] for key in endpoint_keys if key in document}
+            }
+    secrets = document.get("secrets", {})
+    if not isinstance(endpoints, Mapping) or not isinstance(secrets, Mapping):
+        raise ConnectorConfigError("connector config references are invalid")
+    if len(endpoints) > 32 or len(secrets) > 64:
+        raise ConnectorConfigError("connector config references are unbounded")
+
+    envelope = document.get("envelope", {})
+    if not isinstance(envelope, Mapping):
+        raise ConnectorConfigError("connector config envelope is invalid")
+    approved = document.get(
+        "approved_connector_ids", envelope.get("approved_connector_ids")
+    )
+    if not isinstance(approved, list):
+        raise ConnectorConfigError(
+            "connector config approved connector ids are missing"
+        )
+    approved_ids = [_connector_id(item, "approved_connector_ids") for item in approved]
+    if len(approved_ids) > 32 or len(set(approved_ids)) != len(approved_ids):
+        raise ConnectorConfigError(
+            "connector config approved connector ids are invalid"
+        )
+
+    secret_paths: dict[str, Path] = {}
+    for ref, raw_path in secrets.items():
+        normalized_ref = _connector_id(ref, "connector secret reference")
+        if not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+            raise ConnectorConfigError("connector secret paths must be absolute")
+        secret_paths[normalized_ref] = Path(raw_path)
+
+    endpoint_values: dict[str, ConnectorEndpoint] = {}
+    for ref, raw_endpoint in endpoints.items():
+        normalized_ref = _connector_id(ref, "connector endpoint reference")
+        if not isinstance(raw_endpoint, Mapping):
+            raise ConnectorConfigError("connector endpoint must be an object")
+        transport = raw_endpoint.get("transport", "streamable_http")
+        if transport == "streamable_http":
+            endpoint_values[normalized_ref] = _runtime_http_endpoint(
+                raw_endpoint, secret_paths, f"endpoints.{normalized_ref}"
+            )
+        elif transport == "stdio":
+            endpoint_values[normalized_ref] = _runtime_stdio_endpoint(
+                raw_endpoint, f"endpoints.{normalized_ref}"
+            )
+        else:
+            raise ConnectorConfigError("connector endpoint transport is unsupported")
+
+    board_id = _connector_id(
+        document.get("board_id", default_board_id), "connector config board_id"
+    )
+    project_id = _connector_id(
+        document.get("project_id", default_project_id),
+        "connector config project_id",
+    )
+    actor_id = _connector_id(
+        document.get("actor_id", default_actor_id), "connector config actor_id"
+    )
+    policy_digest = document.get("policy_digest_sha256")
+    if policy_digest is None:
+        policy_digest = hashlib.sha256(_canonical_json(approved_ids)).hexdigest()
+
+    def endpoint_resolver(ref: str) -> ConnectorEndpoint:
+        try:
+            return endpoint_values[ref]
+        except KeyError:
+            raise ConnectorConfigError(
+                "connector endpoint reference is unavailable"
+            ) from None
+
+    def secret_resolver(ref: str) -> str:
+        try:
+            secret_path = secret_paths[ref]
+        except KeyError:
+            raise ConnectorConfigError(
+                "connector secret reference is unavailable"
+            ) from None
+        return _connector_secret_file(secret_path)
+
+    runtimes: list[ConnectorRuntime] = []
+    for raw_declaration in declarations:
+        if not isinstance(raw_declaration, Mapping):
+            raise ConnectorConfigError("connector declaration must be an object")
+        normalized_declaration = dict(raw_declaration)
+        legacy_secret = normalized_declaration.get("secret_ref")
+        if isinstance(legacy_secret, str) and Path(legacy_secret).is_absolute():
+            legacy_ref = (
+                "legacy-secret-"
+                + hashlib.sha256(legacy_secret.encode("utf-8")).hexdigest()[:24]
+            )
+            secret_paths[legacy_ref] = Path(legacy_secret)
+            normalized_declaration["secret_ref"] = legacy_ref
+        declaration = _runtime_declaration(normalized_declaration)
+        endpoint = endpoint_resolver(declaration.endpoint_ref)
+        if (
+            declaration.transport == "streamable_http"
+            and not isinstance(endpoint, HttpConnectorEndpoint)
+        ) or (
+            declaration.transport == "stdio"
+            and not isinstance(endpoint, StdioConnectorEndpoint)
+        ):
+            raise ConnectorConfigError("connector endpoint transport mismatch")
+        runtimes.append(
+            ConnectorRuntime(
+                board_id=board_id,
+                project_id=project_id,
+                actor_id=actor_id,
+                policy_digest_sha256=policy_digest,
+                declaration=declaration,
+                approved_connector_ids=approved_ids,
+                endpoint_resolver=endpoint_resolver,
+                secret_resolver=secret_resolver,
+                persistence=InMemoryConnectorPersistence(),
+            )
+        )
+    return tuple(runtimes)
+
+
+async def run_connector_probe(runtimes: Sequence[ConnectorRuntime]) -> int:
+    results: list[dict[str, Any]] = []
+    exit_code = 0
+    for runtime in runtimes:
+        try:
+            result = await runtime.probe()
+        except ConnectorError:
+            result = {
+                "connector_id": runtime.declaration.connector_id,
+                "ok": False,
+                "error": "connector_probe_failed",
+            }
+        if result.get("ok") is not True:
+            exit_code = 1
+        results.append(result)
+    print(json.dumps({"connectors": results, "ok": exit_code == 0}, sort_keys=True))
+    return exit_code
+
+
 def _canonical_json_bytes(value: Any) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -10512,7 +11209,21 @@ async def run(
     args: argparse.Namespace,
     *,
     backend_factory: Any = CentralBackend,
-) -> None:
+) -> int | None:
+    connector_runtimes: tuple[ConnectorRuntime, ...] = ()
+    connector_config = getattr(args, "connector_config", None)
+    if connector_config is not None:
+        connector_runtimes = load_connector_runtimes(
+            connector_config,
+            default_board_id=getattr(args, "home_board", "pursers"),
+            default_project_id=(
+                getattr(args, "project", None) or getattr(args, "home_board", "pursers")
+            ),
+            default_actor_id=getattr(args, "agent_name", DEFAULT_AGENT_NAME),
+        )
+    if getattr(args, "connector_probe", False):
+        return await run_connector_probe(connector_runtimes)
+
     # One-shot controls must remain available while the resident owns the
     # singleton lock. Their coordinator_findings write is CAS-protected by the
     # backend, so they cannot create a second resident or race silently.
@@ -10613,14 +11324,26 @@ async def run(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default=os.environ.get("ONBOARD_CENTRAL_URL", DEFAULT_URL))
-    parser.add_argument("--token-path", type=Path, required=True)
+    parser.add_argument(
+        "--url", default=os.environ.get("ONBOARD_CENTRAL_URL", DEFAULT_URL)
+    )
+    parser.add_argument("--token-path", type=Path)
     parser.add_argument("--home-board", default="pursers")
     parser.add_argument("--agent-name", default=DEFAULT_AGENT_NAME)
-    parser.add_argument("--repo", type=Path, required=True)
+    parser.add_argument("--repo", type=Path)
     parser.add_argument("--integration-ref", default="origin/main")
-    parser.add_argument("--pid-file", type=Path, required=True)
-    parser.add_argument("--cursor-file", type=Path, required=True)
+    parser.add_argument("--pid-file", type=Path)
+    parser.add_argument("--cursor-file", type=Path)
+    parser.add_argument(
+        "--connector-config",
+        type=Path,
+        help="owned mode-0600 JSON runtime connector bindings",
+    )
+    parser.add_argument(
+        "--connector-probe",
+        action="store_true",
+        help="connect once, verify the declared tool set, print JSON, and exit",
+    )
     parser.add_argument("--runtime-status-file", type=Path)
     parser.add_argument("--local-kill-file", type=Path)
     parser.add_argument(
@@ -10727,6 +11450,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     controls.add_argument("--veto-question")
     parser.add_argument("--control-reason", default="operator")
     args = parser.parse_args(argv)
+    if args.connector_probe and args.connector_config is None:
+        parser.error("--connector-probe requires --connector-config")
+    if not args.connector_probe:
+        missing = [
+            name
+            for name in ("token_path", "repo", "pid_file", "cursor_file")
+            if getattr(args, name) is None
+        ]
+        if missing:
+            parser.error(
+                "the following arguments are required: "
+                + ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+            )
     for name in (
         "token_path",
         "repo",
@@ -10735,8 +11471,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "provider_secrets_dir",
     ):
         value = getattr(args, name)
-        if not value.is_absolute():
+        if value is not None and not value.is_absolute():
             parser.error(f"--{name.replace('_', '-')} must be absolute")
+    if args.connector_config is not None and not args.connector_config.is_absolute():
+        parser.error("--connector-config must be absolute")
     for name in (
         "runtime_status_file",
         "local_kill_file",
@@ -10749,7 +11487,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         value = getattr(args, name)
         if value is not None and not value.is_absolute():
             parser.error(f"--{name.replace('_', '-')} must be absolute")
-    if not args.repo.is_dir():
+    if args.repo is not None and not args.repo.is_dir():
         parser.error("--repo must name an existing directory")
     if not 1 <= args.drafts_per_hour <= 100:
         parser.error("--drafts-per-hour must be between 1 and 100")
@@ -10811,10 +11549,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     try:
-        asyncio.run(run(args))
+        exit_code = asyncio.run(run(args))
+        if exit_code:
+            raise SystemExit(exit_code)
     except AlreadyRunning as exc:
         print(f"board-butler: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    except ConnectorError:
+        print("board-butler: connector configuration or probe failed", file=sys.stderr)
+        raise SystemExit(1) from None
     except KeyboardInterrupt:
         pass
 
