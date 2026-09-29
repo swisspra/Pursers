@@ -811,7 +811,8 @@ usage: board_butler.py [-h] [--url URL] [--token-path TOKEN_PATH] [--home-board 
                        [--intake-onboarding-config INTAKE_ONBOARDING_CONFIG] [--drafts-per-hour DRAFTS_PER_HOUR]
                        [--drafts-per-ticket DRAFTS_PER_TICKET] [--drafts-per-board DRAFTS_PER_BOARD]
                        [--project PROJECT] [--wait-timeout WAIT_TIMEOUT] [--refresh-seconds REFRESH_SECONDS]
-                       [--act-on-board BOARD_ID] [--no-live-candidates-cycles NO_LIVE_CANDIDATES_CYCLES]
+                       [--approval-scan-budget APPROVAL_SCAN_BUDGET] [--act-on-board BOARD_ID]
+                       [--no-live-candidates-cycles NO_LIVE_CANDIDATES_CYCLES]
                        [--active-action {park_no_live_candidates,refuse_incapable_target}]
                        [--action-hold-seconds ACTION_HOLD_SECONDS] [--once] [--dry-run]
                        [--kill-switch | --veto-question VETO_QUESTION] [--control-reason CONTROL_REASON]
@@ -859,6 +860,8 @@ options:
   --wait-timeout WAIT_TIMEOUT
   --refresh-seconds REFRESH_SECONDS
                         maximum interval between real coordinator derivations
+  --approval-scan-budget APPROVAL_SCAN_BUDGET
+                        maximum approved-ticket git classifications per board background cycle
   --act-on-board BOARD_ID
                         explicitly opt one active registry board into the two mechanical ticket actions; repeat for
                         multiple boards
