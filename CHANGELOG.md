@@ -7,6 +7,33 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Board Butler can own seat management on a host: a single operator-set host
+  seat cap (`set_host_seat_cap` Butler command, bound to the authorization
+  envelope) authorizes Butler to start, stop, pause, and re-role worker and
+  reviewer seats within the cap through a persisted canonical roster. Re-role
+  refuses a target whose principal is already active on another seat before
+  any host action, and every mutation binds identity, state, and roster
+  revision.
+- Board Butler connectors accept several secret headers per MCP endpoint
+  (for header-gated servers), bounded static headers, a `--connector-config`
+  runtime file with file-referenced secrets, and a `--connector-probe` that
+  reports tool-set drift without printing secrets.
+- Generic source-aware intake: any MCP source is declared in configuration
+  (SonarQube first) and becomes deduplicated, routed intake asks with
+  source text kept in a bounded untrusted block and optional writeback.
+- Board Butler can onboard a project it has not seen before: it resolves the
+  repository, clones the project folder, and registers it, with capped retry
+  and backoff that survive restarts.
+
+### Fixed
+
+- The Fleet release card probes the configured Central URL and derives its
+  health endpoint from that origin instead of the plain-HTTP default.
+- A Board Butler test no longer depends on the checkout having a local main
+  ref, so pull-request CI runs pass.
+
 ## [5.0.6] - 2026-09-28
 
 This release includes `pursers-central==0.1.4`,
@@ -102,6 +129,9 @@ This release includes `pursers-central==0.1.4`,
 - Explicit token files take precedence over inherited environment tokens;
   empty explicit files are rejected and startup configuration failures remain
   visible for recovery.
+- Fleet project lifecycle conflicts return HTTP 409 on every platform instead
+  of 501 on hosts without the macOS worker manager.
+- The PyPI publishing workflow accepts the v5.0.6 stable tag.
 
 ### Security
 
