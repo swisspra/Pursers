@@ -11,6 +11,107 @@ must not run them. Do not push `main`, create or move a tag, publish a package,
 or delete a runtime while following this runbook. The only launchd definition
 change is the explicit, backed-up Board Butler runtime switch in section 7.
 
+## Errata recorded after the live rollout
+
+The live v5.0.6 rollout exposed eight defects in the original procedure below.
+The original numbered steps remain as the historical record; the corrected,
+version-agnostic procedure is
+[`RUNBOOK-template.md`](RUNBOOK-template.md) and supersedes the affected
+commands:
+
+1. A seven-wheel release directory cannot satisfy third-party dependencies.
+   Exact-pin every Pursers distribution from `--find-links`, leave the package
+   index enabled for third-party dependencies, optionally constrain them from
+   an approved environment, and hash-compare installed Pursers sources with
+   the verified wheel members.
+2. Upgrade each service interpreter's complete installed Pursers set. Central
+   requires its own side-by-side venv, artifact/source-hash profile, SQLite
+   `.backup` smoke test on an alternate port through
+   `serve_tls.build_app(data_dir_override=...)`, pre-cutover DB snapshot,
+   launchd/systemd repoint, `/healthz` and version checks, and exact rollback.
+3. Before restarting Fleet Dashboard, add and validate
+   `PURSERS_BUTLER_STATE_DIR`, `PURSERS_BUTLER_ENTRYPOINT`, and
+   `PURSERS_BUTLER_PROVIDER_SECRETS_DIR`; keep private directories outside the
+   checkout.
+4. A host without a fleet executor may upgrade Butler and record
+   `fleet.status=disabled` as the expected deviation. Never fabricate executor
+   settings. Partial settings still fail closed. Use bounded retries when a
+   launchd `bootout` followed by `bootstrap` returns `Bad request`.
+5. The real release checksum file prefixes names with `./` and includes the
+   AionUi and Home assets. Wheel-only staging must filter wheel rows when
+   invoking `shasum`; the doctor accepts the prefix, ignores non-wheel rows,
+   and still requires every staged wheel to be listed and match.
+6. The permanent Butler conflict fix is the bounded `StateWriteConflict` retry,
+   not the temporary hotfix strings. The doctor accepts that implementation
+   only when the reviewed fix commit is an ancestor of the running checkout.
+7. `/api/version` exposes the running SHA, not a visual-shell identifier.
+   Dashboard evidence binds the real release SHA and never fabricates a shell
+   field.
+8. Coordinator freshness comes from collector `observed_at`/`heartbeat_at`,
+   not the last board event. A quiet board is not a stale subscription.
+
+### Linux/systemd corrections from the Azure rollout
+
+The live Linux rollout now keeps persistent data in the version-neutral
+`/PATH/TO/services/pursers/{central,config,credentials,state,bin,backups}` tree.
+Each release lives side-by-side at
+`/PATH/TO/services/pursers-vX.Y.Z/{venv,release-assets,source}`, where `source`
+is the tag checkout and no longer lives under `projects/`. Keep the operator
+project `work_dir` at `/PATH/TO/projects/pursers`, logs at
+`/PATH/TO/logs/pursers`, and `TMPDIR` at `/PATH/TO/cache/pursers`. An upgrade
+repoints only the unit `ExecStart` venv/source paths. Before upgrading, archive
+the pre-upgrade units and database together as a tarball under
+`/PATH/TO/services/pursers/backups/`.
+
+That host had neither `uv` nor `gh`. Use an operator-approved asset transfer,
+filter `SHA256SUMS.txt` to wheel rows, then create the new environment with
+`python3 -m venv`. Freeze the old venv and remove all old `pursers*` and `mcp`
+rows—including extras, editable URLs, and PEP 508 direct references such as
+`pursers @ file:///...` and `mcp @ file:///...`—before using it as a
+constraint. Install every Pursers distribution at the exact v5.0.6 version
+with `python -m pip install --find-links`, and require `python -m pip check`.
+Reuse that same side-by-side venv for Central; the Linux route must not invoke
+`uv` later. Do not use the old MCP pin to constrain the release.
+This includes pip's two-line local-editable form: remove a Pursers/MCP
+`# Editable install with no version control (NAME==VERSION)` plus following
+`-e /PATH/TO/...` pair, and fail closed on every other editable until the
+operator replaces it with an immutable constraint.
+The reusable template contains the executable commands and complete cohort
+guard.
+
+For the Central smoke test, copy the live Central directory into private
+rollout state, create the candidate database with SQLite `.backup`, and rewrite
+the copy's `profile.env` values for `ONBOARD_CENTRAL_PORT`,
+`CENTRAL_JWT_AUDIENCE`, and `ONBOARD_CENTRAL_DATA_DIR`. Start only the copy with
+`"$CENTRAL_VENV/bin/pursers-central" run "$CENTRAL_SMOKE_PROFILE"`; give that
+single process one PID, one bounded health/version probe, and one cleanup. Do
+not also start the host `serve_tls.py` adapter on the same port. Never point the
+candidate at the live profile or database.
+
+The `pursers-butler` and `pursers-fleet-executor` units use
+`StartLimitBurst=1` and `Requires=pursers-central`. Restarting Central can stop
+and auto-start both dependents, consuming their single start allowance. After
+repointing the units, do not repeatedly restart them. Run exactly one
+`reset-failed` followed by one `start` for each unit, in this order:
+
+```sh
+systemctl --user reset-failed pursers-central
+systemctl --user start pursers-central
+systemctl --user reset-failed pursers-fleet-executor
+systemctl --user start pursers-fleet-executor
+systemctl --user reset-failed pursers-butler
+systemctl --user start pursers-butler
+```
+
+Verify each unit is active before advancing to the next one. The coordinator's
+live result was all three units active on the v5.0.6 venv/source, with Butler
+reporting client `0.1.5` and `events-reconnect` without a traceback.
+
+Run the updated doctor before and after the rollout. It inventories inconsistent
+Pursers pins, the three Fleet variables, and whether the executor is fully
+provisioned, absent, or partially configured. It reads launchd on macOS and
+systemd user-service state on Linux, including the Central interpreter.
+
 ## 1. Establish the approved release
 
 Start in a clean clone of the Pursers repository. Replace every placeholder
@@ -176,7 +277,8 @@ Stage the already verified bytes without overwriting the v5.0.5 directory.
 ```sh
 install -d -m 700 "$NEW_WHEEL_DIR"
 cp "$RELEASE_DOWNLOAD"/*.whl "$RELEASE_DOWNLOAD/SHA256SUMS.txt" "$NEW_WHEEL_DIR/"
-(cd "$NEW_WHEEL_DIR" && shasum -a 256 -c SHA256SUMS.txt)
+grep -E '  (\./)?[^/]+\.whl$' "$NEW_WHEEL_DIR/SHA256SUMS.txt" |
+  (cd "$NEW_WHEEL_DIR" && shasum -a 256 -c -)
 test -d "$OLD_WHEEL_DIR"
 ```
 
@@ -389,8 +491,10 @@ launchctl print "gui/$(id -u)/com.pursers.coordinator"
 ```
 
 Success requires a registry digest subscription with `connected=true` and a
-fresh `last_event_at`, plus normal ticket dispatch. A loaded process alone is
-not sufficient.
+fresh collector `observed_at` or `heartbeat_at`, plus normal ticket dispatch.
+`last_event_at` is board activity and may legitimately be old on a quiet board;
+it is not a connection-freshness signal. A loaded process alone is not
+sufficient.
 
 Rollback: check out `coordinator.previous-sha`, restore its previous runtime
 packages if required, kickstart only the coordinator, and recheck the digest.
@@ -564,18 +668,20 @@ it. The operator's evidence collector must produce these JSON files:
 
 | File | Required fields |
 | --- | --- |
-| `coordinator-digest.json` | `connected: true`, fresh ISO-8601 `last_event_at` |
+| `coordinator-digest.json` | `connected: true`, fresh ISO-8601 `observed_at` or `heartbeat_at`; `last_event_at` is optional activity evidence only |
 | `wait-worker.json` | `mode: "push"`, or non-empty `mode_by_board` whose values are all `push` |
 | `wait-reviewer.json` | same push evidence for a reviewer |
-| `board-butler.json` | `effective_state: "autonomous"`; approved-merge capability; `fleet.status: "reconciled"`; `state_precondition_conflict` binds `TK-164fb22b` and the release SHA with `post_restart_refresh_seen: true`, `state_precondition_traceback: false`, and `evidence_kind: "live-runtime"`; when carried, `hotfix` binds the ticket, release SHA, `carried_forward: true`, and the doctor's worktree patch SHA-256 |
-| `dashboard.json` | exact `release_sha`; `visual_shell: "warm-guided-home-v1"` |
+| `board-butler.json` | `effective_state: "autonomous"`; approved-merge capability and `fleet.status: "reconciled"`, or an explicit recorded expected deviation for a pre-TK-ee3d61fd config / unprovisioned executor; `state_precondition_conflict` binds `TK-164fb22b` and the release SHA with `post_restart_refresh_seen: true`, `state_precondition_traceback: false`, and `evidence_kind: "live-runtime"`; when carried, `hotfix` binds the ticket, release SHA, `carried_forward: true`, and the doctor's worktree patch SHA-256 |
+| `dashboard.json` | exact `release_sha` from the real `/api/version` response; do not fabricate a visual-shell identifier |
 | `release-checks.json` | exact `release_sha`; `ci_manifest: "pass"`; `release_train: "pass"` |
 
 The proof must come from product-produced responses or observed runtime state.
 Do not construct expected values and present them as observations.
 
-For conflict evidence, the doctor inspects the running source for the
-`_is_state_precondition_conflict` guard at both `process_question` call sites.
+For conflict evidence, the doctor accepts the temporary
+`_is_state_precondition_conflict` guards or the permanent `StateWriteConflict`
+bounded retry only when `ee5c9e436ce35fd906c0ac943559482046e9186a` is an
+ancestor of the running checkout.
 Retain the post-restart refresh log and prove it contains no `state precondition
 failed` traceback. If `RELEASE_HAS_BUTLER_FIX=true`, also run the permanent
 fix's authoritative test file at the clean `RELEASE_SHA` checkout and record
