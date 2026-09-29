@@ -259,6 +259,79 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             **extra,
         )
 
+    async def test_board_default_ticket_tier_and_explicit_override(self) -> None:
+        unconfigured = (await self.create()).structured_content["ticket"]
+        self.assertEqual(unconfigured["tier"], 2)
+        await self.call(
+            "ticket_update",
+            agent_name="admin-agent",
+            ticket_id=unconfigured["ticket_id"],
+            parked=True,
+        )
+        legacy_id = unconfigured["ticket_id"]
+
+        def remove_legacy_tier(document: dict[str, Any]) -> None:
+            document["tickets"][legacy_id].pop("tier")
+
+        self.service.mutate("pursers", remove_legacy_tier)
+        legacy = (
+            await self.call("ticket_get", ticket_id=legacy_id)
+        ).structured_content["ticket"]
+        self.assertEqual(legacy["tier"], 2)
+
+        low_tier = await self.add_seat(
+            self.worker_a, "worker-low", {"tier_max": 1}
+        )
+        high_tier = await self.add_seat(
+            self.worker_b, "worker-high", {"tier_max": 2}
+        )
+        self.principal = self.admin
+        configured = await self.call(
+            "board_dispatch_policy_set",
+            agent_name="admin-agent",
+            default_ticket_tier=1,
+        )
+        self.assertEqual(
+            configured.structured_content["dispatch_policy"]["default_ticket_tier"],
+            1,
+        )
+
+        omitted = (
+            await self.create(prefer_agents=[low_tier])
+        ).structured_content["ticket"]
+        self.assertEqual(omitted["tier"], 1)
+        self.assertEqual(omitted["work_offer"]["agent_id"], low_tier)
+
+        explicit = (
+            await self.create(tier=2, prefer_agents=[low_tier, high_tier])
+        ).structured_content["ticket"]
+        self.assertEqual(explicit["tier"], 2)
+        self.assertEqual(explicit["work_offer"]["agent_id"], high_tier)
+
+        legacy = (
+            await self.call("ticket_get", ticket_id=legacy_id)
+        ).structured_content["ticket"]
+        self.assertEqual(legacy["tier"], 1)
+        updated_legacy = await self.call(
+            "ticket_update",
+            agent_name="admin-agent",
+            ticket_id=legacy_id,
+            parked=False,
+        )
+        self.assertEqual(updated_legacy.structured_content["ticket"]["tier"], 1)
+
+    async def test_board_default_ticket_tier_rejects_invalid_values(self) -> None:
+        for invalid in (0, 4):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    ToolError, "default_ticket_tier must be 1, 2, or 3"
+                ):
+                    await self.call(
+                        "board_dispatch_policy_set",
+                        agent_name="admin-agent",
+                        default_ticket_tier=invalid,
+                    )
+
     @staticmethod
     def readiness(
         session_id: str,

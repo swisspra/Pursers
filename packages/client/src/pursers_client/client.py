@@ -59,6 +59,7 @@ _SAFE_TOOL_ERROR_PATTERNS = (
     ),
     ("validation", re.compile(r"^(?:summary|review_notes) is required for generated-ID tickets$")),
     ("validation", re.compile(r"^priority must be low, medium, high, or critical$")),
+    ("validation", re.compile(r"^default_ticket_tier must be 1, 2, or 3$")),
     ("validation", re.compile(r"^scope must be READ-ONLY, interactive-no-send, or interactive$")),
     ("validation", re.compile(r"^assigned_to and unassigned=true are mutually exclusive$")),
     ("validation", re.compile(r"^board:intake ticket creation requires coordinator_op_key$")),
@@ -981,16 +982,20 @@ class BoardClient:
         broadcast_reoffer_s: int = 600,
         second_opinion: bool = True,
         fallback_broadcast: bool = True,
+        default_ticket_tier: int | None = None,
     ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "offer_ttl_s": offer_ttl_s,
+            "broadcast_reoffer_s": broadcast_reoffer_s,
+            "second_opinion": second_opinion,
+            "fallback_broadcast": fallback_broadcast,
+        }
+        if default_ticket_tier is not None:
+            arguments["default_ticket_tier"] = default_ticket_tier
         return await self._call(
             "board_dispatch_policy_set",
-            {
-                "agent_name": self.agent_name,
-                "offer_ttl_s": offer_ttl_s,
-                "broadcast_reoffer_s": broadcast_reoffer_s,
-                "second_opinion": second_opinion,
-                "fallback_broadcast": fallback_broadcast,
-            },
+            arguments,
         )
 
     async def board_claim_ttl_set(self, claim_ttl_s: int) -> dict[str, Any]:
@@ -1220,7 +1225,7 @@ class BoardClient:
         target_url: str | None = None,
         assigned_to: str | None = None,
         unassigned: bool = False,
-        tier: int = 2,
+        tier: int | None = None,
         skills_required: list[str] | None = None,
         exclude_agents: list[str] | None = None,
         prefer_agents: list[str] | None = None,
@@ -1231,7 +1236,6 @@ class BoardClient:
             "title": title,
             "priority": priority,
             "unassigned": unassigned,
-            "tier": tier,
         }
         optional = {
             "ticket_id": ticket_id,
@@ -1247,6 +1251,7 @@ class BoardClient:
             "exclude_agents": exclude_agents,
             "prefer_agents": prefer_agents,
             "model_usage": model_usage,
+            "tier": tier,
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
         result = await self._call("ticket_create", arguments)

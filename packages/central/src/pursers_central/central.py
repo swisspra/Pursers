@@ -1819,6 +1819,13 @@ class CentralBoard:
             value = dispatch_policy.setdefault(field, default)
             if not isinstance(value, bool):
                 raise ValueError(f"board dispatch {field} is invalid")
+        default_ticket_tier = dispatch_policy.get("default_ticket_tier")
+        if default_ticket_tier is not None and (
+            isinstance(default_ticket_tier, bool)
+            or not isinstance(default_ticket_tier, int)
+            or default_ticket_tier not in {1, 2, 3}
+        ):
+            raise ValueError("board dispatch default_ticket_tier is invalid")
         intake_rate_limit = config.setdefault(
             "intake_rate_limit_per_hour", DEFAULT_INTAKE_RATE_LIMIT_PER_HOUR
         )
@@ -3729,6 +3736,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     def dispatch_policy(document: Mapping[str, Any]) -> dict[str, Any]:
         return dict(document.get("config", {}).get("dispatch_policy", {}))
 
+    def default_ticket_tier(document: Mapping[str, Any]) -> int:
+        return int(dispatch_policy(document).get("default_ticket_tier", 2))
+
     def parse_epoch(value: Any) -> float | None:
         if not isinstance(value, str):
             return None
@@ -3971,7 +3981,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if kind == "work" and member.get("role") in {"coordinator", "orchestrator"}:
             return False
         caps = member_capabilities(member)
-        required_tier = int(ticket.get("tier", 2))
+        required_tier = int(ticket.get("tier", default_ticket_tier(document)))
         required_skills = set(ticket.get("skills_required", []))
         if (
             int(caps["tier_max"]) < required_tier
@@ -4042,7 +4052,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             assignment_match = assignment_matches(member, str(requested))
         excluded = agent_matches(ticket.get("exclude_agents", []), member)
         caps = member_capabilities(member)
-        required_tier = int(ticket.get("tier", 2))
+        required_tier = int(ticket.get("tier", default_ticket_tier(document)))
         required_skills = set(ticket.get("skills_required", []))
         missing_skills = sorted(required_skills - set(caps["skills"]))
         membership_role = membership.get("role") if isinstance(membership, Mapping) else None
@@ -4458,7 +4468,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ):
             set_broadcast_state(document, ticket, now, kind, "offer_limit_reached")
             return None
-        required_tier = int(ticket.get("tier", 2))
+        required_tier = int(ticket.get("tier", default_ticket_tier(document)))
         preferred = list(ticket.get("prefer_agents", []))
         dispatch_history = list(ticket.get("dispatch_history") or [])
         if ticket.get("dispatch_history_omitted_count"):
@@ -5089,7 +5099,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         projected.setdefault("required_fields", [])
         projected.setdefault("forbidden", [])
         projected.setdefault("priority", "medium")
-        projected.setdefault("tier", 2)
+        tier_document = document if document is not None else service.load(board_id)
+        projected.setdefault("tier", default_ticket_tier(tier_document))
         projected.setdefault("skills_required", [])
         projected.setdefault("exclude_agents", [])
         projected.setdefault("prefer_agents", [])
@@ -8643,6 +8654,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         broadcast_reoffer_s: int = DEFAULT_BROADCAST_REOFFER_S,
         second_opinion: bool = True,
         fallback_broadcast: bool = True,
+        default_ticket_tier: int | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
         """Set per-seat offer expiry and fallback behavior as board admin."""
@@ -8668,19 +8680,32 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         if not isinstance(second_opinion, bool) or not isinstance(fallback_broadcast, bool):
             raise ValueError("second_opinion and fallback_broadcast must be boolean")
+        if default_ticket_tier is not None and (
+            isinstance(default_ticket_tier, bool)
+            or not isinstance(default_ticket_tier, int)
+            or default_ticket_tier not in {1, 2, 3}
+        ):
+            raise ValueError("default_ticket_tier must be 1, 2, or 3")
         principal = current_principal()
         require_board_write_or_coordinate(principal)
         now = time.time()
 
         def set_policy(document: dict[str, Any]) -> dict[str, Any]:
             actor = require_admin_actor(document, principal, agent_name)
+            previous = copy.deepcopy(dispatch_policy(document))
             policy = {
                 "offer_ttl_s": offer_ttl_s,
                 "broadcast_reoffer_s": broadcast_reoffer_s,
                 "second_opinion": second_opinion,
                 "fallback_broadcast": fallback_broadcast,
             }
-            previous = copy.deepcopy(dispatch_policy(document))
+            configured_default = (
+                default_ticket_tier
+                if default_ticket_tier is not None
+                else previous.get("default_ticket_tier")
+            )
+            if configured_default is not None:
+                policy["default_ticket_tier"] = configured_default
             document["config"]["dispatch_policy"] = policy
             actor["last_activity_at"] = iso_at(now)
             return {"previous": previous, "current": policy}
@@ -9194,7 +9219,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         unassigned: bool = False,
         coordinator_op_key: str | None = None,
         expected_generation: str | None = None,
-        tier: int = 2,
+        tier: int | None = None,
         skills_required: list[str] | None = None,
         exclude_agents: list[str] | None = None,
         prefer_agents: list[str] | None = None,
@@ -9216,7 +9241,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket_id = require_id("ticket_id", ticket_id)
         if priority not in TICKET_PRIORITIES:
             raise ValueError("priority must be low, medium, high, or critical")
-        if isinstance(tier, bool) or tier not in {1, 2, 3}:
+        if tier is not None and (
+            isinstance(tier, bool) or not isinstance(tier, int) or tier not in {1, 2, 3}
+        ):
             raise ValueError("tier must be 1, 2, or 3")
         if scope is not None and scope not in TICKET_SCOPES:
             raise ValueError(
@@ -9244,6 +9271,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         now = time.time()
 
         def create(document: dict[str, Any]) -> dict[str, Any]:
+            resolved_tier = tier if tier is not None else default_ticket_tier(document)
             profile = board_scrub_profile(document)
             allow_counts: dict[str, int] = {}
             safe_title = clean_text(
@@ -9383,7 +9411,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "required_fields": safe_required,
                 "forbidden": safe_forbidden,
                 "priority": priority,
-                "tier": tier,
+                "tier": resolved_tier,
                 "skills_required": sorted(set(safe_skills)),
                 "exclude_agents": sorted(set(safe_excluded)),
                 "prefer_agents": sorted(set(safe_preferred)),
@@ -12618,7 +12646,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "ticket_id": ticket["ticket_id"],
                     "status": ticket["status"],
                     "target_url": ticket.get("target_url", ""),
-                    "tier": ticket.get("tier", 2),
+                    "tier": ticket.get("tier", default_ticket_tier(document)),
                     "skills_required": list(
                         ticket.get("skills_required") or []
                     ),
