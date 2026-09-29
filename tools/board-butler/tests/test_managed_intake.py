@@ -505,4 +505,52 @@ def test_resident_reuses_intake_decisions_and_reports_model_calls(monkeypatch):
         backend._source_board_load = {"board": {"idle_workers": 2}}
         assert (await backend._source_intake_decide({"ceiling": 15}))["model_called"] is True
         assert len(calls) == 2
+        with_work = {"ceiling": 15, "sources": [{"open_issue_count": 1}]}
+        assert (await backend._source_intake_decide(with_work))["model_called"] is True
+        assert len(calls) == 3
+        empty = {"ceiling": 15, "sources": [{"open_issue_count": 0}]}
+        assert (await backend._source_intake_decide(empty))["model_called"] is False
+        assert len(calls) == 3
+        assert (await backend._source_intake_decide(with_work))["model_called"] is True
+        assert len(calls) == 4
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("sources", [
+    [{"source_id": "sonar", "open_issue_count": 0}],
+    [{"source_id": "a", "open_issue_count": 0}, {"source_id": "b", "open_issue_count": 0}],
+])
+def test_resident_skips_model_when_all_sources_are_confirmed_empty(monkeypatch, sources):
+    async def scenario():
+        backend = butler.CentralBackend(SimpleNamespace(), "opaque")
+        async def unexpected_config():
+            pytest.fail("Confirmed empty sources must not resolve or call a model")
+        monkeypatch.setattr(backend, "coordinator_config", unexpected_config)
+        result = await backend._source_intake_decide({"ceiling": 15, "sources": sources})
+        assert result == {"pull": 0, "source_ids": [], "reason": "no_open_issues", "model_called": False}
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("sources", [
+    [], [{"open_issue_count": None}], [{"open_issue_count": False}],
+    [{"open_issue_count": -1}], [{"open_issue_count": 0}, {"open_issue_count": 2}],
+    [{"open_issue_count": 0, "observation_error": "TimeoutError"}],
+])
+def test_resident_does_not_treat_unknown_or_nonempty_sources_as_empty(monkeypatch, sources):
+    async def scenario():
+        backend = butler.CentralBackend(SimpleNamespace(), "opaque")
+        async def config():
+            return {}
+        calls = []
+        async def decide(_runtime, context):
+            calls.append(context)
+            return {"pull": 0}
+        monkeypatch.setattr(backend, "coordinator_config", config)
+        monkeypatch.setattr(butler, "resolve_config", lambda *_a, **_kw: None)
+        runtime = butler.ProviderRuntime("https://model.invalid", "model", "secret")
+        monkeypatch.setattr(butler, "resolve_provider_runtime", lambda *_a, **_kw: runtime)
+        monkeypatch.setattr(butler, "decide_intake_with_provider", decide)
+        result = await backend._source_intake_decide({"ceiling": 15, "sources": sources})
+        assert result["model_called"] is True
+        assert len(calls) == 1
     asyncio.run(scenario())

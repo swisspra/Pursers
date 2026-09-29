@@ -229,8 +229,11 @@ work in flight) and the board load; code clamps the answer to that ceiling and
 pulls nothing when the model is unavailable. The resident reuses the decision
 while source observations, board load, in-flight work, ceiling, and provider
 settings are unchanged; source `observed_at` timestamps alone do not trigger
-another model call. The cache lasts for the resident process, so a restart
-makes one fresh decision. Provider failures defer retries for 15 minutes
+another model call. If every source has a successful observation with zero
+open issues, the resident returns `no_open_issues` without calling or resolving
+a model. Unknown, invalid, or failed counts are not treated as zero. The cache
+lasts for the resident process; a restart needs a fresh decision only when
+sources are not confirmed empty. Provider failures defer retries for 15 minutes
 unless provider settings change. Decision logs include `model_called` to
 distinguish new requests from reused decisions. A source may set `page_arg` and
 `max_pages` so already-taken items (tracked in the 0600 index, not in Central)

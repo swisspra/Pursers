@@ -5900,6 +5900,11 @@ class IntakeDecisionCache:
         self._lock = asyncio.Lock()
         self.model_called = False
 
+    def forget_decision(self) -> None:
+        """Invalidate a decision after an empty-source observation, retaining backoff."""
+        self._context = None
+        self._decision = None
+
     async def decide(
         self, runtime: ProviderRuntime, context: Mapping[str, Any], now: datetime
     ) -> Mapping[str, Any]:
@@ -11793,6 +11798,19 @@ class CentralBackend:
     async def _source_intake_decide(
         self, context: Mapping[str, Any]
     ) -> Mapping[str, Any]:
+        sources = context.get("sources")
+        if isinstance(sources, list) and sources and all(
+            isinstance(source, Mapping)
+            and type(source.get("open_issue_count")) is int
+            and source["open_issue_count"] == 0
+            and not source.get("observation_error")
+            for source in sources
+        ):
+            self._intake_decision_cache.forget_decision()
+            return {
+                "pull": 0, "source_ids": [], "reason": "no_open_issues",
+                "model_called": False,
+            }
         document = await self.coordinator_config()
         config = resolve_config(
             document, self.args, {}, utc_now(), project_name=self.project_name
