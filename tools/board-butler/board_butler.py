@@ -3505,6 +3505,7 @@ class SourceWriteback:
     on: str
     tool: str
     arg_template: Mapping[str, Any]
+    preflight: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(
@@ -3513,8 +3514,8 @@ class SourceWriteback:
         path: str,
         connector: ConnectorDeclaration,
     ) -> "SourceWriteback":
-        _connector_keys(value, {"on", "tool", "arg_template"}, path)
-        if set(value) != {"on", "tool", "arg_template"}:
+        _connector_keys(value, {"on", "tool", "arg_template", "preflight"}, path)
+        if not {"on", "tool", "arg_template"}.issubset(value):
             raise ConnectorConfigError(f"{path} is missing required fields")
         on = value["on"]
         if on not in {"approved", "closed"}:
@@ -3542,7 +3543,18 @@ class SourceWriteback:
         }
         if not placeholders.issubset(SOURCE_WRITEBACK_PLACEHOLDERS):
             raise ConnectorConfigError(f"{path}.arg_template has an unknown placeholder")
-        return cls(on, tool, copy.deepcopy(dict(template)))
+        preflight = value.get("preflight")
+        if preflight is not None:
+            keys = {"read_tool", "arg_template", "refs_path", "name_path", "sha_path"}
+            if not isinstance(preflight, Mapping) or set(preflight) != keys:
+                raise ConnectorConfigError(f"{path}.preflight is malformed")
+            if not any(t.name == preflight["read_tool"] and t.effect == "read_only" for t in connector.tools):
+                raise ConnectorConfigError(f"{path}.preflight.read_tool must be declared read_only")
+            if not isinstance(preflight["arg_template"], Mapping) or _source_config_size(preflight, path) > 16384:
+                raise ConnectorConfigError(f"{path}.preflight arguments are malformed")
+            for name in ("refs_path", "name_path", "sha_path"):
+                _source_path(preflight[name], f"{path}.preflight.{name}")
+        return cls(on, tool, copy.deepcopy(dict(template)), copy.deepcopy(preflight))
 
 
 @dataclass(frozen=True)
@@ -6005,6 +6017,9 @@ class SourceIntakePoller:
         self.cycle_cap = cycle_cap
         self._round_robin = 0
         self.index = index if index is not None else SourceIntakeIndex()
+        missing_sources = {e.get("source_id") for e in self.index.entries.values()} - {s.source_id for s in sources}
+        if missing_sources:
+            raise ConnectorConfigError("source index requires explicit source-ID migration")
         self.ceiling = ceiling
         self.decide = decide
         self.project_reader = project_reader
@@ -6104,6 +6119,28 @@ class SourceIntakePoller:
             **_repository_fields(project),
         }
 
+    async def _preflight_writeback(self, runtime, writeback, fields, arguments):
+        expected = {"project": fields["repository_project"], "repositoryId": fields["repository_name"],
+                    "sourceRefName": "refs/heads/" + fields["source_branch"],
+                    "targetRefName": "refs/heads/" + fields["target_branch"]}
+        if (not fields["repository_org"] or not fields["source_branch"]
+                or not re.fullmatch(r"[0-9a-f]{40}", fields["approved_sha"])
+                or any(arguments.get(k) != v for k, v in expected.items())):
+            raise ConnectorDenied("PR repository, branch or approval does not match the registered project")
+        policy = writeback.preflight
+        read_args = _render_source_template(policy["arg_template"], fields)
+        if any(read_args.get(k) != expected[k] for k in ("project", "repositoryId")):
+            raise ConnectorDenied("remote-ref lookup must target the registered project and repository")
+        result = await runtime.call_tool("source-preflight-" + hashlib.sha256(_canonical_json(read_args)).hexdigest()[:32],
+                                         policy["read_tool"], read_args)
+        rows = _source_value(_source_payload_document(result.payload), policy["refs_path"])
+        if not isinstance(rows, list):
+            raise ConnectorDenied("remote-ref response is unavailable")
+        matches = [row for row in rows if isinstance(row, Mapping)
+                   and _source_value(row, policy["name_path"]) == expected["sourceRefName"]]
+        if len(matches) != 1 or _source_value(matches[0], policy["sha_path"]) != fields["approved_sha"]:
+            raise ConnectorDenied("remote branch differs from the approved SHA")
+
     async def _maybe_writeback(
         self,
         source: SourceDeclaration,
@@ -6129,6 +6166,10 @@ class SourceIntakePoller:
             return False
         fields = await self._writeback_fields(source, board_id, ticket_id, ticket, item)
         arguments = _render_source_template(writeback.arg_template, fields)
+        if writeback.preflight is not None:
+            await self._preflight_writeback(runtime, writeback, fields, arguments)
+        elif writeback.tool == "ado_pull_request_create":
+            raise ConnectorDenied("PR delivery requires a configured remote-ref preflight")
         operation = "source-writeback-" + marker_digest[:32]
         tool = next(t for t in runtime.declaration.tools if t.name == writeback.tool)
         grant = ConnectorPolicyRequest(
@@ -6136,6 +6177,17 @@ class SourceIntakePoller:
             operation, writeback.tool, tool.effect,
             hashlib.sha256(_canonical_json(arguments)).hexdigest(),
         )
+        key = self.index.key(source.source_id, item["external_id"])
+        entry = self.index.entries.get(key)
+        if entry is not None and entry.get("status") in {"delivering", "delivered", "closed"}:
+            return False
+        if entry is None:
+            self.index.put(source.source_id, item["external_id"], {
+                **item, "source_id": source.source_id, "board_id": board_id,
+                "ticket_id": ticket_id, "status": "asked",
+            })
+        self.index.set_status(key, "delivering")
+        self.index.save()
         self._writeback_grants.add(grant)
         try:
             await runtime.call_tool(operation, writeback.tool, arguments)
@@ -6146,6 +6198,8 @@ class SourceIntakePoller:
             ticket_id,
             f"{marker}\nConnector writeback completed for the approved intake ticket.",
         )
+        self.index.set_status(key, "delivered")
+        self.index.save()
         return True
 
     async def _writeback_pass(self, findings: list[dict[str, Any]]) -> int:
@@ -6183,13 +6237,11 @@ class SourceIntakePoller:
                 self.index.set_status(key, "delivered")
                 continue
             runtime = self.runtimes[source.connector_id]
-            self.index.set_status(key, "delivering")
-            self.index.save()
             try:
                 delivered = await self._maybe_writeback(
                     source, runtime, board_id, ticket_id, ticket, entry
                 )
-            except ConnectorError as exc:
+            except Exception as exc:
                 findings.append(
                     {
                         "kind": "source-intake-writeback-failed",
@@ -6205,7 +6257,6 @@ class SourceIntakePoller:
                     }
                 )
                 continue
-            self.index.set_status(key, "delivered")
             if delivered:
                 writebacks += 1
         return writebacks
@@ -6393,13 +6444,15 @@ class SourceIntakePoller:
                                     )
                                 ),
                             )
-                        if self.active and await self._maybe_writeback(
-                            source, runtime, board_id, ticket_id, ticket, item
-                        ):
-                            writebacks += 1
-                            index_entry["status"] = "delivered"
                         if self.active:
                             self.index.put(source.source_id, item["external_id"], index_entry)
+                            try:
+                                if await self._maybe_writeback(source, runtime, board_id, ticket_id, ticket, item):
+                                    writebacks += 1
+                            except Exception as exc:
+                                findings.append({"kind": "source-intake-writeback-failed", "level": "warn",
+                                                 "status": "needs_operator", "source_id": source.source_id,
+                                                 "ticket_id": ticket_id, "error_class": type(exc).__name__})
                         continue
                     if board_id not in states:
                         states[board_id] = _decode_source_intake_state(
@@ -6478,8 +6531,11 @@ class SourceIntakePoller:
                 )
         except BaseException:
             # An ask that never reached Central must not be remembered as taken.
-            self.index.entries = index_snapshot
-            self.index.dirty = index_dirty
+            attempts = {k: dict(v) for k, v in self.index.entries.items()
+                        if v.get("status") in {"delivering", "delivered"}}
+            self.index.entries = {**index_snapshot, **attempts}
+            self.index.dirty = index_dirty or bool(attempts)
+            self.index.save()
             raise
         self.index.save()
         return {
@@ -12379,6 +12435,72 @@ class CentralBackend:
             "document": copy.deepcopy(roster),
         }
 
+    async def _collect_local_fleet_observation(self, active_boards, board_snapshots, now):
+        paths = [getattr(self.args, key, None) for key in
+                 ("fleet_local_config", "fleet_executor_config", "fleet_executor_state")]
+        if not all(paths):
+            raise ButlerConfigError("local fleet observation configuration is incomplete")
+        document = json.loads(_read_connector_private_file(paths[0], "local fleet config", 1048576))
+        if not isinstance(document, Mapping) or set(document) != {"templates", "providers"}:
+            raise ButlerConfigError("local fleet config requires templates and providers")
+        executor = runpy.run_path(str(Path(__file__).resolve().parents[1] / "seat-kit" / "fleet_executor.py"))
+        observer_api = runpy.run_path(str(Path(__file__).with_name("fleet_observation.py")))
+        policy = executor["load_policy"](paths[1])
+        state = paths[2]
+        if set(document["templates"]) != set(policy.templates):
+            raise ButlerConfigError("local fleet template bindings must match executor templates")
+        memberships = {}
+        for board_id in active_boards:
+            try:
+                async with self._client_for_board(board_id) as client:
+                    memberships[board_id] = await client._call("board_members", {})
+            except Exception:
+                memberships[board_id] = {}
+
+        def collect():
+            store = executor["ExecutorStore"](state / "executor.sqlite3")
+            try:
+                stored = store.observation_snapshot()
+            finally:
+                store.connection.close()
+            services = executor["service_adapter"](policy, state)
+            providers = {}
+            for name, record in document["providers"].items():
+                started = time.monotonic()
+                healthy = False
+                try:
+                    endpoint, model = record["endpoint"], record["model"]
+                    parsed = urllib.parse.urlsplit(endpoint)
+                    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                        raise ValueError("provider endpoint must be plain HTTPS")
+                    credential = _read_connector_private_file(Path(record["secret_file"]), "provider credential", 8192).decode().strip()
+                    runtime = ProviderRuntime(endpoint, model, credential)
+                    url = endpoint.rstrip("/") + "/models"
+                    request = urllib.request.Request(url, headers=runtime.request_headers())
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _ProviderRedirectHandler(url))
+                    with opener.open(request, timeout=10) as response:
+                        raw = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
+                    if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
+                        raise ValueError("provider response too large")
+                    payload = json.loads(raw)
+                    healthy = model in {row.get("id") for row in payload.get("data", []) if isinstance(row, Mapping)}
+                except Exception:
+                    pass
+                providers[name] = {"status": "healthy" if healthy else "unavailable",
+                                   "latency_ms": int((time.monotonic()-started)*1000)}
+            headroom = read_host_headroom(self.args.repo)
+            host = {"load_ratio": headroom.get("load_ratio", 1),
+                    "capacity_available": bool(headroom.get("complete")) and headroom.get("memory_headroom_ratio", 0) > .1 and headroom.get("disk_headroom_ratio", 0) > .1,
+                    "executor_status": "healthy" if self.args.fleet_executor_socket.is_socket() else "unavailable"}
+            observer = observer_api["LocalFleetObserver"](policy.templates, services, stored, document["templates"])
+            # Use the beginning of collection as the freshness origin: slow probes
+            # must not make old registry evidence appear newly observed.
+            observation, readiness, leases = observer.collect(active_boards, board_snapshots, memberships, now, providers, host)
+            observer_api["publish"](state / "registry-readiness.json", readiness)
+            observer_api["publish"](state / "leases.json", leases)
+            observer_api["publish"](self.args.fleet_observation_file, observation)
+        await asyncio.to_thread(collect)
+
     async def _reconcile_fleet(
         self,
         active_boards: Sequence[str],
@@ -12405,9 +12527,11 @@ class CentralBackend:
         configs = await self._autonomous_fleet_configs(active_boards)
         if not configs:
             return {"status": "shadow", "boards": []}
+        if getattr(self.args, "fleet_observation_mode", "file") == "local":
+            await self._collect_local_fleet_observation(active_boards, board_snapshots, now)
         observation = FileFleetObservationSource(
             self.args.fleet_observation_file
-        ).load(now)
+        ).load(utc_now() if getattr(self.args, "fleet_observation_mode", "file") == "local" else now)
         supervisor_report: Mapping[str, Any] | None = None
         raw_supervisor = observation.get("supervisor_observation")
         if isinstance(raw_supervisor, Mapping):
@@ -14181,6 +14305,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="local service mode; active additionally requires an authorization file",
     )
     parser.add_argument("--active-authorization-file", type=Path)
+    parser.add_argument("--fleet-observation-mode", choices=("file", "local"), default="file")
+    parser.add_argument("--fleet-local-config", type=Path)
+    parser.add_argument("--fleet-executor-state", type=Path)
     parser.add_argument(
         "--fleet-observation-file",
         type=Path,
@@ -14355,6 +14482,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "local_kill_file",
         "active_authorization_file",
         "fleet_observation_file",
+        "fleet_local_config",
+        "fleet_executor_state",
         "fleet_state_file",
         "fleet_executor_socket",
         "fleet_executor_private_key",

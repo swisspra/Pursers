@@ -554,3 +554,103 @@ def test_resident_does_not_treat_unknown_or_nonempty_sources_as_empty(monkeypatc
         assert result["model_called"] is True
         assert len(calls) == 1
     asyncio.run(scenario())
+
+
+def test_revision_update_cannot_replay_uncertain_delivery(tmp_path):
+    async def scenario():
+        calls = []
+        issue = _issue(1)
+        issue['updatedAt'] = 'r2'
+        runtime = _runtime(_declaration(), PagedClient({1: [issue]}, calls))
+        board = Board()
+        ticket_id = butler._source_ticket_id('board-a', butler._source_ask_id('board-a', 'sonar', 'SONAR-1'))
+        board.tickets[ticket_id] = {'status': 'closed', 'review_verdict': 'approve'}
+        index = butler.SourceIntakeIndex(tmp_path / 'index.json')
+        index.put('sonar', 'SONAR-1', {'source_id': 'sonar', 'external_id': 'SONAR-1',
+                  'revision': 'r1', 'board_id': 'board-a', 'ticket_id': ticket_id, 'status': 'delivering'})
+        index.save()
+        source = _source(writeback={'on': 'approved', 'tool': 'pr_create', 'arg_template': {
+            'repositoryId': 'r', 'sourceRefName': 's', 'targetRefName': 't', 'title': 'x'}})
+        poller = _poller(board, runtime, [source], index=butler.SourceIntakeIndex(index.path))
+        await poller.run_cycle(NOW)
+        assert not [name for name, _ in calls if name == 'pr_create']
+        assert butler.SourceIntakeIndex(index.path).get('sonar', 'SONAR-1')['status'] == 'delivering'
+    asyncio.run(scenario())
+
+
+def test_removed_indexed_source_requires_explicit_migration(tmp_path):
+    index = butler.SourceIntakeIndex(tmp_path / 'index.json')
+    index.put('old-source', 'issue', {'source_id': 'old-source', 'status': 'asked'})
+    with pytest.raises(butler.ConnectorConfigError, match='migration'):
+        _poller(Board(), _runtime(_declaration(), PagedClient({}, [])), [_source()], index=index)
+
+
+def _delivery_setup(tmp_path, *, remote_sha='b'*40, mismatch=False, annotate_fails=False):
+    calls = []
+    class DeliveryClient(PagedClient):
+        async def list_tools(self, **kwargs):
+            result = await super().list_tools(**kwargs)
+            result.tools.append(SimpleNamespace(name='refs', input_schema={
+                'type': 'object', 'properties': {'project': {'type': 'string'},
+                'repositoryId': {'type': 'string'}, 'filter': {'type': 'string'}}}))
+            return result
+        async def call_tool(self, name, arguments, **kwargs):
+            if name == 'refs':
+                self.calls.append((name, dict(arguments)))
+                return Model(structured_content={'value': [{'name': 'refs/heads/pursers/TK-test', 'objectId': remote_sha}]})
+            return await super().call_tool(name, arguments, **kwargs)
+    declaration = _declaration()
+    from dataclasses import replace
+    declaration = replace(declaration, tools=(*declaration.tools, replace(declaration.tools[0], name='refs')))
+    runtime = _runtime(declaration, DeliveryClient({}, calls))
+    board = Board()
+    board.tickets['TK-test'] = {'status': 'closed', 'review_verdict': 'approve',
+        'latest_submission': {'notes': 'branch_and_commit: pursers/TK-test@'+'b'*40}}
+    if annotate_fails:
+        async def annotate(*_):
+            raise RuntimeError('annotation unavailable')
+        board.annotate = annotate
+    async def project(_):
+        return {'repository_url': 'https://dev.azure.com/example-org/example-project/_git/example-repo', 'integration_ref': 'main'}
+    source = _source(writeback={'on': 'approved', 'tool': 'pr_create', 'arg_template': {
+        'project': 'wrong-project' if mismatch else '{repository_project}',
+        'repositoryId': '{repository_name}', 'sourceRefName': 'refs/heads/{source_branch}',
+        'targetRefName': 'refs/heads/{target_branch}', 'title': '{ticket_id}'},
+        'preflight': {'read_tool': 'refs', 'arg_template': {'project': '{repository_project}',
+            'repositoryId': '{repository_name}', 'filter': 'heads/{source_branch}'},
+            'refs_path': 'value', 'name_path': 'name', 'sha_path': 'objectId'}})
+    index = butler.SourceIntakeIndex(tmp_path / 'index.json')
+    index.put('sonar', 'one', {'source_id': 'sonar', 'external_id': 'one', 'revision': 'r1',
+              'board_id': 'board-a', 'ticket_id': 'TK-test', 'status': 'asked'})
+    index.save()
+    poller = _poller(board, runtime, [source], index=index, project_reader=project)
+    return poller, calls
+
+
+@pytest.mark.parametrize('remote_sha,mismatch', [('c'*40, False), ('b'*40, True)])
+def test_delivery_preflight_blocks_unapproved_remote_branch_or_target(tmp_path, remote_sha, mismatch):
+    async def scenario():
+        poller, calls = _delivery_setup(tmp_path, remote_sha=remote_sha, mismatch=mismatch)
+        result = await poller.run_cycle(NOW)
+        assert not [name for name, _ in calls if name == 'pr_create']
+        assert any(f['kind'] == 'source-intake-writeback-failed' for f in result['findings'])
+    asyncio.run(scenario())
+
+
+def test_delivery_annotation_failure_preserves_attempt_across_restart(tmp_path):
+    async def scenario():
+        poller, calls = _delivery_setup(tmp_path, annotate_fails=True)
+        await poller.run_cycle(NOW)
+        poller.index = butler.SourceIntakeIndex(poller.index.path)
+        await poller.run_cycle(NOW + timedelta(minutes=1))
+        assert [name for name, _ in calls].count('pr_create') == 1
+        assert poller.index.get('sonar', 'one')['status'] == 'delivering'
+    asyncio.run(scenario())
+
+
+def test_delivery_preflight_accepts_exact_approved_head(tmp_path):
+    async def scenario():
+        poller, calls = _delivery_setup(tmp_path)
+        assert (await poller.run_cycle(NOW))['writebacks'] == 1
+        assert [name for name, _ in calls].count('pr_create') == 1
+    asyncio.run(scenario())

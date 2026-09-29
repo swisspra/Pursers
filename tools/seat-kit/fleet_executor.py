@@ -611,6 +611,12 @@ class ExecutorStore:
         )
         return dict(zip(keys, row, strict=True))
 
+    def observation_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Return detached seat evidence through the supported store interface."""
+        with self.connection:
+            ids = [row[0] for row in self.connection.execute("SELECT seat_id FROM seats")]
+            return {seat_id: record for seat_id in ids if (record := self.seat(seat_id)) is not None}
+
     def active_counts(self, board_id: str) -> tuple[int, int]:
         active = ("starting", "ready", "busy", "draining", "unhealthy")
         marks = ",".join("?" for _ in active)

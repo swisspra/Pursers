@@ -278,6 +278,8 @@ class PursersBoardGateway:
             self.token,
             self.config.board.board_id,
             agent_name=self.config.board.agent_name,
+            role="coordinator" if self.config.central.create_mode == "intake" else "worker",
+            capabilities={"can_work": False, "can_review": False},
         ) as client:
             try:
                 if self.config.central.create_mode == "intake":
@@ -328,6 +330,8 @@ class PursersBoardGateway:
             self.token,
             self.config.board.board_id,
             agent_name=self.config.board.agent_name,
+            role="coordinator" if self.config.central.create_mode == "intake" else "worker",
+            capabilities={"can_work": False, "can_review": False},
         ) as client:
             return (await client.ticket_get(ticket_id))["ticket"]
 

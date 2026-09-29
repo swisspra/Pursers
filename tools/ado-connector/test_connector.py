@@ -384,7 +384,7 @@ def test_end_to_end_real_central_scratch_board_with_intake_scope(
             "localhost", 8765, tmp_path / "central-data"
         )
         admin = central_server.Principal(
-            "PR-admin", "admin", frozenset({"board:read", "board:write", "board:review"})
+            "PR-admin", "admin", frozenset({"board:read", "board:write", "board:review", "board:coordinate"})
         )
         intake = central_server.Principal(
             "PR-intake",
@@ -417,9 +417,9 @@ def test_end_to_end_real_central_scratch_board_with_intake_scope(
                     role="reviewer" if principal is reviewer else "member",
                 )
             )
-        asyncio.run(call(intake, "board_join", agent_name="ado-connector"))
-        asyncio.run(call(worker, "board_join", agent_name="worker"))
-        asyncio.run(call(reviewer, "board_join", agent_name="reviewer"))
+        asyncio.run(call(intake, "board_join", agent_name="ado-connector", role="coordinator", capabilities={"can_work": False, "can_review": False}))
+        worker_join = asyncio.run(call(worker, "board_join", agent_name="worker", capabilities={"can_work": True, "can_review": False, "tier_max": 3, "max_parallel": 1}))
+        asyncio.run(call(reviewer, "board_join", agent_name="reviewer", role="reviewer", capabilities={"can_work": False, "can_review": True, "tier_max": 3, "max_parallel": 1}))
 
         class CentralScratchBoard:
             def create_ticket(self, ticket_id: str, body: Mapping[str, Any]) -> str:
@@ -471,6 +471,9 @@ def test_end_to_end_real_central_scratch_board_with_intake_scope(
             assert created_ticket["origin"] == "coordinator-intake"
             assert created_ticket["coordinator_op_key"] == connector.create_op_key(ticket_id)
 
+            asyncio.run(call(admin, "ticket_assign", agent_name="admin", ticket_id=ticket_id,
+                             assigned_to_agent_id=worker_join["agent_id"], expected_status="open",
+                             coordinator_op_key="test-assign-" + ticket_id, reason="Assign fixture work"))
             asyncio.run(call(worker, "ticket_claim", agent_name="worker", ticket_id=ticket_id))
             asyncio.run(
                 call(
