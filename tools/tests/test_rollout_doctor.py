@@ -423,6 +423,36 @@ def test_inspect_derives_v508_versions_from_release_checkout(tmp_path: Path) -> 
     }
 
 
+def test_inspect_fails_closed_without_release_version_manifest(
+    tmp_path: Path,
+) -> None:
+    args, active, _stale, _release_sha = _fixture(tmp_path, VERSIONS_508)
+    seed = tmp_path / "seed"
+    (seed / "tools/release_versions.toml").unlink()
+    _git(["add", "tools/release_versions.toml"], seed)
+    _git(["commit", "-m", "remove release manifest"], seed)
+    release_sha = _git(["rev-parse", "HEAD"], seed)
+    for repo in (
+        active / "src",
+        args.pursers_home / "runtimes/fleet-dashboard/repo",
+        args.pursers_home / "coordinator/src",
+    ):
+        _git(["fetch", "origin", release_sha], repo)
+        _git(["checkout", "--detach", release_sha], repo)
+    args.release_sha = release_sha
+    args.release_tag = "v-not-present"
+
+    result = doctor.inspect(args)
+
+    assert result["release"]["manifest_ref"] is None
+    assert result["checks"]["release_version_manifest"] == {
+        "status": "FAIL",
+        "detail": "release package versions are missing or mismatched",
+        "failure_kind": "version_mismatch",
+    }
+    assert result["summary"]["ok"] is False
+
+
 def test_v506_installed_client_fails_against_v508_release(tmp_path: Path) -> None:
     args, active, _stale, _release_sha = _fixture(tmp_path, VERSIONS_508)
     metadata = next(

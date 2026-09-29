@@ -1098,7 +1098,10 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
     version_sources = [
         row["versions"] for row in repositories if row["sha"] == args.release_sha
     ]
-    versions_ok = bool(version_sources) and all(
+    release_manifest_complete = release_manifest_ref is not None and all(
+        expected_versions.get(key) for key in REQUIRED_VERSION_KEYS
+    )
+    versions_ok = release_manifest_complete and bool(version_sources) and all(
         all(versions.get(key) == value for key, value in expected_versions.items())
         for versions in version_sources
     )
