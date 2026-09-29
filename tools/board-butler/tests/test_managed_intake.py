@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import json
 import os
+
+import pytest
 from collections.abc import AsyncIterator, Mapping
 from datetime import timedelta
 from pathlib import Path
@@ -266,7 +268,8 @@ def test_ceiling_bounds_the_model_and_failures_pull_nothing() -> None:
     asyncio.run(scenario())
 
 
-def test_approved_ticket_opens_one_ado_pull_request_from_the_approved_branch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("resident", [False, True])
+def test_approved_ticket_opens_one_ado_pull_request_from_the_approved_branch(tmp_path: Path, resident: bool) -> None:
     async def scenario() -> None:
         calls: list = []
         client = PagedClient({1: [_issue(1)]}, calls)
@@ -281,7 +284,7 @@ def test_approved_ticket_opens_one_ado_pull_request_from_the_approved_branch(tmp
 
         async def project(_board_id):
             return {
-                "repository_url": "https://dev.azure.com/SCGC-Digital/MANTA-DEV/_git/manta-backend",
+                "repository_url": "https://dev.azure.com/example-org/example-project/_git/example-backend",
                 "integration_ref": "develop",
             }
 
@@ -301,6 +304,17 @@ def test_approved_ticket_opens_one_ado_pull_request_from_the_approved_branch(tmp
         )
         poller = _poller(board, runtime, [source], index=butler.SourceIntakeIndex(tmp_path / "i.json"),
                          ceiling=ceiling, decide=decide, project_reader=project)
+        if resident:
+            runtime.policy_gate = None  # Production loader has no blanket allow gate.
+            backend = butler.CentralBackend(SimpleNamespace(
+                _connector_runtimes=[runtime], _connector_sources=poller.sources,
+                runtime_mode="active", source_intake_index_file=tmp_path / "resident.json",
+            ), "unused")
+            poller = backend.source_intake_poller
+            poller.registry_projects = {"Alpha": "board-a"}
+            poller.state_reader, poller.state_writer = board.read_state, board.write_state
+            poller.ticket_reader, poller.ticket_annotator = board.read_ticket, board.annotate
+            poller.ceiling, poller.decide, poller.project_reader = ceiling, decide, project
         await poller.run_cycle(NOW)
         ask = board.asks()[0]
         ticket_id = butler._source_ticket_id("board-a", ask["id"])
@@ -318,10 +332,13 @@ def test_approved_ticket_opens_one_ado_pull_request_from_the_approved_branch(tmp
         second = await poller.run_cycle(NOW + timedelta(minutes=2))
         pr_calls = [args for name, args in calls if name == "pr_create"]
         assert first["writebacks"] == 1 and second["writebacks"] == 0
+        if resident:
+            with pytest.raises(butler.ConnectorDenied):
+                await runtime.call_tool("unapproved-pr", "pr_create", pr_calls[0])
         assert pr_calls == [
             {
-                "repositoryId": "manta-backend",
-                "project": "MANTA-DEV",
+                "repositoryId": "example-backend",
+                "project": "example-project",
                 "sourceRefName": f"refs/heads/pursers/{ticket_id}",
                 "targetRefName": "refs/heads/develop",
                 "title": "Fix finding 1",
@@ -371,10 +388,22 @@ def test_failed_pull_request_is_not_retried_automatically(tmp_path: Path) -> Non
 
 def test_repository_fields_parse_azure_devops_urls() -> None:
     fields = butler._repository_fields(
-        {"repository_url": "https://org@dev.azure.com/SCGC-Digital/new%20way%20of%20works/_git/apptier-backend",
+        {"repository_url": "https://org@dev.azure.com/example-org/new%20way%20of%20works/_git/example-service",
          "integration_ref": "main"}
     )
-    assert fields["repository_org"] == "SCGC-Digital"
+    assert fields["repository_org"] == "example-org"
     assert fields["repository_project"] == "new way of works"
-    assert fields["repository_name"] == "apptier-backend"
+    assert fields["repository_name"] == "example-service"
     assert butler._repository_fields({"repository_url": "https://github.com/x/y"})["repository_name"] == ""
+
+
+def test_tool_only_connector_does_not_require_resource_support() -> None:
+    async def scenario() -> None:
+        class ToolOnlyClient(PagedClient):
+            async def list_resources(self, **kwargs):
+                raise RuntimeError("Method not found")
+        calls = []
+        runtime = _runtime(_declaration(), ToolOnlyClient({1: [_issue(1)]}, calls))
+        result = await runtime.call_tool("tool-only-read", "fetch", {"page": 1})
+        assert result.payload["structured_content"]["issues"][0]["key"] == "SONAR-1"
+    asyncio.run(scenario())

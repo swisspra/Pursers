@@ -4644,7 +4644,10 @@ class ConnectorRuntime:
         self, client: Any, secret: ConnectorSecretMaterial
     ) -> tuple[ConnectorDiscovery, dict[str, Any]]:
         listed_tools = await self._all_listed(client, "list_tools")
-        listed_resources = await self._all_listed(client, "list_resources")
+        listed_resources = (
+            await self._all_listed(client, "list_resources")
+            if self.declaration.resources else []
+        )
         allowed_tools = {item.name for item in self.declaration.tools}
         tools: list[dict[str, Any]] = []
         schemas: dict[str, Any] = {}
@@ -5885,6 +5888,7 @@ class SourceIntakePoller:
         ticket_reader: Callable[[str, str], Awaitable[Mapping[str, Any] | None]],
         ticket_annotator: Callable[[str, str, str], Awaitable[Any]],
         active: bool = True,
+        authorize_writeback: bool = False,
         per_source_cap: int = SOURCE_INTAKE_MAX_ITEMS_PER_SOURCE,
         cycle_cap: int = SOURCE_INTAKE_MAX_ITEMS_PER_CYCLE,
         index: SourceIntakeIndex | None = None,
@@ -5921,6 +5925,20 @@ class SourceIntakePoller:
         self.decide = decide
         self.project_reader = project_reader
         self._writeback_offset = 0
+        self._writeback_grants: set[ConnectorPolicyRequest] = set()
+        if authorize_writeback and self.active and self.index.path is not None:
+            for runtime in self.runtimes.values():
+                if runtime.policy_gate is None:
+                    runtime.policy_gate = self._writeback_policy
+
+    async def _writeback_policy(
+        self, request: ConnectorPolicyRequest
+    ) -> ConnectorPolicyDecision:
+        allowed = self.active and request in self._writeback_grants
+        return ConnectorPolicyDecision(
+            allowed, "source-writeback-policy",
+            "approved_source_writeback" if allowed else "unapproved_source_writeback",
+        )
 
     def _route(self, source: SourceDeclaration, hint: str) -> str | None:
         project = (
@@ -6028,7 +6046,17 @@ class SourceIntakePoller:
         fields = await self._writeback_fields(source, board_id, ticket_id, ticket, item)
         arguments = _render_source_template(writeback.arg_template, fields)
         operation = "source-writeback-" + marker_digest[:32]
-        await runtime.call_tool(operation, writeback.tool, arguments)
+        tool = next(t for t in runtime.declaration.tools if t.name == writeback.tool)
+        grant = ConnectorPolicyRequest(
+            runtime.board_id, runtime.project_id, source.connector_id,
+            operation, writeback.tool, tool.effect,
+            hashlib.sha256(_canonical_json(arguments)).hexdigest(),
+        )
+        self._writeback_grants.add(grant)
+        try:
+            await runtime.call_tool(operation, writeback.tool, arguments)
+        finally:
+            self._writeback_grants.discard(grant)
         await self.ticket_annotator(
             board_id,
             ticket_id,
@@ -11520,6 +11548,7 @@ class CentralBackend:
                 ticket_reader=self._source_ticket_reader,
                 ticket_annotator=self._source_ticket_annotator,
                 active=getattr(args, "runtime_mode", "shadow") == "active",
+                authorize_writeback=True,
                 **self._managed_intake_options(args),
             )
             if connector_sources
