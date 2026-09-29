@@ -11,6 +11,10 @@ Zed](zed-first-ticket.md). It is a ten-minute narrative walkthrough that marks
 the boundary between Zed and the separately operated worker/reviewer fleet;
 this page is the complete reference.
 
+For [managed source intake](../managed-intake.md), Zed is the primary GUI/IDE
+workflow. The separately operated fleet uses Goose as its CLI runner; operators
+can continue to inspect work and answer questions from Zed.
+
 ## Commands
 
 | Command | Result |

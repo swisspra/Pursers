@@ -707,13 +707,19 @@ def test_indicator_binds_to_locked_expected_process_and_rejects_zombie(
             "running_shadow"
         )
         process.terminate()
-        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
-        state = subprocess.run(
-            ["/bin/ps", "-p", str(process.pid), "-o", "state="],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        if hasattr(os, "waitid"):
+            os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        # Python's macOS builds do not all expose waitid. Observe the child
+        # without poll()/wait(), which would reap the zombie under test.
+        deadline = time.monotonic() + 5
+        while True:
+            state = subprocess.run(
+                ["/bin/ps", "-p", str(process.pid), "-o", "state="],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+            if state.upper().startswith("Z") or time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
         assert state.upper().startswith("Z")
 
         status = manager.view(configured_payload(), "sandbox")["runtime"]

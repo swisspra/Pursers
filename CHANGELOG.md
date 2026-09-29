@@ -7,6 +7,32 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Native managed source counts: confirmed empty sources skip model calls, unchanged
+  inputs reuse decisions, and provider failures back off for 15 minutes.
+- Configurable local fleet observations, scoped Azure DevOps Git credentials,
+  service rendering and bounded event-driven Goose seats. See
+  [the configuration and migration guide](docs/managed-intake.md).
+- Intake audit fields for model calls, cached decisions, response IDs and retry time.
+- Configuration guidance distinguishes Goose CLI seats from the primary Zed
+  GUI/IDE workflow using the existing integration.
+
+### Fixed
+
+- Approved source delivery shares a durable attempt guard across refresh and revision
+  paths, checks the configured remote branch SHA before Azure DevOps PR creation,
+  and reads Central's actual submission history.
+- Intake-only ADO connector principals join as non-working coordinators.
+- Model-specific fleet budgets preserve worker/reviewer targets and existing seats.
+- Stopped seats can restart using fresh registry membership without requiring a
+  heartbeat from a process that is not running; live lease protection remains.
+- Event-seat generation shares validated model, provider and tier metadata with
+  runtime configuration, preventing stale seat capability mismatches.
+- Scoped Git helpers accept repeated authentication challenges while refusing
+  credential output to terminals and regular log files.
+
+
 ## [5.0.8] - 2026-09-29
 
 This release includes `pursers-central==0.1.5`,

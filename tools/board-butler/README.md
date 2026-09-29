@@ -184,6 +184,66 @@ probe expectations instead of failing the connector. The legacy declaration
 }
 ```
 
+The same file may declare a bounded `sources` array. Each source names one
+declared read-only tool and maps its product response into the generic intake
+shape. For example, a SonarQube source can route project keys through the
+Central project registry:
+
+```json
+{
+  "sources": [{
+    "source_id": "sonarqube",
+    "connector_id": "connector:sonarqube",
+    "list_tool": "sonar_search_sonar_issues_in_projects",
+    "fixed_args": {"projects": ["example-service"]},
+    "items_path": "issues",
+    "field_map": {
+      "external_id": "key",
+      "revision": "updateDate",
+      "title": "message",
+      "body": "message",
+      "link": "url",
+      "project_hint": "project"
+    },
+    "routing": {
+      "project_map": {"example-service": "Example Service"}
+    },
+    "mode": "ask",
+    "content_type": "structured"
+  }]
+}
+```
+
+The resident constructs the source poller from these declarations. Shadow mode
+records bounded `source-intake-would-ask` findings without changing intake
+state; active mode writes the asks. An unavailable connector or invalid source
+is isolated as a bounded `unavailable` or `invalid` finding so the resident can
+continue refreshing. `--connector-probe` remains strict and exits non-zero for
+the same configuration or connection failure.
+
+With `--source-intake-index-file /PATH/TO/private/source-intake-index.json`
+the resident runs Butler-managed intake. The configured Butler model (the
+`drafting` provider) decides when inputs change whether to pull, how many items, and
+from which sources, given the ceiling (`envelope.host_seat_cap` minus intake
+work in flight) and the board load; code clamps the answer to that ceiling and
+pulls nothing when the model is unavailable. The resident reuses the decision
+while source observations, board load, in-flight work, ceiling, and provider
+settings are unchanged; source `observed_at` timestamps alone do not trigger
+another model call. If every source has a successful observation with zero
+open issues, the resident returns `no_open_issues` without calling or resolving
+a model. Unknown, invalid, or failed counts are not treated as zero. The cache
+lasts for the resident process; a restart needs a fresh decision only when
+sources are not confirmed empty. Provider failures defer retries for 15 minutes
+unless provider settings change. Decision logs include `model_called` to
+distinguish new requests from reused decisions. A source may set `page_arg` and
+`max_pages` so already-taken items (tracked in the 0600 index, not in Central)
+are paged past cheaply. Writeback runs as a separate pass once a ticket is
+closed with an approval, so delivery never waits for a pull. Its
+`arg_template` may use `repository_project`, `repository_name`,
+`target_branch`, `source_branch`, `approved_sha` and `ticket_title` (e.g. an
+Azure DevOps `pull_request_create`); a tool without a stable call id is
+attempted once and never retried automatically.
+
 `--connector-probe` is a one-shot, token-free check. It connects, lists tools,
 prints secret-free JSON, and exits non-zero when an enabled classified tool is
 missing, an unclassified tool appears, or connection/protocol validation fails.
@@ -518,3 +578,38 @@ The available replay classifies zero questions as `MECHANICAL`, three as
 `ESCALATE`, and none as `UNKNOWN`. All three match their recorded disposition;
 `CQ-53524d65cdb51016` escalates because a mechanical status fragment cannot
 launder the residual document decision.
+
+### Declared source counts
+
+A source can declare an optional `observation` block. Butler calls the declared
+read-only tool through the normal connector limits before deciding intake:
+
+```json
+"observation": {
+  "read_tool": "sonar_issues_search",
+  "arguments": {"pageSize": 1, "pageIndex": 1},
+  "count_path": "paging.total",
+  "max_age_s": 120
+}
+```
+
+Include the same project and open-status filters used by the source's `fixed_args`
+in the observation arguments. The tool must be declared `read_only`; names and
+arguments depend on the server schema. This example deliberately omits severity:
+a combined-severity source is useful when an upstream server's severity mapping
+is incompatible. Pursers does not translate severity enums implicitly.
+
+When every enabled source returns integer zero, intake returns `no_open_issues`
+without resolving model credentials or issuing a model request, including after
+restart. Missing, stale, invalid or failed observations are unknown, never zero.
+`max_age_s` is bounded to 1–120 seconds (default 120). Without this optional block,
+existing sources remain supported with unknown counts. Unchanged semantic inputs
+reuse the model's previous successful decision; provider failures back off for
+15 minutes. Board refreshes and read-only source checks can continue during that
+interval. Approval writeback runs independently of the intake decision.
+
+## Managed intake runtime
+
+See [configuration, feature behavior, migration and rollback](../../docs/managed-intake.md)
+for `tools/board-butler/deployment.py`, `tools/seat-kit/event_seat.py` and
+`tools/ado-connector/git_credential.py`.

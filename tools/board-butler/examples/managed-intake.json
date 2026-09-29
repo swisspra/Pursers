@@ -1,0 +1,14 @@
+{
+  "python": "/PATH/TO/venv/bin/python",
+  "source": "/PATH/TO/source",
+  "state": "/PATH/TO/state/butler",
+  "url": "https://central.example/mcp",
+  "token_file": "/PATH/TO/auth/butler.jwt",
+  "home_board": "pursers",
+  "provider_secrets_dir": "/PATH/TO/auth/providers",
+  "runtime_mode": "shadow",
+  "connector_config": "/PATH/TO/config/connectors.json",
+  "source_intake_index_file": "/PATH/TO/state/butler/source-index.json",
+  "intake_onboarding_config": "/PATH/TO/config/onboarding.json",
+  "git_credentials_config": "/PATH/TO/config/git-credentials.json"
+}

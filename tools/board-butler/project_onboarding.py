@@ -52,6 +52,7 @@ class IntakeSourcePolicy:
     retry_limit: int
     retry_backoff_s: int
     repositories: Mapping[str, RepositoryResolution]
+    default_ticket_tier: int | None = None
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,9 @@ class RetryState:
 class ProjectRegistry(Protocol):
     async def snapshot(self) -> tuple[Mapping[str, Any], str]: ...
 
-    async def ensure_board(self, board_id: str, domain: str) -> None: ...
+    async def ensure_board(
+        self, board_id: str, domain: str, default_ticket_tier: int | None = None
+    ) -> None: ...
 
     async def add_project(
         self,
@@ -140,6 +143,7 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             "retry_backoff_s",
             "repositories",
             "repository_map",
+            "default_ticket_tier",
         }
         if (
             not isinstance(raw, Mapping)
@@ -215,6 +219,13 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
                 86_400,
             ),
             repositories=repositories,
+            default_ticket_tier=(
+                _bounded_int(
+                    raw["default_ticket_tier"], f"{path}.default_ticket_tier", 1, 5
+                )
+                if "default_ticket_tier" in raw
+                else None
+            ),
         )
     return result
 
@@ -465,7 +476,9 @@ class ProjectOnboarder:
                     )
                 if git_mode == "clone":
                     await asyncio.to_thread(lifecycle.clone_project_source, plan)
-                await self.registry.ensure_board(board_id, policy.domain)
+                await self.registry.ensure_board(
+                    board_id, policy.domain, policy.default_ticket_tier
+                )
                 entry = dict(plan["proposed_entry"])
                 entry.update(
                     {

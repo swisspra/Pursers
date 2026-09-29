@@ -611,6 +611,12 @@ class ExecutorStore:
         )
         return dict(zip(keys, row, strict=True))
 
+    def observation_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Return detached seat evidence through the supported store interface."""
+        with self.connection:
+            ids = [row[0] for row in self.connection.execute("SELECT seat_id FROM seats")]
+            return {seat_id: record for seat_id in ids if (record := self.seat(seat_id)) is not None}
+
     def active_counts(self, board_id: str) -> tuple[int, int]:
         active = ("starting", "ready", "busy", "draining", "unhealthy")
         marks = ",".join("?" for _ in active)
@@ -854,6 +860,21 @@ class SystemdUserAdapter:
             properties = self._show_properties(result.stdout)
         except ValueError:
             return ServiceObservation(True, False, False, False)
+        # systemd omits ExecStart for units that have never been created.
+        # Treat only a proven inactive, absent unit as available to instantiate.
+        if (
+            not unit_exists
+            and not unit_path.is_symlink()
+            and properties.get("LoadState") == "not-found"
+            and properties.get("ActiveState") == "inactive"
+            and properties.get("SubState") == "dead"
+            and properties.get("MainPID") == "0"
+            and not properties.get("FragmentPath")
+            and not properties.get("DropInPaths")
+            and not properties.get("ExecStart")
+            and not properties.get("ControlGroup")
+        ):
+            return ServiceObservation(False, False, False, False)
         if set(properties) != set(property_names):
             return ServiceObservation(True, False, False, False)
         load = properties["LoadState"]

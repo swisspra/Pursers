@@ -1,5 +1,5 @@
 #!/bin/sh
-# Repo-owned fleet entry. This path is intentionally shadow-only.
+# Repo-owned fleet entry. Shadow by default; active mode requires authorization.
 set -eu
 
 : "${PURSERS_BUTLER_PYTHON:?set PURSERS_BUTLER_PYTHON}"
@@ -50,6 +50,22 @@ case "$runtime_mode" in
     exit 64
     ;;
 esac
+
+if [ -n "${PURSERS_BUTLER_CONNECTOR_CONFIG:-}" ]; then
+  set -- "$@" --connector-config "$PURSERS_BUTLER_CONNECTOR_CONFIG"
+fi
+if [ -n "${PURSERS_BUTLER_SOURCE_INTAKE_INDEX_FILE:-}" ]; then
+  set -- "$@" --source-intake-index-file "$PURSERS_BUTLER_SOURCE_INTAKE_INDEX_FILE"
+fi
+if [ -n "${PURSERS_BUTLER_INTAKE_ONBOARDING_CONFIG:-}" ]; then
+  set -- "$@" --intake-onboarding-config "$PURSERS_BUTLER_INTAKE_ONBOARDING_CONFIG"
+fi
+if [ "${PURSERS_BUTLER_FLEET_OBSERVATION_MODE:-file}" = local ]; then
+  : "${PURSERS_BUTLER_FLEET_LOCAL_CONFIG:?set PURSERS_BUTLER_FLEET_LOCAL_CONFIG}"
+  : "${PURSERS_BUTLER_FLEET_EXECUTOR_STATE:?set PURSERS_BUTLER_FLEET_EXECUTOR_STATE}"
+  set -- "$@" --fleet-observation-mode local --fleet-local-config "$PURSERS_BUTLER_FLEET_LOCAL_CONFIG" \
+    --fleet-executor-state "$PURSERS_BUTLER_FLEET_EXECUTOR_STATE"
+fi
 
 exec "$PURSERS_BUTLER_PYTHON" "$repo/tools/board-butler/board_butler.py" \
   --url "$PURSERS_BUTLER_URL" \

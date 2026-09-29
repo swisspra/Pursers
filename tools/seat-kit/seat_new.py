@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import re
+import runpy
 import shlex
 import subprocess
 import sys
@@ -2761,7 +2762,20 @@ def _check_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def apply_event_config(args: argparse.Namespace) -> None:
+    path = getattr(args, "event_config", None)
+    if path is None:
+        return
+    api = runpy.run_path(str(Path(__file__).with_name("event_seat.py")))
+    config = api["validate_config"](json.loads(api["HELPERS"]["private_read"](Path(path))))
+    if config["seat_id"] != args.name or config["role"] != args.role:
+        raise ValueError("event config identity must match the generated seat")
+    args.model, args.provider = config["model"], config["provider"]
+    args.tier_max = config.get("tier_max", 2)
+
+
 def generate(args: argparse.Namespace) -> Path:
+    apply_event_config(args)
     if not NAME_RE.fullmatch(args.name):
         raise ValueError("--name must be a safe 1-80 character agent name")
     if args.door:
@@ -2913,6 +2927,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="declare review capability (defaults true for reviewer seats)",
     )
+    parser.add_argument("--event-config", type=Path, help="private event-seat config; shares model/provider/tier metadata")
     parser.add_argument("--model")
     parser.add_argument("--provider")
     parser.add_argument(

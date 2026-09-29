@@ -302,3 +302,9 @@ The generated `AGENTS.md` and `.goosehints` contain the relentless loop:
 
 **Never** poll `bin/board.sh list` in a loop. The wait verb blocks on Central's
 subscriptions/listen, using zero model turns except the re-arm.
+
+## Managed intake runtime
+
+See [configuration, feature behavior, migration and rollback](../../docs/managed-intake.md)
+for `tools/board-butler/deployment.py`, `tools/seat-kit/event_seat.py` and
+`tools/ado-connector/git_credential.py`.

@@ -94,3 +94,9 @@ Run the suite:
 ```sh
 python3 -m pytest -q tools/ado-connector/test_connector.py
 ```
+
+## Managed intake runtime
+
+See [configuration, feature behavior, migration and rollback](../../docs/managed-intake.md)
+for `tools/board-butler/deployment.py`, `tools/seat-kit/event_seat.py` and
+`tools/ado-connector/git_credential.py`.
