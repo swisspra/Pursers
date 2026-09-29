@@ -68,6 +68,10 @@ constraint. Install every Pursers distribution at the exact v5.0.6 version
 with `python -m pip install --find-links`, and require `python -m pip check`.
 Reuse that same side-by-side venv for Central; the Linux route must not invoke
 `uv` later. Do not use the old MCP pin to constrain the release.
+This includes pip's two-line local-editable form: remove a Pursers/MCP
+`# Editable install with no version control (NAME==VERSION)` plus following
+`-e /PATH/TO/...` pair, and fail closed on every other editable until the
+operator replaces it with an immutable constraint.
 The reusable template contains the executable commands and complete cohort
 guard.
 

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from importlib.metadata import version
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -827,12 +828,15 @@ def test_runbook_constraint_filter_handles_real_pip_freeze_forms(
     destination = tmp_path / "constraints.txt"
     _write(
         source,
-        """requests==2.32.5
+        f"""pip=={version("pip")}
  pursers @ file:///PATH/TO/pursers
 MCP[cli] @ file:///PATH/TO/mcp
 -e git+https://example.invalid/repo#egg=pursers-client
 pursers_wait_bridge===0.1.2
-tomli @ https://example.invalid/tomli.whl
+# Editable install with no version control (pursers-demo==0.0.1)
+-e /PATH/TO/pursers-demo
+# Editable install with no version control (mcp==2.2.0)
+-e /PATH/TO/mcp
 """,
     )
 
@@ -841,10 +845,38 @@ tomli @ https://example.invalid/tomli.whl
         check=True,
     )
 
-    assert destination.read_text(encoding="utf-8") == (
-        "requests==2.32.5\n"
-        "tomli @ https://example.invalid/tomli.whl\n"
+    assert destination.read_text(encoding="utf-8") == f"pip=={version('pip')}\n"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--dry-run",
+            "--no-index",
+            "--break-system-packages",
+            "--constraint",
+            str(destination),
+            f"pip=={version('pip')}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
     )
+
+    _write(
+        source,
+        """# Editable install with no version control (customer-addon==1.0.0)
+-e /PATH/TO/customer-addon
+""",
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(source), str(destination)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "operator-approved immutable pin" in result.stderr
 
 
 def test_runbook_smoke_adapters_are_mutually_exclusive_and_share_cleanup() -> None:

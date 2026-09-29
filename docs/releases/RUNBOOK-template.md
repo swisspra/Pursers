@@ -137,6 +137,11 @@ name_pattern = re.compile(
     r"\s*(?:@|===|==|~=|!=|<=|>=|<|>|$)"
 )
 egg_pattern = re.compile(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)", re.I)
+editable_comment_pattern = re.compile(
+    r"^# Editable install with no version control "
+    r"\(([A-Za-z0-9][A-Za-z0-9._-]*)(?:\s*==[^)]*)?\)$",
+    re.I,
+)
 
 def canonical_name(line: str) -> str | None:
     value = line.strip()
@@ -147,12 +152,44 @@ def canonical_name(line: str) -> str | None:
         return None
     return re.sub(r"[-_.]+", "-", match.group(1)).lower()
 
+def is_pursers_or_mcp(name: str | None) -> bool:
+    return name == "mcp" or name == "pursers" or (name or "").startswith("pursers-")
+
+lines = source.read_text(encoding="utf-8").splitlines()
 kept = []
-for line in source.read_text(encoding="utf-8").splitlines():
+index = 0
+while index < len(lines):
+    line = lines[index]
+    editable_comment = editable_comment_pattern.fullmatch(line.strip())
+    if editable_comment is not None:
+        if index + 1 >= len(lines) or not lines[index + 1].lstrip().startswith(
+            ("-e ", "--editable ")
+        ):
+            raise SystemExit(f"unpaired editable freeze comment: {line!r}")
+        name = re.sub(r"[-_.]+", "-", editable_comment.group(1)).lower()
+        editable_line = lines[index + 1]
+        if is_pursers_or_mcp(name):
+            index += 2
+            continue
+        raise SystemExit(
+            "editable requirement cannot be used as a constraint; replace it "
+            f"with an operator-approved immutable pin: {editable_line!r}"
+        )
+
     name = canonical_name(line)
-    if name == "mcp" or name == "pursers" or (name or "").startswith("pursers-"):
+    if line.lstrip().startswith(("-e ", "--editable ")):
+        if is_pursers_or_mcp(name):
+            index += 1
+            continue
+        raise SystemExit(
+            "editable requirement cannot be used as a constraint; replace it "
+            f"with an operator-approved immutable pin: {line!r}"
+        )
+    if is_pursers_or_mcp(name):
+        index += 1
         continue
     kept.append(line)
+    index += 1
 destination.write_text("\n".join(kept) + "\n", encoding="utf-8")
 PY
 python3 -m venv "$TARGET_VENV"
@@ -173,8 +210,12 @@ The filtered constraints deliberately remove every old `pursers*` and `mcp`
 pin, including extras, editable URLs, and PEP 508 direct references such as
 `pursers @ file:///...` and `mcp @ file:///...`. The release's exact Pursers
 pins and their current MCP requirement must win; all other previously approved
-third-party versions remain constrained. Retain `OLD_FREEZE` with the private
-rollout evidence so the filtering step can be audited.
+third-party versions remain constrained. The filter also associates pip's
+two-line `# Editable install with no version control (NAME==VERSION)` plus
+`-e /PATH/TO/...` form: Pursers/MCP pairs are removed, while every other
+editable fails closed until an operator supplies an immutable constraint.
+Retain `OLD_FREEZE` with the private rollout evidence so the filtering step can
+be audited.
 
 For an existing service environment, upgrade its complete installed Pursers
 set in one transaction. The script keeps service-specific subsets, adds the
