@@ -103,6 +103,7 @@ from butler_commands import (
     validate_command_result,
     validate_config as validate_butler_config,
     validate_config_authority,
+    validate_host_seat_cap_command_authority,
 )
 
 from cursor import CursorStore
@@ -13647,12 +13648,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         config: dict[str, Any],
         expected_revision: int,
         ctx: Context,
+        authorization_command_id: str | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
         """CAS-write one strict Butler config with per-field authority checks."""
         board_id = require_id("board_id", board_id)
         agent_name = require_id("agent_name", agent_name)
         mutation_id = require_butler_identifier("mutation_id", mutation_id)
+        if authorization_command_id is not None:
+            authorization_command_id = require_butler_identifier(
+                "authorization_command_id", authorization_command_id
+            )
         if (
             isinstance(expected_revision, bool)
             or not isinstance(expected_revision, int)
@@ -13670,6 +13676,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "sender_channel": sender_channel,
             "expected_revision": expected_revision,
             "config": validated,
+            "authorization_command_id": authorization_command_id,
         }
         mutation_digest = canonical_digest(mutation_payload)
 
@@ -13719,7 +13726,19 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 )
             if validated["revision"] != expected_revision + 1:
                 raise ValueError("config revision must advance exactly one")
-            paths = validate_config_authority(before, validated, sender_channel)
+            if authorization_command_id is None:
+                paths = validate_config_authority(before, validated, sender_channel)
+            else:
+                if sender_channel != "a2a":
+                    raise PermissionError("delegated config authority requires the A2A channel")
+                command = document.setdefault("butler_commands", {}).get(
+                    authorization_command_id
+                )
+                if command is None:
+                    raise PermissionError("host seat cap authorization command was not found")
+                paths = validate_host_seat_cap_command_authority(
+                    before, validated, command
+                )
             audit = append_butler_audit(
                 document,
                 actor=actor,
@@ -13850,6 +13869,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             sender = butler_sender(document, principal, actor, sender_channel)
             if sender_channel == "a2a" and priority == "emergency":
                 raise PermissionError("emergency priority is reserved for human-admin commands")
+            if intent == "set_host_seat_cap" and sender_channel != "human":
+                raise PermissionError("host seat cap grants require human-admin authority")
             if intent == "resume" and sender_channel != "human":
                 raise PermissionError("resume requires human-admin authority")
             if sender_channel == "a2a" and intent not in {

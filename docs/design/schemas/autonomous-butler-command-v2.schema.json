@@ -13,7 +13,7 @@
     "board_id": {"$ref": "#/$defs/id"},
     "project_id": {"$ref": "#/$defs/id"},
     "sender": {"$ref": "#/$defs/sender"},
-    "intent": {"enum": ["set_desired_state", "reconcile_now", "drain_seat", "retire_seat", "enable_connector", "disable_connector", "veto_action", "kill", "resume"]},
+    "intent": {"enum": ["set_desired_state", "set_host_seat_cap", "reconcile_now", "drain_seat", "retire_seat", "enable_connector", "disable_connector", "veto_action", "kill", "resume"]},
     "parameters": {"$ref": "#/$defs/parameters"},
     "expected_config_revision": {"type": "integer", "minimum": 0},
     "expires_at": {"type": "string", "format": "date-time"},
@@ -33,7 +33,8 @@
     {"if": {"properties": {"intent": {"enum": ["enable_connector", "disable_connector"]}}}, "then": {"properties": {"parameters": {"required": ["connector_id"], "minProperties": 1, "maxProperties": 1}}}},
     {"if": {"properties": {"intent": {"const": "veto_action"}}}, "then": {"properties": {"parameters": {"required": ["action_id", "reason_code"], "minProperties": 2, "maxProperties": 2}}}},
     {"if": {"properties": {"intent": {"enum": ["kill", "resume"]}}}, "then": {"properties": {"parameters": {"required": ["reason_code"], "minProperties": 1, "maxProperties": 1}}}},
-    {"if": {"properties": {"intent": {"const": "set_desired_state"}}}, "then": {"properties": {"parameters": {"required": ["desired_revision", "desired_digest_sha256"], "minProperties": 2, "maxProperties": 2}}}}
+    {"if": {"properties": {"intent": {"const": "set_desired_state"}}}, "then": {"properties": {"parameters": {"required": ["desired_revision", "desired_digest_sha256"], "minProperties": 2, "maxProperties": 2}}}},
+    {"if": {"properties": {"intent": {"const": "set_host_seat_cap"}}}, "then": {"properties": {"parameters": {"required": ["host_seat_cap"], "minProperties": 1, "maxProperties": 1}}}}
   ],
   "$defs": {
     "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
@@ -58,6 +59,7 @@
       "properties": {
         "desired_revision": {"type": "integer", "minimum": 1},
         "desired_digest_sha256": {"$ref": "#/$defs/sha256"},
+        "host_seat_cap": {"type": "integer", "minimum": 2, "maximum": 100},
         "seat_id": {"$ref": "#/$defs/id"},
         "seat_generation": {"type": "integer", "minimum": 1},
         "connector_id": {"$ref": "#/$defs/id"},

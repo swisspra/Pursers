@@ -1,0 +1,55 @@
+{
+  "observed_at": "2030-01-01T12:00:00+00:00",
+  "seats": [
+    {
+      "seat_id": "seat-worker-1",
+      "identity_id": "agent-worker-1",
+      "state_id": "state-worker-1",
+      "state_dir_id": "state-dir-worker-1",
+      "generation": 1,
+      "role": "worker",
+      "lifecycle": "ready",
+      "work_claim": false,
+      "review_lease": false,
+      "transition_at": "2030-01-01T11:50:00+00:00"
+    },
+    {
+      "seat_id": "seat-worker-2",
+      "identity_id": "agent-worker-2",
+      "state_id": "state-worker-2",
+      "state_dir_id": "state-dir-worker-2",
+      "generation": 1,
+      "role": "worker",
+      "lifecycle": "ready",
+      "work_claim": false,
+      "review_lease": false,
+      "transition_at": "2030-01-01T11:50:00+00:00"
+    },
+    {
+      "seat_id": "seat-reviewer-1",
+      "identity_id": "agent-reviewer-1",
+      "state_id": "state-reviewer-1",
+      "state_dir_id": "state-dir-reviewer-1",
+      "generation": 1,
+      "role": "reviewer",
+      "lifecycle": "ready",
+      "work_claim": false,
+      "review_lease": false,
+      "transition_at": "2030-01-01T11:50:00+00:00"
+    }
+  ],
+  "demand": {
+    "unassignable_work": 0,
+    "unassignable_review": 4,
+    "oldest_work_age_s": 0,
+    "oldest_review_age_s": 300,
+    "rejection_rework": 0,
+    "full_gate_queue_depth": 0,
+    "full_gate_oldest_wait_s": 0
+  },
+  "host": {
+    "load_ratio": 0.3,
+    "memory_headroom_ratio": 0.7,
+    "disk_headroom_ratio": 0.8
+  }
+}

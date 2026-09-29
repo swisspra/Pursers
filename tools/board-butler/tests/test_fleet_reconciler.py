@@ -8,6 +8,7 @@ import os
 import socket
 import sys
 import threading
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -166,6 +167,12 @@ def active_config(board_id: str = "pursers") -> dict[str, Any]:
         "reviewer": {"min": 0, "target": 1, "max": 1},
         "acp_worker": {"min": 0, "target": 1, "max": 1},
     }
+    budget = {
+        "period": "day",
+        "max_tokens": 1000,
+        "max_cost_microunits": 1000,
+        "max_external_calls": 10,
+    }
     return {
         "schema": "autonomous_butler_config_v1",
         "schema_version": 1,
@@ -178,9 +185,12 @@ def active_config(board_id: str = "pursers") -> dict[str, Any]:
             "agent_process_ceiling": 4,
             "control_plane_processes": 2,
             "total_process_ceiling": 6,
+            "configured_by": "operator",
+            "configured_at": NOW.isoformat(),
         },
         "desired": {
             "mode": "autonomous",
+            "runner": "direct_api",
             "capacity": counts,
             "host_concurrency": 4,
             "board_concurrency": 4,
@@ -189,6 +199,8 @@ def active_config(board_id: str = "pursers") -> dict[str, Any]:
                 "scale_down_s": 60,
                 "failure_backoff_s": 5,
             },
+            "budget": budget,
+            "connectors": [],
         },
         "envelope": {
             "fingerprint_sha256": FINGERPRINT,
@@ -197,11 +209,16 @@ def active_config(board_id: str = "pursers") -> dict[str, Any]:
                 "template:reviewer:direct",
                 "template:acp_worker:direct",
             ],
+            "approved_connector_ids": [],
             "max_capacity": {"worker": 2, "reviewer": 1, "acp_worker": 1},
             "max_host_concurrency": 4,
             "max_board_concurrency": 4,
+            "max_budget": budget,
+            "created_by": "operator",
+            "created_at": NOW.isoformat(),
         },
         "authorization": {
+            "authorization_id": "authorization:one",
             "config_revision": 3,
             "envelope_fingerprint_sha256": FINGERPRINT,
             "expires_at": (NOW + timedelta(hours=1)).isoformat(),
@@ -258,6 +275,124 @@ def test_active_config_derives_only_human_authorized_bounds() -> None:
         butler.fleet_policies_from_config(
             {"pursers": expired}, {"pursers": {"direct": 4}}, NOW
         )
+
+
+def test_runtime_persists_and_commands_canonical_supervisor_roster(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    raw = json.loads(
+        (
+            Path(__file__).with_name("fixtures")
+            / "supervisor_demand_shift.json"
+        ).read_text(encoding="utf-8")
+    )
+    raw["observed_at"] = NOW.isoformat()
+    for row in raw["seats"]:
+        row["transition_at"] = (NOW - timedelta(minutes=10)).isoformat()
+
+    class Client:
+        state: str | None = None
+        command: dict[str, Any] | None = None
+
+        async def board_state_get(self, key: str) -> dict[str, Any]:
+            if self.state is None:
+                raise RuntimeError("state key not found")
+            return {"state": {"value": self.state}}
+
+        async def board_state_update(
+            self, key: str, value: str, *, expected_sha256: str | None = None
+        ) -> dict[str, Any]:
+            assert key == butler.SUPERVISOR_ROSTER_STATE_KEY
+            assert expected_sha256 is None
+            self.state = value
+            return {"ok": True}
+
+        async def butler_command_submit(self, **kwargs: Any) -> dict[str, Any]:
+            self.command = kwargs
+            return {"command_id": "BC-runtime"}
+
+    client = Client()
+
+    @asynccontextmanager
+    async def client_context(_board_id: str) -> Any:
+        yield client
+
+    backend = butler.CentralBackend(
+        SimpleNamespace(
+            url="https://central.invalid/mcp",
+            home_board="pursers",
+            agent_name="board-butler-test",
+            supervisor_roster_file=tmp_path / "state" / "supervisor-roster.json",
+        ),
+        "opaque",
+    )
+    monkeypatch.setattr(backend, "_client_for_board", client_context)
+    config = active_config()
+    config["authorization"]["expires_at"] = (NOW + timedelta(hours=1)).isoformat()
+
+    report = asyncio.run(
+        backend._confirm_supervisor_roster("pursers", config, raw, NOW)
+    )
+
+    assert report["revision"] == 1
+    assert report["command_id"] == "BC-runtime"
+    assert client.state is not None
+    persisted = json.loads(client.state)
+    assert persisted["schema"] == "pursers_supervisor_roster_v1"
+    assert json.loads(backend.args.supervisor_roster_file.read_text()) == persisted
+    assert client.command is not None
+    assert client.command["parameters"] == {
+        "desired_revision": 1,
+        "desired_digest_sha256": report["digest_sha256"],
+    }
+
+
+def test_canonical_re_role_translates_to_fully_bound_executor_operation() -> None:
+    api = butler.supervisor_roster_api()
+    raw = json.loads(
+        (
+            Path(__file__).with_name("fixtures")
+            / "supervisor_demand_shift.json"
+        ).read_text(encoding="utf-8")
+    )
+    raw["observed_at"] = NOW.isoformat()
+    raw["seats"][0]["lifecycle"] = "draining"
+    raw["seats"][0]["transition_at"] = (
+        NOW - timedelta(minutes=10)
+    ).isoformat()
+    config = active_config()
+    config["authorization"]["expires_at"] = (NOW + timedelta(hours=1)).isoformat()
+    grant = api["grant_from_config"](config, NOW)
+    observation = api["observation_from_fixture"](raw)
+    plan = api["create_plan"](grant, observation, now=NOW)
+    roster = api["confirm_plan"](plan, grant, observation, now=NOW)
+
+    operations = butler.canonical_supervisor_operations(
+        roster,
+        [
+            {
+                "seat_id": "seat-worker-1",
+                "template_id": "template:worker:direct",
+                "template_digest_sha256": "b" * 64,
+            }
+        ],
+        {
+            "template:worker:direct": "b" * 64,
+            "template:reviewer:direct": "c" * 64,
+            "template:acp_worker:direct": "d" * 64,
+        },
+    )
+
+    operation = next(item for item in operations if item.action == "re_role")
+    assert operation.action == "re_role"
+    assert operation.identity_id == "agent-worker-1"
+    assert operation.state_id == "state-worker-1"
+    assert operation.state_dir_id == "state-dir-worker-1"
+    assert operation.target_template_id == "template:reviewer:direct"
+    assert operation.target_template_digest_sha256 == "c" * 64
+    assert operation.supervisor_roster_revision == roster["revision"]
+    assert operation.supervisor_roster_digest_sha256 == api["digest"](roster)
 
 
 def test_product_snapshot_selector_consumes_real_board_shaped_state() -> None:

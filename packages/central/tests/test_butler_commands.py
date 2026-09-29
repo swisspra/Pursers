@@ -270,6 +270,118 @@ class ButlerCommandTests(unittest.IsolatedAsyncioTestCase):
                 expected_revision=2,
             )
 
+    async def test_host_seat_cap_uses_human_command_and_delegated_confirm(self) -> None:
+        current = await self.call("butler_config_get")
+        for index, invalid_cap in enumerate((True, 1, 101, "10"), 1):
+            with self.assertRaisesRegex(ToolError, "host_seat_cap"):
+                await self.call(
+                    "butler_command_submit",
+                    agent_name="human-admin",
+                    request_id=f"host-cap-invalid-{index}",
+                    project_id="pursers",
+                    sender_channel="human",
+                    intent="set_host_seat_cap",
+                    parameters={"host_seat_cap": invalid_cap},
+                    expected_config_revision=1,
+                    expires_at=self.expiry(),
+                    priority="high",
+                )
+        with self.assertRaisesRegex(ToolError, "config precondition failed"):
+            await self.call(
+                "butler_command_submit",
+                agent_name="human-admin",
+                request_id="host-cap-stale-revision",
+                project_id="pursers",
+                sender_channel="human",
+                intent="set_host_seat_cap",
+                parameters={"host_seat_cap": 10},
+                expected_config_revision=0,
+                expires_at=self.expiry(),
+                priority="high",
+            )
+        submitted = await self.call(
+            "butler_command_submit",
+            agent_name="human-admin",
+            request_id="host-cap-grant-2",
+            project_id="pursers",
+            sender_channel="human",
+            intent="set_host_seat_cap",
+            parameters={"host_seat_cap": 10},
+            expected_config_revision=1,
+            expires_at=self.expiry(),
+            priority="high",
+        )
+        command = submitted.structured_content["command"]
+        validate_schema("autonomous-butler-command-v2.schema.json", command)
+        self.principal = self.butler
+        for status in ("validating", "pending", "applying"):
+            advanced = await self.call(
+                "butler_command_acknowledge",
+                agent_name="board-butler-1",
+                command_id=command["command_id"],
+                expected_revision=command["revision"],
+                target_status=status,
+                reason_code=f"host_cap_{status}",
+            )
+            command = advanced.structured_content["command"]
+        granted = copy.deepcopy(current.structured_content["config"])
+        granted["revision"] = 2
+        granted["host_runtime"]["revision"] = 2
+        granted["host_runtime"]["agent_process_ceiling"] = 10
+        granted["host_runtime"]["configured_by"] = command["sender"]["agent_id"]
+        granted["host_runtime"]["configured_at"] = datetime.now(timezone.utc).isoformat()
+        granted["envelope"]["host_seat_cap"] = 10
+        granted["authorization"]["authorization_id"] = command["command_id"]
+        granted["authorization"]["config_revision"] = 2
+        granted["authorization"]["expires_at"] = command["expires_at"]
+        set_envelope_fingerprint(granted)
+
+        saved = await self.call(
+            "butler_config_set",
+            agent_name="board-butler-1",
+            mutation_id="host-cap-grant-2",
+            sender_channel="a2a",
+            config=granted,
+            expected_revision=1,
+            authorization_command_id=command["command_id"],
+        )
+
+        self.assertFalse(saved.is_error)
+        reread = await self.call("butler_config_get")
+        self.assertEqual(
+            reread.structured_content["config"]["envelope"]["host_seat_cap"],
+            10,
+        )
+        completed = await self.call(
+            "butler_command_result",
+            agent_name="board-butler-1",
+            command_id=command["command_id"],
+            expected_revision=command["revision"],
+            result={
+                "outcome": "succeeded",
+                "reason_code": "host_seat_cap_committed",
+                "commit_state": "reached",
+                "effect_observation_ref": "butler-config-2",
+                "config_revision": 2,
+            },
+        )
+        self.assertEqual(completed.structured_content["command"]["status"], "succeeded")
+
+        self.principal = self.worker
+        with self.assertRaisesRegex(ToolError, "human-admin"):
+            await self.call(
+                "butler_command_submit",
+                agent_name="worker-1",
+                request_id="host-cap-not-human",
+                project_id="pursers",
+                sender_channel="a2a",
+                intent="set_host_seat_cap",
+                parameters={"host_seat_cap": 9},
+                expected_config_revision=2,
+                expires_at=self.expiry(),
+                priority="high",
+            )
+
     async def test_command_replay_priority_lifecycle_and_product_result(self) -> None:
         self.principal = self.worker
         worker_command = await self.call(

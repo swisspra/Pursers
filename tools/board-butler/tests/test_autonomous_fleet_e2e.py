@@ -743,6 +743,21 @@ class DirectSignedExecutorClient:
             "template_digest_sha256": operation.template_digest_sha256,
             "expected_seat_generation": operation.expected_seat_generation,
             "authorization_fingerprint_sha256": operation.authorization_fingerprint_sha256,
+            # This scenario deliberately exercises the pre-roster
+            # FleetReconciler path.  Keep the complete executor wire contract,
+            # but leave canonical roster bindings absent so the executor uses
+            # its one-way-compatible legacy authorization path.
+            "identity_id": operation.identity_id,
+            "state_id": operation.state_id,
+            "state_dir_id": operation.state_dir_id,
+            "supervisor_roster_revision": operation.supervisor_roster_revision,
+            "supervisor_roster_digest_sha256": (
+                operation.supervisor_roster_digest_sha256
+            ),
+            "target_template_id": operation.target_template_id,
+            "target_template_digest_sha256": (
+                operation.target_template_digest_sha256
+            ),
             "deadline": (
                 self.now.replace(second=0, microsecond=0) + timedelta(minutes=1)
             ).isoformat(),

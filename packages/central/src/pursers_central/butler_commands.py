@@ -21,6 +21,7 @@ COMMAND_SCHEMA = "autonomous_butler_command_v2"
 COMMAND_INTENTS = frozenset(
     {
         "set_desired_state",
+        "set_host_seat_cap",
         "reconcile_now",
         "drain_seat",
         "retire_seat",
@@ -58,6 +59,7 @@ RESULT_COMMIT_STATES = frozenset(
 )
 PARAMETER_FIELDS = {
     "set_desired_state": frozenset({"desired_revision", "desired_digest_sha256"}),
+    "set_host_seat_cap": frozenset({"host_seat_cap"}),
     "reconcile_now": frozenset(),
     "drain_seat": frozenset({"seat_id", "seat_generation"}),
     "retire_seat": frozenset({"seat_id", "seat_generation"}),
@@ -167,6 +169,10 @@ def validate_command_parameters(intent: str, parameters: Any) -> dict[str, Any]:
     if "desired_revision" in normalized:
         normalized["desired_revision"] = _bounded_int(
             "parameters.desired_revision", normalized["desired_revision"], 1, 2**63 - 1
+        )
+    if "host_seat_cap" in normalized:
+        normalized["host_seat_cap"] = _bounded_int(
+            "parameters.host_seat_cap", normalized["host_seat_cap"], 2, 100
         )
     if "desired_digest_sha256" in normalized and not (
         isinstance(normalized["desired_digest_sha256"], str)
@@ -450,6 +456,7 @@ def validate_config(value: Any, board_id: str) -> dict[str, Any]:
                 "max_budget", "created_by", "created_at",
             }
         ),
+        optional=frozenset({"host_seat_cap"}),
     )
     if not isinstance(envelope["fingerprint_sha256"], str) or not SHA256_RE.fullmatch(envelope["fingerprint_sha256"]):
         raise ValueError("config.envelope.fingerprint_sha256 is invalid")
@@ -479,14 +486,24 @@ def validate_config(value: Any, board_id: str) -> dict[str, Any]:
     max_host = _bounded_int(
         "config.envelope.max_host_concurrency", envelope["max_host_concurrency"], 1, 256
     )
+    host_seat_cap = envelope.get("host_seat_cap")
+    if host_seat_cap is not None:
+        host_seat_cap = _bounded_int(
+            "config.envelope.host_seat_cap", host_seat_cap, 2, 100
+        )
+        if host_seat_cap != agent_ceiling:
+            raise ValueError("host seat cap does not match the host runtime ceiling")
     max_board = _bounded_int(
         "config.envelope.max_board_concurrency", envelope["max_board_concurrency"], 1, 256
     )
     max_budget = _validate_budget("config.envelope.max_budget", envelope["max_budget"])
     if any(counts[role]["max"] > max_capacity[role] for role in counts):
         raise ValueError("desired capacity exceeds immutable envelope")
-    if sum(counts[role]["max"] for role in counts) > agent_ceiling:
-        raise ValueError("desired role maxima exceed the host agent-process ceiling")
+    if host_seat_cap is None:
+        if sum(counts[role]["max"] for role in counts) > agent_ceiling:
+            raise ValueError("desired role maxima exceed the host agent-process ceiling")
+    elif sum(counts[role]["min"] for role in counts) > host_seat_cap:
+        raise ValueError("desired role floors exceed the host seat cap")
     if host_concurrency > max_host or board_concurrency > max_board:
         raise ValueError("desired concurrency exceeds immutable envelope")
     if desired_budget["period"] != max_budget["period"] or any(
@@ -538,6 +555,55 @@ def validate_config_authority(
         ]
         if denied:
             raise PermissionError(f"A2A authority cannot mutate {denied[0]}")
+    return paths
+
+
+def validate_host_seat_cap_command_authority(
+    before: Mapping[str, Any] | None,
+    after: Mapping[str, Any],
+    command: Mapping[str, Any],
+) -> list[str]:
+    """Authorize only the config delta delegated by one human cap command."""
+    if before is None:
+        raise PermissionError("host seat cap command requires an existing Butler config")
+    sender = command.get("sender")
+    parameters = command.get("parameters")
+    if (
+        command.get("intent") != "set_host_seat_cap"
+        or command.get("status") != "applying"
+        or not isinstance(sender, Mapping)
+        or sender.get("channel") != "human"
+        or not isinstance(parameters, Mapping)
+        or command.get("expected_config_revision") != before.get("revision")
+    ):
+        raise PermissionError("host seat cap command is not an applying human grant")
+    cap = _bounded_int("parameters.host_seat_cap", parameters.get("host_seat_cap"), 2, 100)
+    authorization = after.get("authorization")
+    if (
+        after.get("revision") != int(before.get("revision", 0)) + 1
+        or after.get("enabled") is not True
+        or after.get("desired", {}).get("mode") != "autonomous"
+        or after.get("host_runtime", {}).get("agent_process_ceiling") != cap
+        or after.get("envelope", {}).get("host_seat_cap") != cap
+        or not isinstance(authorization, Mapping)
+        or authorization.get("authorization_id") != command.get("command_id")
+        or authorization.get("config_revision") != after.get("revision")
+        or authorization.get("envelope_fingerprint_sha256")
+        != after.get("envelope", {}).get("fingerprint_sha256")
+        or authorization.get("expires_at") != command.get("expires_at")
+    ):
+        raise PermissionError("host seat cap command does not match the config grant")
+    allowed = (
+        re.compile(r"^enabled$"),
+        re.compile(r"^desired\.mode$"),
+        re.compile(r"^host_runtime\.(revision|agent_process_ceiling|configured_by|configured_at)$"),
+        re.compile(r"^envelope\.(host_seat_cap|fingerprint_sha256)$"),
+        re.compile(r"^authorization(\..+)?$"),
+    )
+    paths = [path for path in changed_paths(before, after) if path != "revision"]
+    denied = [path for path in paths if not any(pattern.fullmatch(path) for pattern in allowed)]
+    if denied:
+        raise PermissionError(f"host seat cap command cannot mutate {denied[0]}")
     return paths
 
 

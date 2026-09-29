@@ -229,6 +229,109 @@ cycle reads one consistent snapshot, validates authorization, computes a pure
 plan, persists the plan with its input revisions, and executes at most the
 configured operation and start-rate ceilings.
 
+### Host-agnostic registry supervisor ownership
+
+Each managed host has one Butler-owned, versioned roster document. It contains a
+monotonic revision, the operator's `host_seat_cap`, its envelope fingerprint,
+the desired active role for every opaque seat identity, the full-gate
+concurrency budget, and a canonical plan digest. The supervisor reads this
+document on every cycle. Legacy `ROSTER`, `MAX`, `FULL_ACCESS`, and
+`PURSERS_FULL_GATE_CONCURRENCY` values remain a read-only fallback while the
+5.0.6 executor rollout is disabled or the document is absent; once a valid
+document exists they are not another control surface.
+
+The normal fleet-observation refresh may carry a `supervisor_observation`.
+Board Butler rejects that input after 180 seconds, derives a new plan from the
+strict autonomous-config schema, CAS-writes the complete seat inventory and
+lifecycle actions under board state key `supervisor_roster`, and submits a
+bounded `set_desired_state` command that names the resulting revision and
+digest. After that command is accepted, Butler atomically syncs the exact
+canonical bytes to an owner-only host file. Both launchd and systemd executor
+startup pass that path explicitly and reload it at every signed mutation; the
+legacy path is consulted only while the canonical file is absent. The host
+executor accepts a mutation only when its board, authorization fingerprint,
+roster revision and digest, seat generation, identity ID, state ID,
+state-directory ID, approved template, and lifecycle action all match that
+canonical document. A malformed or altered canonical document fails closed.
+
+The planner and roster are executor-agnostic. They identify opaque seats,
+approved templates, generations, state-directory IDs, lifecycle actions, and
+registry projects, but do not name an IDE, model provider, process manager, or
+operating system. A host adapter translates those actions: the development
+host may use its supervisor adapter, while a Linux deployment can use seat-kit
+Goose CLI/ACP templates through the existing systemd `ServiceAdapter`. Other
+MCP-capable IDE/provider adapters use the same typed roster and executor
+boundary; adding one does not change demand planning or authorization.
+Re-role is a first-class signed executor action: it requires an already drained
+seat with no work or review lease, stops the source template, replaces the
+launchd plist or systemd unit with the exact approved target template, starts
+and verifies registry readiness, preserves the opaque identity/state bindings,
+and advances the seat generation.
+
+The operator grant is the single integer `host_seat_cap`. Setting or changing
+it creates a new authorization whose envelope fingerprint covers the cap,
+approved role templates, host identity, and safety version. Worker, reviewer,
+and verifier maxima are not operator inputs. Butler supplies internal floors
+(normally one worker and one reviewer) and may provision, start, pause, resume,
+stop, remove, or re-role any managed seat inside the cap without a per-action
+confirmation. A plan is accepted only when its config revision and envelope
+fingerprint still match the active authorization; confirmation revalidates the
+same digest and observations immediately before publishing the roster.
+
+Every registry event and observation refresh triggers planning, with a target
+latency of one refresh cycle (about two minutes). Inputs are unassignable work
+and review counts, oldest queue age, rejection/rework load, the product-produced
+full-gate admission depth and wait, idle seats, and host CPU, memory, and disk
+headroom. Butler converts pressure into a total active count and role mix,
+prioritizes the older bottleneck, pauses idle capacity down to its safety
+floors, and raises the gate budget only when headroom permits. A growing gate
+queue without headroom instead reduces concurrent gate-heavy seats. Durable
+hysteresis and scale/re-role cooldowns prevent oscillation.
+
+Registry observations carry per-project demand and an operator-owned project
+priority. The canonical roster publishes a `project_admission` table containing
+nonzero weighted share units for every project with queued work, review, rework,
+or gate demand. Queue age increases that weight, so a low-priority project that
+waits continues to gain service instead of starving; priority affects ordering
+but never changes the host cap or authorization. Role-mix and gate decisions
+use the validated aggregate of those project observations, and inconsistent
+per-project versus aggregate totals fail closed. Seats remain a shared registry
+pool rather than being permanently pinned to one board, allowing hundreds of
+projects to share worker/reviewer/ACP capacity.
+
+One explicitly named control board holds the host grant, roster CAS state, and
+authorization fingerprint. A multi-project observation must name that board;
+the reconciler never chooses one project implicitly. Other active projects
+contribute demand and priority only, so they cannot raise host authority.
+
+Lifecycle changes are two-phase. The plan first marks a seat draining so no
+new offer is routed to it. Stop, remove, or re-role is confirmable only after a
+fresh observation proves that it holds neither a work claim nor a review
+lease. Re-role assigns a new generation and template while retaining an
+unambiguous identity history; removed identity names and state directories are
+never reused. A new seat receives a new opaque identity and state directory
+from an approved template. The supervisor only consumes confirmed roster
+state; it never invents these transitions.
+
+Butler may set the active roster size no higher than `host_seat_cap`. Gate
+concurrency is separately bounded by the envelope's immutable
+`max_host_concurrency`; the roster cap cannot raise that ceiling. Butler may
+set `PURSERS_FULL_GATE_CONCURRENCY` between zero and the confirmed gate
+ceiling. It cannot alter credentials, template allowlists, state roots, host
+identity, or the safety version. Each proposal, confirmation, refusal, and
+lifecycle result is appended to the Butler command log and projected as a
+redacted `coordinator_findings` row containing revisions, digests, observations,
+reason code, and affected opaque seat IDs.
+
+The hand-managed migration inventory is 16 seats (11 workers including the
+verifier role, plus 5 reviewers). The first valid observation adopts those
+identities as migration input and reports `observed_seats_exceed_cap` when the
+operator grants a lower cap such as 15. Butler then drains idle seats and
+converges safely; it neither treats the observed 16 as authorization nor stops
+a lease holder. A changed cap is a fresh grant and therefore produces a new
+envelope fingerprint. No launchd, restart, seat creation, or kill occurs while
+the rollout dependencies remain disabled.
+
 Scale-up selects only an approved template with a pre-provisioned credential
 reference and asks the host executor to instantiate it. Scale-down selects only
 idle Butler-managed seats, marks one draining, waits for lease/offer release,
@@ -448,12 +551,14 @@ operation IDs, and outcome remain durable.
 
 ## Dashboard contract
 
-Fleet Settings exposes per-board mode, runner, approved templates, desired
-min/target/max counts, board and host ceilings, cooldowns, budgets, connectors,
-and authorization fingerprint. Team shows desired versus actual capacity and
-seat lifecycle. Activity shows commands and redacted audits. Controls create
-typed commands with the displayed config revision and require confirmation for
-kill, resume, drain, retire, and autonomous enablement.
+The operator grants `host_seat_cap` with the typed `set_host_seat_cap` Butler
+command. Butler validates its config-revision precondition, advances the command
+through plan/confirm, and commits only the delegated cap, host-runtime revision,
+envelope fingerprint, and matching authorization. Worker/reviewer maxima are
+not operator inputs to this control. A Fleet Settings editor for the command is
+a separate follow-up; this ticket does not add a direct config-write UI. Team
+continues to show desired versus actual capacity and seat lifecycle. Activity
+shows commands and redacted audits.
 
 The UI labels `pending`, `applying`, `degraded`, `killed`, and `auto-demoted`
 exactly as returned. It does not optimistically display a desired value as

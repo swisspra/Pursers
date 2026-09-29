@@ -117,6 +117,10 @@ def test_plan_confirm_stages_owner_only_runtime_without_launchctl(tmp_path: Path
     assert len(private_key.read_bytes()) == 32
     assert provision.executor.load_policy(config_path).host_cap == 12
     executor_document = plistlib.loads(executor_plist.read_bytes())
+    assert "--supervisor-roster" in executor_document["ProgramArguments"]
+    assert str(state / "supervisor-roster.json") in executor_document["ProgramArguments"]
+    assert "--legacy-supervisor-config" in executor_document["ProgramArguments"]
+    assert str(state / "supervisor-legacy.json") in executor_document["ProgramArguments"]
     assert executor_document["ProgramArguments"][-2:] == [
         "--service-manager",
         "launchd",
@@ -126,17 +130,33 @@ def test_plan_confirm_stages_owner_only_runtime_without_launchctl(tmp_path: Path
         state / "executor.sock"
     )
     assert environment["PURSERS_BUTLER_FLEET_EXECUTOR_KEY_ID"] == "board-butler-local"
+    assert environment["PURSERS_BUTLER_FLEET_EXECUTOR_CONFIG"] == str(config_path)
+    assert environment["PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE"] == str(
+        state / "supervisor-roster.json"
+    )
+    assert json.loads((state / "supervisor-legacy.json").read_text()) == {
+        "schema": "pursers_legacy_supervisor_config_v1"
+    }
     assert "synthetic" not in json.dumps(environment)
     assert (butler_plist.with_suffix(".plist.before-fleet")).exists()
 
 
-def test_plan_rejects_host_ceiling_above_twelve(tmp_path: Path) -> None:
+def test_plan_accepts_operator_cap_fifteen_and_rejects_above_product_bound(
+    tmp_path: Path,
+) -> None:
     specification = provision_spec(tmp_path)
-    specification["policy"]["host_cap"] = 13
+    specification["policy"]["host_cap"] = 15
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(specification), encoding="utf-8")
+    plan = provision.create_plan(spec_path, tmp_path / "plan.json")
+    assert plan["spec"]["policy"]["host_cap"] == 15
+
+    other = provision_spec(tmp_path / "other")
+    other["policy"]["host_cap"] = 101
+    other_spec = tmp_path / "other-spec.json"
+    other_spec.write_text(json.dumps(other), encoding="utf-8")
     with pytest.raises(provision.ProvisionError, match="host_cap_invalid"):
-        provision.create_plan(spec_path, tmp_path / "plan.json")
+        provision.create_plan(other_spec, tmp_path / "other-plan.json")
 
 
 def test_confirm_rejects_preexisting_non_private_state_directory(

@@ -71,6 +71,15 @@ class FakeAdapter:
             raise RuntimeError("stop failed")
         self.observations[seat_id] = executor.ServiceObservation(True, False, False, True)
 
+    def replace(
+        self,
+        seat_id: str,
+        source: executor.SeatTemplate,
+        target: executor.SeatTemplate,
+    ) -> None:
+        self.calls.append(("replace", seat_id))
+        self.observations[seat_id] = executor.ServiceObservation(True, False, False, True)
+
 
 class FakeLeases:
     def __init__(self, observation: executor.LeaseObservation | None = None) -> None:
@@ -184,6 +193,12 @@ def signed_request(
     seat_id: str = "worker-a",
     generation: int = 1,
     nonce: str | None = None,
+    identity_id: str | None = None,
+    state_id: str | None = None,
+    state_dir_id: str | None = None,
+    roster_revision: int | None = None,
+    roster_digest: str | None = None,
+    target_template: executor.SeatTemplate | None = None,
 ) -> dict[str, Any]:
     template = runtime["template"]
     signed_at = datetime.fromtimestamp(NOW, timezone.utc).isoformat()
@@ -199,6 +214,17 @@ def signed_request(
         "template_digest_sha256": template.digest_sha256,
         "expected_seat_generation": generation,
         "authorization_fingerprint_sha256": FINGERPRINT,
+        "identity_id": identity_id,
+        "state_id": state_id,
+        "state_dir_id": state_dir_id,
+        "supervisor_roster_revision": roster_revision,
+        "supervisor_roster_digest_sha256": roster_digest,
+        "target_template_id": (
+            target_template.template_id if target_template is not None else None
+        ),
+        "target_template_digest_sha256": (
+            target_template.digest_sha256 if target_template is not None else None
+        ),
         "deadline": datetime.fromtimestamp(NOW + 60, timezone.utc).isoformat(),
         "caller_auth": {
             "scheme": "local_ed25519_v1",
@@ -226,6 +252,39 @@ def signed_request(
     return request
 
 
+def supervisor_roster(
+    *,
+    actions: list[dict[str, Any]],
+    seats: list[dict[str, Any]] | None = None,
+    revision: int = 1,
+) -> dict[str, Any]:
+    return {
+        "schema": executor.SUPERVISOR_ROSTER_SCHEMA,
+        "revision": revision,
+        "board_id": "pursers",
+        "config_revision": 1,
+        "envelope_fingerprint_sha256": FINGERPRINT,
+        "host_seat_cap": 3,
+        "gate_concurrency_ceiling": 2,
+        "desired": {"worker": 1, "reviewer": 1, "verifier": 0},
+        "full_gate_concurrency": 1,
+        "project_admission": [
+            {
+                "project_id": "pursers",
+                "priority": 50,
+                "share_units": 51,
+                "role_pressure": {"worker": 1, "reviewer": 0, "verifier": 0},
+            }
+        ],
+        "seats": list(seats or []),
+        "actions": actions,
+        "plan_digest_sha256": "b" * 64,
+        "confirmed_at": datetime.fromtimestamp(NOW, timezone.utc).isoformat(),
+        "audit": [],
+        "findings": [],
+    }
+
+
 def test_start_creates_ready_seat_and_publishes_bounded_receipt(runtime: dict[str, Any]) -> None:
     result = runtime["service"].handle(signed_request(runtime, "start", "op-start"))
 
@@ -250,6 +309,331 @@ def test_start_creates_ready_seat_and_publishes_bounded_receipt(runtime: dict[st
     jsonschema.Draft202012Validator(
         schema, format_checker=jsonschema.FormatChecker()
     ).validate(result)
+
+
+def test_canonical_supervisor_roster_authorizes_only_matching_mutation(
+    runtime: dict[str, Any],
+) -> None:
+    action = {
+        "kind": "provision",
+        "target_role": "worker",
+        "template_id": "worker-standard",
+        "seat_id": "worker-a",
+        "identity_id": "identity:worker-a",
+        "state_id": "state:worker-a",
+        "state_dir_id": "state-dir:worker-a",
+        "generation": 1,
+    }
+    runtime["service"].supervisor_control = {
+        "source": "canonical",
+        "document": supervisor_roster(actions=[action]),
+    }
+    document = runtime["service"].supervisor_control["document"]
+
+    result = runtime["service"].handle(
+        signed_request(
+            runtime,
+            "start",
+            "op-roster-start",
+            identity_id=action["identity_id"],
+            state_id=action["state_id"],
+            state_dir_id=action["state_dir_id"],
+            roster_revision=document["revision"],
+            roster_digest=executor.hashlib.sha256(
+                executor.canonical_json(document)
+            ).hexdigest(),
+        )
+    )
+    assert result["outcome"] == "succeeded"
+
+    with pytest.raises(executor.PolicyError, match="operation_not_in_supervisor_roster"):
+        runtime["service"].handle(
+            signed_request(
+                runtime,
+                "stop",
+                "op-roster-stop",
+                identity_id=action["identity_id"],
+                state_id=action["state_id"],
+                state_dir_id=action["state_dir_id"],
+                roster_revision=document["revision"],
+                roster_digest=executor.hashlib.sha256(
+                    executor.canonical_json(document)
+                ).hexdigest(),
+            )
+        )
+
+
+def test_supervisor_roster_is_bound_to_board_and_authorization(
+    runtime: dict[str, Any],
+) -> None:
+    document = supervisor_roster(actions=[])
+    document["board_id"] = "other-board"
+    runtime["service"].supervisor_control = {
+        "source": "canonical",
+        "document": document,
+    }
+    with pytest.raises(
+        executor.PolicyError, match="supervisor_roster_authorization_mismatch"
+    ):
+        runtime["service"].handle(
+            signed_request(runtime, "inspect", "op-wrong-roster")
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("identity_id", "identity:changed", "operation_not_in_supervisor_roster"),
+        ("state_id", "state:changed", "operation_not_in_supervisor_roster"),
+        ("state_dir_id", "state-dir:changed", "operation_not_in_supervisor_roster"),
+        ("supervisor_roster_revision", 2, "supervisor_roster_authorization_mismatch"),
+        (
+            "supervisor_roster_digest_sha256",
+            "c" * 64,
+            "supervisor_roster_authorization_mismatch",
+        ),
+    ],
+)
+def test_canonical_binding_change_is_rejected_before_mutation(
+    runtime: dict[str, Any], field: str, value: Any, error: str
+) -> None:
+    action = {
+        "kind": "provision",
+        "target_role": "worker",
+        "template_id": "worker-standard",
+        "seat_id": "worker-a",
+        "identity_id": "identity:worker-a",
+        "state_id": "state:worker-a",
+        "state_dir_id": "state-dir:worker-a",
+        "generation": 1,
+    }
+    document = supervisor_roster(actions=[action])
+    runtime["service"].supervisor_control = {
+        "source": "canonical",
+        "document": document,
+    }
+    values = {
+        "identity_id": action["identity_id"],
+        "state_id": action["state_id"],
+        "state_dir_id": action["state_dir_id"],
+        "roster_revision": document["revision"],
+        "roster_digest": executor.hashlib.sha256(
+            executor.canonical_json(document)
+        ).hexdigest(),
+    }
+    aliases = {
+        "supervisor_roster_revision": "roster_revision",
+        "supervisor_roster_digest_sha256": "roster_digest",
+    }
+    values[aliases.get(field, field)] = value
+    request = signed_request(runtime, "start", f"op-changed-{field}", **values)
+
+    with pytest.raises(executor.PolicyError, match=error):
+        runtime["service"].handle(request)
+    assert runtime["adapter"].calls == []
+
+
+def test_first_canonical_action_adopts_unbound_legacy_executor_state(
+    runtime: dict[str, Any],
+) -> None:
+    assert runtime["service"].handle(
+        signed_request(runtime, "start", "op-legacy-start")
+    )["outcome"] == "succeeded"
+    binding = {
+        "seat_id": "worker-a",
+        "identity_id": "identity:worker-a",
+        "state_id": "state:worker-a",
+        "state_dir_id": "state-dir:worker-a",
+        "generation": 1,
+    }
+    seat = {
+        **binding,
+        "role": "worker",
+        "lifecycle": "ready",
+        "work_claim": False,
+        "review_lease": False,
+        "transition_at": datetime.fromtimestamp(NOW - 600, timezone.utc).isoformat(),
+    }
+    action = {**binding, "kind": "drain", "target_role": "reviewer"}
+    document = supervisor_roster(actions=[action], seats=[seat])
+    runtime["service"].supervisor_control = {
+        "source": "canonical",
+        "document": document,
+    }
+    roster_digest = executor.hashlib.sha256(
+        executor.canonical_json(document)
+    ).hexdigest()
+
+    result = runtime["service"].handle(
+        signed_request(
+            runtime, "drain", "op-adopt-and-drain",
+            identity_id=binding["identity_id"], state_id=binding["state_id"],
+            state_dir_id=binding["state_dir_id"], roster_revision=1,
+            roster_digest=roster_digest,
+        )
+    )
+
+    assert result["outcome"] == "succeeded"
+    stored = runtime["service"].store.seat("worker-a")
+    assert stored["identity_id"] == binding["identity_id"]
+    assert stored["state_id"] == binding["state_id"]
+    assert stored["state_dir_id"] == binding["state_dir_id"]
+
+
+def test_drained_worker_re_roles_through_exact_canonical_action(
+    runtime: dict[str, Any],
+) -> None:
+    worker = runtime["template"]
+    reviewer_record = template_record(
+        worker.repository_root,
+        worker.seat_root,
+        principal="PR-reviewer-a",
+    )
+    reviewer_record["role"] = "reviewer"
+    reviewer_record["capabilities"] = {
+        "can_work": False,
+        "can_review": True,
+        "tier_max": 2,
+        "max_parallel": 1,
+    }
+    reviewer = executor.SeatTemplate.from_record("reviewer-standard", reviewer_record)
+    runtime["service"].policy.templates[reviewer.template_id] = reviewer
+    binding = {
+        "seat_id": "worker-a",
+        "identity_id": "identity:worker-a",
+        "state_id": "state:worker-a",
+        "state_dir_id": "state-dir:worker-a",
+        "generation": 1,
+    }
+
+    def install(document: dict[str, Any]) -> tuple[int, str]:
+        runtime["service"].supervisor_control = {
+            "source": "canonical",
+            "document": document,
+        }
+        return document["revision"], executor.hashlib.sha256(
+            executor.canonical_json(document)
+        ).hexdigest()
+
+    provision = {**binding, "kind": "provision", "target_role": "worker", "template_id": worker.template_id}
+    revision, digest = install(supervisor_roster(actions=[provision], revision=1))
+    started = runtime["service"].handle(
+        signed_request(
+            runtime, "start", "op-canonical-start",
+            identity_id=binding["identity_id"], state_id=binding["state_id"],
+            state_dir_id=binding["state_dir_id"], roster_revision=revision,
+            roster_digest=digest,
+        )
+    )
+    assert started["outcome"] == "succeeded"
+
+    ready_seat = {
+        **binding,
+        "role": "worker",
+        "lifecycle": "ready",
+        "work_claim": False,
+        "review_lease": False,
+        "transition_at": datetime.fromtimestamp(NOW - 600, timezone.utc).isoformat(),
+    }
+    drain = {**binding, "kind": "drain", "target_role": "reviewer"}
+    revision, digest = install(
+        supervisor_roster(actions=[drain], seats=[ready_seat], revision=2)
+    )
+    drained = runtime["service"].handle(
+        signed_request(
+            runtime, "drain", "op-canonical-drain",
+            identity_id=binding["identity_id"], state_id=binding["state_id"],
+            state_dir_id=binding["state_dir_id"], roster_revision=revision,
+            roster_digest=digest,
+        )
+    )
+    assert drained["outcome"] == "succeeded"
+
+    draining_seat = {**ready_seat, "lifecycle": "draining"}
+    re_role = {
+        **binding,
+        "kind": "re_role",
+        "target_role": "reviewer",
+        "template_id": reviewer.template_id,
+    }
+    revision, digest = install(
+        supervisor_roster(actions=[re_role], seats=[draining_seat], revision=3)
+    )
+    runtime["service"].store.save_seat(
+        seat_id="reviewer-b",
+        board_id="pursers",
+        template=reviewer,
+        identity_id="identity:reviewer-b",
+        state_id="state:reviewer-b",
+        state_dir_id="state-dir:reviewer-b",
+        generation=1,
+        lifecycle="ready",
+        process_ref="pid:reviewer-b",
+        now=NOW,
+    )
+    calls_before_collision = list(runtime["adapter"].calls)
+    blocked = runtime["service"].handle(
+        signed_request(
+            runtime, "re_role", "op-canonical-re-role-principal-collision",
+            identity_id=binding["identity_id"], state_id=binding["state_id"],
+            state_dir_id=binding["state_dir_id"], roster_revision=revision,
+            roster_digest=digest, target_template=reviewer,
+        )
+    )
+    assert blocked["outcome"] == "rejected"
+    assert blocked["reason_code"] == "principal_not_independent"
+    collision_calls = runtime["adapter"].calls[len(calls_before_collision):]
+    assert collision_calls == []
+    runtime["service"].store.save_seat(
+        seat_id="reviewer-b",
+        board_id="pursers",
+        template=reviewer,
+        identity_id="identity:reviewer-b",
+        state_id="state:reviewer-b",
+        state_dir_id="state-dir:reviewer-b",
+        generation=2,
+        lifecycle="stopped",
+        process_ref=None,
+        now=NOW,
+    )
+    changed = runtime["service"].handle(
+        signed_request(
+            runtime, "re_role", "op-canonical-re-role",
+            identity_id=binding["identity_id"], state_id=binding["state_id"],
+            state_dir_id=binding["state_dir_id"], roster_revision=revision,
+            roster_digest=digest, target_template=reviewer,
+        )
+    )
+
+    assert changed["outcome"] == "succeeded"
+    stored = runtime["service"].store.seat("worker-a")
+    assert stored["template_id"] == reviewer.template_id
+    assert stored["identity_id"] == binding["identity_id"]
+    assert stored["state_id"] == binding["state_id"]
+    assert stored["state_dir_id"] == binding["state_dir_id"]
+    assert stored["generation"] == 2
+    assert ("replace", "worker-a") in runtime["adapter"].calls
+
+
+def test_supervisor_control_prefers_canonical_and_fails_closed_when_malformed(
+    tmp_path: Path,
+) -> None:
+    roster_path = tmp_path / "roster.json"
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text(json.dumps({"max": 3}), encoding="utf-8")
+    legacy_path.chmod(0o600)
+
+    control = executor.load_supervisor_control(roster_path, legacy_path)
+    assert control == {"source": "legacy", "document": {"max": 3}}
+
+    roster_path.write_text(json.dumps(supervisor_roster(actions=[])), encoding="utf-8")
+    roster_path.chmod(0o600)
+    control = executor.load_supervisor_control(roster_path, legacy_path)
+    assert control["source"] == "canonical"
+
+    roster_path.write_text('{"schema":"pursers_supervisor_roster_v1"}', encoding="utf-8")
+    with pytest.raises(executor.PolicyError, match="supervisor_roster_invalid"):
+        executor.load_supervisor_control(roster_path, legacy_path)
 
 
 def test_identical_operation_replays_without_second_mutation(runtime: dict[str, Any]) -> None:

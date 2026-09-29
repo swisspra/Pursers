@@ -41,6 +41,10 @@
     <string>board-butler-local</string>
     <key>PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY</key>
     <string>/PATH/TO/private/fleet-executor/board-butler-local.key</string>
+    <key>PURSERS_BUTLER_FLEET_EXECUTOR_CONFIG</key>
+    <string>/PATH/TO/private/fleet-executor/executor.json</string>
+    <key>PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE</key>
+    <string>/PATH/TO/private/fleet-executor/supervisor-roster.json</string>
     <key>PYTHONPATH</key>
     <string>/PATH/TO/ButlerPursers/packages/client/src</string>
   </dict>
