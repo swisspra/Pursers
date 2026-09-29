@@ -34,6 +34,10 @@ This release includes `pursers-central==0.1.5`,
 - Board Butler can onboard a project it has not seen before: it resolves the
   repository, clones the project folder, and registers it, with capped retry
   and backoff that survive restarts.
+- Boards can set a default ticket tier (`board_dispatch_policy_set` with
+  `default_ticket_tier`). A ticket created without an explicit tier takes the
+  board default, explicit tiers still win, and boards without the setting keep
+  tier 2. The client no longer sends tier 2 when the caller omits it.
 
 ### Fixed
 
@@ -48,6 +52,11 @@ This release includes `pursers-central==0.1.5`,
   installs, Central upgrades with pinned clients, the Fleet environment
   contract, Butler fleet preflight, `./`-prefixed checksum rows, editable
   freeze constraints, and collector-based digest freshness.
+
+### Changed
+
+- The Home runtime wheelhouse lock is refreshed for Linux x86_64 and macOS
+  arm64 (PyJWT 2.15.1, sse-starlette 3.5.0).
 
 ### Documentation
 

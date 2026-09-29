@@ -249,7 +249,7 @@ Required authorization: `board:write`, or restricted `board:intake`.
 | `unassigned` | `boolean` | optional | `false` |
 | `coordinator_op_key` | `string | null` | optional | `null` |
 | `expected_generation` | `string | null` | optional | `null` |
-| `tier` | `integer` | optional | `2` |
+| `tier` | `integer | null` | optional | `null` |
 | `skills_required` | `array[string] | null` | optional | `null` |
 | `exclude_agents` | `array[string] | null` | optional | `null` |
 | `prefer_agents` | `array[string] | null` | optional | `null` |
@@ -1070,6 +1070,7 @@ Required authorization: `board:write` as admin, or `board:coordinate`.
 | `broadcast_reoffer_s` | `integer` | optional | `600` |
 | `second_opinion` | `boolean` | optional | `true` |
 | `fallback_broadcast` | `boolean` | optional | `true` |
+| `default_ticket_tier` | `integer | null` | optional | `null` |
 | `expected_generation` | `string | null` | optional | `null` |
 
 Response fields: `ok, board_id, dispatch_policy, previous_dispatch_policy, changed`.
