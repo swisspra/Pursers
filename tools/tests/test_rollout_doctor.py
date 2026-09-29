@@ -777,7 +777,7 @@ def test_runbook_pins_reviewed_butler_fix_and_authoritative_suite() -> None:
     assert '(cd "$RELEASE_WHEELS" && shasum -a 256 -c SHA256SUMS.txt)' not in template
     assert "python3 -m venv \"$TARGET_VENV\"" in template
     assert "old-third-party-constraints.txt" in template
-    assert "mcp($|\\[|[-_=.<])" in template
+    assert "canonical_name(line: str)" in template
     assert '"pursers-personal==$PRODUCT_VERSION"' in template
     assert '"pursers-acp==$ACP_VERSION"' in template
     assert '"pursers-personal-import==$IMPORT_VERSION"' in template
@@ -813,6 +813,77 @@ def test_runbook_pins_reviewed_butler_fix_and_authoritative_suite() -> None:
     executor_start = runbook.index("systemctl --user start pursers-fleet-executor")
     butler_start = runbook.index("systemctl --user start pursers-butler")
     assert central_start < executor_start < butler_start
+
+
+def test_runbook_constraint_filter_handles_real_pip_freeze_forms(
+    tmp_path: Path,
+) -> None:
+    template = (
+        MODULE_PATH.parents[1] / "docs/releases/RUNBOOK-template.md"
+    ).read_text(encoding="utf-8")
+    marker = '"$OLD_SERVICE_PYTHON" - "$OLD_FREEZE" "$THIRD_PARTY_CONSTRAINTS" <<\'PY\'\n'
+    script = template.split(marker, 1)[1].split("\nPY\n", 1)[0]
+    source = tmp_path / "freeze.txt"
+    destination = tmp_path / "constraints.txt"
+    _write(
+        source,
+        """requests==2.32.5
+ pursers @ file:///PATH/TO/pursers
+MCP[cli] @ file:///PATH/TO/mcp
+-e git+https://example.invalid/repo#egg=pursers-client
+pursers_wait_bridge===0.1.2
+tomli @ https://example.invalid/tomli.whl
+""",
+    )
+
+    subprocess.run(
+        [sys.executable, "-c", script, str(source), str(destination)],
+        check=True,
+    )
+
+    assert destination.read_text(encoding="utf-8") == (
+        "requests==2.32.5\n"
+        "tomli @ https://example.invalid/tomli.whl\n"
+    )
+
+
+def test_runbook_smoke_adapters_are_mutually_exclusive_and_share_cleanup() -> None:
+    template = (
+        MODULE_PATH.parents[1] / "docs/releases/RUNBOOK-template.md"
+    ).read_text(encoding="utf-8")
+    smoke = template.split('case "$CENTRAL_SMOKE_ADAPTER" in', 1)[1].split(
+        "Take a second SQLite", 1
+    )[0]
+    profile_branch, launcher_branch = smoke.split("  launcher)", 1)
+    launcher_branch = launcher_branch.split("esac", 1)[0]
+
+    assert (
+        '"$CENTRAL_VENV/bin/pursers-central" run "$CENTRAL_SMOKE_PROFILE" &'
+        in profile_branch
+    )
+    assert "module.build_app(data_dir_override=data_dir)" not in profile_branch
+    assert "module.build_app(data_dir_override=data_dir)" in launcher_branch
+    assert "pursers-central\" run" not in launcher_branch
+    assert smoke.count("SMOKE_PID=$!") == 1
+    assert smoke.index("SMOKE_PID=$!") < smoke.index("trap 'kill \"$SMOKE_PID\"")
+    assert smoke.index("trap 'kill \"$SMOKE_PID\"") < smoke.index(
+        "for attempt in 1 2 3 4 5 6 7 8 9 10"
+    )
+
+
+def test_runbook_systemd_central_install_is_uv_free() -> None:
+    template = (
+        MODULE_PATH.parents[1] / "docs/releases/RUNBOOK-template.md"
+    ).read_text(encoding="utf-8")
+    install_case = template.split('case "$CENTRAL_SERVICE_KIND" in', 1)[1].split(
+        '"$CENTRAL_VENV/bin/python" -m pip check', 1
+    )[0]
+    systemd_branch, launchd_branch = install_case.split("  launchd)", 1)
+
+    assert "CENTRAL_VENV=$TARGET_VENV" in systemd_branch
+    assert '"$CENTRAL_VENV/bin/python" -m pip install' in systemd_branch
+    assert "\n    uv " not in systemd_branch
+    assert "uv venv" in launchd_branch
 
 
 def test_main_writes_only_when_output_is_explicit(tmp_path: Path, capsys) -> None:

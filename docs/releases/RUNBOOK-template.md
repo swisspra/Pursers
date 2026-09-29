@@ -121,12 +121,40 @@ export RELEASE_WHEELS="$RELEASE_ROOT/release-assets"
 export RELEASE_CHECKOUT=/PATH/TO/projects/pursers-$RELEASE_TAG-source
 export TARGET_VENV="$RELEASE_ROOT/venv"
 export OLD_SERVICE_PYTHON=/PATH/TO/services/pursers-OLD/venv/bin/python
+export OLD_FREEZE="$ROLLOUT_STATE/old-environment-freeze.txt"
 export THIRD_PARTY_CONSTRAINTS="$ROLLOUT_STATE/old-third-party-constraints.txt"
 
 install -d -m 700 "$RELEASE_ROOT" "$ROLLOUT_STATE"
-"$OLD_SERVICE_PYTHON" -m pip freeze |
-  grep -Eiv '^(pursers($|[-_=.<])|mcp($|\[|[-_=.<]))' \
-  > "$THIRD_PARTY_CONSTRAINTS"
+"$OLD_SERVICE_PYTHON" -m pip freeze > "$OLD_FREEZE"
+"$OLD_SERVICE_PYTHON" - "$OLD_FREEZE" "$THIRD_PARTY_CONSTRAINTS" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+source, destination = map(Path, sys.argv[1:])
+name_pattern = re.compile(
+    r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\s*\[[^]]*\])?"
+    r"\s*(?:@|===|==|~=|!=|<=|>=|<|>|$)"
+)
+egg_pattern = re.compile(r"[#&]egg=([A-Za-z0-9][A-Za-z0-9._-]*)", re.I)
+
+def canonical_name(line: str) -> str | None:
+    value = line.strip()
+    match = name_pattern.match(value)
+    if match is None:
+        match = egg_pattern.search(value)
+    if match is None:
+        return None
+    return re.sub(r"[-_.]+", "-", match.group(1)).lower()
+
+kept = []
+for line in source.read_text(encoding="utf-8").splitlines():
+    name = canonical_name(line)
+    if name == "mcp" or name == "pursers" or (name or "").startswith("pursers-"):
+        continue
+    kept.append(line)
+destination.write_text("\n".join(kept) + "\n", encoding="utf-8")
+PY
 python3 -m venv "$TARGET_VENV"
 "$TARGET_VENV/bin/python" -m pip install \
   --find-links "$RELEASE_WHEELS" \
@@ -142,8 +170,11 @@ python3 -m venv "$TARGET_VENV"
 ```
 
 The filtered constraints deliberately remove every old `pursers*` and `mcp`
-pin. The release's exact Pursers pins and their current MCP requirement must
-win; all other previously approved third-party versions remain constrained.
+pin, including extras, editable URLs, and PEP 508 direct references such as
+`pursers @ file:///...` and `mcp @ file:///...`. The release's exact Pursers
+pins and their current MCP requirement must win; all other previously approved
+third-party versions remain constrained. Retain `OLD_FREEZE` with the private
+rollout evidence so the filtering step can be audited.
 
 For an existing service environment, upgrade its complete installed Pursers
 set in one transaction. The script keeps service-specific subsets, adds the
@@ -244,11 +275,28 @@ export CLIENT_WHEEL=$(find "$RELEASE_WHEELS" -maxdepth 1 -name "pursers_client-$
 test -f "$CENTRAL_WHEEL"
 test -f "$CLIENT_WHEEL"
 
-uv venv --python /PATH/TO/python3.12 "$CENTRAL_VENV"
-uv pip install --python "$CENTRAL_VENV/bin/python" \
-  --find-links "$RELEASE_WHEELS" \
-  "pursers-central==$CENTRAL_VERSION" \
-  "pursers-client==$CLIENT_VERSION"
+case "$CENTRAL_SERVICE_KIND" in
+  systemd)
+    # The no-uv Linux route already created and populated TARGET_VENV above.
+    # Reuse it for Central so this path stays uv-free end to end.
+    CENTRAL_VENV=$TARGET_VENV
+    export CENTRAL_VENV
+    test -x "$CENTRAL_VENV/bin/python"
+    "$CENTRAL_VENV/bin/python" -m pip install \
+      --find-links "$RELEASE_WHEELS" \
+      --constraint "$THIRD_PARTY_CONSTRAINTS" \
+      "pursers-central==$CENTRAL_VERSION" \
+      "pursers-client==$CLIENT_VERSION"
+    ;;
+  launchd)
+    uv venv --python /PATH/TO/python3.12 "$CENTRAL_VENV"
+    uv pip install --python "$CENTRAL_VENV/bin/python" \
+      --find-links "$RELEASE_WHEELS" \
+      "pursers-central==$CENTRAL_VERSION" \
+      "pursers-client==$CLIENT_VERSION"
+    ;;
+  *) echo "CENTRAL_SERVICE_KIND must be launchd or systemd" >&2; exit 64 ;;
+esac
 "$CENTRAL_VENV/bin/python" -m pip check
 
 CENTRAL_SHA256=$(shasum -a 256 "$CENTRAL_WHEEL" | awk '{print $1}')
@@ -304,21 +352,26 @@ sqlite3 "$CENTRAL_DB" ".backup '$CENTRAL_SMOKE_DATA/central.sqlite3'"
 sqlite3 "$CENTRAL_SMOKE_DATA/central.sqlite3" 'PRAGMA integrity_check;' | grep -Fx ok
 ```
 
-On a Linux/systemd host, smoke-test the installed console entry point using a
-private copy of the live Central profile directory and the SQLite backup. The
-copy may retain host credentials, so it stays under `ROLLOUT_STATE`; only the
-three isolation keys are rewritten. Do not run the candidate against the live
-profile or data directory.
+Choose exactly one smoke adapter. Use `profile` for the Linux/systemd console
+entry point or `launcher` for a host-owned `serve_tls.py`; never start both on
+the same alternate port. Both branches feed the single PID, bounded probe, and
+cleanup sequence below.
 
 ```sh
-export CENTRAL_LIVE_PROFILE_DIR=/PATH/TO/services/pursers-OLD/central
-export CENTRAL_SMOKE_PROFILE="$ROLLOUT_STATE/central-smoke-profile"
-export CENTRAL_SMOKE_AUDIENCE=pursers-rollout-smoke
+case "$CENTRAL_SERVICE_KIND" in
+  systemd) CENTRAL_SMOKE_ADAPTER=profile ;;
+  launchd) CENTRAL_SMOKE_ADAPTER=launcher ;;
+esac
 
-test ! -e "$CENTRAL_SMOKE_PROFILE"
-cp -R "$CENTRAL_LIVE_PROFILE_DIR" "$CENTRAL_SMOKE_PROFILE"
-python3 - "$CENTRAL_SMOKE_PROFILE/profile.env" "$CENTRAL_SMOKE_PORT" \
-  "$CENTRAL_SMOKE_AUDIENCE" "$CENTRAL_SMOKE_DATA" <<'PY'
+case "$CENTRAL_SMOKE_ADAPTER" in
+  profile)
+    export CENTRAL_LIVE_PROFILE_DIR=/PATH/TO/services/pursers-OLD/central
+    export CENTRAL_SMOKE_PROFILE="$ROLLOUT_STATE/central-smoke-profile"
+    export CENTRAL_SMOKE_AUDIENCE=pursers-rollout-smoke
+    test ! -e "$CENTRAL_SMOKE_PROFILE"
+    cp -R "$CENTRAL_LIVE_PROFILE_DIR" "$CENTRAL_SMOKE_PROFILE"
+    python3 - "$CENTRAL_SMOKE_PROFILE/profile.env" "$CENTRAL_SMOKE_PORT" \
+      "$CENTRAL_SMOKE_AUDIENCE" "$CENTRAL_SMOKE_DATA" <<'PY'
 import sys
 from pathlib import Path
 
@@ -341,26 +394,16 @@ for key in updates.keys() - seen:
     lines.append(f"{key}={updates[key]}")
 path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
-grep -E '^(ONBOARD_CENTRAL_PORT|CENTRAL_JWT_AUDIENCE|ONBOARD_CENTRAL_DATA_DIR)=' \
-  "$CENTRAL_SMOKE_PROFILE/profile.env"
-"$CENTRAL_VENV/bin/pursers-central" run "$CENTRAL_SMOKE_PROFILE" &
-SMOKE_PID=$!
-```
-
-Apply the same bounded health/version probe and cleanup shown below. A copied
-profile plus explicit `ONBOARD_CENTRAL_PORT`, `CENTRAL_JWT_AUDIENCE`, and
-`ONBOARD_CENTRAL_DATA_DIR` is the supported Linux isolation boundary.
-
-Start the host's `serve_tls.py` launcher on the alternate port with
-`build_app(data_dir_override=...)`. The host-owned profile must provide its
-normal TLS/auth settings; do not copy secrets into this repository.
-
-```sh
-set -a
-. "$CENTRAL_PROFILE"
-. /PATH/TO/private/current-central-auth.env
-set +a
-"$CENTRAL_VENV/bin/python" - "$CENTRAL_LAUNCHER" "$CENTRAL_SMOKE_DATA" "$CENTRAL_SMOKE_PORT" <<'PY' &
+    grep -E '^(ONBOARD_CENTRAL_PORT|CENTRAL_JWT_AUDIENCE|ONBOARD_CENTRAL_DATA_DIR)=' \
+      "$CENTRAL_SMOKE_PROFILE/profile.env"
+    "$CENTRAL_VENV/bin/pursers-central" run "$CENTRAL_SMOKE_PROFILE" &
+    ;;
+  launcher)
+    set -a
+    . "$CENTRAL_PROFILE"
+    . /PATH/TO/private/current-central-auth.env
+    set +a
+    "$CENTRAL_VENV/bin/python" - "$CENTRAL_LAUNCHER" "$CENTRAL_SMOKE_DATA" "$CENTRAL_SMOKE_PORT" <<'PY' &
 import importlib.util, sys
 from pathlib import Path
 import uvicorn
@@ -374,6 +417,9 @@ spec.loader.exec_module(module)
 app = module.build_app(data_dir_override=data_dir)
 uvicorn.run(app, host="127.0.0.1", port=port, server_header=False, access_log=False)
 PY
+    ;;
+  *) echo "CENTRAL_SMOKE_ADAPTER must be profile or launcher" >&2; exit 64 ;;
+esac
 SMOKE_PID=$!
 trap 'kill "$SMOKE_PID" 2>/dev/null || true' EXIT HUP INT TERM
 for attempt in 1 2 3 4 5 6 7 8 9 10; do

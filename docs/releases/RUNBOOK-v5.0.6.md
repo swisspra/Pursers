@@ -62,9 +62,12 @@ Back up every unit as `rollout/*.service.before-v5.0.6` before editing it.
 That host had neither `uv` nor `gh`. Use an operator-approved asset transfer,
 filter `SHA256SUMS.txt` to wheel rows, then create the new environment with
 `python3 -m venv`. Freeze the old venv and remove all old `pursers*` and `mcp`
-rows before using it as a constraint; install every Pursers distribution at
-the exact v5.0.6 version with `python -m pip install --find-links`, and require
-`python -m pip check`. Do not use the old MCP pin to constrain the release.
+rows—including extras, editable URLs, and PEP 508 direct references such as
+`pursers @ file:///...` and `mcp @ file:///...`—before using it as a
+constraint. Install every Pursers distribution at the exact v5.0.6 version
+with `python -m pip install --find-links`, and require `python -m pip check`.
+Reuse that same side-by-side venv for Central; the Linux route must not invoke
+`uv` later. Do not use the old MCP pin to constrain the release.
 The reusable template contains the executable commands and complete cohort
 guard.
 
@@ -72,8 +75,10 @@ For the Central smoke test, copy the live Central directory into private
 rollout state, create the candidate database with SQLite `.backup`, and rewrite
 the copy's `profile.env` values for `ONBOARD_CENTRAL_PORT`,
 `CENTRAL_JWT_AUDIENCE`, and `ONBOARD_CENTRAL_DATA_DIR`. Start only the copy with
-`"$CENTRAL_VENV/bin/pursers-central" run "$CENTRAL_SMOKE_PROFILE"`; never point
-the candidate at the live profile or database.
+`"$CENTRAL_VENV/bin/pursers-central" run "$CENTRAL_SMOKE_PROFILE"`; give that
+single process one PID, one bounded health/version probe, and one cleanup. Do
+not also start the host `serve_tls.py` adapter on the same port. Never point the
+candidate at the live profile or database.
 
 The `pursers-butler` and `pursers-fleet-executor` units use
 `StartLimitBurst=1` and `Requires=pursers-central`. Restarting Central can stop
