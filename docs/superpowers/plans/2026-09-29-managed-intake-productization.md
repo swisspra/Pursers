@@ -132,7 +132,8 @@
 ## Validation evidence
 
 - Candidate `4e511f20`: local strict gate passed all 14 suites; collection verification passed. Linux runtime suites passed 852 tests with one platform skip; GitHub CI passed.
-- Native canary exposed repeated Git `wwwauth[]` challenges and provider allocation starving a reviewer-only model. Regression tests reproduced both; follow-up fixes require a fresh strict gate and canary before integration.
+- Candidate `87da40f4`: repeat local strict gate passed all 14 suites and collection verification.
+- Native canary exposed repeated Git `wwwauth[]` challenges and provider allocation starving a reviewer-only model. Regression tests reproduced both. Follow-up canary also exposed stale seat tier metadata and a stopped-template heartbeat dependency. Tier metadata now comes from the validated event config; current registry membership can authorize a stopped template without weakening running-seat freshness or live-lease checks. Final CI and canary evidence is recorded in the PR.
 - CodeQL credential-output alert was reviewed as a false positive: stdout is Git's required helper response pipe, with terminal/regular-file refusal and scoped private-file access. The dismissal records the rationale; security analysis remains enabled.
 
 ## Execution rulings

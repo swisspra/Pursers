@@ -109,3 +109,21 @@ def test_reported_unready_agent_cannot_authorize_fleet_readiness():
     observation,readiness,leases=observer.collect(['a','b'],boards,members,NOW,{}, {})
     assert observation['executor_seats'][0]['lifecycle']=='unhealthy'
     assert 'seat' not in readiness['boards']['b']['seats']
+
+
+def test_stopped_seat_uses_current_membership_without_requiring_a_live_heartbeat():
+    template,boards,members,_=fixture()
+    services=SimpleNamespace(inspect=lambda *_: fleet_executor.ServiceObservation(True,False,False,True))
+    for board in boards.values():
+        board['agents'][0]['last_activity_at']=(NOW-timedelta(hours=1)).isoformat()
+    observer=observer_api()['LocalFleetObserver']({'t':template},services,{}, {'t':{'board_id':'a','provider':'worker'}})
+    observation,readiness,leases=observer.collect(['a','b'],boards,members,NOW,{}, {})
+    assert observation['executor_seats'][0]['lifecycle']=='stopped'
+    assert all('seat' in readiness['boards'][b]['seats'] for b in ('a','b'))
+    boards['b']['agents'][0]['lease_expires_at']=(NOW+timedelta(minutes=2)).isoformat()
+    _,_,leases=observer.collect(['a','b'],boards,members,NOW,{}, {})
+    assert all(leases['boards'][b]['seats']['seat']['work'] for b in ('a','b'))
+    members['b']['members']=[]
+    _,readiness,leases=observer.collect(['a','b'],boards,members,NOW,{}, {})
+    assert 'seat' not in readiness['boards']['b']['seats']
+    assert all('seat' not in leases['boards'][b]['seats'] for b in ('a','b'))

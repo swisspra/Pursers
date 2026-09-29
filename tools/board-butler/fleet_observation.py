@@ -69,7 +69,11 @@ class LocalFleetObserver:
                 fresh = seen is not None and 0 <= (now-seen).total_seconds() <= 300
                 caps = agent.get('capabilities', {})
                 ready = agent.get('readiness', {})
-                valid = (fresh and not (isinstance(ready, Mapping) and ready.get('reported') is True and ready.get('dispatch_ready') is not True)
+                # A stopped process cannot send heartbeats. Current registry
+                # identity/membership still authorizes restart; live leases below
+                # remain protected. Running processes require fresh activity.
+                activity_valid = fresh or (not service.running and seen is not None and seen <= now)
+                valid = (activity_valid and not (isinstance(ready, Mapping) and ready.get('reported') is True and ready.get('dispatch_ready') is not True)
                          and agent.get('lifecycle_status') == 'active'
                          and agent.get('role') == template.role
                          and member.get('role') == ('reviewer' if template.role == 'reviewer' else 'member')

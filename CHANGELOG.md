@@ -23,6 +23,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and reads Central's actual submission history.
 - Intake-only ADO connector principals join as non-working coordinators.
 - Model-specific fleet budgets preserve worker/reviewer targets and existing seats.
+- Stopped seats can restart using fresh registry membership without requiring a
+  heartbeat from a process that is not running; live lease protection remains.
+- Event-seat generation shares validated model, provider and tier metadata with
+  runtime configuration, preventing stale seat capability mismatches.
 - Scoped Git helpers accept repeated authentication challenges while refusing
   credential output to terminals and regular log files.
 

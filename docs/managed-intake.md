@@ -152,7 +152,10 @@ The collector uses platform service adapters and the supported executor store
 interface, then atomically writes fleet, registry-readiness and lease documents.
 A busy seat on any selected board is protected across all boards. Missing, stale,
 truncated, mismatched or retired identity evidence is treated conservatively.
-The 120-second freshness deadline begins before collection, not after slow probes.
+Running seats require a recent registry heartbeat. Stopped seats can restart from
+a fresh identity/membership read even when their last heartbeat is old; remote
+leases still protect held work. The 120-second observation deadline begins before
+collection, not after slow probes.
 
 ## Scoped Git credentials
 
@@ -236,7 +239,9 @@ Goose turn only after a relevant registry event. Supply private configuration:
 
 Pass the same file as `--event-config` to `tools/seat-kit/seat_new.py` when generating
 or upgrading that seat. It verifies seat identity/role and uses the configured
-model/provider for generated board metadata. Configure the executor's approved
+model/provider and `tier_max` for generated board metadata. Regenerate managed
+seat files with `--upgrade` during migration; an old `board.sh` can advertise a
+different tier and correctly fail readiness checks. Configure the executor's approved
 command to invoke the event runner with that config; retain the executor's existing
 provisioning, template digest and authorization checks.
 

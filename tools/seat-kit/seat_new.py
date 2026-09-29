@@ -2771,6 +2771,7 @@ def apply_event_config(args: argparse.Namespace) -> None:
     if config["seat_id"] != args.name or config["role"] != args.role:
         raise ValueError("event config identity must match the generated seat")
     args.model, args.provider = config["model"], config["provider"]
+    args.tier_max = config.get("tier_max", 2)
 
 
 def generate(args: argparse.Namespace) -> Path:
@@ -2926,7 +2927,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="declare review capability (defaults true for reviewer seats)",
     )
-    parser.add_argument("--event-config", type=Path, help="private event-seat config; shares model/provider metadata")
+    parser.add_argument("--event-config", type=Path, help="private event-seat config; shares model/provider/tier metadata")
     parser.add_argument("--model")
     parser.add_argument("--provider")
     parser.add_argument(

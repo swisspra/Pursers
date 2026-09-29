@@ -29,6 +29,8 @@ def validate_config(config):
     for key, default, ceiling in (('max_runs_per_hour',5,100),('max_turns',30,100),('turn_timeout_s',1800,3600)):
         value=config.get(key,default)
         if type(value) is not int or not 1 <= value <= ceiling: raise ValueError('invalid turn limit')
+    tier = config.get('tier_max',2)
+    if type(tier) is not int or tier not in (1,2,3): raise ValueError('invalid seat tier')
     return config
 
 

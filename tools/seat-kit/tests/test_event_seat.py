@@ -45,10 +45,12 @@ def test_cursor_validation_never_accepts_zero(tmp_path):
     with pytest.raises(ValueError,match='skipped'):runner.process({'new_seq':{'home':8},'skipped_boards':['x']},100)
 
 
-def test_generation_uses_event_config_for_model_and_provider(tmp_path):
+@pytest.mark.parametrize("tier_max", [1,2,3])
+def test_generation_uses_event_config_for_model_and_provider(tmp_path,tier_max):
     from test_seat_new import args, seat_new
     cfg=config(tmp_path)
     cfg['seat_id']='seat-test'
+    cfg['tier_max']=tier_max
     path=tmp_path/'event.json';path.write_text(json.dumps(cfg));path.chmod(0o600)
     parsed=args(tmp_path)
     parsed.name='seat-test'
@@ -57,6 +59,7 @@ def test_generation_uses_event_config_for_model_and_provider(tmp_path):
     assert hasattr(seat_new,'apply_event_config'), 'seat metadata integration is missing'
     seat_new.apply_event_config(parsed)
     assert (parsed.model,parsed.provider)==('test-model','test-provider')
+    assert parsed.tier_max == tier_max
     parsed.role='reviewer'
     with pytest.raises(ValueError,match='identity'):seat_new.apply_event_config(parsed)
 
@@ -82,3 +85,10 @@ def test_bootstrap_reads_authoritative_watermarks_only_for_new_boards(tmp_path,m
     resumed=api()['EventSeatRunner'](cfg)
     asyncio.run(resumed.bootstrap())
     assert snapshots==['home','project']
+
+
+@pytest.mark.parametrize("tier", [True,0,4,"2"])
+def test_invalid_event_tier_is_rejected(tmp_path,tier):
+    cfg=config(tmp_path);cfg["tier_max"]=tier
+    with pytest.raises(ValueError,match="tier"):
+        api()["validate_config"](cfg)
