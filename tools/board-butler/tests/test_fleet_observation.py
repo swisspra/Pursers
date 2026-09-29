@@ -92,3 +92,20 @@ def test_service_lifecycle_and_persisted_generation(running,ready,verified,prior
     assert observation['executor_seats'][0]['lifecycle'] == want
     assert observation['executor_seats'][0]['generation'] == 7
     assert observation['provider_observations']['a']['worker']['status'] == 'unavailable'
+
+
+def test_subscription_wait_heartbeat_uses_registry_freshness_window():
+    template,boards,members,services=fixture()
+    for board in boards.values():board['agents'][0]['last_activity_at']=(NOW-timedelta(seconds=240)).isoformat()
+    observer=observer_api()['LocalFleetObserver']({'t':template},services,{}, {'t':{'board_id':'a','provider':'worker'}})
+    observation,_,_=observer.collect(['a','b'],boards,members,NOW,{}, {})
+    assert observation['executor_seats'][0]['lifecycle']=='ready'
+
+
+def test_reported_unready_agent_cannot_authorize_fleet_readiness():
+    template,boards,members,services=fixture()
+    boards['b']['agents'][0]['readiness']={'reported':True,'dispatch_ready':False}
+    observer=observer_api()['LocalFleetObserver']({'t':template},services,{}, {'t':{'board_id':'a','provider':'worker'}})
+    observation,readiness,leases=observer.collect(['a','b'],boards,members,NOW,{}, {})
+    assert observation['executor_seats'][0]['lifecycle']=='unhealthy'
+    assert 'seat' not in readiness['boards']['b']['seats']

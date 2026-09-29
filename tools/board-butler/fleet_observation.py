@@ -66,9 +66,11 @@ class LocalFleetObserver:
                     continue
                 agent, member = matches[0], member_matches[0]
                 seen = timestamp(agent.get('last_activity_at') or agent.get('last_seen'))
-                fresh = seen is not None and 0 <= (now-seen).total_seconds() <= 120
+                fresh = seen is not None and 0 <= (now-seen).total_seconds() <= 300
                 caps = agent.get('capabilities', {})
-                valid = (fresh and agent.get('lifecycle_status') == 'active'
+                ready = agent.get('readiness', {})
+                valid = (fresh and not (isinstance(ready, Mapping) and ready.get('reported') is True and ready.get('dispatch_ready') is not True)
+                         and agent.get('lifecycle_status') == 'active'
                          and agent.get('role') == template.role
                          and member.get('role') == ('reviewer' if template.role == 'reviewer' else 'member')
                          and all(type(caps.get(k)) is type(v) and caps[k] == v for k,v in template.capabilities.items()))
