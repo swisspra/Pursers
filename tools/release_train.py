@@ -109,6 +109,16 @@ LOCKED_SOURCE_PACKAGES = {
     "pursers-client": ("packages/client/src", "pursers_client"),
 }
 
+PROJECTS: dict[str, tuple[str, str]] = {
+    "packages/pursers/pyproject.toml": ("pursers", "pursers"),
+    "packages/central/pyproject.toml": ("pursers-central", "central"),
+    "packages/client/pyproject.toml": ("pursers-client", "client"),
+    "packages/personal/pyproject.toml": ("pursers-personal", "personal"),
+    "packages/import/pyproject.toml": ("pursers-personal-import", "import"),
+    "tools/wait-bridge/pyproject.toml": ("pursers-wait-bridge", "wait_bridge"),
+    "tools/acp-agent/pyproject.toml": ("pursers-acp", "acp"),
+}
+
 
 class ReleaseTrainError(RuntimeError):
     pass
@@ -494,11 +504,15 @@ def plan_bump(
     if current.product != target.product:
         planned[root / "CHANGELOG.md"] = _plan_changelog(root, target)
     _update_view_attestation(root, planned)
-    return {
+    planned = {
         path: content
         for path, content in planned.items()
         if path.read_text(encoding="utf-8") != content
     }
+    pin_errors = _unchanged_version_pin_errors(root, planned)
+    if pin_errors:
+        raise ReleaseTrainError("; ".join(pin_errors))
+    return planned
 
 
 def _diff(root: Path, planned: dict[Path, str]) -> str:
@@ -518,6 +532,98 @@ def _diff(root: Path, planned: dict[Path, str]) -> str:
 
 def _pyproject(path: Path) -> dict:
     return tomllib.loads(path.read_text(encoding="utf-8"))
+
+
+def _latest_release_tag(root: Path) -> str | None:
+    repository = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+    )
+    if repository.returncode != 0 or repository.stdout.strip() != "true":
+        # Unit-test/source fixtures are intentionally usable without Git metadata.
+        return None
+    described = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "describe",
+            "--tags",
+            "--abbrev=0",
+            "--match",
+            "v[0-9]*",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if described.returncode != 0:
+        raise ReleaseTrainError(
+            "cannot find the last release tag; fetch tags before bump/check"
+        )
+    return described.stdout.strip()
+
+
+def _tag_pyproject(root: Path, tag: str, relative: str) -> dict:
+    result = subprocess.run(
+        ["git", "-C", str(root), "show", f"{tag}:{relative}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ReleaseTrainError(f"cannot read {relative} from release tag {tag}")
+    return tomllib.loads(result.stdout)
+
+
+def _exact_dependency_pins(document: dict) -> frozenset[str]:
+    return frozenset(
+        str(dependency).strip()
+        for dependency in document["project"].get("dependencies", [])
+        if "==" in str(dependency)
+    )
+
+
+def _suggest_next_version(version: str) -> str:
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?", version)
+    if match is None:
+        return f"a version newer than {version}"
+    major, minor, patch, phase, serial = match.groups()
+    if phase is not None and serial is not None:
+        return f"{major}.{minor}.{patch}{phase}{int(serial) + 1}"
+    return f"{major}.{minor}.{int(patch) + 1}"
+
+
+def _unchanged_version_pin_errors(
+    root: Path,
+    planned: Mapping[Path, str] | None = None,
+) -> list[str]:
+    """Reject changed exact pins unless the owning distribution also moved."""
+    tag = _latest_release_tag(root)
+    if tag is None:
+        return []
+    planned = planned or {}
+    errors: list[str] = []
+    for relative, (distribution, _key) in PROJECTS.items():
+        path = root / relative
+        candidate = tomllib.loads(planned[path]) if path in planned else _pyproject(path)
+        released = _tag_pyproject(root, tag, relative)
+        candidate_version = str(candidate["project"]["version"])
+        released_version = str(released["project"]["version"])
+        if candidate_version != released_version:
+            continue
+        candidate_pins = _exact_dependency_pins(candidate)
+        released_pins = _exact_dependency_pins(released)
+        if candidate_pins == released_pins:
+            continue
+        removed = ", ".join(sorted(released_pins - candidate_pins)) or "none"
+        added = ", ".join(sorted(candidate_pins - released_pins)) or "none"
+        errors.append(
+            f"{relative}: {distribution} exact-pinned dependencies changed since "
+            f"{tag} while version remains {candidate_version}; bump {distribution} "
+            f"to {_suggest_next_version(candidate_version)} "
+            f"(removed: {removed}; added: {added})"
+        )
+    return errors
 
 
 def _component_source_lock_errors(root: Path, lock: dict) -> list[str]:
@@ -563,16 +669,7 @@ def _component_source_lock_errors(root: Path, lock: dict) -> list[str]:
 def check(root: Path, versions: ReleaseVersions) -> list[str]:
     errors: list[str] = []
     package = versions.packages
-    projects = {
-        "packages/pursers/pyproject.toml": ("pursers", "pursers"),
-        "packages/central/pyproject.toml": ("pursers-central", "central"),
-        "packages/client/pyproject.toml": ("pursers-client", "client"),
-        "packages/personal/pyproject.toml": ("pursers-personal", "personal"),
-        "packages/import/pyproject.toml": ("pursers-personal-import", "import"),
-        "tools/wait-bridge/pyproject.toml": ("pursers-wait-bridge", "wait_bridge"),
-        "tools/acp-agent/pyproject.toml": ("pursers-acp", "acp"),
-    }
-    for relative, (name, key) in projects.items():
+    for relative, (name, key) in PROJECTS.items():
         document = _pyproject(root / relative)
         actual = document["project"]["version"]
         if document["project"]["name"] != name or actual != package[key]:
@@ -624,6 +721,7 @@ def check(root: Path, versions: ReleaseVersions) -> list[str]:
             "tools/wait-bridge/pursers_wait_server.py: "
             f"SOURCE_VERSION {source_version!r} != {package['wait_bridge']!r}"
         )
+    errors.extend(_unchanged_version_pin_errors(root))
     lock_path = root / "packages/personal/src/pursers_personal/resources/component-lock.json"
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     if lock.get("product_version") != versions.product:
@@ -676,7 +774,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     current = load_versions(MANIFEST)
     if args.command == "check":
-        errors = check(ROOT, current)
+        try:
+            errors = check(ROOT, current)
+        except (OSError, ValueError, ReleaseTrainError) as exc:
+            print(f"release_train: {exc}", file=sys.stderr)
+            return 2
         if errors:
             print("release version drift:", file=sys.stderr)
             for error in errors:

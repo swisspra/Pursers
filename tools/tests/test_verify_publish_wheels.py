@@ -156,6 +156,20 @@ def test_publish_workflow_checks_pypi_before_both_uploads() -> None:
     assert bridge.index("--verify-pypi") < bridge.index("Publish to PyPI")
 
 
+def test_ci_checks_reproducible_wheels_against_pypi_before_tests() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml"
+    ).read_text(encoding="utf-8")
+    command = (
+        "python tools/verify_publish_wheels.py \\\n"
+        "            --wheel-dir .ci/wheels --verify-pypi"
+    )
+
+    assert "fetch-depth: 0" in workflow
+    assert command in workflow
+    assert workflow.index(command) < workflow.index("Run every required Python suite")
+
+
 def test_publish_workflow_serializes_new_version_check_and_upload() -> None:
     workflow = (
         Path(__file__).resolve().parents[2] / ".github/workflows/publish-pypi.yml"

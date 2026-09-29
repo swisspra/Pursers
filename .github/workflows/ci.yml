@@ -20,8 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # PR merge -> head -> head parent, required by candidate-only diff.
-          fetch-depth: 3
+          # Release checks compare dependency pins with the latest release tag.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v7
         with:
@@ -89,6 +89,12 @@ jobs:
           assert metadata.version("mcp") == "2.2.0"
           print("mcp=2.2.0")
           PY
+
+      - name: Reject changed same-version wheels before tagging
+        run: |
+          set -euo pipefail
+          python tools/verify_publish_wheels.py \
+            --wheel-dir .ci/wheels --verify-pypi
 
       - name: Scan repository for secrets and identifying paths
         run: python tools/leak_scan.py

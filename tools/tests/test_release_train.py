@@ -75,6 +75,21 @@ def _rebase_to_distinct_versions(root: Path) -> None:
         path.write_text(content, encoding="utf-8")
 
 
+def _tag_fixture_release(root: Path, version: str) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Release Test"], cwd=root, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "release-test@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "release fixture"], cwd=root, check=True)
+    subprocess.run(["git", "tag", f"v{version}"], cwd=root, check=True)
+
+
 def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
     tmp_path: Path,
 ) -> None:
@@ -191,6 +206,92 @@ def test_acp_bump_updates_its_surfaces_without_rewriting_dependency_versions(
     ]
     assert '"version": "0.1.1"' in planned[root / "tools/acp-agent/pursers/agent.json"]
     assert "pursers-acp==0.1.1" in planned[root / "tools/acp-agent/README.md"]
+
+
+def test_bump_rejects_changed_client_pin_without_acp_version(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_repository(tmp_path)
+    current = load_versions(root / "tools/release_versions.toml")
+    _tag_fixture_release(root, current.product)
+    target = release_train.bumped_versions(
+        current,
+        (
+            "product=5.0.0a91",
+            "central=0.1.0a81",
+            "client=0.1.0a71",
+            "wait_bridge=0.1.0a51",
+        ),
+        None,
+    )
+
+    with pytest.raises(release_train.ReleaseTrainError) as rejected:
+        release_train.plan_bump(root, current, target)
+
+    message = str(rejected.value)
+    assert "pursers-acp exact-pinned dependencies changed" in message
+    assert "bump pursers-acp to 0.1.0a41" in message
+
+
+def test_bump_accepts_changed_client_pin_with_acp_version(tmp_path: Path) -> None:
+    root = _fixture_repository(tmp_path)
+    current = load_versions(root / "tools/release_versions.toml")
+    _tag_fixture_release(root, current.product)
+    target = release_train.bumped_versions(
+        current,
+        (
+            "product=5.0.0a91",
+            "central=0.1.0a81",
+            "client=0.1.0a71",
+            "wait_bridge=0.1.0a51",
+            "acp=0.1.0a41",
+        ),
+        None,
+    )
+
+    planned = release_train.plan_bump(root, current, target)
+
+    assert 'version = "0.1.0a41"' in planned[
+        root / "tools/acp-agent/pyproject.toml"
+    ]
+
+
+def test_bump_allows_unchanged_version_when_exact_pins_do_not_change(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_repository(tmp_path)
+    current = load_versions(root / "tools/release_versions.toml")
+    _tag_fixture_release(root, current.product)
+    target = release_train.bumped_versions(current, ("acp=0.1.0a41",), None)
+
+    planned = release_train.plan_bump(root, current, target)
+
+    assert root / "packages/client/pyproject.toml" not in planned
+    assert root / "packages/import/pyproject.toml" not in planned
+
+
+def test_check_rejects_changed_exact_pins_with_unchanged_version(
+    tmp_path: Path,
+) -> None:
+    root = _fixture_repository(tmp_path)
+    current = load_versions(root / "tools/release_versions.toml")
+    _tag_fixture_release(root, current.product)
+    pyproject = root / "tools/acp-agent/pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            f'pursers-client=={current.packages["client"]}',
+            "pursers-client==9.9.9",
+        ),
+        encoding="utf-8",
+    )
+
+    errors = release_train.check(root, current)
+
+    assert any(
+        "pursers-acp exact-pinned dependencies changed" in error
+        and f"version remains {current.packages['acp']}" in error
+        for error in errors
+    )
 
 
 def test_acp_only_bump_preserves_delivery_manifest_validation(tmp_path: Path) -> None:
