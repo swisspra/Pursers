@@ -52,12 +52,16 @@ commands:
 
 ### Linux/systemd corrections from the Azure rollout
 
-The live Linux rollout used a side-by-side
-`/PATH/TO/services/pursers-v5.0.6/{release-assets,venv,rollout}` tree and a
-`/PATH/TO/projects/pursers-v5.0.6-source` checkout at the tag. Data, profiles,
-credentials, and state remained under the previous service tree; only the
-service venv/source paths and the fleet clone's exact tag were repointed.
-Back up every unit as `rollout/*.service.before-v5.0.6` before editing it.
+The live Linux rollout now keeps persistent data in the version-neutral
+`/PATH/TO/services/pursers/{central,config,credentials,state,bin,backups}` tree.
+Each release lives side-by-side at
+`/PATH/TO/services/pursers-vX.Y.Z/{venv,release-assets,source}`, where `source`
+is the tag checkout and no longer lives under `projects/`. Keep the operator
+project `work_dir` at `/PATH/TO/projects/pursers`, logs at
+`/PATH/TO/logs/pursers`, and `TMPDIR` at `/PATH/TO/cache/pursers`. An upgrade
+repoints only the unit `ExecStart` venv/source paths. Before upgrading, archive
+the pre-upgrade units and database together as a tarball under
+`/PATH/TO/services/pursers/backups/`.
 
 That host had neither `uv` nor `gh`. Use an operator-approved asset transfer,
 filter `SHA256SUMS.txt` to wheel rows, then create the new environment with

@@ -804,7 +804,10 @@ def test_runbook_pins_reviewed_butler_fix_and_authoritative_suite() -> None:
     assert "PURSERS_BUTLER_PROVIDER_SECRETS_DIR" in template
     assert '"status":"not_provisioned","recorded":true' in template
     assert "Bad request" in template
-    assert "/PATH/TO/services/pursers-v5.0.6/{release-assets,venv,rollout}" in runbook
+    assert (
+        "/PATH/TO/services/pursers/{central,config,credentials,state,bin,backups}"
+        in runbook
+    )
     assert "neither `uv` nor `gh`" in runbook
     assert "python3 -m venv" in runbook
     assert "ONBOARD_CENTRAL_PORT" in runbook
