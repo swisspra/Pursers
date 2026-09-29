@@ -68,6 +68,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
+_SOURCE_OBSERVATION_API = runpy.run_path(str(Path(__file__).with_name("source_observation.py")))
+SourceObservationPolicy = _SOURCE_OBSERVATION_API["SourceObservationPolicy"]
+observe_source = _SOURCE_OBSERVATION_API["observe_source"]
+
 STATE_KEY = "coordinator_findings"
 SUBSCRIPTION_HEALTH_KEY = "board_butler_subscription_health"
 FLEET_STATE_KEY = "autonomous_butler_state"
@@ -3556,6 +3560,7 @@ class SourceDeclaration:
     writeback: SourceWriteback | None = None
     page_arg: str | None = None
     max_pages: int = 1
+    observation: Any = None
 
     @classmethod
     def from_mapping(
@@ -3579,6 +3584,7 @@ class SourceDeclaration:
             "writeback",
             "page_arg",
             "max_pages",
+            "observation",
         }
         _connector_keys(value, allowed, "source")
         if not required.issubset(value):
@@ -3628,6 +3634,11 @@ class SourceDeclaration:
             or (max_pages > 1 and page_arg is None)
         ):
             raise ConnectorConfigError("source.max_pages is invalid")
+        try:
+            observation = (SourceObservationPolicy.from_mapping(value["observation"], connector.tools)
+                           if "observation" in value else None)
+        except ValueError as exc:
+            raise ConnectorConfigError(str(exc)) from None
         return cls(
             source_id,
             connector_id,
@@ -3648,6 +3659,7 @@ class SourceDeclaration:
             ),
             page_arg,
             max_pages,
+            observation,
         )
 
 
@@ -6199,7 +6211,7 @@ class SourceIntakePoller:
         return writebacks
 
     async def _allowance(
-        self, findings: list[dict[str, Any]]
+        self, findings: list[dict[str, Any]], now: datetime
     ) -> tuple[int | None, tuple[str, ...], dict[str, Any]]:
         """Ask the Butler decision-maker how much to pull, within the hard ceiling."""
         source_ids = tuple(source.source_id for source in self.sources)
@@ -6210,14 +6222,17 @@ class SourceIntakePoller:
         if ceiling is None or ceiling <= 0:
             return 0, (), {"mode": "decided", "ceiling": ceiling or 0, "pull": 0,
                            "reason": "no_capacity"}
-        context = {
-            "ceiling": ceiling,
-            "in_flight_by_source": in_flight,
-            "sources": [
-                {"source_id": source.source_id, "list_tool": source.list_tool}
-                for source in self.sources
-            ],
-        }
+        observations = []
+        for source in self.sources:
+            runtime = self.runtimes[source.connector_id]
+            async def read(tool, arguments):
+                operation = hashlib.sha256(f"{source.source_id}:{now.isoformat()}".encode()).hexdigest()
+                result = await runtime.call_tool("source-count-" + operation[:32], tool, arguments)
+                return _source_payload_document(result.payload)
+            observation = await observe_source(source.source_id, source.observation, read, now)
+            observations.append({"source_id": source.source_id, "list_tool": source.list_tool,
+                                 **observation.decision_fields()})
+        context = {"ceiling": ceiling, "in_flight_by_source": in_flight, "sources": observations}
         try:
             decision = await self.decide(context)
         except Exception as exc:  # the decision-maker must never break intake
@@ -6245,7 +6260,7 @@ class SourceIntakePoller:
             return {"processed": 0, "findings": [], "writebacks": 0}
         findings: list[dict[str, Any]] = []
         writebacks = await self._writeback_pass(findings) if self.active else 0
-        allowance, order, decision = await self._allowance(findings)
+        allowance, order, decision = await self._allowance(findings, now)
         by_id = {source.source_id: source for source in self.sources}
         if decision.get("mode") == "unbounded":
             ordered = self.sources[self._round_robin :] + self.sources[: self._round_robin]

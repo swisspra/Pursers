@@ -578,3 +578,32 @@ The available replay classifies zero questions as `MECHANICAL`, three as
 `ESCALATE`, and none as `UNKNOWN`. All three match their recorded disposition;
 `CQ-53524d65cdb51016` escalates because a mechanical status fragment cannot
 launder the residual document decision.
+
+### Declared source counts
+
+A source can declare an optional `observation` block. Butler calls the declared
+read-only tool through the normal connector limits before deciding intake:
+
+```json
+"observation": {
+  "read_tool": "sonar_issues_search",
+  "arguments": {"pageSize": 1, "pageIndex": 1},
+  "count_path": "paging.total",
+  "max_age_s": 120
+}
+```
+
+Include the same project and open-status filters used by the source's `fixed_args`
+in the observation arguments. The tool must be declared `read_only`; names and
+arguments depend on the server schema. This example deliberately omits severity:
+a combined-severity source is useful when an upstream server's severity mapping
+is incompatible. Pursers does not translate severity enums implicitly.
+
+When every enabled source returns integer zero, intake returns `no_open_issues`
+without resolving model credentials or issuing a model request, including after
+restart. Missing, stale, invalid or failed observations are unknown, never zero.
+`max_age_s` is bounded to 1–120 seconds (default 120). Without this optional block,
+existing sources remain supported with unknown counts. Unchanged semantic inputs
+reuse the model's previous successful decision; provider failures back off for
+15 minutes. Board refreshes and read-only source checks can continue during that
+interval. Approval writeback runs independently of the intake decision.
