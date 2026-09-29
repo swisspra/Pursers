@@ -110,6 +110,28 @@ def joined_event_client() -> BoardClient:
 
 
 @pytest.mark.anyio
+async def test_ticket_tier_defaults_are_deferred_to_central(monkeypatch) -> None:
+    board = joined_event_client()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return {"ok": True}
+
+    monkeypatch.setattr(board, "_call", call)
+
+    await board.ticket_create(None, "server default")
+    await board.ticket_create(None, "explicit tier", tier=1)
+    await board.board_dispatch_policy_set()
+    await board.board_dispatch_policy_set(default_ticket_tier=1)
+
+    assert "tier" not in calls[0][1]
+    assert calls[1][1]["tier"] == 1
+    assert "default_ticket_tier" not in calls[2][1]
+    assert calls[3][1]["default_ticket_tier"] == 1
+
+
+@pytest.mark.anyio
 async def test_default_board_join_preserves_existing_behavior(monkeypatch) -> None:
     board = client()
     captured: dict[str, Any] = {}
