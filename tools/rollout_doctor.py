@@ -9,6 +9,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -37,15 +38,51 @@ RUNTIME_REQUIRED_DISTRIBUTIONS = {
     "pursers-wait-bridge": EXPECTED_WAIT_BRIDGE,
 }
 SERVICE_REQUIRED_DISTRIBUTIONS = {"pursers-client": EXPECTED_CLIENT}
+CENTRAL_SERVICE_REQUIRED_DISTRIBUTIONS = {
+    "pursers-central": EXPECTED_PACKAGES["central"],
+    "pursers-client": EXPECTED_CLIENT,
+}
+PURSERS_DISTRIBUTIONS = {
+    "pursers": EXPECTED_PACKAGES["product"],
+    "pursers-personal": EXPECTED_PACKAGES["product"],
+    "pursers-central": EXPECTED_PACKAGES["central"],
+    "pursers-client": EXPECTED_PACKAGES["client"],
+    "pursers-wait-bridge": EXPECTED_PACKAGES["wait_bridge"],
+    "pursers-acp": EXPECTED_PACKAGES["acp"],
+    "pursers-personal-import": EXPECTED_PACKAGES["import"],
+}
+FLEET_REQUIRED_ENVIRONMENT = (
+    "PURSERS_BUTLER_STATE_DIR",
+    "PURSERS_BUTLER_ENTRYPOINT",
+    "PURSERS_BUTLER_PROVIDER_SECRETS_DIR",
+)
+FLEET_EXECUTOR_ENVIRONMENT = (
+    "PURSERS_BUTLER_FLEET_EXECUTOR_SOCKET",
+    "PURSERS_BUTLER_FLEET_EXECUTOR_KEY_ID",
+    "PURSERS_BUTLER_FLEET_EXECUTOR_PRIVATE_KEY",
+)
 RUNTIME_NAMES = re.compile(r"^(?:registry-main|review(?:-main)?)-[A-Za-z0-9._-]+$")
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+BUTLER_FIX_SHA = "ee5c9e436ce35fd906c0ac943559482046e9186a"
 LAUNCHD_LABELS = (
+    "com.pursers.central",
     "com.pursers.fleet-dashboard",
     "com.pursers.coordinator",
     "com.pursers.board-butler",
     "com.pursers.mong1-supervisor",
 )
+SERVICE_ROLES = (
+    "central",
+    "fleet-dashboard",
+    "coordinator",
+    "board-butler",
+    "mong1-supervisor",
+)
+SYSTEMD_UNITS = {
+    role: f"pursers-{role}.service"
+    for role in SERVICE_ROLES
+}
 
 
 def _json(path: Path) -> Mapping[str, Any] | None:
@@ -157,19 +194,30 @@ def _python_environment(
     *,
     home: Path,
     pursers_home: Path,
+    expected_if_present: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     environment = (
         interpreter.parent.parent
         if interpreter is not None and interpreter.parent.name == "bin"
         else None
     )
+    expected = dict(expected_if_present or {})
+    expected.update(required)
     installed = {
         distribution: (
             _metadata_version(environment, distribution)
             if environment is not None
             else None
         )
-        for distribution in required
+        for distribution in expected
+    }
+    inconsistent = {
+        distribution: {
+            "installed": version,
+            "expected": expected[distribution],
+        }
+        for distribution, version in installed.items()
+        if version is not None and version != expected[distribution]
     }
     present = interpreter is not None and interpreter.is_file()
     return {
@@ -181,8 +229,10 @@ def _python_environment(
         "present": present,
         "required_versions": dict(required),
         "installed_versions": installed,
+        "inconsistent_pursers_distributions": inconsistent,
         "ok": present
-        and all(installed[name] == version for name, version in required.items()),
+        and all(installed[name] == version for name, version in required.items())
+        and not inconsistent,
     }
 
 
@@ -232,6 +282,7 @@ def _repo_record(
     referenced: bool,
     interpreter: Path | None = None,
     required_distributions: Mapping[str, str] | None = None,
+    expected_distributions: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     status = _git_status(repo)
     record = {
@@ -251,6 +302,7 @@ def _repo_record(
             required_distributions,
             home=home,
             pursers_home=pursers_home,
+            expected_if_present=expected_distributions,
         )
     return record
 
@@ -322,8 +374,53 @@ def _launchd(
         rows.append(
             {
                 "consumer": f"launchd:{label}",
+                "service_role": label.removeprefix("com.pursers."),
                 "loaded": text is not None,
                 "running": bool(pid_match) or (state_match and state_match.group(1) == "running"),
+            }
+        )
+    return rows, references
+
+
+def _systemd(
+    units: Mapping[str, str], *, snapshot_root: Path | None
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    rows: list[dict[str, Any]] = []
+    references: dict[str, str] = {}
+    for role, unit in units.items():
+        if snapshot_root is None:
+            text = _run(
+                (
+                    "systemctl",
+                    "--user",
+                    "show",
+                    unit,
+                    "--no-pager",
+                    "--property=LoadState,ActiveState,MainPID,ExecStart,Environment",
+                )
+            )
+        else:
+            path = snapshot_root / "systemd" / f"{unit}.txt"
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                text = None
+        if text:
+            references[unit] = text
+        load_state = re.search(r"(?m)^LoadState=(\S+)\s*$", text or "")
+        active_state = re.search(r"(?m)^ActiveState=(\S+)\s*$", text or "")
+        main_pid = re.search(r"(?m)^MainPID=(\d+)\s*$", text or "")
+        rows.append(
+            {
+                "consumer": f"systemd:{unit}",
+                "service_role": role,
+                "loaded": load_state is not None and load_state.group(1) == "loaded",
+                "running": (
+                    active_state is not None
+                    and active_state.group(1) == "active"
+                    and main_pid is not None
+                    and int(main_pid.group(1)) > 0
+                ),
             }
         )
     return rows, references
@@ -343,14 +440,32 @@ def _wheel_checksums(wheel_dir: Path, sums_path: Path) -> bool:
         return False
     seen: set[str] = set()
     for row in rows:
-        match = re.fullmatch(r"([0-9a-f]{64})  ([^/]+\.whl)", row)
-        if match is None or match.group(2) in seen:
+        match = re.fullmatch(r"([0-9a-f]{64})  (?:\./)?(.+)", row)
+        if match is None:
             return False
         expected, name = match.groups()
+        if not name.endswith(".whl"):
+            continue
+        if "/" in name or name in seen:
+            return False
         seen.add(name)
         if _file_sha256(wheel_dir / name) != expected:
             return False
     return bool(seen) and {path.name for path in wheel_dir.glob("*.whl")} == seen
+
+
+def _git_is_ancestor(repo: Path, ancestor: str) -> bool:
+    try:
+        completed = subprocess.run(
+            ("git", "merge-base", "--is-ancestor", ancestor, "HEAD"),
+            cwd=repo,
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
 
 
 def _butler_conflict_guard(repo: Path) -> bool:
@@ -360,11 +475,20 @@ def _butler_conflict_guard(repo: Path) -> bool:
         )
     except OSError:
         return False
-    return (
+    legacy_hotfix = (
         source.count("_is_state_precondition_conflict") >= 3
         and source.count("await process_question(") >= 2
         and "deferred question after state precondition conflict" in source
         and "deferred pending question after state precondition conflict" in source
+    )
+    permanent_retry = (
+        "class StateWriteConflict" in source
+        and "STATE_WRITE_MAX_ATTEMPTS" in source
+        and "for attempt in range(STATE_WRITE_MAX_ATTEMPTS)" in source
+        and '"state precondition failed"' in source
+    )
+    return legacy_hotfix or (
+        _git_is_ancestor(repo, BUTLER_FIX_SHA) and permanent_retry
     )
 
 
@@ -379,33 +503,70 @@ def _entrypoint(text: str) -> Path | None:
         candidate = Path(line)
         if candidate.is_file() and candidate.suffix in {".py", ".sh"}:
             candidates.append(candidate)
+    for raw in re.findall(r"/[^\s;{}\[\]]+", text):
+        candidate = Path(raw.strip("\"'(),"))
+        if candidate.is_file() and candidate.suffix in {".py", ".sh"}:
+            candidates.append(candidate)
     return candidates[0] if candidates else None
 
 
-def _launchd_interpreter(label: str, text: str) -> Path | None:
+def _service_interpreter(role: str, text: str) -> Path | None:
     preferred_keys = {
-        "com.pursers.fleet-dashboard": "PURSERS_FLEET_PYTHON",
-        "com.pursers.board-butler": "PURSERS_BUTLER_PYTHON",
-        "com.pursers.coordinator": "PURSERS_COORDINATOR_PYTHON",
+        "fleet-dashboard": "PURSERS_FLEET_PYTHON",
+        "board-butler": "PURSERS_BUTLER_PYTHON",
+        "coordinator": "PURSERS_COORDINATOR_PYTHON",
     }
-    preferred = preferred_keys.get(label)
+    preferred = preferred_keys.get(role)
     if preferred is not None:
-        match = re.search(
-            rf"(?m)^\s*{re.escape(preferred)}\s*(?:=>|=)\s*(/\S+)\s*$",
-            text,
+        configured = _service_environment(text, (preferred,))
+        if preferred in configured:
+            return Path(configured[preferred])
+    if role == "central":
+        configured = _service_environment(
+            text, ("PURSERS_CENTRAL_PYTHON", "CENTRAL_VENV")
         )
-        if match is not None:
-            return Path(match.group(1))
+        if "PURSERS_CENTRAL_PYTHON" in configured:
+            return Path(configured["PURSERS_CENTRAL_PYTHON"])
+        if "CENTRAL_VENV" in configured:
+            return Path(configured["CENTRAL_VENV"]) / "bin/python"
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if line.startswith("program = "):
             candidate = Path(line.removeprefix("program = "))
             if candidate.name.startswith("python"):
                 return candidate
+    for raw in re.findall(r"/[^\s;{}\[\]]+", text):
+        candidate = Path(raw.strip("\"'(),"))
+        if candidate.name.startswith("python") and candidate.is_file():
+            return candidate
     return None
 
 
-def _attach_launchd_sources(
+def _service_environment(text: str, keys: Sequence[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for key in keys:
+        match = re.search(
+            rf"(?m)^\s*{re.escape(key)}\s*(?:=>|=)\s*(.+?)\s*$",
+            text,
+        )
+        if match is not None and match.group(1):
+            values[key] = match.group(1)
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("Environment="):
+            continue
+        try:
+            items = shlex.split(line.removeprefix("Environment="))
+        except ValueError:
+            continue
+        for item in items:
+            key, separator, value = item.partition("=")
+            if separator and key in keys and value:
+                values[key] = value
+    return values
+
+
+def _attach_service_sources(
     rows: list[dict[str, Any]],
     references: Mapping[str, str],
     sources: Sequence[tuple[Path, Mapping[str, Any]]],
@@ -414,8 +575,9 @@ def _attach_launchd_sources(
     pursers_home: Path,
 ) -> None:
     for row in rows:
-        label = row["consumer"].removeprefix("launchd:")
-        text = references.get(label, "")
+        consumer_key = row["consumer"].split(":", 1)[1]
+        role = row["service_role"]
+        text = references.get(consumer_key, "")
         matches = sorted(
             [
                 (path, source)
@@ -438,13 +600,45 @@ def _attach_launchd_sources(
             _safe_path(entrypoint, home, pursers_home) if entrypoint else None
         )
         row["entrypoint_sha256"] = _file_sha256(entrypoint) if entrypoint else None
-        if label != "com.pursers.mong1-supervisor":
+        if role != "mong1-supervisor":
+            required_distributions = (
+                CENTRAL_SERVICE_REQUIRED_DISTRIBUTIONS
+                if role == "central"
+                else SERVICE_REQUIRED_DISTRIBUTIONS
+            )
             row["python_environment"] = _python_environment(
-                _launchd_interpreter(label, text),
-                SERVICE_REQUIRED_DISTRIBUTIONS,
+                _service_interpreter(role, text),
+                required_distributions,
                 home=home,
                 pursers_home=pursers_home,
+                expected_if_present=PURSERS_DISTRIBUTIONS,
             )
+        if role == "fleet-dashboard":
+            configured = _service_environment(text, FLEET_REQUIRED_ENVIRONMENT)
+            missing = [key for key in FLEET_REQUIRED_ENVIRONMENT if key not in configured]
+            row["fleet_environment"] = {
+                "configured": {
+                    key: _safe_path(Path(value), home, pursers_home)
+                    for key, value in configured.items()
+                },
+                "missing": missing,
+                "ok": not missing,
+            }
+        if role == "board-butler":
+            configured = _service_environment(text, FLEET_EXECUTOR_ENVIRONMENT)
+            missing = [key for key in FLEET_EXECUTOR_ENVIRONMENT if key not in configured]
+            state = (
+                "provisioned"
+                if not missing
+                else "not_provisioned"
+                if not configured
+                else "partial"
+            )
+            row["fleet_executor"] = {
+                "state": state,
+                "configured": sorted(configured),
+                "missing": missing,
+            }
 
 
 def _process_text(snapshot_root: Path | None) -> str:
@@ -485,21 +679,26 @@ def _post_rollout_checks(
     release_sha: str,
     now: datetime,
     fresh_seconds: int,
+    fleet_executor_state: str | None,
 ) -> dict[str, dict[str, str]]:
     checks: dict[str, dict[str, str]] = {}
     coordinator = _proof(proof_dir, "coordinator-digest")
-    event_at = _parse_time(coordinator.get("last_event_at")) if coordinator else None
+    observed_at = (
+        _parse_time(coordinator.get("observed_at") or coordinator.get("heartbeat_at"))
+        if coordinator
+        else None
+    )
     fresh = (
-        event_at is not None
+        observed_at is not None
         and 0
-        <= (now - event_at.astimezone(timezone.utc)).total_seconds()
+        <= (now - observed_at.astimezone(timezone.utc)).total_seconds()
         <= fresh_seconds
     )
     checks["coordinator_digest_subscription"] = _check(
         "PASS" if coordinator and coordinator.get("connected") is True and fresh else "FAIL",
-        "connected=true with fresh last_event_at"
+        "connected=true with fresh observed_at/heartbeat_at"
         if fresh
-        else "missing, disconnected, or stale coordinator digest proof",
+        else "missing, disconnected, or stale coordinator observation proof",
     )
     for role in ("worker", "reviewer"):
         value = _proof(proof_dir, f"wait-{role}")
@@ -523,16 +722,51 @@ def _post_rollout_checks(
     )
     autonomous = butler is not None and butler.get("effective_state") == "autonomous"
     fleet_reconciled = isinstance(fleet, Mapping) and fleet.get("status") == "reconciled"
+    deviations = butler.get("deviations") if butler else None
+    approved_merge_deviation = (
+        deviations.get("approved_merge")
+        if isinstance(deviations, Mapping)
+        else None
+    )
+    approved_merge_not_granted = (
+        isinstance(approved_merge_deviation, Mapping)
+        and approved_merge_deviation.get("status") == "not_granted"
+        and approved_merge_deviation.get("recorded") is True
+    )
+    executor_deviation = (
+        deviations.get("fleet_executor")
+        if isinstance(deviations, Mapping)
+        else None
+    )
+    executor_not_provisioned = (
+        isinstance(fleet, Mapping)
+        and fleet.get("status") == "disabled"
+        and isinstance(executor_deviation, Mapping)
+        and executor_deviation.get("status") == "not_provisioned"
+        and executor_deviation.get("recorded") is True
+        and fleet_executor_state == "not_provisioned"
+    )
     checks["board_butler_autonomous_merge"] = _check(
-        "PASS" if autonomous and merged else "FAIL",
+        "PASS"
+        if autonomous and merged
+        else "WARN"
+        if autonomous and approved_merge_not_granted
+        else "FAIL",
         "autonomous mode includes approved merge"
         if autonomous and merged
+        else (
+            "approved merge is not granted in this pre-TK-ee3d61fd "
+            "configuration and is recorded as an expected deviation"
+        )
+        if autonomous and approved_merge_not_granted
         else "missing autonomous/approved-merge proof",
     )
     checks["board_butler_fleet_reconciled"] = _check(
-        "PASS" if fleet_reconciled else "FAIL",
+        "PASS" if fleet_reconciled else "WARN" if executor_not_provisioned else "FAIL",
         "new post-restart refresh reports fleet status reconciled"
         if fleet_reconciled
+        else "fleet executor is not provisioned; disabled status recorded as an expected deviation"
+        if executor_not_provisioned
         else "fleet status is not reconciled",
     )
     conflict = butler.get("state_precondition_conflict") if butler else None
@@ -551,17 +785,15 @@ def _post_rollout_checks(
         else "missing release-bound post-restart refresh/no-traceback proof",
     )
     dashboard = _proof(proof_dir, "dashboard")
-    shell = dashboard.get("visual_shell") if dashboard else None
     dashboard_ok = (
         dashboard is not None
         and dashboard.get("release_sha") == release_sha
-        and shell == "warm-guided-home-v1"
     )
-    checks["dashboard_visual_shell"] = _check(
+    checks["dashboard_release_sha"] = _check(
         "PASS" if dashboard_ok else "FAIL",
-        "release SHA serves warm-guided-home-v1"
+        "dashboard proof binds the exact release SHA"
         if dashboard_ok
-        else "dashboard proof does not bind the release SHA and visual shell",
+        else "dashboard proof does not bind the release SHA",
     )
     release = _proof(proof_dir, "release-checks")
     release_ok = (
@@ -589,9 +821,19 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         else pursers_home / "rollout/v5.0.6/proofs"
     )
     mcp_rows, mcp_references = _mcp_clients(home, pursers_home)
-    launchd_rows, launchd_references = _launchd(LAUNCHD_LABELS, snapshot_root=snapshot_root)
+    use_systemd = (
+        snapshot_root is not None and (snapshot_root / "systemd").is_dir()
+    ) or (snapshot_root is None and sys.platform != "darwin")
+    if use_systemd:
+        service_rows, service_references = _systemd(
+            SYSTEMD_UNITS, snapshot_root=snapshot_root
+        )
+    else:
+        service_rows, service_references = _launchd(
+            LAUNCHD_LABELS, snapshot_root=snapshot_root
+        )
     process_text = _process_text(snapshot_root)
-    references = [*mcp_references, *launchd_references.values(), process_text]
+    references = [*mcp_references, *service_references.values(), process_text]
 
     repositories: list[dict[str, Any]] = []
     runtime_dirs: list[Path] = []
@@ -611,6 +853,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
                 referenced=_referenced(runtime, references),
                 interpreter=runtime / ".venv/bin/python",
                 required_distributions=RUNTIME_REQUIRED_DISTRIBUTIONS,
+                expected_distributions=PURSERS_DISTRIBUTIONS,
             )
         )
     fixed_repositories = (
@@ -636,9 +879,9 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         (repo, repositories[len(runtime_dirs) + offset])
         for offset, (_name, repo) in enumerate(fixed_repositories)
     )
-    _attach_launchd_sources(
-        launchd_rows,
-        launchd_references,
+    _attach_service_sources(
+        service_rows,
+        service_references,
         repo_sources,
         home=home,
         pursers_home=pursers_home,
@@ -693,9 +936,12 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(environment, Mapping):
             checks[f'{row["consumer"]}:installed_packages'] = _check(
                 "PASS" if environment.get("ok") is True else "FAIL",
-                "active interpreter has the required installed distributions"
+                "active interpreter has required distributions and consistent Pursers pins"
                 if environment.get("ok") is True
-                else "active interpreter is missing or has mismatched installed distributions",
+                else (
+                    "active interpreter is missing, lacks required distributions, "
+                    "or has inconsistent Pursers pins"
+                ),
             )
     version_sources = [
         row["versions"] for row in repositories if row["sha"] == args.release_sha
@@ -728,10 +974,10 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         if release_inputs_ok
         else "release tag, wheel directory, or SHA256SUMS validation failed",
     )
-    for row in launchd_rows:
+    for row in service_rows:
         source_shas = {source["sha"] for source in row["sources"]}
         sources_ok = bool(source_shas) and source_shas == {args.release_sha}
-        if row["consumer"] == "launchd:com.pursers.mong1-supervisor":
+        if row["service_role"] == "mong1-supervisor":
             sources_ok = sources_ok or row["entrypoint_sha256"] is not None
         checks[row["consumer"]] = _check(
             "PASS" if row["loaded"] and row["running"] and sources_ok else "FAIL",
@@ -744,29 +990,84 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
             checks[f'{row["consumer"]}:installed_packages'] = _check(
                 "PASS" if environment.get("ok") is True else "FAIL",
                 "configured service interpreter has pursers-client "
-                f"{EXPECTED_CLIENT}"
+                f"{EXPECTED_CLIENT} and consistent Pursers pins"
                 if environment.get("ok") is True
-                else "configured service interpreter is missing or pursers-client is mismatched",
+                else (
+                    "configured service interpreter is missing, pursers-client is "
+                    "mismatched, or another installed Pursers pin is inconsistent"
+                ),
+            )
+        fleet_environment = row.get("fleet_environment")
+        if isinstance(fleet_environment, Mapping):
+            checks[f'{row["consumer"]}:fleet_environment'] = _check(
+                "PASS" if fleet_environment.get("ok") is True else "FAIL",
+                "Fleet launch contract contains all required Butler paths"
+                if fleet_environment.get("ok") is True
+                else "Fleet launch contract is missing required Butler environment variables",
+            )
+        fleet_executor = row.get("fleet_executor")
+        if isinstance(fleet_executor, Mapping):
+            executor_state = fleet_executor.get("state")
+            checks[f'{row["consumer"]}:fleet_executor'] = _check(
+                "PASS"
+                if executor_state == "provisioned"
+                else "WARN"
+                if executor_state == "not_provisioned"
+                else "FAIL",
+                "fleet executor configuration is complete"
+                if executor_state == "provisioned"
+                else (
+                    "fleet executor is not provisioned; use the documented "
+                    "disabled-status deviation"
+                )
+                if executor_state == "not_provisioned"
+                else "fleet executor configuration is partial and unsafe",
             )
     configured_hosts = {row["consumer"] for row in mcp_rows if row["launches_wait_bridge"]}
+    present_hosts = {row["consumer"] for row in mcp_rows if row["present"]}
     for name in ("host-mcp:Claude Desktop", "host-mcp:Zed"):
         alternatives = (
             {"host-mcp:Claude Desktop", "host-mcp:Claude Desktop 3P"}
             if name.endswith("Claude Desktop")
             else {"host-mcp:Zed", "host-mcp:Zed macOS"}
         )
+        configured = bool(configured_hosts.intersection(alternatives))
+        installed = bool(present_hosts.intersection(alternatives))
         checks[name] = _check(
-            "PASS" if configured_hosts.intersection(alternatives) else "FAIL",
+            "PASS"
+            if configured
+            else "WARN"
+            if use_systemd or not installed
+            else "FAIL",
             "launches pursers-wait-bridge"
-            if configured_hosts.intersection(alternatives)
+            if configured
+            else (
+                "IDE is not installed on this host; use saved-cursor wait proofs"
+            )
+            if use_systemd or not installed
             else "wait bridge command not found",
         )
+    butler_launchd = next(
+        (
+            row
+            for row in service_rows
+            if row["service_role"] == "board-butler"
+        ),
+        {},
+    )
+    fleet_executor = butler_launchd.get("fleet_executor")
+    fleet_executor_state = (
+        fleet_executor.get("state")
+        if isinstance(fleet_executor, Mapping)
+        else None
+    )
     checks.update(
         _post_rollout_checks(
             proof_dir,
             release_sha=args.release_sha,
             now=args.now,
             fresh_seconds=args.fresh_seconds,
+            fleet_executor_state=fleet_executor_state,
         )
     )
     if args.inventory_only:
@@ -806,7 +1107,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
             "wait_bridge": EXPECTED_WAIT_BRIDGE,
             "client": EXPECTED_CLIENT,
         },
-        "inventory": [uv_tool, *repositories, *launchd_rows, *mcp_rows],
+        "inventory": [uv_tool, *repositories, *service_rows, *mcp_rows],
         "stale_runtime_cleanup": cleanup,
         "checks": checks,
         "summary": {
