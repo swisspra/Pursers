@@ -5340,7 +5340,8 @@ def test_module_has_only_bounded_question_answer_ticket_mutation() -> None:
     assert source.count("client.ticket_question_answer(") == 3
     assert "host_binding" not in source
     assert "ticket_update(action.ticket_id, parked=True)" in source
-    assert source.count("ticket_annotate(") == 2
+    assert source.count("ticket_annotate(") == 3
+    assert "client.ticket_annotate(ticket_id, text, kind=\"note\")" in source
     assert "board_catchup" not in source
     assert "ticket_list" not in source
 
