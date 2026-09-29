@@ -806,7 +806,8 @@ usage: board_butler.py [-h] [--url URL] [--token-path TOKEN_PATH] [--home-board 
                        [--fleet-observation-file FLEET_OBSERVATION_FILE] [--fleet-state-file FLEET_STATE_FILE]
                        [--fleet-executor-socket FLEET_EXECUTOR_SOCKET] [--fleet-executor-key-id FLEET_EXECUTOR_KEY_ID]
                        [--fleet-executor-private-key FLEET_EXECUTOR_PRIVATE_KEY]
-                       [--provider-secrets-dir PROVIDER_SECRETS_DIR]
+                       [--fleet-executor-config FLEET_EXECUTOR_CONFIG]
+                       [--supervisor-roster-file SUPERVISOR_ROSTER_FILE] [--provider-secrets-dir PROVIDER_SECRETS_DIR]
                        [--intake-onboarding-config INTAKE_ONBOARDING_CONFIG] [--drafts-per-hour DRAFTS_PER_HOUR]
                        [--drafts-per-ticket DRAFTS_PER_TICKET] [--drafts-per-board DRAFTS_PER_BOARD]
                        [--project PROJECT] [--wait-timeout WAIT_TIMEOUT] [--refresh-seconds REFRESH_SECONDS]
@@ -846,6 +847,8 @@ options:
   --fleet-executor-socket FLEET_EXECUTOR_SOCKET
   --fleet-executor-key-id FLEET_EXECUTOR_KEY_ID
   --fleet-executor-private-key FLEET_EXECUTOR_PRIVATE_KEY
+  --fleet-executor-config FLEET_EXECUTOR_CONFIG
+  --supervisor-roster-file SUPERVISOR_ROSTER_FILE
   --provider-secrets-dir PROVIDER_SECRETS_DIR
   --intake-onboarding-config INTAKE_ONBOARDING_CONFIG
                         private operator JSON declaring per-source repository resolution and limits

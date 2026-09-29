@@ -830,6 +830,7 @@ Required authorization: `board:write` or `board:coordinate`; human initializatio
 | `sender_channel` | `string` | required | — |
 | `config` | `object` | required | — |
 | `expected_revision` | `integer` | required | — |
+| `authorization_command_id` | `string | null` | optional | `null` |
 | `expected_generation` | `string | null` | optional | `null` |
 
 Response fields: `ok, board_id, config, idempotent_replay, event_created, rollback_evidence, event, release_events, implicitly_renewed`.
