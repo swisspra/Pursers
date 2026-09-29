@@ -184,6 +184,43 @@ probe expectations instead of failing the connector. The legacy declaration
 }
 ```
 
+The same file may declare a bounded `sources` array. Each source names one
+declared read-only tool and maps its product response into the generic intake
+shape. For example, a SonarQube source can route project keys through the
+Central project registry:
+
+```json
+{
+  "sources": [{
+    "source_id": "sonarqube",
+    "connector_id": "connector:sonarqube",
+    "list_tool": "sonar_search_sonar_issues_in_projects",
+    "fixed_args": {"projects": ["example-service"]},
+    "items_path": "issues",
+    "field_map": {
+      "external_id": "key",
+      "revision": "updateDate",
+      "title": "message",
+      "body": "message",
+      "link": "url",
+      "project_hint": "project"
+    },
+    "routing": {
+      "project_map": {"example-service": "Example Service"}
+    },
+    "mode": "ask",
+    "content_type": "structured"
+  }]
+}
+```
+
+The resident constructs the source poller from these declarations. Shadow mode
+records bounded `source-intake-would-ask` findings without changing intake
+state; active mode writes the asks. An unavailable connector or invalid source
+is isolated as a bounded `unavailable` or `invalid` finding so the resident can
+continue refreshing. `--connector-probe` remains strict and exits non-zero for
+the same configuration or connection failure.
+
 `--connector-probe` is a one-shot, token-free check. It connects, lists tools,
 prints secret-free JSON, and exits non-zero when an enabled classified tool is
 missing, an unclassified tool appears, or connection/protocol validation fails.

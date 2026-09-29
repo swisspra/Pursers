@@ -5438,6 +5438,25 @@ def load_connector_runtimes(
     return tuple(runtimes)
 
 
+def load_connector_sources(
+    path: Path,
+    runtimes: Sequence[ConnectorRuntime],
+) -> tuple[SourceDeclaration, ...]:
+    """Load bounded source declarations against the resolved connectors."""
+    raw = _read_connector_private_file(path, "connector config", 1_048_576)
+    try:
+        document = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError):
+        raise ConnectorConfigError("connector config is invalid JSON") from None
+    if not isinstance(document, Mapping) or document.get("schema_version") != 1:
+        raise ConnectorConfigError("connector config schema is invalid")
+    sources = document.get("sources", [])
+    declarations = {
+        runtime.declaration.connector_id: runtime.declaration for runtime in runtimes
+    }
+    return parse_source_declarations(sources, declarations)
+
+
 async def run_connector_probe(runtimes: Sequence[ConnectorRuntime]) -> int:
     results: list[dict[str, Any]] = []
     exit_code = 0
@@ -5629,6 +5648,7 @@ class SourceIntakePoller:
         state_writer: Callable[[str, str, str | None], Awaitable[Any]],
         ticket_reader: Callable[[str, str], Awaitable[Mapping[str, Any] | None]],
         ticket_annotator: Callable[[str, str, str], Awaitable[Any]],
+        active: bool = True,
         per_source_cap: int = SOURCE_INTAKE_MAX_ITEMS_PER_SOURCE,
         cycle_cap: int = SOURCE_INTAKE_MAX_ITEMS_PER_CYCLE,
     ) -> None:
@@ -5648,6 +5668,7 @@ class SourceIntakePoller:
         self.state_writer = state_writer
         self.ticket_reader = ticket_reader
         self.ticket_annotator = ticket_annotator
+        self.active = active
         self.per_source_cap = per_source_cap
         self.cycle_cap = cycle_cap
         self._round_robin = 0
@@ -5760,11 +5781,13 @@ class SourceIntakePoller:
         writebacks = 0
         findings: list[dict[str, Any]] = []
         successful_sources: list[str] = []
+        attempted_sources: list[str] = []
         states: dict[str, tuple[list[dict[str, Any]], list[Any], str | None]] = {}
         dirty: set[str] = set()
         for source in ordered:
             if processed >= self.cycle_cap:
                 break
+            attempted_sources.append(source.source_id)
             runtime = self.runtimes[source.connector_id]
             operation_digest = hashlib.sha256(
                 f"{source.source_id}\0{now.isoformat()}".encode()
@@ -5786,6 +5809,7 @@ class SourceIntakePoller:
                     {
                         "kind": "source-intake-poll-failed",
                         "level": "warn",
+                        "status": "unavailable",
                         "source_id": source.source_id,
                         "error_class": type(exc).__name__,
                         "message": "External source poll failed; other sources continued.",
@@ -5804,6 +5828,7 @@ class SourceIntakePoller:
                         {
                             "kind": "source-intake-item-invalid",
                             "level": "warn",
+                            "status": "invalid",
                             "source_id": source.source_id,
                             "item_offset": offset,
                             "error_class": type(exc).__name__,
@@ -5833,7 +5858,7 @@ class SourceIntakePoller:
                     source.source_id, item["revision"]
                 )
                 if ticket is not None:
-                    if revision_marker not in _ticket_text(ticket):
+                    if self.active and revision_marker not in _ticket_text(ticket):
                         await self.ticket_annotator(
                             board_id,
                             ticket_id,
@@ -5850,7 +5875,7 @@ class SourceIntakePoller:
                                 )
                             ),
                         )
-                    if await self._maybe_writeback(
+                    if self.active and await self._maybe_writeback(
                         source, runtime, board_id, ticket_id, ticket, item
                     ):
                         writebacks += 1
@@ -5888,11 +5913,35 @@ class SourceIntakePoller:
                     },
                 }
                 if source_row is None:
-                    rows.append(ask)
-                    dirty.add(board_id)
+                    if self.active:
+                        rows.append(ask)
+                        dirty.add(board_id)
+                    else:
+                        findings.append(
+                            {
+                                "kind": "source-intake-would-ask",
+                                "level": "info",
+                                "status": "shadow",
+                                "source_id": source.source_id,
+                                "item_id": item["external_id"],
+                                "board_id": board_id,
+                            }
+                        )
                 elif source_row.get("source", {}).get("revision") != item["revision"]:
-                    rows[rows.index(source_row)] = ask
-                    dirty.add(board_id)
+                    if self.active:
+                        rows[rows.index(source_row)] = ask
+                        dirty.add(board_id)
+                    else:
+                        findings.append(
+                            {
+                                "kind": "source-intake-would-ask",
+                                "level": "info",
+                                "status": "shadow",
+                                "source_id": source.source_id,
+                                "item_id": item["external_id"],
+                                "board_id": board_id,
+                            }
+                        )
                 states[board_id] = (rows, tombstones, previous)
         for board_id in sorted(dirty):
             rows, tombstones, previous = states[board_id]
@@ -5911,6 +5960,7 @@ class SourceIntakePoller:
             "writebacks": writebacks,
             "updated_boards": sorted(dirty),
             "successful_sources": successful_sources,
+            "attempted_sources": attempted_sources,
         }
 
 
@@ -11012,11 +11062,41 @@ class CentralBackend:
         self._project_onboarding_retry_keys: set[tuple[str, str]] = set()
         self.subscription_healthy = True
         self._subscription_failure_active = False
-        # TODO(TK-a2766e6ff9b15f05864e): construct this from --connector-config.
-        self.source_intake_poller: SourceIntakePoller | None = None
+        self._source_registry_projects: dict[str, str] = {}
+        connector_runtimes = tuple(
+            getattr(args, "_connector_runtimes", ()) or ()
+        )
+        connector_sources = tuple(getattr(args, "_connector_sources", ()) or ())
+        self.source_intake_poller: SourceIntakePoller | None = (
+            SourceIntakePoller(
+                sources=connector_sources,
+                runtimes={
+                    runtime.declaration.connector_id: runtime
+                    for runtime in connector_runtimes
+                },
+                registry_projects=lambda: self._source_registry_projects,
+                state_reader=self._source_state_reader,
+                state_writer=self._source_state_writer,
+                ticket_reader=self._source_ticket_reader,
+                ticket_annotator=self._source_ticket_annotator,
+                active=getattr(args, "runtime_mode", "shadow") == "active",
+            )
+            if connector_sources
+            else None
+        )
         self._source_intake_task: asyncio.Task[dict[str, Any]] | None = None
-        self._source_intake_last: dict[str, Any] = {"status": "disabled"}
-        self._source_intake_findings_pending = False
+        startup_findings = [
+            dict(item)
+            for item in (getattr(args, "_connector_startup_findings", ()) or ())
+            if isinstance(item, Mapping)
+        ]
+        self._source_intake_last: dict[str, Any] = {
+            "status": "invalid" if startup_findings else "disabled",
+            "findings": startup_findings,
+            "attempted_sources": [],
+            "successful_sources": [],
+        }
+        self._source_intake_findings_pending = bool(startup_findings)
         self._approval_scanners: dict[str, ApprovalClassificationCache] = {}
         self._approval_scan_task: asyncio.Task[
             dict[str, ApprovalScanOutcome]
@@ -11146,6 +11226,46 @@ class CentralBackend:
             )
             return {"status": "scheduled", "previous": dict(self._source_intake_last)}
         return {"status": "running", "previous": dict(self._source_intake_last)}
+
+    async def _source_state_reader(self, board_id: str) -> Mapping[str, Any] | None:
+        async with self._client_for_board(board_id) as client:
+            try:
+                return await client.board_state_get(SOURCE_INTAKE_STATE_KEY)
+            except Exception as exc:
+                if "state key not found" in str(exc).casefold():
+                    return None
+                raise
+
+    async def _source_state_writer(
+        self, board_id: str, value: str, expected_sha256: str | None
+    ) -> Mapping[str, Any]:
+        async with self._client_for_board(board_id) as client:
+            return await client.board_state_update(
+                SOURCE_INTAKE_STATE_KEY,
+                value,
+                expected_sha256=expected_sha256,
+            )
+
+    async def _source_ticket_reader(
+        self, board_id: str, ticket_id: str
+    ) -> Mapping[str, Any] | None:
+        from pursers_client import BoardClientError
+
+        async with self._client_for_board(board_id) as client:
+            try:
+                payload = await client.ticket_get(ticket_id, view="full")
+            except BoardClientError as exc:
+                if str(exc).strip().casefold() == "ticket not found":
+                    return None
+                raise
+        ticket = payload.get("ticket") if isinstance(payload, Mapping) else None
+        return ticket if isinstance(ticket, Mapping) else None
+
+    async def _source_ticket_annotator(
+        self, board_id: str, ticket_id: str, text: str
+    ) -> Mapping[str, Any]:
+        async with self._client_for_board(board_id) as client:
+            return await client.ticket_annotate(ticket_id, text, kind="note")
 
     async def _run_approval_scan_cycle(
         self, board_ids: Sequence[str], now: datetime
@@ -11281,7 +11401,7 @@ class CentralBackend:
         ]
 
     async def _write_source_intake_findings(self, now: datetime) -> None:
-        """Replace durable unknown-project rows for successfully polled sources."""
+        """Replace durable bounded source findings for sources observed this cycle."""
         if not self._source_intake_findings_pending:
             return
         result = self._source_intake_last
@@ -11290,14 +11410,19 @@ class CentralBackend:
             for item in result.get("successful_sources", [])
             if isinstance(item, str)
         }
-        if not successful:
-            self._source_intake_findings_pending = False
-            return
+        attempted = {
+            item
+            for item in result.get("attempted_sources", [])
+            if isinstance(item, str)
+        }
         current = [
             dict(item)
             for item in result.get("findings", [])
             if isinstance(item, Mapping)
-            and item.get("reason_code") == SOURCE_UNKNOWN_PROJECT_KIND
+            and (
+                item.get("reason_code") == SOURCE_UNKNOWN_PROJECT_KIND
+                or str(item.get("kind", "")).startswith("source-intake-")
+            )
         ]
         async with self._client_for_board(self.args.home_board) as client:
             try:
@@ -11312,8 +11437,17 @@ class CentralBackend:
                 for item in state.get("findings", [])
                 if isinstance(item, Mapping)
                 and not (
-                    item.get("reason_code") == SOURCE_UNKNOWN_PROJECT_KIND
-                    and item.get("source_id") in successful
+                    (
+                        item.get("reason_code") == SOURCE_UNKNOWN_PROJECT_KIND
+                        and item.get("source_id") in successful
+                    )
+                    or (
+                        str(item.get("kind", "")).startswith("source-intake-")
+                        and (
+                            item.get("source_id") in attempted
+                            or item.get("source_id") is None
+                        )
+                    )
                 )
             ]
             critical = [item for item in existing if item.get("level") == "critical"]
@@ -12556,6 +12690,11 @@ class CentralBackend:
             projects, snapshots, previous = await coordinator["read_cycle"](
                 reader, self.args.home_board
             )
+        self._source_registry_projects = {
+            project.name: project.board_id
+            for project in projects
+            if isinstance(getattr(project, "name", None), str)
+        }
         project_onboarding = await self._auto_onboard_unknown_projects(previous, now)
         active_boards = {project.board_id for project in projects}
         self._harvest_approval_scan(sorted(active_boards))
@@ -13245,18 +13384,45 @@ async def run(
     backend_factory: Any = CentralBackend,
 ) -> int | None:
     connector_runtimes: tuple[ConnectorRuntime, ...] = ()
+    connector_sources: tuple[SourceDeclaration, ...] = ()
+    connector_startup_findings: tuple[dict[str, Any], ...] = ()
     connector_config = getattr(args, "connector_config", None)
     if connector_config is not None:
-        connector_runtimes = load_connector_runtimes(
-            connector_config,
-            default_board_id=getattr(args, "home_board", "pursers"),
-            default_project_id=(
-                getattr(args, "project", None) or getattr(args, "home_board", "pursers")
-            ),
-            default_actor_id=getattr(args, "agent_name", DEFAULT_AGENT_NAME),
-        )
+        try:
+            connector_runtimes = load_connector_runtimes(
+                connector_config,
+                default_board_id=getattr(args, "home_board", "pursers"),
+                default_project_id=(
+                    getattr(args, "project", None)
+                    or getattr(args, "home_board", "pursers")
+                ),
+                default_actor_id=getattr(args, "agent_name", DEFAULT_AGENT_NAME),
+            )
+            connector_sources = load_connector_sources(
+                connector_config, connector_runtimes
+            )
+        except ConnectorError as exc:
+            if getattr(args, "connector_probe", False):
+                raise
+            connector_runtimes = ()
+            connector_sources = ()
+            connector_startup_findings = (
+                {
+                    "kind": "source-intake-config-invalid",
+                    "level": "warn",
+                    "status": "invalid",
+                    "error_class": type(exc).__name__,
+                    "message": (
+                        "Connector source configuration was invalid; "
+                        "resident refresh continued with source intake disabled."
+                    ),
+                },
+            )
     if getattr(args, "connector_probe", False):
         return await run_connector_probe(connector_runtimes)
+    args._connector_runtimes = connector_runtimes
+    args._connector_sources = connector_sources
+    args._connector_startup_findings = connector_startup_findings
 
     # One-shot controls must remain available while the resident owns the
     # singleton lock. Their coordinator_findings write is CAS-protected by the

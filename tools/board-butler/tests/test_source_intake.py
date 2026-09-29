@@ -211,6 +211,43 @@ def runtime_for(
     )
 
 
+def write_runtime_config(
+    path: Path, *, sources: list[Mapping[str, Any]] | None = None
+) -> None:
+    document: dict[str, Any] = {
+        "schema_version": 1,
+        "approved_connector_ids": ["connector:sonar"],
+        "connectors": [
+            {
+                "connector_id": "connector:sonar",
+                "transport": "stdio",
+                "protocol_revision": "2026-07-28",
+                "endpoint_ref": "endpoint:sonar",
+                "tools": [
+                    {
+                        "name": "fetch",
+                        "effect": "read_only",
+                        "replay": "safe_with_stable_call_id",
+                        "stable_call_id_field": "call_id",
+                    }
+                ],
+                "risky_tools": [],
+                "denied_tools": [],
+            }
+        ],
+        "endpoints": {
+            "endpoint:sonar": {
+                "transport": "stdio",
+                "executable": "fake-source",
+            }
+        },
+    }
+    if sources is not None:
+        document["sources"] = sources
+    path.write_text(json.dumps(document), encoding="utf-8")
+    path.chmod(0o600)
+
+
 def test_source_config_is_generic_and_free_text_is_forced_to_ask() -> None:
     sonar = connector_declaration("connector:sonar")
     jira = connector_declaration("connector:jira")
@@ -244,6 +281,274 @@ def test_source_config_is_generic_and_free_text_is_forced_to_ask() -> None:
     invalid = dict(configs[1], mode="auto")
     with pytest.raises(butler.ConnectorConfigError, match="free-text"):
         butler.parse_source_declarations([invalid], connectors)
+
+
+def test_runtime_config_sources_construct_resident_and_active_cycle_writes_intake(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "connectors.json"
+    write_runtime_config(
+        config,
+        sources=[
+            source_config(
+                "sonar",
+                "connector:sonar",
+                items_path="issues",
+                field_map=SONAR_FIELDS,
+                routing={"project_map": {"alpha": "Alpha"}},
+            )
+        ],
+    )
+    runtimes = butler.load_connector_runtimes(
+        config,
+        default_board_id="pursers",
+        default_project_id="registry",
+        default_actor_id="board-butler",
+    )
+    sources = butler.load_connector_sources(config, runtimes)
+    calls: list[tuple[str, dict]] = []
+    client = SourceClient(
+        {
+            "issues": [
+                {
+                    "key": "SONAR-1",
+                    "updatedAt": "r1",
+                    "message": "Fix issue",
+                    "details": "Bounded source detail.",
+                    "url": "https://sonar.invalid/SONAR-1",
+                    "project": "alpha",
+                }
+            ]
+        },
+        calls,
+    )
+
+    @contextlib.asynccontextmanager
+    async def factory(*_args: Any) -> AsyncIterator[SourceClient]:
+        yield client
+
+    runtimes[0].client_factory = factory
+    stored: dict[str, str] = {}
+
+    class CentralClient:
+        async def board_state_get(self, key: str) -> Mapping[str, Any]:
+            if key not in stored:
+                raise RuntimeError("state key not found")
+            return {"state": {"value": stored[key]}}
+
+        async def board_state_update(
+            self,
+            key: str,
+            value: str,
+            *,
+            expected_sha256: str | None = None,
+        ) -> Mapping[str, Any]:
+            assert expected_sha256 is None
+            stored[key] = value
+            return {"ok": True}
+
+        async def ticket_get(self, *_args: Any, **_kwargs: Any) -> Mapping[str, Any]:
+            return {"ticket": None}
+
+        async def ticket_annotate(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("new intake must not annotate a ticket")
+
+    options = SimpleNamespace(
+        home_board="pursers",
+        intake_onboarding_config=None,
+        runtime_mode="active",
+        _connector_runtimes=runtimes,
+        _connector_sources=sources,
+        _connector_startup_findings=(),
+    )
+    backend = butler.CentralBackend(options, "opaque")
+    backend.client = CentralClient()
+    backend._source_registry_projects = {"Alpha": "pursers"}
+    assert backend.source_intake_poller is not None
+
+    result = asyncio.run(backend.source_intake_poller.run_cycle(NOW))
+
+    assert result["updated_boards"] == ["pursers"]
+    asks = json.loads(stored[butler.SOURCE_INTAKE_STATE_KEY])["asks"]
+    assert asks[0]["source"]["external_id"] == "SONAR-1"
+    assert [name for name, _arguments in calls] == ["fetch"]
+
+
+def test_shadow_source_cycle_reports_would_ask_without_writing() -> None:
+    declaration = connector_declaration("connector:sonar")
+    calls: list[tuple[str, dict]] = []
+    runtime = runtime_for(
+        declaration,
+        {
+            "issues": [
+                {
+                    "key": "SONAR-1",
+                    "updatedAt": "r1",
+                    "message": "Fix issue",
+                    "details": "Bounded source detail.",
+                    "url": "https://sonar.invalid/SONAR-1",
+                    "project": "alpha",
+                }
+            ]
+        },
+        calls,
+    )
+    source = butler.parse_source_declarations(
+        [
+            source_config(
+                "sonar",
+                declaration.connector_id,
+                items_path="issues",
+                field_map=SONAR_FIELDS,
+                routing={"project_map": {"alpha": "Alpha"}},
+            )
+        ],
+        {declaration.connector_id: declaration},
+    )
+    writes = 0
+
+    async def scenario() -> Mapping[str, Any]:
+        async def read_state(_board_id: str) -> None:
+            return None
+
+        async def write_state(*_args: Any) -> None:
+            nonlocal writes
+            writes += 1
+
+        async def read_ticket(*_args: Any) -> None:
+            return None
+
+        async def annotate(*_args: Any) -> None:
+            raise AssertionError("shadow mode must not annotate")
+
+        poller = butler.SourceIntakePoller(
+            sources=source,
+            runtimes={declaration.connector_id: runtime},
+            registry_projects={"Alpha": "pursers"},
+            state_reader=read_state,
+            state_writer=write_state,
+            ticket_reader=read_ticket,
+            ticket_annotator=annotate,
+            active=False,
+        )
+        return await poller.run_cycle(NOW)
+
+    result = asyncio.run(scenario())
+
+    assert writes == 0
+    assert result["updated_boards"] == []
+    assert result["findings"] == [
+        {
+            "kind": "source-intake-would-ask",
+            "level": "info",
+            "status": "shadow",
+            "source_id": "sonar",
+            "item_id": "SONAR-1",
+            "board_id": "pursers",
+        }
+    ]
+
+
+def test_no_sources_keeps_resident_intake_disabled(tmp_path: Path) -> None:
+    config = tmp_path / "connectors.json"
+    write_runtime_config(config)
+    runtimes = butler.load_connector_runtimes(
+        config,
+        default_board_id="pursers",
+        default_project_id="registry",
+        default_actor_id="board-butler",
+    )
+    sources = butler.load_connector_sources(config, runtimes)
+    backend = butler.CentralBackend(
+        SimpleNamespace(
+            home_board="pursers",
+            intake_onboarding_config=None,
+            runtime_mode="active",
+            _connector_runtimes=runtimes,
+            _connector_sources=sources,
+            _connector_startup_findings=(),
+        ),
+        "opaque",
+    )
+
+    assert sources == ()
+    assert backend.source_intake_poller is None
+    assert backend._source_intake_last["status"] == "disabled"
+
+
+def test_invalid_source_config_keeps_resident_refreshing_with_finding(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "connectors.json"
+    write_runtime_config(
+        config,
+        sources=[
+            source_config(
+                "sonar",
+                "connector:missing",
+                items_path="issues",
+                field_map=SONAR_FIELDS,
+                routing={"project_map": {"alpha": "Alpha"}},
+            )
+        ],
+    )
+    token = tmp_path / "token"
+    token.write_text("opaque", encoding="utf-8")
+    options = SimpleNamespace(
+        connector_config=config,
+        connector_probe=False,
+        home_board="pursers",
+        project="registry",
+        agent_name="board-butler",
+        kill_switch=False,
+        veto_question=None,
+        token_path=token,
+        pid_file=tmp_path / "butler.pid",
+        local_kill_file=None,
+        runtime_status_file=tmp_path / "runtime.json",
+        runtime_mode="shadow",
+        cursor_file=tmp_path / "cursor.json",
+        wait_timeout=1,
+        refresh_seconds=60,
+        once=True,
+        dry_run=False,
+        intake_onboarding_config=None,
+    )
+    observed: dict[str, Any] = {}
+
+    class Backend:
+        latest_seq = 7
+        subscription_healthy = True
+
+        async def __aenter__(self) -> "Backend":
+            central = butler.CentralBackend(options, "opaque")
+            observed.update(central._source_intake_last)
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def refresh_registry_findings(
+            self, _now: datetime
+        ) -> Mapping[str, Any]:
+            observed["refreshed"] = True
+            return {"source_intake": dict(observed)}
+
+        async def wait_for_question(
+            self, cursor: int, _timeout: float
+        ) -> tuple[int, None]:
+            return cursor, None
+
+    asyncio.run(butler.run(options, backend_factory=lambda *_args: Backend()))
+
+    assert observed["status"] == "invalid"
+    assert observed["refreshed"] is True
+    assert observed["findings"][0]["kind"] == "source-intake-config-invalid"
+    assert observed["findings"][0]["status"] == "invalid"
+
+    options.connector_probe = True
+    with pytest.raises(butler.ConnectorConfigError):
+        asyncio.run(butler.run(options, backend_factory=lambda *_args: Backend()))
 
 
 def test_poller_routes_two_shapes_dedupes_revisions_and_bounds_unroutable() -> None:
@@ -440,6 +745,104 @@ def test_poller_routes_two_shapes_dedupes_revisions_and_bounds_unroutable() -> N
             item["source"]["external_id"]
             for item in json.loads(states["board-new"])["asks"]
         ] == ["SONAR-3"]
+
+    asyncio.run(scenario())
+
+
+def test_unavailable_connector_records_finding_and_other_source_continues() -> None:
+    async def scenario() -> None:
+        sonar = connector_declaration("connector:sonar")
+        jira = connector_declaration("connector:jira")
+
+        class UnavailableRuntime:
+            async def call_tool(self, *_args: Any) -> None:
+                raise butler.ConnectorProtocolError("synthetic unavailable connector")
+
+        calls: list[tuple[str, dict]] = []
+        runtimes = {
+            sonar.connector_id: UnavailableRuntime(),
+            jira.connector_id: runtime_for(
+                jira,
+                {
+                    "result": {
+                        "nodes": [
+                            {
+                                "issue": {
+                                    "id": 42,
+                                    "version": 7,
+                                    "summary": "Still processed",
+                                    "description": "The second source remains live.",
+                                    "self": "https://jira.invalid/42",
+                                },
+                                "routing": {"registryProject": "Alpha"},
+                            }
+                        ]
+                    }
+                },
+                calls,
+            ),
+        }
+        sources = butler.parse_source_declarations(
+            [
+                source_config(
+                    "sonar",
+                    sonar.connector_id,
+                    items_path="issues",
+                    field_map=SONAR_FIELDS,
+                    routing={"project_map": {"alpha": "Alpha"}},
+                ),
+                source_config(
+                    "jira",
+                    jira.connector_id,
+                    items_path="result.nodes",
+                    field_map=JIRA_FIELDS,
+                    routing={"project_hint_is_registry_key": True},
+                ),
+            ],
+            {sonar.connector_id: sonar, jira.connector_id: jira},
+        )
+        stored: dict[str, str] = {}
+
+        async def read_state(board_id: str) -> Mapping[str, Any] | None:
+            value = stored.get(board_id)
+            return {"state": {"value": value}} if value is not None else None
+
+        async def write_state(
+            board_id: str, value: str, _expected: str | None
+        ) -> None:
+            stored[board_id] = value
+
+        async def read_ticket(*_args: Any) -> None:
+            return None
+
+        async def annotate(*_args: Any) -> None:
+            raise AssertionError("new intake must not annotate")
+
+        poller = butler.SourceIntakePoller(
+            sources=sources,
+            runtimes=runtimes,
+            registry_projects={"Alpha": "pursers"},
+            state_reader=read_state,
+            state_writer=write_state,
+            ticket_reader=read_ticket,
+            ticket_annotator=annotate,
+        )
+        result = await poller.run_cycle(NOW)
+
+        assert result["successful_sources"] == ["jira"]
+        assert result["updated_boards"] == ["pursers"]
+        assert result["findings"] == [
+            {
+                "kind": "source-intake-poll-failed",
+                "level": "warn",
+                "status": "unavailable",
+                "source_id": "sonar",
+                "error_class": "ConnectorProtocolError",
+                "message": "External source poll failed; other sources continued.",
+            }
+        ]
+        asks = json.loads(stored["pursers"])["asks"]
+        assert asks[0]["source"]["source_id"] == "jira"
 
     asyncio.run(scenario())
 
