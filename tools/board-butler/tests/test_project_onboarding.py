@@ -38,7 +38,9 @@ class FakeRegistry:
     async def snapshot(self) -> tuple[Mapping[str, Any], str]:
         return copy.deepcopy(self.document), self.digest()
 
-    async def ensure_board(self, board_id: str, domain: str) -> None:
+    async def ensure_board(
+        self, board_id: str, domain: str, default_ticket_tier: int | None = None
+    ) -> None:
         self.boards.append((board_id, domain))
 
     async def add_project(
@@ -266,6 +268,14 @@ def test_config_requires_absolute_root_and_rejects_credentials(tmp_path: Path) -
     }
     parsed = onboarding.parse_source_policies(base)
     assert parsed["sonarqube"].projects_root == tmp_path / "projects"
+    assert parsed["sonarqube"].default_ticket_tier is None
+
+    tiered = copy.deepcopy(base)
+    tiered["sources"]["sonarqube"]["default_ticket_tier"] = 1
+    assert onboarding.parse_source_policies(tiered)["sonarqube"].default_ticket_tier == 1
+    tiered["sources"]["sonarqube"]["default_ticket_tier"] = 9
+    with pytest.raises(ValueError):
+        onboarding.parse_source_policies(tiered)
 
     aliases = copy.deepcopy(base)
     source = aliases["sources"]["sonarqube"]

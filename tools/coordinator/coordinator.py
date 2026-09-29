@@ -684,7 +684,13 @@ def _intake_identity(ask: IntakeAsk) -> tuple[str, str]:
 
 
 def deterministic_intake_draft(ask: IntakeAsk, project: Project) -> IntakeDraft:
-    category, has_reproduction = classify_intake(ask.text)
+    if ask.source is not None:
+        # External-source items (e.g. SonarQube issues) are code fixes by
+        # construction; keyword classification of the untrusted text must not
+        # turn them into read-only or human-only categories.
+        category, has_reproduction = "production-code", False
+    else:
+        category, has_reproduction = classify_intake(ask.text)
     ticket_id, op_key = _intake_identity(ask)
     required = {
         "docs": ("commit_hash", "test_output"),
@@ -743,6 +749,13 @@ def deterministic_intake_draft(ask: IntakeAsk, project: Project) -> IntakeDraft:
                 "--- END SOURCE DATA ---",
                 f"Category: {category}",
                 "Acceptance: complete the requested work and provide every required field.",
+                (
+                    f"Delivery: fix it on a new branch named pursers/{ticket_id} "
+                    f"created from {project.integration_ref}, push that branch to "
+                    "origin, and include `branch_and_commit: <branch>@<full sha>` in "
+                    "the submission notes. Do not open a pull request yourself; "
+                    "Board Butler opens it after independent approval."
+                ),
                 f"Intake op-key: {op_key}",
             )
         )
@@ -3417,6 +3430,8 @@ async def process_intakes(
             )
             if ask.source is not None and ask.source.mode == "ask":
                 decision, rule = "ask", "source-declared-ask"
+            elif ask.source is not None and ask.source.mode == "auto":
+                decision, rule = "auto", "source-declared-auto"
             if ask.approved:
                 decision, rule = "auto", "human-approved"
             if decision == "auto" and not intake_authorized and not dry_run:

@@ -221,6 +221,20 @@ is isolated as a bounded `unavailable` or `invalid` finding so the resident can
 continue refreshing. `--connector-probe` remains strict and exits non-zero for
 the same configuration or connection failure.
 
+With `--source-intake-index-file /PATH/TO/private/source-intake-index.json`
+the resident runs Butler-managed intake. The configured Butler model (the
+`drafting` provider) decides each cycle whether to pull, how many items, and
+from which sources, given the ceiling (`envelope.host_seat_cap` minus intake
+work in flight) and the board load; code clamps the answer to that ceiling and
+pulls nothing when the model is unavailable. A source may set `page_arg` and
+`max_pages` so already-taken items (tracked in the 0600 index, not in Central)
+are paged past cheaply. Writeback runs as a separate pass once a ticket is
+closed with an approval, so delivery never waits for a pull. Its
+`arg_template` may use `repository_project`, `repository_name`,
+`target_branch`, `source_branch`, `approved_sha` and `ticket_title` (e.g. an
+Azure DevOps `pull_request_create`); a tool without a stable call id is
+attempted once and never retried automatically.
+
 `--connector-probe` is a one-shot, token-free check. It connects, lists tools,
 prints secret-free JSON, and exits non-zero when an enabled classified tool is
 missing, an unclassified tool appears, or connection/protocol validation fails.

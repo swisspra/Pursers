@@ -2912,6 +2912,59 @@ def test_source_declared_ask_overrides_personal_auto_matrix() -> None:
     assert findings[0]["matrix_rule"] == "source-declared-ask"
 
 
+
+def test_source_declared_auto_creates_work_domain_code_ticket() -> None:
+    row = {
+        **_intake_row(
+            "ask-source-auto",
+            "Release notes: grant permission on the board registry",  # keywords only
+        ),
+        "source": {
+            "source_id": "sonar",
+            "external_id": "AaDspWnRfQY1WC_toV-7",
+            "revision": "2026-09-29T10:00:00+0000",
+            "link": "https://sonar.invalid/issue",
+            "project_hint": "project-a",
+            "mode": "auto",
+        },
+    }
+    created: list[Any] = []
+
+    async def create(_board_id: str, draft: Any) -> str:
+        created.append(draft)
+        return draft.ticket_id
+
+    findings, _updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project("work")],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": {
+                        "state": {
+                            "value": json.dumps(
+                                {"schema_version": 2, "asks": [row], "tombstones": []}
+                            )
+                        }
+                    },
+                }
+            },
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=False,
+            create_ticket=create,
+        )
+    )
+
+    assert len(created) == 1
+    draft = created[0]
+    assert draft.category == "production-code"
+    assert draft.scope == "interactive-no-send"
+    assert f"branch named pursers/{draft.ticket_id}" in draft.description
+    assert "branch_and_commit: <branch>@<full sha>" in draft.description
+    assert any(f.get("matrix_rule") == "source-declared-auto" for f in findings)
+
 def test_human_approved_intake_bypasses_matrix_with_same_identity() -> None:
     approved = {
         **_intake_row("ask-approved", "Publish the next release"),
