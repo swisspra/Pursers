@@ -6546,6 +6546,44 @@ def test_intake_append_uses_create_then_cas_and_coordinator_shape() -> None:
     ] == [(ask["id"], ask["text"], "dashboard-seat", "pursers")]
 
 
+def test_dashboard_intake_parser_accepts_v1_and_preserves_v2_source() -> None:
+    legacy_ask = {
+        "id": "legacy-ask",
+        "text": "Update the operator guide",
+        "requested_by": "operator",
+        "board_id": "pursers",
+    }
+    legacy = {
+        "state": {
+            "value": json.dumps(
+                {"schema_version": 1, "asks": [legacy_ask], "tombstones": []}
+            )
+        }
+    }
+    rows, tombstones, _raw = dashboard._intake_state_value(legacy, "pursers")
+    assert rows == [legacy_ask]
+    assert tombstones == []
+
+    source = {
+        **legacy_ask,
+        "id": "source-ask",
+        "source": {
+            "source_id": "sonar",
+            "external_id": "SONAR-1",
+            "revision": "r1",
+            "link": "https://sonar.invalid/SONAR-1",
+            "project_hint": "Alpha",
+            "mode": "ask",
+        },
+    }
+    encoded = dashboard._encode_intake_document([source], [])
+    assert json.loads(encoded)["schema_version"] == 2
+    current = dashboard._intake_state_value(
+        {"state": {"value": encoded}}, "pursers"
+    )
+    assert current[0] == [source]
+
+
 def test_intake_uuid_is_deterministic_for_content_and_time() -> None:
     first = asyncio.run(
         intake_fetcher(FakeIntakeCentral()).save_intake("pursers", "Update docs")

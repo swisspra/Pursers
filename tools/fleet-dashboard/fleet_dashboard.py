@@ -268,7 +268,8 @@ INTAKE_TEXT_MAX_CHARS = 500
 INTAKE_RATE_LIMIT = 10
 INTAKE_RATE_WINDOW_SECONDS = 3_600
 MAX_INTAKE_ROWS = 1_000
-INTAKE_DOCUMENT_SCHEMA_VERSION = 1
+INTAKE_DOCUMENT_SCHEMA_VERSION = 2
+LEGACY_INTAKE_DOCUMENT_SCHEMA_VERSION = 1
 MAX_INTAKE_TOMBSTONES = 20
 INTAKE_TITLE_MAX_CHARS = 200
 MAX_INTAKE_DRAFT_EVIDENCE_CHARS = 4_000
@@ -714,7 +715,8 @@ def _intake_state_value(
     elif (
         isinstance(document, dict)
         and set(document) == {"schema_version", "asks", "tombstones"}
-        and document.get("schema_version") == INTAKE_DOCUMENT_SCHEMA_VERSION
+        and document.get("schema_version")
+        in {LEGACY_INTAKE_DOCUMENT_SCHEMA_VERSION, INTAKE_DOCUMENT_SCHEMA_VERSION}
         and isinstance(document.get("asks"), list)
         and isinstance(document.get("tombstones"), list)
     ):
@@ -741,6 +743,7 @@ def _intake_state_value(
         approved = row.get("approved", False)
         approval_values = (row.get("approved_by"), row.get("approved_at"))
         approved_title = row.get("approved_title")
+        source = row.get("source")
         if type(approved) is not bool or (
             approved
             and not all(
@@ -758,6 +761,32 @@ def _intake_state_value(
             or len(approved_title.strip()) > INTAKE_TITLE_MAX_CHARS
         ):
             raise ConfigConflictError("coordinator_intake state is malformed")
+        if source is not None:
+            if not isinstance(source, dict) or set(source) != {
+                "source_id",
+                "external_id",
+                "revision",
+                "link",
+                "project_hint",
+                "mode",
+            }:
+                raise ConfigConflictError("coordinator_intake state is malformed")
+            for name, limit in {
+                "source_id": 120,
+                "external_id": 240,
+                "revision": 240,
+                "link": 1_000,
+                "project_hint": 120,
+            }.items():
+                item = source.get(name)
+                if (
+                    not isinstance(item, str)
+                    or (name != "link" and not item.strip())
+                    or len(item.strip()) > limit
+                ):
+                    raise ConfigConflictError("coordinator_intake state is malformed")
+            if source.get("mode") not in {"auto", "ask"}:
+                raise ConfigConflictError("coordinator_intake state is malformed")
         seen.add(ask_id)
         clean.append(json.loads(json.dumps(row)))
     clean_tombstones: list[dict[str, Any]] = []
