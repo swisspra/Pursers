@@ -146,7 +146,8 @@ The private local-fleet configuration binds every approved executor template:
 
 Provider health checks read `/models`; they never issue chat/completion requests.
 Bind worker/reviewer templates to their actual model, not merely Butler's drafting
-endpoint. Unknown or unavailable evidence cannot authorize unsafe scale changes.
+endpoint. Provider budgets preserve each role's target and retain active holders;
+a faster worker model cannot consume a reviewer-only model's allocation. Unknown or unavailable evidence cannot authorize unsafe scale changes.
 The collector uses platform service adapters and the supported executor store
 interface, then atomically writes fleet, registry-readiness and lease documents.
 A busy seat on any selected board is protected across all boards. Missing, stale,

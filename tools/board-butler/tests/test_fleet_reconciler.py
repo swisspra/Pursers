@@ -1685,3 +1685,22 @@ def test_production_cycle_fences_real_executor_client_after_policy_race(
     assert publications == []
     _revision, durable = store.load()
     assert durable == newer
+
+
+@pytest.mark.parametrize('worker_state', ['stopped', 'ready'])
+def test_model_specific_providers_preserve_worker_and_reviewer_targets(worker_state):
+    policy = board_policy(provider_maximums={'fast': 1, 'other': 1, 'review': 1})
+    current = snapshot({'pursers': demand(work=1, review=1,
+        health={'fast':'healthy','other':'healthy','review':'healthy'},
+        latency={'fast':10,'other':5,'review':100})}, [
+        seat('worker-a','worker',provider='fast',lifecycle=worker_state),
+        seat('worker-b','worker',provider='other'),
+        seat('reviewer','reviewer',provider='review')])
+    plan = reconciler({'pursers':policy}).plan(current,{})
+    assert plan.desired['pursers']['worker'] == 1
+    assert plan.desired['pursers']['reviewer'] == 1
+    assert plan.provider_desired['pursers']['review'] == 1
+    assert ('start','reviewer') in [(op.action,op.seat_id) for op in plan.operations]
+    if worker_state == 'ready':
+        assert plan.provider_desired['pursers']['fast'] == 1
+        assert [(op.action,op.seat_id) for op in plan.operations] == [('start','reviewer')]

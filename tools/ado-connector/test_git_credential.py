@@ -52,7 +52,8 @@ def test_git_protocol_only_returns_credentials_to_a_pipe(tmp_path):
     config.chmod(0o600)
     command = [sys.executable, str(Path(__file__).with_name('git_credential.py')),
                '--config', str(config), 'get']
-    request = 'protocol=https\nhost=dev.azure.com\npath=org/project/_git/repo\n\n'
+    request = ('protocol=https\nhost=dev.azure.com\npath=org/project/_git/repo\n'
+               'wwwauth[]=Bearer synthetic\nwwwauth[]=Basic synthetic\n\n')
     result = subprocess.run(command, input=request, capture_output=True, text=True, check=True)
     assert result.stdout == 'username=pursers\npassword=synthetic-value\n\n'
     assert result.stderr == ''

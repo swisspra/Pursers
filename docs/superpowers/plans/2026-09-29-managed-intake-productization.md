@@ -117,17 +117,23 @@
 
 **Files:** regenerate docs/reference/cli.md with tools/generate_reference_docs.py; update the affected READMEs, delivery-manifest.toml and repository-generated integration artifacts only through their generators. Deployment runbooks contain placeholders, not real installation data.
 
-- [ ] Refresh main and inspect conflicts against the exact candidate. Account for all PR #52 changes and every row of the design inventory; keep deployed history intact.
-- [ ] Run tools/generate_reference_docs.py and tools/regenerate_integration_manifest.py as required by changed delivered paths. Do not hand-edit component-lock.json or INTEGRATION_FILES.sha256.
-- [ ] Run the full strict gate: python tools/ci_manifest.py check; python tools/ci_manifest.py collect --output /tmp/pursers-counts.json; python tools/ci_manifest.py run --jobs 2; python tools/ci_manifest.py verify --input /tmp/pursers-counts.json. Also run python tools/leak_scan.py and git diff --check.
-- [ ] Validate a clean Linux installation with the native entry point, and exercise macOS adapter tests. Record which evidence is automated versus live. Do not mark real issue-to-PR acceptance complete while the source has no accessible issues.
-- [ ] Prepare one-revision canary cutover and rollback files. Preserve source index, delivery attempts, executor state, authorization references and cursors. Remove private-adapter references only after the native path passes acceptance.
+- [x] Refresh main and inspect conflicts against the exact candidate. Account for all PR #52 changes and every row of the design inventory; keep deployed history intact.
+- [x] Run tools/generate_reference_docs.py and tools/regenerate_integration_manifest.py as required by changed delivered paths. Do not hand-edit component-lock.json or INTEGRATION_FILES.sha256.
+- [x] Run the full strict gate: python tools/ci_manifest.py check; python tools/ci_manifest.py collect --output /tmp/pursers-counts.json; python tools/ci_manifest.py run --jobs 2; python tools/ci_manifest.py verify --input /tmp/pursers-counts.json. Also run python tools/leak_scan.py and git diff --check.
+- [x] Validate a clean Linux installation with the native entry point, and exercise macOS adapter tests. Record which evidence is automated versus live. Do not mark real issue-to-PR acceptance complete while the source has no accessible issues.
+- [x] Prepare one-revision canary cutover and rollback files. Preserve source index, delivery attempts, executor state, authorization references and cursors. Remove private-adapter references only after the native path passes acceptance.
 - [ ] Run a canary observation period with confirmed empty sources: zero chat/completion calls, healthy board refresh, no duplicate intake/PR, correct source and authorization diagnostics. Use the existing isolated acceptance path for simulated work.
 - [ ] When accessible work and the scoped target exist, record one real approved issue-to-PR flow. Keep this as an explicit rollout gate for production writeback, not a claimed result of unit tests.
 - [ ] Integrate reviewable PRs into main only with required checks and the repository's integration requirements satisfied; wait for gh run watch on the main ci workflow after each main push. Do not dismiss or disable required security checks to accommodate a service failure.
 - [ ] If a release is requested, use a release-train version change and build/publish from the tested tag; provide the existing operator cutover commands. Do not equate main integration with a completed package release.
 
 **Deliverable:** Main contains a supported reproducible implementation, the canary uses one tested revision, and rollback plus remaining external acceptance requirements are explicit.
+
+## Validation evidence
+
+- Candidate `4e511f20`: local strict gate passed all 14 suites; collection verification passed. Linux runtime suites passed 852 tests with one platform skip; GitHub CI passed.
+- Native canary exposed repeated Git `wwwauth[]` challenges and provider allocation starving a reviewer-only model. Regression tests reproduced both; follow-up fixes require a fresh strict gate and canary before integration.
+- CodeQL credential-output alert was reviewed as a false positive: stdout is Git's required helper response pipe, with terminal/regular-file refusal and scoped private-file access. The dismissal records the rationale; security analysis remains enabled.
 
 ## Execution rulings
 

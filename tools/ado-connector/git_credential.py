@@ -69,6 +69,9 @@ def main():
         if not line: break
         if '=' not in line: return 0
         key, value = line.split('=', 1)
+        # Git may forward multiple authentication challenges. They do not
+        # change repository scope or the credential we return.
+        if key == 'wwwauth[]': continue
         if key in fields: return 0
         fields[key] = value
     result = credentials_for_request(fields, args.config)

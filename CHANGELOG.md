@@ -22,6 +22,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   paths, checks the configured remote branch SHA before Azure DevOps PR creation,
   and reads Central's actual submission history.
 - Intake-only ADO connector principals join as non-working coordinators.
+- Model-specific fleet budgets preserve worker/reviewer targets and existing seats.
+- Scoped Git helpers accept repeated authentication challenges while refusing
+  credential output to terminals and regular log files.
 
 
 ## [5.0.8] - 2026-09-29

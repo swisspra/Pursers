@@ -2236,31 +2236,37 @@ class FleetReconciler:
         for board_id, counts in requested.items():
             demand = snapshot.demands[board_id]
             policy = self.board_policies[board_id]
-            remaining = sum(counts.values())
-            provider_counts: dict[str, int] = {
-                provider: 0 for provider in sorted(policy.provider_maximums)
-            }
-            providers = sorted(
-                provider_counts,
-                key=lambda provider: (
-                    demand.provider_latency_ms.get(provider, 10**9),
-                    provider,
-                ),
-            )
-            for provider in providers:
-                if not _healthy_provider(demand, policy, provider):
-                    continue
-                approved = sum(
-                    1
-                    for seat in snapshot.seats
-                    if seat.managed
-                    and seat.board_id == board_id
-                    and seat.template_id in policy.approved_template_ids
-                    and seat.provider == provider
+            provider_counts = {provider: 0 for provider in sorted(policy.provider_maximums)}
+            inventory = [seat for seat in snapshot.seats
+                         if seat.managed and seat.board_id == board_id
+                         and seat.template_id in policy.approved_template_ids]
+            remaining = dict(counts)
+            # Reserve active holders first, matching _operations' keep order.
+            # Provider budgets must cover role targets: spare worker providers
+            # cannot consume the budget needed by a reviewer-only model.
+            for role in FLEET_ROLES:
+                active = sorted(
+                    (seat for seat in inventory if seat.role == role and seat.active),
+                    key=lambda seat: (not seat.live_lease, not seat.busy,
+                        demand.provider_latency_ms.get(seat.provider, 10**9), seat.seat_id),
+                )[:counts[role]]
+                for seat in active:
+                    provider_counts[seat.provider] = provider_counts.get(seat.provider, 0) + 1
+                remaining[role] -= len(active)
+            for role in FLEET_ROLES:
+                candidates = sorted(
+                    (seat for seat in inventory if seat.role == role and not seat.active
+                     and _healthy_provider(demand, policy, seat.provider)),
+                    key=lambda seat: (demand.provider_latency_ms.get(seat.provider, 10**9), seat.seat_id),
                 )
-                assigned = min(remaining, policy.provider_maximums[provider], approved)
-                provider_counts[provider] = assigned
-                remaining -= assigned
+                for seat in candidates:
+                    if remaining[role] <= 0:
+                        break
+                    provider = seat.provider
+                    if provider_counts.get(provider, 0) >= policy.provider_maximums.get(provider, 0):
+                        continue
+                    provider_counts[provider] += 1
+                    remaining[role] -= 1
             result[board_id] = provider_counts
         return result
 
