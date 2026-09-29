@@ -5,6 +5,18 @@ source tickets, and open a pull request after independent approval. Local Git
 performs checkout, edits, tests and push. MCP performs source reads and PR creation.
 The native resident no longer requires a deployment-specific backend subclass.
 
+## Choose the operator interface and runner
+
+Zed is the primary GUI/IDE workflow for this integration. Use the existing
+[Zed guide](guides/zed.md) and [first-ticket walkthrough](guides/zed-first-ticket.md)
+to connect, inspect work, answer questions and follow delivery evidence.
+
+Goose is the CLI runner used by the event-driven worker/reviewer seats because
+it fits unattended command-line execution. Its selection does not make Goose the
+primary GUI or require operators to use its desktop interface. Zed and the CLI
+fleet share Pursers Central and its authorization, ticket and review contracts;
+this integration adds no new Zed UI or automatic GUI seat launcher.
+
 ## Ownership and prerequisites
 
 Use Python 3.12 and one tested source revision for Butler, coordinator and executor.

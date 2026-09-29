@@ -15,6 +15,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   service rendering and bounded event-driven Goose seats. See
   [the configuration and migration guide](docs/managed-intake.md).
 - Intake audit fields for model calls, cached decisions, response IDs and retry time.
+- Configuration guidance distinguishes Goose CLI seats from the primary Zed
+  GUI/IDE workflow using the existing integration.
 
 ### Fixed
 

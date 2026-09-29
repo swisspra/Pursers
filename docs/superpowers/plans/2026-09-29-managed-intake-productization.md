@@ -122,7 +122,7 @@
 - [x] Run the full strict gate: python tools/ci_manifest.py check; python tools/ci_manifest.py collect --output /tmp/pursers-counts.json; python tools/ci_manifest.py run --jobs 2; python tools/ci_manifest.py verify --input /tmp/pursers-counts.json. Also run python tools/leak_scan.py and git diff --check.
 - [x] Validate a clean Linux installation with the native entry point, and exercise macOS adapter tests. Record which evidence is automated versus live. Do not mark real issue-to-PR acceptance complete while the source has no accessible issues.
 - [x] Prepare one-revision canary cutover and rollback files. Preserve source index, delivery attempts, executor state, authorization references and cursors. Remove private-adapter references only after the native path passes acceptance.
-- [ ] Run a canary observation period with confirmed empty sources: zero chat/completion calls, healthy board refresh, no duplicate intake/PR, correct source and authorization diagnostics. Use the existing isolated acceptance path for simulated work.
+- [x] Run a canary observation period with confirmed empty sources: zero chat/completion calls, healthy board refresh, no duplicate intake/PR, correct source and authorization diagnostics. Use the existing isolated acceptance path for simulated work.
 - [ ] When accessible work and the scoped target exist, record one real approved issue-to-PR flow. Keep this as an explicit rollout gate for production writeback, not a claimed result of unit tests.
 - [ ] Integrate reviewable PRs into main only with required checks and the repository's integration requirements satisfied; wait for gh run watch on the main ci workflow after each main push. Do not dismiss or disable required security checks to accommodate a service failure.
 - [ ] If a release is requested, use a release-train version change and build/publish from the tested tag; provide the existing operator cutover commands. Do not equate main integration with a completed package release.
@@ -130,6 +130,10 @@
 **Deliverable:** Main contains a supported reproducible implementation, the canary uses one tested revision, and rollback plus remaining external acceptance requirements are explicit.
 
 ## Validation evidence
+
+- Runtime candidate `cfe41bca`: final local strict gate passed all 14 suites (3503 tests); final collection verification passed. Native Linux follow-up regressions passed 59 tests.
+- Native canary: all three control services active on one revision, worker/reviewer ready beyond a subscription heartbeat, six confirmed-empty refreshes with zero model runs, no intake/PR, preserved empty index and cap 15. Real accessible-issue acceptance remains pending.
+- Operator interface decision: Goose supplies CLI-friendly unattended execution; Zed is the primary GUI/IDE workflow. The configuration guide links the existing Zed setup; no new GUI implementation is claimed.
 
 - Candidate `4e511f20`: local strict gate passed all 14 suites; collection verification passed. Linux runtime suites passed 852 tests with one platform skip; GitHub CI passed.
 - Candidate `87da40f4`: repeat local strict gate passed all 14 suites and collection verification.

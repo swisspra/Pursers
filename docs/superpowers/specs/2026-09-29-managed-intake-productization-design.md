@@ -86,6 +86,12 @@ The current source index keys include source_id. Keep source IDs stable during t
 
 ### Runtime and configuration ownership
 
+Goose is selected for CLI-friendly unattended seat execution. Zed remains the
+primary GUI/IDE direction, using the existing Pursers MCP/ACP integrations.
+Keep orchestration and delivery contracts independent of the chosen host; the
+Goose event runner is a CLI implementation, not a universal GUI requirement.
+This delivery documents the existing Zed path rather than adding new GUI behavior.
+
 Pursers owns the mechanisms, schemas, launchers, diagnostics and tests. Deployment configuration owns service paths, endpoints, credential references, repositories, models, seat templates, cap values and authorization lifetimes. None of the current deployment's identifiers or secrets belongs in public fixtures or defaults.
 
 Use the existing authorized executor and host-cap command path. Do not add another process manager, bypass authorization expiry, or make active mode the installation default. Existing shadow and file-observation deployments must continue working.
