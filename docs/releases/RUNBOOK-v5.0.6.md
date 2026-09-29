@@ -50,6 +50,50 @@ commands:
 8. Coordinator freshness comes from collector `observed_at`/`heartbeat_at`,
    not the last board event. A quiet board is not a stale subscription.
 
+### Linux/systemd corrections from the Azure rollout
+
+The live Linux rollout used a side-by-side
+`/PATH/TO/services/pursers-v5.0.6/{release-assets,venv,rollout}` tree and a
+`/PATH/TO/projects/pursers-v5.0.6-source` checkout at the tag. Data, profiles,
+credentials, and state remained under the previous service tree; only the
+service venv/source paths and the fleet clone's exact tag were repointed.
+Back up every unit as `rollout/*.service.before-v5.0.6` before editing it.
+
+That host had neither `uv` nor `gh`. Use an operator-approved asset transfer,
+filter `SHA256SUMS.txt` to wheel rows, then create the new environment with
+`python3 -m venv`. Freeze the old venv and remove all old `pursers*` and `mcp`
+rows before using it as a constraint; install every Pursers distribution at
+the exact v5.0.6 version with `python -m pip install --find-links`, and require
+`python -m pip check`. Do not use the old MCP pin to constrain the release.
+The reusable template contains the executable commands and complete cohort
+guard.
+
+For the Central smoke test, copy the live Central directory into private
+rollout state, create the candidate database with SQLite `.backup`, and rewrite
+the copy's `profile.env` values for `ONBOARD_CENTRAL_PORT`,
+`CENTRAL_JWT_AUDIENCE`, and `ONBOARD_CENTRAL_DATA_DIR`. Start only the copy with
+`"$CENTRAL_VENV/bin/pursers-central" run "$CENTRAL_SMOKE_PROFILE"`; never point
+the candidate at the live profile or database.
+
+The `pursers-butler` and `pursers-fleet-executor` units use
+`StartLimitBurst=1` and `Requires=pursers-central`. Restarting Central can stop
+and auto-start both dependents, consuming their single start allowance. After
+repointing the units, do not repeatedly restart them. Run exactly one
+`reset-failed` followed by one `start` for each unit, in this order:
+
+```sh
+systemctl --user reset-failed pursers-central
+systemctl --user start pursers-central
+systemctl --user reset-failed pursers-fleet-executor
+systemctl --user start pursers-fleet-executor
+systemctl --user reset-failed pursers-butler
+systemctl --user start pursers-butler
+```
+
+Verify each unit is active before advancing to the next one. The coordinator's
+live result was all three units active on the v5.0.6 venv/source, with Butler
+reporting client `0.1.5` and `events-reconnect` without a traceback.
+
 Run the updated doctor before and after the rollout. It inventories inconsistent
 Pursers pins, the three Fleet variables, and whether the executor is fully
 provisioned, absent, or partially configured. It reads launchd on macOS and

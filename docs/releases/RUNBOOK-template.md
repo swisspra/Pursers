@@ -24,6 +24,8 @@ export CENTRAL_SMOKE_PORT=18766
 export CENTRAL_SERVICE_KIND=launchd  # or systemd
 export CENTRAL_SERVICE_FILE=/PATH/TO/service-definition
 export CENTRAL_SERVICE_NAME=com.pursers.central
+export FLEET_EXECUTOR_SERVICE_NAME=pursers-fleet-executor
+export BUTLER_SERVICE_NAME=pursers-butler
 
 test "$(git -C "$RELEASE_CHECKOUT" rev-parse --verify "$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
 test "$(git -C "$RELEASE_CHECKOUT" rev-parse --verify 'HEAD^{commit}')" = "$RELEASE_SHA"
@@ -31,22 +33,37 @@ python3 "$RELEASE_CHECKOUT/tools/release_train.py" check
 install -d -m 700 "$ROLLOUT_STATE"
 ```
 
-Verify `SHA256SUMS.txt` and the exact wheel cohort before installing anything:
+The release `SHA256SUMS.txt` is a mixed-asset manifest: wheel names may start
+with `./`, and non-wheel assets are also present. Verify only its wheel rows,
+then require the manifest, staged directory, and release version map to name
+the same complete wheel cohort:
 
 ```sh
-(cd "$RELEASE_WHEELS" && shasum -a 256 -c SHA256SUMS.txt)
-python3 - "$RELEASE_CHECKOUT" "$RELEASE_WHEELS" <<'PY'
-import sys
+grep -E '^[0-9a-fA-F]{64}  (\./)?[^/]+\.whl$' \
+  "$RELEASE_WHEELS/SHA256SUMS.txt" |
+  (cd "$RELEASE_WHEELS" && shasum -a 256 -c -)
+python3 - "$RELEASE_CHECKOUT" "$RELEASE_WHEELS" \
+  "$RELEASE_WHEELS/SHA256SUMS.txt" <<'PY'
+import re, sys
 from pathlib import Path
 
-checkout, wheels = map(Path, sys.argv[1:])
+checkout, wheels, sums = map(Path, sys.argv[1:])
 sys.path.insert(0, str(checkout))
 from tools.release_versions import expected_wheel_filenames
 
 actual = {path.name for path in wheels.glob("*.whl")}
 expected = set(expected_wheel_filenames())
-if actual != expected:
-    raise SystemExit(f"wheel cohort mismatch: actual={sorted(actual)!r}, expected={sorted(expected)!r}")
+listed = set()
+for line in sums.read_text(encoding="utf-8").splitlines():
+    match = re.fullmatch(r"[0-9a-fA-F]{64}  (?:\./)?([^/]+\.whl)", line)
+    if match:
+        listed.add(match.group(1))
+if actual != expected or listed != expected:
+    raise SystemExit(
+        "wheel cohort mismatch: "
+        f"actual={sorted(actual)!r}, listed={sorted(listed)!r}, "
+        f"expected={sorted(expected)!r}"
+    )
 PY
 ```
 
@@ -91,6 +108,42 @@ uv pip install --python "$TARGET_VENV/bin/python" \
   "pursers-wait-bridge==$WAIT_BRIDGE_VERSION"
 "$TARGET_VENV/bin/python" -m pip check
 ```
+
+### Linux/systemd hosts without `uv` or `gh`
+
+Use a side-by-side layout; do not replace the old service tree or venv. Obtain
+the release assets through an operator-approved transfer, verify them with the
+wheel-only manifest procedure above, and retain the old tree for rollback.
+
+```sh
+export RELEASE_ROOT=/PATH/TO/services/pursers-$RELEASE_TAG
+export RELEASE_WHEELS="$RELEASE_ROOT/release-assets"
+export RELEASE_CHECKOUT=/PATH/TO/projects/pursers-$RELEASE_TAG-source
+export TARGET_VENV="$RELEASE_ROOT/venv"
+export OLD_SERVICE_PYTHON=/PATH/TO/services/pursers-OLD/venv/bin/python
+export THIRD_PARTY_CONSTRAINTS="$ROLLOUT_STATE/old-third-party-constraints.txt"
+
+install -d -m 700 "$RELEASE_ROOT" "$ROLLOUT_STATE"
+"$OLD_SERVICE_PYTHON" -m pip freeze |
+  grep -Eiv '^(pursers($|[-_=.<])|mcp($|\[|[-_=.<]))' \
+  > "$THIRD_PARTY_CONSTRAINTS"
+python3 -m venv "$TARGET_VENV"
+"$TARGET_VENV/bin/python" -m pip install \
+  --find-links "$RELEASE_WHEELS" \
+  --constraint "$THIRD_PARTY_CONSTRAINTS" \
+  "pursers==$PRODUCT_VERSION" \
+  "pursers-personal==$PRODUCT_VERSION" \
+  "pursers-central==$CENTRAL_VERSION" \
+  "pursers-client==$CLIENT_VERSION" \
+  "pursers-wait-bridge==$WAIT_BRIDGE_VERSION" \
+  "pursers-acp==$ACP_VERSION" \
+  "pursers-personal-import==$IMPORT_VERSION"
+"$TARGET_VENV/bin/python" -m pip check
+```
+
+The filtered constraints deliberately remove every old `pursers*` and `mcp`
+pin. The release's exact Pursers pins and their current MCP requirement must
+win; all other previously approved third-party versions remain constrained.
 
 For an existing service environment, upgrade its complete installed Pursers
 set in one transaction. The script keeps service-specific subsets, adds the
@@ -251,6 +304,53 @@ sqlite3 "$CENTRAL_DB" ".backup '$CENTRAL_SMOKE_DATA/central.sqlite3'"
 sqlite3 "$CENTRAL_SMOKE_DATA/central.sqlite3" 'PRAGMA integrity_check;' | grep -Fx ok
 ```
 
+On a Linux/systemd host, smoke-test the installed console entry point using a
+private copy of the live Central profile directory and the SQLite backup. The
+copy may retain host credentials, so it stays under `ROLLOUT_STATE`; only the
+three isolation keys are rewritten. Do not run the candidate against the live
+profile or data directory.
+
+```sh
+export CENTRAL_LIVE_PROFILE_DIR=/PATH/TO/services/pursers-OLD/central
+export CENTRAL_SMOKE_PROFILE="$ROLLOUT_STATE/central-smoke-profile"
+export CENTRAL_SMOKE_AUDIENCE=pursers-rollout-smoke
+
+test ! -e "$CENTRAL_SMOKE_PROFILE"
+cp -R "$CENTRAL_LIVE_PROFILE_DIR" "$CENTRAL_SMOKE_PROFILE"
+python3 - "$CENTRAL_SMOKE_PROFILE/profile.env" "$CENTRAL_SMOKE_PORT" \
+  "$CENTRAL_SMOKE_AUDIENCE" "$CENTRAL_SMOKE_DATA" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+updates = {
+    "ONBOARD_CENTRAL_PORT": sys.argv[2],
+    "CENTRAL_JWT_AUDIENCE": sys.argv[3],
+    "ONBOARD_CENTRAL_DATA_DIR": sys.argv[4],
+}
+lines = []
+seen = set()
+for line in path.read_text(encoding="utf-8").splitlines():
+    key = line.split("=", 1)[0].removeprefix("export ").strip()
+    if key in updates:
+        lines.append(f"{key}={updates[key]}")
+        seen.add(key)
+    else:
+        lines.append(line)
+for key in updates.keys() - seen:
+    lines.append(f"{key}={updates[key]}")
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+grep -E '^(ONBOARD_CENTRAL_PORT|CENTRAL_JWT_AUDIENCE|ONBOARD_CENTRAL_DATA_DIR)=' \
+  "$CENTRAL_SMOKE_PROFILE/profile.env"
+"$CENTRAL_VENV/bin/pursers-central" run "$CENTRAL_SMOKE_PROFILE" &
+SMOKE_PID=$!
+```
+
+Apply the same bounded health/version probe and cleanup shown below. A copied
+profile plus explicit `ONBOARD_CENTRAL_PORT`, `CENTRAL_JWT_AUDIENCE`, and
+`ONBOARD_CENTRAL_DATA_DIR` is the supported Linux isolation boundary.
+
 Start the host's `serve_tls.py` launcher on the alternate port with
 `build_app(data_dir_override=...)`. The host-owned profile must provide its
 normal TLS/auth settings; do not copy secrets into this repository.
@@ -310,7 +410,11 @@ cp -p "$CENTRAL_SERVICE_FILE" "$ROLLOUT_STATE/central.service.before"
 
 For launchd, edit the staged plist, run `plutil -lint`, then use a bounded
 `bootout`/`bootstrap` retry. For systemd, stage the updated unit/drop-in, run
-`systemd-analyze verify`, `systemctl daemon-reload`, and restart only Central.
+`systemd-analyze verify` and `systemctl daemon-reload`. Units with
+`StartLimitBurst=1`, and executor/Butler units that `Require` Central, must not
+use `restart`: a Central restart stops its dependents, whose automatic restart
+can consume the only start attempt. Reset each failed state and issue one
+explicit `start`, in this order: Central, fleet executor, then Butler.
 The launch wrapper or unit must consume `PURSERS_CENTRAL_PYTHON`; merely adding
 an unused environment variable does not repoint the service. For a direct
 systemd `ExecStart`, replace only the interpreter and preserve the reviewed
@@ -349,7 +453,17 @@ case "$CENTRAL_SERVICE_KIND" in
     grep -F "$CENTRAL_PROFILE" "$CENTRAL_SERVICE_FILE"
     systemd-analyze verify "$CENTRAL_SERVICE_FILE"
     systemctl --user daemon-reload
-    systemctl --user restart "$CENTRAL_SERVICE_NAME"
+    systemctl --user stop "$BUTLER_SERVICE_NAME" "$FLEET_EXECUTOR_SERVICE_NAME" \
+      "$CENTRAL_SERVICE_NAME" || true
+    systemctl --user reset-failed "$CENTRAL_SERVICE_NAME"
+    systemctl --user start "$CENTRAL_SERVICE_NAME"
+    systemctl --user is-active --quiet "$CENTRAL_SERVICE_NAME"
+    systemctl --user reset-failed "$FLEET_EXECUTOR_SERVICE_NAME"
+    systemctl --user start "$FLEET_EXECUTOR_SERVICE_NAME"
+    systemctl --user is-active --quiet "$FLEET_EXECUTOR_SERVICE_NAME"
+    systemctl --user reset-failed "$BUTLER_SERVICE_NAME"
+    systemctl --user start "$BUTLER_SERVICE_NAME"
+    systemctl --user is-active --quiet "$BUTLER_SERVICE_NAME"
     ;;
   *) echo "CENTRAL_SERVICE_KIND must be launchd or systemd" >&2; exit 64 ;;
 esac

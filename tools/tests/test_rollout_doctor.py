@@ -772,16 +772,47 @@ def test_runbook_pins_reviewed_butler_fix_and_authoritative_suite() -> None:
     assert "  --no-index" not in template
     assert '"pursers-central==$CENTRAL_VERSION"' in template
     assert '"pursers-client==$CLIENT_VERSION"' in template
+    assert "grep -E '^[0-9a-fA-F]{64}  (\\./)?[^/]+\\.whl$'" in template
+    assert "listed != expected" in template
+    assert '(cd "$RELEASE_WHEELS" && shasum -a 256 -c SHA256SUMS.txt)' not in template
+    assert "python3 -m venv \"$TARGET_VENV\"" in template
+    assert "old-third-party-constraints.txt" in template
+    assert "mcp($|\\[|[-_=.<])" in template
+    assert '"pursers-personal==$PRODUCT_VERSION"' in template
+    assert '"pursers-acp==$ACP_VERSION"' in template
+    assert '"pursers-personal-import==$IMPORT_VERSION"' in template
     assert "CENTRAL_SOURCE_SHA256" in template
     assert "CLIENT_SOURCE_SHA256" in template
     assert "sqlite3 \"$CENTRAL_DB\" \".backup" in template
     assert "module.build_app(data_dir_override=data_dir)" in template
+    assert '"$CENTRAL_VENV/bin/pursers-central" run "$CENTRAL_SMOKE_PROFILE"' in template
+    assert "ONBOARD_CENTRAL_PORT" in template
+    assert "CENTRAL_JWT_AUDIENCE" in template
+    assert "ONBOARD_CENTRAL_DATA_DIR" in template
     assert "systemctl --user daemon-reload" in template
+    assert "StartLimitBurst=1" in template
+    central_reset = template.index('systemctl --user reset-failed "$CENTRAL_SERVICE_NAME"')
+    executor_reset = template.index(
+        'systemctl --user reset-failed "$FLEET_EXECUTOR_SERVICE_NAME"'
+    )
+    butler_reset = template.index('systemctl --user reset-failed "$BUTLER_SERVICE_NAME"')
+    assert central_reset < executor_reset < butler_reset
+    assert 'systemctl --user restart "$CENTRAL_SERVICE_NAME"' not in template
     assert "PURSERS_BUTLER_STATE_DIR" in template
     assert "PURSERS_BUTLER_ENTRYPOINT" in template
     assert "PURSERS_BUTLER_PROVIDER_SECRETS_DIR" in template
     assert '"status":"not_provisioned","recorded":true' in template
     assert "Bad request" in template
+    assert "/PATH/TO/services/pursers-v5.0.6/{release-assets,venv,rollout}" in runbook
+    assert "neither `uv` nor `gh`" in runbook
+    assert "python3 -m venv" in runbook
+    assert "ONBOARD_CENTRAL_PORT" in runbook
+    assert "CENTRAL_JWT_AUDIENCE" in runbook
+    assert "ONBOARD_CENTRAL_DATA_DIR" in runbook
+    central_start = runbook.index("systemctl --user start pursers-central")
+    executor_start = runbook.index("systemctl --user start pursers-fleet-executor")
+    butler_start = runbook.index("systemctl --user start pursers-butler")
+    assert central_start < executor_start < butler_start
 
 
 def test_main_writes_only_when_output_is_explicit(tmp_path: Path, capsys) -> None:
