@@ -19,6 +19,23 @@ doctor: ModuleType = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = doctor
 SPEC.loader.exec_module(doctor)
 
+VERSIONS_506 = {
+    "product": "5.0.6",
+    "client": "0.1.5",
+    "wait_bridge": "0.1.3",
+    "central": "0.1.4",
+    "acp": "0.1.4",
+    "import": "5.0.0",
+}
+VERSIONS_508 = {
+    "product": "5.0.8",
+    "client": "0.1.6",
+    "wait_bridge": "0.1.4",
+    "central": "0.1.5",
+    "acp": "0.1.5",
+    "import": "5.0.0",
+}
+
 
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,21 +46,24 @@ def _git(command: list[str], cwd: Path) -> str:
     return subprocess.check_output(["git", *command], cwd=cwd, text=True).strip()
 
 
-def _seed_repo(path: Path, marker: str) -> str:
+def _seed_repo(
+    path: Path, marker: str, versions: dict[str, str] | None = None
+) -> str:
+    versions = versions or VERSIONS_506
     path.mkdir(parents=True)
     _git(["init", "-b", "main"], path)
     _git(["config", "user.name", "Fixture"], path)
     _git(["config", "user.email", "fixture@example.invalid"], path)
     _write(
         path / "tools/release_versions.toml",
-        """schema_version = 1
-product = "5.0.6"
+        f"""schema_version = 1
+product = "{versions['product']}"
 [packages]
-client = "0.1.5"
-wait_bridge = "0.1.3"
-central = "0.1.4"
-acp = "0.1.4"
-import = "5.0.0"
+client = "{versions['client']}"
+wait_bridge = "{versions['wait_bridge']}"
+central = "{versions['central']}"
+acp = "{versions['acp']}"
+import = "{versions['import']}"
 """,
     )
     _write(path / "marker.txt", marker)
@@ -97,51 +117,54 @@ def _seed_environment(root: Path, packages: dict[str, str]) -> Path:
     return interpreter
 
 
-def _fixture(tmp_path: Path) -> tuple[SimpleNamespace, Path, Path, str]:
+def _fixture(
+    tmp_path: Path, versions: dict[str, str] | None = None
+) -> tuple[SimpleNamespace, Path, Path, str]:
+    versions = versions or VERSIONS_506
     home = tmp_path / "home"
     pursers_home = home / ".pursers"
     snapshot = tmp_path / "snapshot"
     proof_dir = snapshot / "proofs"
     seed = tmp_path / "seed"
-    release_sha = _seed_repo(seed, "release")
+    release_sha = _seed_repo(seed, "release", versions)
 
     active = pursers_home / "runtimes/registry-main-release"
     _clone(seed, active / "src")
     active_python = _seed_environment(
         active / ".venv",
         {
-            "pursers-central": "0.1.4",
-            "pursers-client": "0.1.5",
-            "pursers-wait-bridge": "0.1.3",
+            "pursers-central": versions["central"],
+            "pursers-client": versions["client"],
+            "pursers-wait-bridge": versions["wait_bridge"],
         },
     )
     stale = pursers_home / "runtimes/review-stale"
-    stale_sha = _seed_repo(stale / "src", "stale")
+    stale_sha = _seed_repo(stale / "src", "stale", versions)
     assert stale_sha != release_sha
     (stale / ".venv").mkdir()
     _clone(seed, pursers_home / "runtimes/fleet-dashboard/repo")
     _clone(seed, pursers_home / "coordinator/src")
     fleet_python = _seed_environment(
         pursers_home / "runtimes/fleet-dashboard/.venv",
-        {"pursers-client": "0.1.5"},
+        {"pursers-client": versions["client"]},
     )
     coordinator_python = _seed_environment(
         pursers_home / "coordinator/.venv",
-        {"pursers-client": "0.1.5"},
+        {"pursers-client": versions["client"]},
     )
 
     tool = home / ".local/share/uv/tools/pursers-wait-bridge"
     _write(
         tool / "uv-receipt.toml",
-        """[tool]
-requirements = [{ name = "pursers-wait-bridge", specifier = "==0.1.3" }]
+        f"""[tool]
+requirements = [{{ name = "pursers-wait-bridge", specifier = "=={versions['wait_bridge']}" }}]
 [tool.options]
-find-links = ["file:///PATH/TO/wheels/v5.0.6"]
+find-links = ["file:///PATH/TO/wheels/v{versions['product']}"]
 """,
     )
     for distribution, version in (
-        ("pursers_wait_bridge", "0.1.3"),
-        ("pursers_client", "0.1.5"),
+        ("pursers_wait_bridge", versions["wait_bridge"]),
+        ("pursers_client", versions["client"]),
     ):
         _write(
             tool / f"lib/python3.12/site-packages/{distribution}-{version}.dist-info/METADATA",
@@ -206,14 +229,14 @@ find-links = ["file:///PATH/TO/wheels/v5.0.6"]
     _write(snapshot / "processes.txt", f"python {active}/src/tools/example.py\n")
     now = datetime(2026, 9, 27, 19, 1, tzinfo=timezone.utc)
     wheel_dir = tmp_path / "wheels"
-    wheel = wheel_dir / "fixture-5.0.6-py3-none-any.whl"
+    wheel = wheel_dir / f"fixture-{versions['product']}-py3-none-any.whl"
     _write(wheel, "fixture wheel\n")
     digest = __import__("hashlib").sha256(wheel.read_bytes()).hexdigest()
     assets = []
     for name in (
         "pursers-aionui-0.1.0.zip",
-        "pursers-home-runtime-wheelhouse-5.0.6-linux-x86_64.tar.gz",
-        "pursers-home-runtime-wheelhouse-5.0.6-linux-x86_64.json",
+        f"pursers-home-runtime-wheelhouse-{versions['product']}-linux-x86_64.tar.gz",
+        f"pursers-home-runtime-wheelhouse-{versions['product']}-linux-x86_64.json",
     ):
         path = wheel_dir / name
         _write(path, f"fixture {name}\n")
@@ -268,7 +291,7 @@ find-links = ["file:///PATH/TO/wheels/v5.0.6"]
         snapshot_root=snapshot,
         proof_dir=proof_dir,
         release_sha=release_sha,
-        release_tag="v5.0.6",
+        release_tag=f"v{versions['product']}",
         wheel_dir=wheel_dir,
         sha256s=sums,
         now=now,
@@ -382,6 +405,85 @@ def test_inspect_reports_complete_passing_inventory_and_stale_cleanup(
     assert str(args.home) not in json.dumps(result)
 
 
+def test_inspect_derives_v508_versions_from_release_checkout(tmp_path: Path) -> None:
+    args, _active, _stale, release_sha = _fixture(tmp_path, VERSIONS_508)
+
+    result = doctor.inspect(args)
+
+    assert result["summary"]["ok"] is True
+    assert result["release"] == {
+        "tag": "v5.0.8",
+        "sha": release_sha,
+        "manifest_ref": release_sha,
+        **VERSIONS_508,
+    }
+    assert result["checks"]["uv_wait_bridge"] == {
+        "status": "PASS",
+        "detail": "expected wait-bridge 0.1.4, client 0.1.6, find-links v5.0.8",
+    }
+
+
+def test_v506_installed_client_fails_against_v508_release(tmp_path: Path) -> None:
+    args, active, _stale, _release_sha = _fixture(tmp_path, VERSIONS_508)
+    metadata = next(
+        active.glob(
+            ".venv/lib/python*/site-packages/pursers_client-0.1.6.dist-info/METADATA"
+        )
+    )
+    metadata.unlink()
+    _write(
+        metadata.parents[1] / "pursers_client-0.1.5.dist-info/METADATA",
+        "Name: pursers-client\nVersion: 0.1.5\n",
+    )
+
+    result = doctor.inspect(args)
+
+    check = result["checks"]["runtime:registry-main-release:installed_packages"]
+    assert check["status"] == "FAIL"
+    assert check["failure_kind"] == "version_mismatch"
+    assert result["summary"]["failure_kinds"]["version_mismatch"] >= 1
+
+
+def test_jsonc_zed_settings_resolve_wait_bridge_command(tmp_path: Path) -> None:
+    args, _active, _stale, _release_sha = _fixture(tmp_path, VERSIONS_508)
+    command = args.home / ".local/bin/pursers-wait-bridge"
+    _write(
+        args.home / ".config/zed/settings.json",
+        """{
+  // Zed settings permit comments and trailing commas.
+  "context_servers": {
+    "pursers": {
+      "command": "%s",
+    },
+  },
+}
+""" % command,
+    )
+
+    result = doctor.inspect(args)
+
+    zed = next(
+        row for row in result["inventory"] if row["consumer"] == "host-mcp:Zed"
+    )
+    assert zed["parse_error"] is None
+    assert zed["launches_wait_bridge"] is True
+    assert result["checks"]["host-mcp:Zed"]["status"] == "PASS"
+
+
+def test_invalid_zed_jsonc_reports_parse_failure_not_missing_command(
+    tmp_path: Path,
+) -> None:
+    args, _active, _stale, _release_sha = _fixture(tmp_path)
+    _write(args.home / ".config/zed/settings.json", "{ invalid jsonc")
+
+    result = doctor.inspect(args)
+
+    check = result["checks"]["host-mcp:Zed"]
+    assert check["status"] == "FAIL"
+    assert check["detail"].startswith("configuration parse failed:")
+    assert "command not found" not in check["detail"]
+
+
 def test_inspect_supports_systemd_service_inventory(tmp_path: Path) -> None:
     args, active, _stale, release_sha = _fixture(tmp_path)
     _add_systemd_snapshot(args, active)
@@ -448,6 +550,8 @@ def test_inspect_fails_closed_for_stale_or_missing_post_rollout_proofs(
     assert result["summary"]["ok"] is False
     assert result["checks"]["wait_bridge_push_reviewer"]["status"] == "FAIL"
     assert result["checks"]["coordinator_digest_subscription"]["status"] == "FAIL"
+    assert result["summary"]["failure_kinds"]["proof_missing"] == 1
+    assert result["summary"]["failure_kinds"]["proof_mismatch"] == 1
     assert stale.exists()
 
 
@@ -983,7 +1087,17 @@ def test_inventory_only_reports_without_rollout_proofs(tmp_path: Path, capsys) -
     assert exit_code == 0
     assert result["mode"] == "inventory"
     assert result["checks"] == {}
-    assert result["summary"] == {"fail": 0, "ok": True, "pass": 0, "warn": 0}
+    assert result["summary"] == {
+        "fail": 0,
+        "failure_kinds": {
+            "proof_mismatch": 0,
+            "proof_missing": 0,
+            "version_mismatch": 0,
+        },
+        "ok": True,
+        "pass": 0,
+        "warn": 0,
+    }
     assert stale.exists()
 
 

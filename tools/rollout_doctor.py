@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only inventory and post-rollout checks for Pursers v5.0.6."""
+"""Read-only inventory and post-rollout checks for a Pursers release."""
 
 from __future__ import annotations
 
@@ -20,37 +20,14 @@ from typing import Any, Iterable, Mapping, Sequence
 
 
 SCHEMA = "pursers_rollout_doctor_v1"
-RELEASE_TAG = "v5.0.6"
-EXPECTED_PRODUCT = "5.0.6"
-EXPECTED_WAIT_BRIDGE = "0.1.3"
-EXPECTED_CLIENT = "0.1.5"
-EXPECTED_PACKAGES = {
-    "product": "5.0.6",
-    "client": "0.1.5",
-    "wait_bridge": "0.1.3",
-    "central": "0.1.4",
-    "acp": "0.1.4",
-    "import": "5.0.0",
-}
-RUNTIME_REQUIRED_DISTRIBUTIONS = {
-    "pursers-central": EXPECTED_PACKAGES["central"],
-    "pursers-client": EXPECTED_CLIENT,
-    "pursers-wait-bridge": EXPECTED_WAIT_BRIDGE,
-}
-SERVICE_REQUIRED_DISTRIBUTIONS = {"pursers-client": EXPECTED_CLIENT}
-CENTRAL_SERVICE_REQUIRED_DISTRIBUTIONS = {
-    "pursers-central": EXPECTED_PACKAGES["central"],
-    "pursers-client": EXPECTED_CLIENT,
-}
-PURSERS_DISTRIBUTIONS = {
-    "pursers": EXPECTED_PACKAGES["product"],
-    "pursers-personal": EXPECTED_PACKAGES["product"],
-    "pursers-central": EXPECTED_PACKAGES["central"],
-    "pursers-client": EXPECTED_PACKAGES["client"],
-    "pursers-wait-bridge": EXPECTED_PACKAGES["wait_bridge"],
-    "pursers-acp": EXPECTED_PACKAGES["acp"],
-    "pursers-personal-import": EXPECTED_PACKAGES["import"],
-}
+REQUIRED_VERSION_KEYS = (
+    "product",
+    "central",
+    "client",
+    "wait_bridge",
+    "acp",
+    "import",
+)
 FLEET_REQUIRED_ENVIRONMENT = (
     "PURSERS_BUTLER_STATE_DIR",
     "PURSERS_BUTLER_ENTRYPOINT",
@@ -91,6 +68,98 @@ def _json(path: Path) -> Mapping[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return value if isinstance(value, Mapping) else None
+
+
+def _strip_jsonc_comments(source: str) -> str:
+    result: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(source):
+        char = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            result.append(char)
+            index += 1
+            continue
+        if char == "/" and following == "/":
+            index += 2
+            while index < len(source) and source[index] not in "\r\n":
+                index += 1
+            continue
+        if char == "/" and following == "*":
+            index += 2
+            while index < len(source) - 1:
+                if source[index] == "*" and source[index + 1] == "/":
+                    index += 2
+                    break
+                if source[index] in "\r\n":
+                    result.append(source[index])
+                index += 1
+            continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _strip_jsonc_trailing_commas(source: str) -> str:
+    result: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(source):
+        char = source[index]
+        if in_string:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+        elif char == ",":
+            lookahead = index + 1
+            while lookahead < len(source) and source[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(source) and source[lookahead] in "}]":
+                index += 1
+                continue
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
+def _jsonc(path: Path) -> tuple[Mapping[str, Any] | None, str | None]:
+    try:
+        source = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, None
+    except OSError:
+        return None, "configuration could not be read"
+    try:
+        value = json.loads(
+            _strip_jsonc_trailing_commas(_strip_jsonc_comments(source))
+        )
+    except json.JSONDecodeError as exc:
+        return None, f"invalid JSON/JSONC at line {exc.lineno}, column {exc.colno}"
+    if not isinstance(value, Mapping):
+        return None, "configuration root is not an object"
+    return value, None
 
 
 def _run(command: Sequence[str], *, cwd: Path | None = None) -> str | None:
@@ -149,11 +218,10 @@ def _git_diff_sha256(repo: Path) -> str | None:
     return hashlib.sha256(completed.stdout).hexdigest()
 
 
-def _release_versions(repo: Path) -> dict[str, str]:
-    path = repo / "tools/release_versions.toml"
+def _parse_release_versions(source: str) -> dict[str, str]:
     try:
-        document = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
+        document = tomllib.loads(source)
+    except tomllib.TOMLDecodeError:
         return {}
     packages = document.get("packages")
     result = {"product": str(document.get("product", ""))}
@@ -162,6 +230,55 @@ def _release_versions(repo: Path) -> dict[str, str]:
             if isinstance(name, str) and isinstance(value, str):
                 result[name] = value
     return result
+
+
+def _release_versions(repo: Path) -> dict[str, str]:
+    path = repo / "tools/release_versions.toml"
+    try:
+        return _parse_release_versions(path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+
+
+def _release_versions_at_ref(
+    repositories: Sequence[Path], release_sha: str, release_tag: str
+) -> tuple[dict[str, str], str | None]:
+    refs = (release_sha, f"refs/tags/{release_tag}")
+    for ref in refs:
+        for repo in repositories:
+            source = _run(
+                ("git", "show", f"{ref}:tools/release_versions.toml"), cwd=repo
+            )
+            if source is None:
+                continue
+            versions = _parse_release_versions(source)
+            if all(versions.get(key) for key in REQUIRED_VERSION_KEYS):
+                return versions, ref
+    return {}, None
+
+
+def _distribution_versions(
+    versions: Mapping[str, str],
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+    all_distributions = {
+        "pursers": versions.get("product", ""),
+        "pursers-personal": versions.get("product", ""),
+        "pursers-central": versions.get("central", ""),
+        "pursers-client": versions.get("client", ""),
+        "pursers-wait-bridge": versions.get("wait_bridge", ""),
+        "pursers-acp": versions.get("acp", ""),
+        "pursers-personal-import": versions.get("import", ""),
+    }
+    runtime_required = {
+        name: all_distributions[name]
+        for name in ("pursers-central", "pursers-client", "pursers-wait-bridge")
+    }
+    service_required = {"pursers-client": all_distributions["pursers-client"]}
+    central_required = {
+        name: all_distributions[name]
+        for name in ("pursers-central", "pursers-client")
+    }
+    return runtime_required, service_required, central_required, all_distributions
 
 
 def _safe_path(path: Path, home: Path, pursers_home: Path) -> str:
@@ -333,7 +450,7 @@ def _mcp_clients(
     rows: list[dict[str, Any]] = []
     references: list[str] = []
     for name, path in candidates:
-        value = _json(path)
+        value, parse_error = _jsonc(path)
         strings = list(_recursive_strings(value)) if value is not None else []
         matches = [item for item in strings if "pursers-wait-bridge" in item]
         references.extend(strings)
@@ -343,6 +460,7 @@ def _mcp_clients(
                     "consumer": f"host-mcp:{name}",
                     "config": _safe_path(path, home, pursers_home),
                     "present": path.is_file(),
+                    "parse_error": parse_error,
                     "launches_wait_bridge": bool(matches),
                     "commands": [
                         _safe_path(Path(item), home, pursers_home) for item in matches
@@ -573,6 +691,9 @@ def _attach_service_sources(
     *,
     home: Path,
     pursers_home: Path,
+    service_required_distributions: Mapping[str, str],
+    central_service_required_distributions: Mapping[str, str],
+    expected_distributions: Mapping[str, str],
 ) -> None:
     for row in rows:
         consumer_key = row["consumer"].split(":", 1)[1]
@@ -602,16 +723,16 @@ def _attach_service_sources(
         row["entrypoint_sha256"] = _file_sha256(entrypoint) if entrypoint else None
         if role != "mong1-supervisor":
             required_distributions = (
-                CENTRAL_SERVICE_REQUIRED_DISTRIBUTIONS
+                central_service_required_distributions
                 if role == "central"
-                else SERVICE_REQUIRED_DISTRIBUTIONS
+                else service_required_distributions
             )
             row["python_environment"] = _python_environment(
                 _service_interpreter(role, text),
                 required_distributions,
                 home=home,
                 pursers_home=pursers_home,
-                expected_if_present=PURSERS_DISTRIBUTIONS,
+                expected_if_present=expected_distributions,
             )
         if role == "fleet-dashboard":
             configured = _service_environment(text, FLEET_REQUIRED_ENVIRONMENT)
@@ -665,8 +786,13 @@ def _parse_time(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
-def _check(status: str, detail: str) -> dict[str, str]:
-    return {"status": status, "detail": detail}
+def _check(
+    status: str, detail: str, *, failure_kind: str | None = None
+) -> dict[str, str]:
+    result = {"status": status, "detail": detail}
+    if status == "FAIL" and failure_kind is not None:
+        result["failure_kind"] = failure_kind
+    return result
 
 
 def _proof(proof_dir: Path, name: str) -> Mapping[str, Any] | None:
@@ -699,6 +825,7 @@ def _post_rollout_checks(
         "connected=true with fresh observed_at/heartbeat_at"
         if fresh
         else "missing, disconnected, or stale coordinator observation proof",
+        failure_kind="proof_missing" if coordinator is None else "proof_mismatch",
     )
     for role in ("worker", "reviewer"):
         value = _proof(proof_dir, f"wait-{role}")
@@ -712,6 +839,7 @@ def _post_rollout_checks(
             "saved positive-cursor wait used push transport"
             if push
             else f"missing push proof for {role}",
+            failure_kind="proof_missing" if value is None else "proof_mismatch",
         )
     butler = _proof(proof_dir, "board-butler")
     capabilities = butler.get("capabilities", []) if butler else []
@@ -760,6 +888,7 @@ def _post_rollout_checks(
         )
         if autonomous and approved_merge_not_granted
         else "missing autonomous/approved-merge proof",
+        failure_kind="proof_missing" if butler is None else "proof_mismatch",
     )
     checks["board_butler_fleet_reconciled"] = _check(
         "PASS" if fleet_reconciled else "WARN" if executor_not_provisioned else "FAIL",
@@ -768,6 +897,7 @@ def _post_rollout_checks(
         else "fleet executor is not provisioned; disabled status recorded as an expected deviation"
         if executor_not_provisioned
         else "fleet status is not reconciled",
+        failure_kind="proof_missing" if butler is None else "proof_mismatch",
     )
     conflict = butler.get("state_precondition_conflict") if butler else None
     conflict_survived = (
@@ -783,6 +913,7 @@ def _post_rollout_checks(
         "post-restart refreshes continued without a state-precondition traceback"
         if conflict_survived
         else "missing release-bound post-restart refresh/no-traceback proof",
+        failure_kind="proof_missing" if butler is None else "proof_mismatch",
     )
     dashboard = _proof(proof_dir, "dashboard")
     dashboard_ok = (
@@ -794,6 +925,7 @@ def _post_rollout_checks(
         "dashboard proof binds the exact release SHA"
         if dashboard_ok
         else "dashboard proof does not bind the release SHA",
+        failure_kind="proof_missing" if dashboard is None else "proof_mismatch",
     )
     release = _proof(proof_dir, "release-checks")
     release_ok = (
@@ -807,6 +939,7 @@ def _post_rollout_checks(
         "ci_manifest and release_train passed at the release SHA"
         if release_ok
         else "release-tag ci_manifest/release_train proof is missing or mismatched",
+        failure_kind="proof_missing" if release is None else "proof_mismatch",
     )
     return checks
 
@@ -818,7 +951,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
     proof_dir = (
         args.proof_dir.resolve()
         if args.proof_dir
-        else pursers_home / "rollout/v5.0.6/proofs"
+        else pursers_home / "rollout" / args.release_tag / "proofs"
     )
     mcp_rows, mcp_references = _mcp_clients(home, pursers_home)
     use_systemd = (
@@ -842,6 +975,23 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         runtime_dirs = sorted(
             path for path in root.iterdir() if path.is_dir() and RUNTIME_NAMES.fullmatch(path.name)
         )
+    fixed_repositories = (
+        ("runtime:fleet-dashboard+board-butler", pursers_home / "runtimes/fleet-dashboard/repo"),
+        ("runtime:coordinator", pursers_home / "coordinator/src"),
+    )
+    release_repositories = [
+        *(runtime / "src" for runtime in runtime_dirs),
+        *(repo for _name, repo in fixed_repositories),
+    ]
+    expected_versions, release_manifest_ref = _release_versions_at_ref(
+        release_repositories, args.release_sha, args.release_tag
+    )
+    (
+        runtime_required_distributions,
+        service_required_distributions,
+        central_service_required_distributions,
+        pursers_distributions,
+    ) = _distribution_versions(expected_versions)
     for runtime in runtime_dirs:
         repo = runtime / "src"
         repositories.append(
@@ -852,14 +1002,10 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
                 pursers_home=pursers_home,
                 referenced=_referenced(runtime, references),
                 interpreter=runtime / ".venv/bin/python",
-                required_distributions=RUNTIME_REQUIRED_DISTRIBUTIONS,
-                expected_distributions=PURSERS_DISTRIBUTIONS,
+                required_distributions=runtime_required_distributions,
+                expected_distributions=pursers_distributions,
             )
         )
-    fixed_repositories = (
-        ("runtime:fleet-dashboard+board-butler", pursers_home / "runtimes/fleet-dashboard/repo"),
-        ("runtime:coordinator", pursers_home / "coordinator/src"),
-    )
     for name, repo in fixed_repositories:
         repositories.append(
             _repo_record(
@@ -885,6 +1031,9 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         repo_sources,
         home=home,
         pursers_home=pursers_home,
+        service_required_distributions=service_required_distributions,
+        central_service_required_distributions=central_service_required_distributions,
+        expected_distributions=pursers_distributions,
     )
 
     uv_tool = _uv_tool(home)
@@ -893,14 +1042,16 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         row["client_version"] = uv_tool["client_version"]
     checks: dict[str, dict[str, str]] = {}
     uv_ok = (
-        uv_tool["wait_bridge_version"] == EXPECTED_WAIT_BRIDGE
-        and uv_tool["client_version"] == EXPECTED_CLIENT
-        and uv_tool["find_links_release"] == RELEASE_TAG
+        bool(expected_versions)
+        and uv_tool["wait_bridge_version"] == expected_versions.get("wait_bridge")
+        and uv_tool["client_version"] == expected_versions.get("client")
+        and uv_tool["find_links_release"] == args.release_tag
     )
     checks["uv_wait_bridge"] = _check(
         "PASS" if uv_ok else "FAIL",
-        f"expected wait-bridge {EXPECTED_WAIT_BRIDGE}, client {EXPECTED_CLIENT}, "
-        f"find-links {RELEASE_TAG}",
+        f"expected wait-bridge {expected_versions.get('wait_bridge')}, "
+        f"client {expected_versions.get('client')}, find-links {args.release_tag}",
+        failure_kind="version_mismatch",
     )
     butler_proof = _proof(proof_dir, "board-butler")
     hotfix = butler_proof.get("hotfix") if butler_proof else None
@@ -942,12 +1093,13 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
                     "active interpreter is missing, lacks required distributions, "
                     "or has inconsistent Pursers pins"
                 ),
+                failure_kind="version_mismatch",
             )
     version_sources = [
         row["versions"] for row in repositories if row["sha"] == args.release_sha
     ]
     versions_ok = bool(version_sources) and all(
-        all(versions.get(key) == value for key, value in EXPECTED_PACKAGES.items())
+        all(versions.get(key) == value for key, value in expected_versions.items())
         for versions in version_sources
     )
     checks["release_version_manifest"] = _check(
@@ -955,6 +1107,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         "release_versions.toml matches the approved package map"
         if versions_ok
         else "release package versions are missing or mismatched",
+        failure_kind="version_mismatch",
     )
     fleet_repo = pursers_home / "runtimes/fleet-dashboard/repo"
     checks["board_butler_conflict_guard_source"] = _check(
@@ -963,8 +1116,14 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         if _butler_conflict_guard(fleet_repo)
         else "running Butler source lacks the two conflict-deferral guards",
     )
+    expected_tag = (
+        f"v{expected_versions['product']}"
+        if expected_versions.get("product")
+        else None
+    )
+    release_tag_ok = args.release_tag == expected_tag
     release_inputs_ok = (
-        args.release_tag == RELEASE_TAG
+        release_tag_ok
         and args.sha256s.resolve().parent == args.wheel_dir.resolve()
         and _wheel_checksums(args.wheel_dir.resolve(), args.sha256s.resolve())
     )
@@ -973,6 +1132,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         "release tag and complete SHA256SUMS wheel cohort match"
         if release_inputs_ok
         else "release tag, wheel directory, or SHA256SUMS validation failed",
+        failure_kind="version_mismatch" if not release_tag_ok else "release_input",
     )
     for row in service_rows:
         source_shas = {source["sha"] for source in row["sources"]}
@@ -990,12 +1150,13 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
             checks[f'{row["consumer"]}:installed_packages'] = _check(
                 "PASS" if environment.get("ok") is True else "FAIL",
                 "configured service interpreter has pursers-client "
-                f"{EXPECTED_CLIENT} and consistent Pursers pins"
+                f"{expected_versions.get('client')} and consistent Pursers pins"
                 if environment.get("ok") is True
                 else (
                     "configured service interpreter is missing, pursers-client is "
                     "mismatched, or another installed Pursers pin is inconsistent"
                 ),
+                failure_kind="version_mismatch",
             )
         fleet_environment = row.get("fleet_environment")
         if isinstance(fleet_environment, Mapping):
@@ -1033,14 +1194,21 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
         )
         configured = bool(configured_hosts.intersection(alternatives))
         installed = bool(present_hosts.intersection(alternatives))
+        parse_errors = [
+            row["parse_error"]
+            for row in mcp_rows
+            if row["consumer"] in alternatives and row.get("parse_error")
+        ]
         checks[name] = _check(
             "PASS"
             if configured
             else "WARN"
-            if use_systemd or not installed
+            if (use_systemd or not installed) and not parse_errors
             else "FAIL",
             "launches pursers-wait-bridge"
             if configured
+            else f"configuration parse failed: {parse_errors[0]}"
+            if parse_errors
             else (
                 "IDE is not installed on this host; use saved-cursor wait proofs"
             )
@@ -1096,16 +1264,23 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
     failures = sum(item["status"] == "FAIL" for item in checks.values())
+    failure_kinds = {
+        kind: sum(
+            item.get("failure_kind") == kind
+            for item in checks.values()
+            if item["status"] == "FAIL"
+        )
+        for kind in ("proof_missing", "proof_mismatch", "version_mismatch")
+    }
     return {
         "schema": SCHEMA,
         "read_only": True,
         "mode": "inventory" if args.inventory_only else "verify",
         "release": {
-            "tag": RELEASE_TAG,
+            "tag": args.release_tag,
             "sha": args.release_sha,
-            "product": EXPECTED_PRODUCT,
-            "wait_bridge": EXPECTED_WAIT_BRIDGE,
-            "client": EXPECTED_CLIENT,
+            "manifest_ref": release_manifest_ref,
+            **{key: expected_versions.get(key) for key in REQUIRED_VERSION_KEYS},
         },
         "inventory": [uv_tool, *repositories, *service_rows, *mcp_rows],
         "stale_runtime_cleanup": cleanup,
@@ -1114,6 +1289,7 @@ def inspect(args: argparse.Namespace) -> dict[str, Any]:
             "pass": sum(item["status"] == "PASS" for item in checks.values()),
             "warn": sum(item["status"] == "WARN" for item in checks.values()),
             "fail": failures,
+            "failure_kinds": failure_kinds,
             "ok": failures == 0,
         },
     }
