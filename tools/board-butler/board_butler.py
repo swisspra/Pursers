@@ -9736,11 +9736,16 @@ def _observe_role_imbalance(
     ]
 
 
+APPROVED_NOT_LANDED_OBSERVATION_RULE = ObservationRule(
+    "approved_not_landed", 2, _observe_stranded_approvals
+)
+
+
 OBSERVATION_RULES: tuple[ObservationRule, ...] = (
     ObservationRule("fleet_demand_snapshot", 2, _observe_fleet_demand_snapshot),
     ObservationRule("full_gate_queue", 2, _observe_gate_queue),
     ObservationRule("unanswered_questions", 2, _observe_unanswered_questions),
-    ObservationRule("approved_not_landed", 2, _observe_stranded_approvals),
+    APPROVED_NOT_LANDED_OBSERVATION_RULE,
     ObservationRule("rejection_loop", 2, _observe_rejection_loops),
     ObservationRule("role_imbalance", 2, _observe_role_imbalance),
     ObservationRule("stale_open_question", 1, _observe_stale_open_questions),
@@ -9748,6 +9753,56 @@ OBSERVATION_RULES: tuple[ObservationRule, ...] = (
     ObservationRule("standing_decision_repeated", 0, _observe_repeated_standing_decisions),
     ObservationRule("decision_scope_drift", 1, _observe_decision_scope_drift),
 )
+
+
+def _decorate_observation_candidate(
+    context: ObservationContext,
+    rule: ObservationRule,
+    candidate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply the common durable-observation envelope to one candidate."""
+    identifiers = {
+        key: candidate[key]
+        for key in ("ticket_id", "question_id", "annotation_id")
+        if candidate.get(key)
+    }
+    material = json.dumps(
+        [context.board_id, rule.name, identifiers],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    row = {
+        "kind": OBSERVATION_FINDING_KIND,
+        "level": str(candidate.get("level", "warn")),
+        "board_id": context.board_id,
+        "observer": rule.name,
+        "observer_priority": rule.priority,
+        "observation_key": hashlib.sha256(material.encode("utf-8")).hexdigest()[:20],
+        "message": str(candidate.get("message", "")),
+        "evidence": str(candidate.get("evidence", "")),
+        "next_action": str(candidate.get("next_action", "")),
+        "mode": "shadow-observation",
+        "observed_at": context.now.isoformat(),
+        **identifiers,
+    }
+    if isinstance(candidate.get("rediscovery_question_ids"), list):
+        row["rediscovery_question_ids"] = sorted(
+            {
+                str(value)
+                for value in candidate["rediscovery_question_ids"]
+                if value
+            }
+        )
+    if isinstance(candidate.get("reconciled"), bool):
+        row["reconciled"] = candidate["reconciled"]
+    for name in ("escalated", "human_attention"):
+        if isinstance(candidate.get(name), bool):
+            row[name] = candidate[name]
+    if isinstance(candidate.get("threshold"), str):
+        row["threshold"] = candidate["threshold"][:240]
+    if isinstance(candidate.get("demand_snapshot"), Mapping):
+        row["demand_snapshot"] = copy.deepcopy(dict(candidate["demand_snapshot"]))
+    return row
 
 
 def derive_board_observations(
@@ -9758,50 +9813,7 @@ def derive_board_observations(
     findings: list[dict[str, Any]] = []
     for rule in rules:
         for candidate in rule.evaluate(context):
-            identifiers = {
-                key: candidate[key]
-                for key in ("ticket_id", "question_id", "annotation_id")
-                if candidate.get(key)
-            }
-            material = json.dumps(
-                [context.board_id, rule.name, identifiers],
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            row = {
-                "kind": OBSERVATION_FINDING_KIND,
-                "level": str(candidate.get("level", "warn")),
-                "board_id": context.board_id,
-                "observer": rule.name,
-                "observer_priority": rule.priority,
-                "observation_key": hashlib.sha256(material.encode("utf-8")).hexdigest()[:20],
-                "message": str(candidate.get("message", "")),
-                "evidence": str(candidate.get("evidence", "")),
-                "next_action": str(candidate.get("next_action", "")),
-                "mode": "shadow-observation",
-                "observed_at": context.now.isoformat(),
-                **identifiers,
-            }
-            if isinstance(candidate.get("rediscovery_question_ids"), list):
-                row["rediscovery_question_ids"] = sorted(
-                    {
-                        str(value)
-                        for value in candidate["rediscovery_question_ids"]
-                        if value
-                    }
-                )
-            if isinstance(candidate.get("reconciled"), bool):
-                row["reconciled"] = candidate["reconciled"]
-            for name in ("escalated", "human_attention"):
-                if isinstance(candidate.get(name), bool):
-                    row[name] = candidate[name]
-            if isinstance(candidate.get("threshold"), str):
-                row["threshold"] = candidate["threshold"][:240]
-            if isinstance(candidate.get("demand_snapshot"), Mapping):
-                row["demand_snapshot"] = copy.deepcopy(
-                    dict(candidate["demand_snapshot"])
-                )
-            findings.append(row)
+            findings.append(_decorate_observation_candidate(context, rule, candidate))
     if not context.questions_complete or not context.tickets_complete:
         missing = []
         if not context.questions_complete:
@@ -11241,7 +11253,20 @@ class CentralBackend:
     ) -> list[Mapping[str, Any]]:
         outcome = self._approval_scan_last.get(board_id)
         if outcome is not None and outcome.complete:
-            return [dict(row) for row in outcome.findings]
+            context = ObservationContext(
+                board_id=board_id,
+                tickets={},
+                questions=(),
+                now=now,
+            )
+            return [
+                _decorate_observation_candidate(
+                    context,
+                    APPROVED_NOT_LANDED_OBSERVATION_RULE,
+                    row,
+                )
+                for row in outcome.findings
+            ]
         return [
             approval_scan_coverage_finding(
                 board_id,

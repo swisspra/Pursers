@@ -4815,6 +4815,67 @@ def test_approval_scan_scheduler_does_not_await_heavy_work(
     assert backend._approval_scan_task is None
 
 
+def test_completed_approval_scan_findings_are_decorated_merged_and_deduplicated(
+    tmp_path: Path,
+) -> None:
+    backend = butler.CentralBackend(args(tmp_path), "opaque")
+    stranded = {
+        "level": "critical",
+        "ticket_id": "TK-stranded",
+        "message": "Approved ticket is not landed.",
+        "evidence": "state=STRANDED",
+        "next_action": "Integrate it.",
+    }
+    unverifiable = {
+        "level": "warn",
+        "ticket_id": "TK-unverifiable",
+        "message": "Approved ticket cannot be verified.",
+        "evidence": "state=UNVERIFIABLE; error=ValueError",
+        "next_action": "Refresh refs.",
+    }
+    backend._approval_scan_last["pursers"] = butler.ApprovalScanOutcome(
+        findings=(stranded, dict(stranded), unverifiable),
+        complete=True,
+        pending=0,
+        classified=2,
+        cache_hits=0,
+        ticket_count=2,
+        main_sha="a" * 40,
+    )
+    coverage = butler.approval_scan_coverage_finding(
+        "pursers", NOW - butler.timedelta(minutes=1), status="pending", pending=2
+    )
+
+    findings = backend._approval_findings_for_board("pursers", NOW)
+    merged = butler.merge_observation_findings(
+        {"findings": [coverage]}, findings, NOW
+    )
+
+    observations = [
+        row
+        for row in merged["findings"]
+        if row.get("kind") == butler.OBSERVATION_FINDING_KIND
+    ]
+    assert {row["ticket_id"] for row in observations} == {
+        "TK-stranded",
+        "TK-unverifiable",
+    }
+    assert len(observations) == 2
+    assert all(
+        row["board_id"] == "pursers"
+        and row["observer"] == "approved_not_landed"
+        and row["observer_priority"] == 2
+        and row["mode"] == "shadow-observation"
+        and row["observed_at"] == NOW.isoformat()
+        and row["observation_key"]
+        for row in observations
+    )
+    assert not any(
+        row.get("observer") == "approved_not_landed_coverage"
+        for row in merged["findings"]
+    )
+
+
 def test_mature_board_hydrates_closed_approval_without_intake_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
