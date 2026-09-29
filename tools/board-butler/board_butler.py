@@ -5824,6 +5824,23 @@ def clamp_intake_decision(
 
 
 
+def source_intake_board_load(
+    snapshot: Mapping[str, Any], now: datetime
+) -> dict[str, int]:
+    """Supply observed queue and idle capacity to the model without deciding pulls."""
+    counts: dict[str, int] = {}
+    tickets = snapshot.get("tickets", [])
+    for ticket in tickets if isinstance(tickets, list) else []:
+        status = ticket.get("status") if isinstance(ticket, Mapping) else None
+        if isinstance(status, str) and status not in {"closed", "canceled"}:
+            counts[status] = counts.get(status, 0) + 1
+    agents = snapshot.get("agents", [])
+    rows = [agent for agent in agents if isinstance(agent, Mapping)] if isinstance(agents, list) else []
+    counts["idle_workers"] = sum(_available_for(agent, "can_work", now) for agent in rows)
+    counts["idle_reviewers"] = sum(_available_for(agent, "can_review", now) for agent in rows)
+    return counts
+
+
 INTAKE_DECISION_SYSTEM_PROMPT = (
     "You are the Board Butler deciding whether to pull new work from external "
     "sources onto the board. Pull only what the board can actually run now: "
@@ -13215,15 +13232,10 @@ class CentralBackend:
             for project in projects
             if isinstance(getattr(project, "name", None), str)
         }
-        self._source_board_load = {}
-        for board_id, snapshot in snapshots.items():
-            counts: dict[str, int] = {}
-            tickets = snapshot.get("tickets") if isinstance(snapshot, Mapping) else None
-            for ticket in tickets if isinstance(tickets, list) else []:
-                status = ticket.get("status") if isinstance(ticket, Mapping) else None
-                if isinstance(status, str) and status not in {"closed", "canceled"}:
-                    counts[status] = counts.get(status, 0) + 1
-            self._source_board_load[board_id] = counts
+        self._source_board_load = {
+            board_id: source_intake_board_load(snapshot, now)
+            for board_id, snapshot in snapshots.items()
+        }
         project_onboarding = await self._auto_onboard_unknown_projects(previous, now)
         active_boards = {project.board_id for project in projects}
         self._harvest_approval_scan(sorted(active_boards))

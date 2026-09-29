@@ -407,3 +407,22 @@ def test_tool_only_connector_does_not_require_resource_support() -> None:
         result = await runtime.call_tool("tool-only-read", "fetch", {"page": 1})
         assert result.payload["structured_content"]["issues"][0]["key"] == "SONAR-1"
     asyncio.run(scenario())
+
+
+def test_intake_board_load_counts_only_fresh_dispatchable_capacity():
+    idle = {"capabilities": {"can_work": True, "can_review": False},
+            "capabilities_explicit": True, "role": "worker", "status": "idle",
+            "last_activity_at": NOW.isoformat()}
+    reviewer = {**idle, "role": "reviewer",
+                "capabilities": {"can_work": False, "can_review": True}}
+    snapshot = {"tickets": [{"status": "open"}, {"status": "review"},
+                            {"status": "closed"}, {"status": "canceled"}],
+                "agents": [idle, reviewer, {**idle, "status": "busy"},
+                    {**idle, "last_activity_at": (NOW-timedelta(minutes=6)).isoformat()},
+                    {**idle, "readiness": {"reported": True, "dispatch_ready": False}},
+                    {**idle, "lease_expires_at": (NOW+timedelta(minutes=1)).isoformat()},
+                    {**idle, "role": "coordinator"}]}
+    assert butler.source_intake_board_load(snapshot, NOW) == {
+        "open": 1, "review": 1, "idle_workers": 1, "idle_reviewers": 1}
+    assert butler.source_intake_board_load({}, NOW) == {
+        "idle_workers": 0, "idle_reviewers": 0}
