@@ -174,6 +174,10 @@ they set process-local Git helper configuration with `credential.useHttpPath=tru
 They do not replace unrelated global Git configuration. Child clone/push commands
 inherit the scoped helper.
 
+The Git credential helper responds only through a pipe, as used by Git. Direct
+terminal output and redirection to a regular log file return no credentials.
+Never route the helper protocol stream into application logs.
+
 ## Render and launch
 
 Start from [the deployment example](../tools/board-butler/examples/managed-intake.json):

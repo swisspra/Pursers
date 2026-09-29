@@ -59,6 +59,9 @@ def main():
     parser.add_argument('operation', choices=('get', 'store', 'erase'))
     args = parser.parse_args()
     if args.operation != 'get': return 0
+    # Git reads the credential protocol from an anonymous pipe. Refuse a
+    # terminal or regular log file, including accidental service execution.
+    if not stat.S_ISFIFO(os.fstat(sys.stdout.fileno()).st_mode): return 0
     raw = sys.stdin.read(16385)
     if len(raw) > 16384: return 0
     fields = {}
@@ -69,6 +72,7 @@ def main():
         if key in fields: return 0
         fields[key] = value
     result = credentials_for_request(fields, args.config)
+    # This is a required Git credential-protocol response, never a log message.
     if result: sys.stdout.write(''.join(f'{k}={v}\n' for k,v in result.items()) + '\n')
     return 0
 
