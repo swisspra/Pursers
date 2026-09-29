@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.7] - 2026-09-29
+
+This release includes `pursers-central==0.1.5`,
+`pursers-client==0.1.6`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.0.7`, `pursers==5.0.7`,
+`pursers-wait-bridge==0.1.4`, and
+`pursers-acp==0.1.4`.
+
 ### Added
 
 - Board Butler can own seat management on a host: a single operator-set host
@@ -33,6 +41,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   health endpoint from that origin instead of the plain-HTTP default.
 - A Board Butler test no longer depends on the checkout having a local main
   ref, so pull-request CI runs pass.
+- Board Butler moves the approved-but-not-landed scan off its hot refresh loop
+  and reuses cached findings, so a large board no longer slows every refresh.
+- The rollout runbook and read-only rollout doctor handle the defects found in
+  the live 5.0.6 rollout: third-party dependency resolution for offline
+  installs, Central upgrades with pinned clients, the Fleet environment
+  contract, Butler fleet preflight, `./`-prefixed checksum rows, editable
+  freeze constraints, and collector-based digest freshness.
+
+### Documentation
+
+- The rollout runbook documents the Linux/systemd path and a version-neutral
+  host layout: persistent data in one stable service tree, each release as a
+  side-by-side venv/assets/source tree, and upgrades that only repoint the
+  unit's runtime paths.
 
 ## [5.0.6] - 2026-09-28
 

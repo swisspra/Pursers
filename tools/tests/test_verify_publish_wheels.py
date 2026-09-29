@@ -178,7 +178,7 @@ def test_publish_workflow_is_bound_to_exact_stable_tag() -> None:
     assert "release_tag:" in workflow
     assert "required: true" in workflow
     assert workflow.count("ref: refs/tags/${{ inputs.release_tag }}") == 2
-    assert workflow.count('test "$TAG" = "v5.0.6"') == 2
+    assert workflow.count('test "$TAG" = "v5.0.7"') == 2
     assert workflow.count('python tools/release_publish.py "$TAG" verify-checkout') == 2
 
 
