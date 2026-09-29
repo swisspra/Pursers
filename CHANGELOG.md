@@ -7,7 +7,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.8] - 2026-09-29
+
+This release includes `pursers-central==0.1.5`,
+`pursers-client==0.1.6`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.0.8`, `pursers==5.0.8`,
+`pursers-wait-bridge==0.1.4`, and
+`pursers-acp==0.1.5`.
+
+5.0.8 ships everything listed under 5.0.7. The v5.0.7 tag was never published
+to PyPI apart from `pursers-wait-bridge==0.1.4`: its `pursers-acp` wheel kept
+version 0.1.4 while its dependency pins moved to the 5.0.7 cohort, so the
+publish verifier refused bytes that differed from the 0.1.4 already on PyPI.
+
+### Fixed
+
+- `pursers-acp` is versioned 0.1.5 so it installs alongside the rest of the
+  cohort (`pursers-client==0.1.6`, `pursers-personal==5.0.8`,
+  `pursers-wait-bridge==0.1.4`).
+
 ## [5.0.7] - 2026-09-29
+
+Tagged but not published to PyPI (except `pursers-wait-bridge==0.1.4`);
+use 5.0.8.
 
 This release includes `pursers-central==0.1.5`,
 `pursers-client==0.1.6`, `pursers-personal-import==5.0.0`,
