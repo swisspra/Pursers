@@ -87,6 +87,7 @@ DEFAULT_VETO_COUNT = 3
 DEFAULT_FAILURE_COUNT = 3
 DEFAULT_VETO_WINDOW_S = 3_600
 DEFAULT_REFRESH_SECONDS = 60
+DEFAULT_APPROVAL_SCAN_BUDGET = 10
 DEFAULT_NO_LIVE_CANDIDATES_CYCLES = 3
 DEFAULT_ACTION_HOLD_SECONDS = 60
 ACTIVE_AUTHORIZATION_SCHEMA_VERSION = 1
@@ -2697,6 +2698,119 @@ class ObservationRule:
     name: str
     priority: int
     evaluate: Callable[[ObservationContext], Sequence[Mapping[str, Any]]]
+
+
+@dataclass(frozen=True)
+class ApprovalClassification:
+    """One cacheable classifier outcome, including fail-closed errors."""
+
+    result: Any | None = None
+    error_class: str | None = None
+
+
+@dataclass(frozen=True)
+class ApprovalScanOutcome:
+    """One bounded approval scan step and its publishable observations."""
+
+    findings: tuple[dict[str, Any], ...]
+    complete: bool
+    pending: int
+    classified: int
+    cache_hits: int
+    ticket_count: int
+    main_sha: str
+
+
+@dataclass
+class ApprovalClassificationCache:
+    """Carry approval classifications across refreshes with bounded work."""
+
+    cache: dict[tuple[str, str, str], ApprovalClassification] = field(
+        default_factory=dict
+    )
+    pending: deque[tuple[str, str, str]] = field(default_factory=deque)
+
+    def scan(
+        self,
+        context: ObservationContext,
+        *,
+        main_sha: str,
+        budget: int,
+        classify: Callable[..., Any] | None = None,
+    ) -> ApprovalScanOutcome:
+        if budget < 1:
+            raise ValueError("approval scan budget must be positive")
+        classifier = classify or _stranded_approvals_api()["classify_approval"]
+        parser = _stranded_approvals_api()["parse_approved_reference"]
+        desired: dict[str, tuple[tuple[str, str, str], Mapping[str, Any]]] = {}
+        for ticket_id, ticket in sorted(context.tickets.items()):
+            if ticket.get("review_verdict") != "approve" or ticket.get("status") != "closed":
+                continue
+            reference = parser(ticket)
+            approved_sha = reference[1] if reference is not None else "-"
+            key = (ticket_id, approved_sha, main_sha)
+            desired[ticket_id] = (key, ticket)
+
+        desired_keys = {key for key, _ticket in desired.values()}
+        self.cache = {
+            key: value for key, value in self.cache.items() if key in desired_keys
+        }
+        queued = {
+            key
+            for key in self.pending
+            if key in desired_keys and key not in self.cache
+        }
+        self.pending = deque(
+            key
+            for key in self.pending
+            if key in desired_keys and key not in self.cache
+        )
+        cache_hits = sum(key in self.cache for key in desired_keys)
+        for key in sorted(desired_keys):
+            if key not in self.cache and key not in queued:
+                self.pending.append(key)
+                queued.add(key)
+
+        tickets_by_key = {key: ticket for key, ticket in desired.values()}
+        classified = 0
+        while self.pending and classified < budget:
+            key = self.pending.popleft()
+            ticket = tickets_by_key.get(key)
+            if ticket is None or key in self.cache:
+                continue
+            try:
+                result = classifier(
+                    ticket,
+                    repo=context.repo,
+                    main_ref=context.main_ref,
+                )
+            except Exception as exc:
+                value = ApprovalClassification(error_class=type(exc).__name__)
+            else:
+                value = ApprovalClassification(result=result)
+            self.cache[key] = value
+            classified += 1
+
+        classifications = {
+            ticket_id: self.cache[key]
+            for ticket_id, (key, _ticket) in desired.items()
+            if key in self.cache
+        }
+        complete = len(classifications) == len(desired)
+        findings = (
+            tuple(_render_stranded_approvals(context, classifications))
+            if complete
+            else ()
+        )
+        return ApprovalScanOutcome(
+            findings=findings,
+            complete=complete,
+            pending=len(desired) - len(classifications),
+            classified=classified,
+            cache_hits=cache_hits,
+            ticket_count=len(desired),
+            main_sha=main_sha,
+        )
 
 
 @dataclass(frozen=True)
@@ -8739,6 +8853,96 @@ def _local_main_ref(repo: Path) -> str | None:
     return None
 
 
+def _git_metadata_dirs(repo: Path) -> tuple[Path, ...]:
+    dot_git = repo / ".git"
+    if dot_git.is_dir():
+        git_dir = dot_git
+    else:
+        try:
+            marker = dot_git.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ()
+        if not marker.startswith("gitdir: "):
+            return ()
+        git_dir = (repo / marker.removeprefix("gitdir: ")).resolve()
+    directories = [git_dir]
+    try:
+        common_marker = (git_dir / "commondir").read_text(encoding="utf-8").strip()
+    except OSError:
+        common_marker = ""
+    if common_marker:
+        common_dir = (git_dir / common_marker).resolve()
+        if common_dir not in directories:
+            directories.append(common_dir)
+    return tuple(directories)
+
+
+def _read_local_ref_sha(repo: Path, reference: str) -> str | None:
+    for git_dir in _git_metadata_dirs(repo):
+        try:
+            value = (git_dir / reference).read_text(encoding="utf-8").strip().lower()
+        except OSError:
+            value = ""
+        if re.fullmatch(r"[0-9a-f]{40}", value):
+            return value
+    for git_dir in reversed(_git_metadata_dirs(repo)):
+        try:
+            packed = (git_dir / "packed-refs").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in packed.splitlines():
+            if line.startswith(("#", "^")):
+                continue
+            value, separator, name = line.partition(" ")
+            if (
+                separator
+                and name == reference
+                and re.fullmatch(r"[0-9a-f]{40}", value.lower())
+            ):
+                return value.lower()
+    return None
+
+
+def _local_main_revision(repo: Path) -> tuple[str, str] | None:
+    for reference in ("refs/remotes/origin/main", "refs/heads/main"):
+        if sha := _read_local_ref_sha(repo, reference):
+            return reference, sha
+    return None
+
+
+def approval_scan_coverage_finding(
+    board_id: str,
+    now: datetime,
+    *,
+    status: str,
+    pending: int | None = None,
+) -> dict[str, Any]:
+    detail = f"status={status}"
+    if pending is not None:
+        detail += f"; pending={pending}"
+    return {
+        "kind": OBSERVATION_FINDING_KIND,
+        "level": "warn",
+        "board_id": board_id,
+        "observer": "approved_not_landed_coverage",
+        "observer_priority": 0,
+        "observation_key": hashlib.sha256(
+            f"{board_id}:approved_not_landed_coverage".encode("utf-8")
+        ).hexdigest()[:20],
+        "message": (
+            "Approved-ticket landing scan is incomplete; "
+            "no negative landing conclusion is valid."
+        ),
+        "evidence": detail,
+        "next_action": (
+            "Allow the bounded background scan to finish; "
+            "Butler does not block the hot refresh loop."
+        ),
+        "mode": "shadow-observation",
+        "observed_at": now.isoformat(),
+    }
+
+
 def _ticket_row_map(context: ObservationContext) -> dict[str, Mapping[str, Any]]:
     rows = {
         str(row.get("ticket_id")): row
@@ -9189,29 +9393,31 @@ def _approved_at(ticket: Mapping[str, Any]) -> datetime | None:
     return _record_time(ticket, "reviewed_at", "closed_at", "updated_at")
 
 
-def _observe_stranded_approvals(
+def _render_stranded_approvals(
     context: ObservationContext,
+    classifications: Mapping[str, ApprovalClassification],
 ) -> list[Mapping[str, Any]]:
-    if context.repo is None or not context.main_ref:
-        return []
-    classify = _stranded_approvals_api()["classify_approval"]
     ranked: list[tuple[bool, int, Mapping[str, Any]]] = []
     for ticket_id, ticket in sorted(context.tickets.items()):
         if ticket.get("review_verdict") != "approve" or ticket.get("status") != "closed":
             continue
-        try:
-            result = classify(ticket, repo=context.repo, main_ref=context.main_ref)
-        except Exception as exc:
+        classification = classifications.get(ticket_id)
+        if classification is None:
+            continue
+        if classification.error_class is not None:
             ranked.append(
                 (False, 0, {
                     "level": "warn",
                     "ticket_id": ticket_id,
                     "message": "Approved-ticket landing could not be verified from the local repository.",
-                    "evidence": f"state=UNVERIFIABLE; error={type(exc).__name__}",
+                    "evidence": f"state=UNVERIFIABLE; error={classification.error_class}",
                     "next_action": "Coordinator: refresh the read-only repository refs and rerun the ancestry audit.",
                     **_escalation_fields(False, "verification must be complete before declaring a ticket landed"),
                 })
             )
+            continue
+        result = classification.result
+        if result is None:
             continue
         # The shared classifier may add new independently proven landing
         # mechanisms (for example LANDED_BY_REFERENCE).  Any LANDED_* result
@@ -9267,6 +9473,27 @@ def _observe_stranded_approvals(
             }
         )
     return observations
+
+
+def _observe_stranded_approvals(
+    context: ObservationContext,
+) -> list[Mapping[str, Any]]:
+    if context.repo is None or not context.main_ref:
+        return []
+    classify = _stranded_approvals_api()["classify_approval"]
+    classifications: dict[str, ApprovalClassification] = {}
+    for ticket_id, ticket in sorted(context.tickets.items()):
+        if ticket.get("review_verdict") != "approve" or ticket.get("status") != "closed":
+            continue
+        try:
+            result = classify(ticket, repo=context.repo, main_ref=context.main_ref)
+        except Exception as exc:
+            classifications[ticket_id] = ApprovalClassification(
+                error_class=type(exc).__name__
+            )
+        else:
+            classifications[ticket_id] = ApprovalClassification(result=result)
+    return _render_stranded_approvals(context, classifications)
 
 
 def _observe_rejection_loops(
@@ -10778,6 +11005,12 @@ class CentralBackend:
         self._source_intake_task: asyncio.Task[dict[str, Any]] | None = None
         self._source_intake_last: dict[str, Any] = {"status": "disabled"}
         self._source_intake_findings_pending = False
+        self._approval_scanners: dict[str, ApprovalClassificationCache] = {}
+        self._approval_scan_task: asyncio.Task[
+            dict[str, ApprovalScanOutcome]
+        ] | None = None
+        self._approval_scan_last: dict[str, ApprovalScanOutcome] = {}
+        self._approval_scan_failure: str | None = None
 
     async def _auto_onboard_unknown_projects(
         self,
@@ -10868,6 +11101,10 @@ class CentralBackend:
         return self
 
     async def __aexit__(self, *args: Any) -> None:
+        if self._approval_scan_task is not None:
+            self._approval_scan_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await self._approval_scan_task
         if self._source_intake_task is not None:
             self._source_intake_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -10897,6 +11134,126 @@ class CentralBackend:
             )
             return {"status": "scheduled", "previous": dict(self._source_intake_last)}
         return {"status": "running", "previous": dict(self._source_intake_last)}
+
+    async def _run_approval_scan_cycle(
+        self, board_ids: Sequence[str], now: datetime
+    ) -> dict[str, ApprovalScanOutcome]:
+        """Fetch approvals asynchronously and run bounded git work in a thread."""
+        revision = await asyncio.to_thread(_local_main_revision, self.args.repo)
+        if revision is None:
+            raise RuntimeError("local main revision is unavailable")
+        _main_ref, main_sha = revision
+        results: dict[str, ApprovalScanOutcome] = {}
+        for board_id in board_ids:
+            async with self._client_for_board(board_id) as client:
+                rows = await _stranded_approvals_api()["fetch_all_tickets"](client)
+            tickets = {
+                str(row["ticket_id"]): row
+                for row in rows
+                if isinstance(row, Mapping)
+                and isinstance(row.get("ticket_id"), str)
+                and row.get("ticket_id")
+                and row.get("status") == "closed"
+                and row.get("review_verdict") == "approve"
+            }
+            context = ObservationContext(
+                board_id=board_id,
+                tickets=tickets,
+                questions=(),
+                now=now,
+                repo=self.args.repo,
+                # Pin the classifier to the SHA used by the cache key so a
+                # concurrent ref update cannot store a new-main result under
+                # the old-main key.
+                main_ref=main_sha,
+            )
+            scanner = self._approval_scanners.setdefault(
+                board_id, ApprovalClassificationCache()
+            )
+            results[board_id] = await asyncio.to_thread(
+                scanner.scan,
+                context,
+                main_sha=main_sha,
+                budget=getattr(
+                    self.args,
+                    "approval_scan_budget",
+                    DEFAULT_APPROVAL_SCAN_BUDGET,
+                ),
+            )
+        return results
+
+    def _harvest_approval_scan(self, board_ids: Sequence[str]) -> None:
+        """Collect completed background work without starting more I/O."""
+        task = self._approval_scan_task
+        if task is not None and task.done():
+            try:
+                self._approval_scan_last = task.result()
+                self._approval_scan_failure = None
+            except asyncio.CancelledError:
+                self._approval_scan_failure = "CancelledError"
+            except Exception as exc:
+                self._approval_scan_failure = type(exc).__name__
+            self._approval_scan_task = None
+        active = set(board_ids)
+        self._approval_scanners = {
+            board_id: scanner
+            for board_id, scanner in self._approval_scanners.items()
+            if board_id in active
+        }
+        self._approval_scan_last = {
+            board_id: outcome
+            for board_id, outcome in self._approval_scan_last.items()
+            if board_id in active
+        }
+
+    def _schedule_approval_scan(
+        self, board_ids: Sequence[str], now: datetime
+    ) -> dict[str, Any]:
+        """Restart the approval scan after hot-path work has finished."""
+        self._harvest_approval_scan(board_ids)
+        active = set(board_ids)
+        if self._approval_scan_task is None:
+            self._approval_scan_task = asyncio.create_task(
+                self._run_approval_scan_cycle(tuple(sorted(active)), now),
+                name="board-butler-approved-not-landed",
+            )
+            status = "scheduled"
+        else:
+            status = "running"
+        return {
+            "status": status,
+            "failure": self._approval_scan_failure,
+            "boards": {
+                board_id: {
+                    "complete": outcome.complete,
+                    "pending": outcome.pending,
+                    "classified": outcome.classified,
+                    "cache_hits": outcome.cache_hits,
+                    "ticket_count": outcome.ticket_count,
+                    "main_sha": outcome.main_sha,
+                }
+                for board_id, outcome in sorted(self._approval_scan_last.items())
+            },
+        }
+
+    def _approval_findings_for_board(
+        self, board_id: str, now: datetime
+    ) -> list[Mapping[str, Any]]:
+        outcome = self._approval_scan_last.get(board_id)
+        if outcome is not None and outcome.complete:
+            return [dict(row) for row in outcome.findings]
+        return [
+            approval_scan_coverage_finding(
+                board_id,
+                now,
+                status=(
+                    f"failed:{self._approval_scan_failure}"
+                    if self._approval_scan_failure
+                    else "pending"
+                ),
+                pending=outcome.pending if outcome is not None else None,
+            )
+        ]
 
     async def _write_source_intake_findings(self, now: datetime) -> None:
         """Replace durable unknown-project rows for successfully polled sources."""
@@ -11767,7 +12124,12 @@ class CentralBackend:
         return result
 
     async def _observation_context_for_board(
-        self, board_id: str, snapshot: Mapping[str, Any], now: datetime
+        self,
+        board_id: str,
+        snapshot: Mapping[str, Any],
+        now: datetime,
+        *,
+        include_approval_tickets: bool = True,
     ) -> ObservationContext:
         """Read one bounded board projection and read-only host demand sample."""
         from pursers_client import BoardClient
@@ -11802,28 +12164,29 @@ class CentralBackend:
             # auditor's deterministic status/batch reader so closed approvals
             # remain observable without trusting a truncated fallback.
             complete_ticket_index: dict[str, Mapping[str, Any]] = {}
-            try:
-                complete_rows = await _stranded_approvals_api()[
-                    "fetch_all_tickets"
-                ](client)
-            except Exception:
-                tickets_complete = False
-            else:
-                for row in complete_rows:
-                    ticket_id = row.get("ticket_id")
-                    if not isinstance(ticket_id, str) or not ticket_id:
-                        tickets_complete = False
-                        complete_ticket_index = {}
-                        break
-                    # Question and active-ticket observers require the richer
-                    # single-ticket shape (including complete annotations and
-                    # dispatch history), so retain this batch index only for
-                    # the closed approvals that motivated the complete read.
-                    if (
-                        row.get("status") == "closed"
-                        and row.get("review_verdict") == "approve"
-                    ):
-                        complete_ticket_index[ticket_id] = row
+            if include_approval_tickets:
+                try:
+                    complete_rows = await _stranded_approvals_api()[
+                        "fetch_all_tickets"
+                    ](client)
+                except Exception:
+                    tickets_complete = False
+                else:
+                    for row in complete_rows:
+                        ticket_id = row.get("ticket_id")
+                        if not isinstance(ticket_id, str) or not ticket_id:
+                            tickets_complete = False
+                            complete_ticket_index = {}
+                            break
+                        # Question and active-ticket observers require the richer
+                        # single-ticket shape (including complete annotations and
+                        # dispatch history), so retain this batch index only for
+                        # the closed approvals that motivated the complete read.
+                        if (
+                            row.get("status") == "closed"
+                            and row.get("review_verdict") == "approve"
+                        ):
+                            complete_ticket_index[ticket_id] = row
             question_rows: dict[str, Mapping[str, Any]] = {}
             for question_state in ("open", "accepted", "answered"):
                 try:
@@ -11947,8 +12310,12 @@ class CentralBackend:
                 else None
             ),
             host_headroom=read_host_headroom(self.args.repo),
-            repo=self.args.repo,
-            main_ref=_local_main_ref(self.args.repo),
+            repo=self.args.repo if include_approval_tickets else None,
+            main_ref=(
+                _local_main_ref(self.args.repo)
+                if include_approval_tickets
+                else None
+            ),
             questions_complete=questions_complete,
             tickets_complete=tickets_complete,
         )
@@ -12166,18 +12533,25 @@ class CentralBackend:
             )
         project_onboarding = await self._auto_onboard_unknown_projects(previous, now)
         active_boards = {project.board_id for project in projects}
+        self._harvest_approval_scan(sorted(active_boards))
         source_intake = self._schedule_source_intake_refresh(now)
         fleet = await self._reconcile_fleet(
             sorted(active_boards), snapshots, now
         )
         observation_contexts = {
             board_id: await self._observation_context_for_board(
-                board_id, snapshots[board_id], now
+                board_id,
+                snapshots[board_id],
+                now,
+                include_approval_tickets=False,
             )
             for board_id in sorted(active_boards)
         }
         observations = {
-            board_id: derive_board_observations(context)
+            board_id: [
+                *derive_board_observations(context),
+                *self._approval_findings_for_board(board_id, now),
+            ]
             for board_id, context in observation_contexts.items()
         }
         configured = (
@@ -12255,6 +12629,7 @@ class CentralBackend:
                 await self._write_observation_findings(
                     board_id, observations[board_id], now
                 )
+        approval_scan = self._schedule_approval_scan(sorted(active_boards), now)
         return {
             "active_boards": sorted(active_boards),
             "acting_boards": sorted(acting_boards),
@@ -12272,6 +12647,7 @@ class CentralBackend:
             "fleet": dict(fleet),
             "project_onboarding": project_onboarding,
             "source_intake": source_intake,
+            "approval_scan": approval_scan,
             "board_failures": {
                 board_id: list(rows)
                 for board_id, rows in sorted(self._registry_failures.items())
@@ -13075,6 +13451,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="maximum interval between real coordinator derivations",
     )
     parser.add_argument(
+        "--approval-scan-budget",
+        type=int,
+        default=DEFAULT_APPROVAL_SCAN_BUDGET,
+        help="maximum approved-ticket git classifications per board background cycle",
+    )
+    parser.add_argument(
         "--act-on-board",
         action="append",
         default=[],
@@ -13168,6 +13550,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--wait-timeout must be positive")
     if not 10 <= args.refresh_seconds <= 60:
         parser.error("--refresh-seconds must be between 10 and 60")
+    if not 1 <= args.approval_scan_budget <= OBSERVATION_TICKET_LIMIT:
+        parser.error(
+            f"--approval-scan-budget must be between 1 and {OBSERVATION_TICKET_LIMIT}"
+        )
     if not 1 <= args.no_live_candidates_cycles <= 50:
         parser.error("--no-live-candidates-cycles must be between 1 and 50")
     if not 1 <= args.action_hold_seconds <= 86_400:

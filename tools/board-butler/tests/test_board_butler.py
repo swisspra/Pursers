@@ -296,6 +296,7 @@ def args(tmp_path: Path, *, dry_run: bool = False) -> argparse.Namespace:
         drafts_per_board=20,
         project="Pursers",
         wait_timeout=1,
+        approval_scan_budget=butler.DEFAULT_APPROVAL_SCAN_BUDGET,
         once=True,
         dry_run=dry_run,
         runtime_mode="shadow",
@@ -317,6 +318,25 @@ def cli_args(tmp_path: Path) -> list[str]:
         "--cursor-file",
         str(tmp_path / "cursor.json"),
     ]
+
+
+def test_approval_scan_budget_is_bounded(tmp_path: Path) -> None:
+    parsed = butler.parse_args(
+        [*cli_args(tmp_path), "--approval-scan-budget", "7"]
+    )
+    assert parsed.approval_scan_budget == 7
+    with pytest.raises(SystemExit):
+        butler.parse_args(
+            [*cli_args(tmp_path), "--approval-scan-budget", "0"]
+        )
+    with pytest.raises(SystemExit):
+        butler.parse_args(
+            [
+                *cli_args(tmp_path),
+                "--approval-scan-budget",
+                str(butler.OBSERVATION_TICKET_LIMIT + 1),
+            ]
+        )
 
 
 def test_active_mode_requires_separate_private_authorization(
@@ -4629,6 +4649,172 @@ def test_approved_not_landed_observer_reuses_equivalent_content_check(
     )
 
 
+def test_approval_classification_cache_hits_and_invalidates_exact_keys(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def classify(ticket: Mapping[str, Any], **_kwargs: Any) -> Any:
+        notes = ticket["submission_history"][-1]["notes"]
+        approved_sha = notes.rsplit("@", 1)[-1]
+        calls.append((str(ticket["ticket_id"]), approved_sha))
+        return SimpleNamespace(
+            approved_sha=approved_sha,
+            state="STRANDED",
+            matched_lines=0,
+            added_lines=1,
+        )
+
+    def approved(ticket_id: str, approved_sha: str) -> dict[str, Any]:
+        return {
+            "ticket_id": ticket_id,
+            "status": "closed",
+            "review_verdict": "approve",
+            "updated_at": (NOW - butler.timedelta(days=2)).isoformat(),
+            "submission_history": [
+                {
+                    "notes": (
+                        f"branch_and_commit: worker/{ticket_id}@{approved_sha}"
+                    )
+                }
+            ],
+        }
+
+    tickets = {
+        "TK-a": approved("TK-a", "a" * 40),
+        "TK-b": approved("TK-b", "b" * 40),
+    }
+    context = butler.ObservationContext(
+        board_id="pursers",
+        tickets=tickets,
+        questions=(),
+        now=NOW,
+        repo=tmp_path,
+        main_ref="refs/remotes/origin/main",
+    )
+    cache = butler.ApprovalClassificationCache()
+
+    first = cache.scan(context, main_sha="1" * 40, budget=10, classify=classify)
+    hit = cache.scan(context, main_sha="1" * 40, budget=10, classify=classify)
+    moved = cache.scan(context, main_sha="2" * 40, budget=10, classify=classify)
+    changed_tickets = dict(tickets)
+    changed_tickets["TK-a"] = approved("TK-a", "c" * 40)
+    changed = cache.scan(
+        replace(context, tickets=changed_tickets),
+        main_sha="2" * 40,
+        budget=10,
+        classify=classify,
+    )
+
+    assert (first.classified, first.cache_hits) == (2, 0)
+    assert (hit.classified, hit.cache_hits) == (0, 2)
+    assert (moved.classified, moved.cache_hits) == (2, 0)
+    assert (changed.classified, changed.cache_hits) == (1, 1)
+    assert len(calls) == 5
+
+
+def test_local_main_revision_reads_ref_without_git_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    expected = commit_fixture(repo, initial_branch="main")
+    monkeypatch.setattr(
+        butler.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("cache key lookup must not run git"),
+    )
+
+    assert butler._local_main_revision(repo) == ("refs/heads/main", expected)
+
+
+def test_approval_classification_budget_carries_over_without_changing_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def classify(ticket: Mapping[str, Any], **_kwargs: Any) -> Any:
+        ticket_id = str(ticket["ticket_id"])
+        calls.append(ticket_id)
+        stranded = int(ticket_id.rsplit("-", 1)[-1]) % 2 == 1
+        return SimpleNamespace(
+            approved_sha=ticket["submission_history"][-1]["notes"].rsplit("@", 1)[-1],
+            state="STRANDED" if stranded else "LANDED_ANCESTOR",
+            matched_lines=0 if stranded else None,
+            added_lines=1 if stranded else None,
+        )
+
+    tickets = {
+        f"TK-{index}": {
+            "ticket_id": f"TK-{index}",
+            "status": "closed",
+            "review_verdict": "approve",
+            "updated_at": (NOW - butler.timedelta(days=2)).isoformat(),
+            "submission_history": [
+                {
+                    "notes": (
+                        "branch_and_commit: worker/fixture@"
+                        + f"{index + 1:040x}"
+                    )
+                }
+            ],
+        }
+        for index in range(5)
+    }
+    context = butler.ObservationContext(
+        board_id="pursers",
+        tickets=tickets,
+        questions=(),
+        now=NOW,
+        repo=tmp_path,
+        main_ref="refs/remotes/origin/main",
+    )
+    cache = butler.ApprovalClassificationCache()
+
+    first = cache.scan(context, main_sha="f" * 40, budget=2, classify=classify)
+    second = cache.scan(context, main_sha="f" * 40, budget=2, classify=classify)
+    third = cache.scan(context, main_sha="f" * 40, budget=2, classify=classify)
+    assert (first.classified, first.pending, first.complete) == (2, 3, False)
+    assert (second.classified, second.pending, second.complete) == (2, 1, False)
+    assert (third.classified, third.pending, third.complete) == (1, 0, True)
+    assert len(calls) == 5
+
+    monkeypatch.setitem(
+        butler._stranded_approvals_api(), "classify_approval", classify
+    )
+    expected = butler._observe_stranded_approvals(context)
+    assert list(third.findings) == expected
+
+
+def test_approval_scan_scheduler_does_not_await_heavy_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = butler.CentralBackend(args(tmp_path), "opaque")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_scan(
+        _board_ids: Any, _now: Any
+    ) -> dict[str, butler.ApprovalScanOutcome]:
+        started.set()
+        await release.wait()
+        return {}
+
+    monkeypatch.setattr(backend, "_run_approval_scan_cycle", slow_scan)
+
+    async def exercise() -> None:
+        scheduled = backend._schedule_approval_scan(["pursers"], NOW)
+        assert scheduled["status"] == "scheduled"
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert backend._approval_scan_task is not None
+        assert not backend._approval_scan_task.done()
+        release.set()
+        await backend._approval_scan_task
+        backend._harvest_approval_scan(["pursers"])
+
+    asyncio.run(exercise())
+    assert backend._approval_scan_task is None
+
+
 def test_mature_board_hydrates_closed_approval_without_intake_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5384,7 +5570,7 @@ def test_registry_refresh_runs_real_derivation_for_two_active_boards_twice(
     )
 
     async def observation_context(
-        board_id: str, _snapshot: Mapping[str, Any], now: Any
+        board_id: str, _snapshot: Mapping[str, Any], now: Any, **_kwargs: Any
     ) -> Any:
         return butler.ObservationContext(
             board_id=board_id, tickets={}, questions=(), now=now
@@ -5536,7 +5722,7 @@ def test_registry_refresh_continues_after_list_get_delete_race(
     monkeypatch.setattr(backend, "_client_for_board", client_for_board)
 
     async def observation_context(
-        board_id: str, _snapshot: Mapping[str, Any], now: Any
+        board_id: str, _snapshot: Mapping[str, Any], now: Any, **_kwargs: Any
     ) -> butler.ObservationContext:
         return butler.ObservationContext(
             board_id=board_id, tickets={}, questions=(), now=now
@@ -5563,13 +5749,13 @@ def test_registry_refresh_continues_after_list_get_delete_race(
     assert refreshed["active_boards"] == ["away", "home"]
     assert refreshed["observations"] == {
         "away": {
-            "findings": 0,
+            "findings": 1,
             "open_questions": 0,
             "reconciled_open_questions": 0,
             "repeat_rediscovery_escalations": 0,
         },
         "home": {
-            "findings": 0,
+            "findings": 1,
             "open_questions": 0,
             "reconciled_open_questions": 0,
             "repeat_rediscovery_escalations": 0,
