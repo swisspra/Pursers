@@ -45,6 +45,14 @@ class ProjectLifecycleConflictError(RuntimeError):
     """Observed product state changed after the plan was created."""
 
 
+class ProjectLifecycleCloneError(ProjectLifecycleConflictError):
+    """A clone failed with a bounded reason that is safe to persist."""
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__("Git source clone failed; the target was preserved for inspection")
+        self.reason_code = reason_code
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -684,6 +692,21 @@ def clone_project_source(plan: Mapping[str, Any]) -> None:
         env=env,
     )
     if completed.returncode != 0:
-        raise ProjectLifecycleConflictError(
-            "Git source clone failed; the target was preserved for inspection"
+        detail = f"{completed.stdout}\n{completed.stderr}".casefold()
+        access_markers = (
+            "authentication failed",
+            "authorization failed",
+            "permission denied",
+            "access denied",
+            "repository not found",
+            "could not read username",
+            "terminal prompts disabled",
+            "requested url returned error: 401",
+            "requested url returned error: 403",
         )
+        reason_code = (
+            "repository_access_denied"
+            if any(marker in detail for marker in access_markers)
+            else "clone_failed"
+        )
+        raise ProjectLifecycleCloneError(reason_code)

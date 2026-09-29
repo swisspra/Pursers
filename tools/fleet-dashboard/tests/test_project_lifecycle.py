@@ -466,3 +466,40 @@ def test_failed_source_clone_preserves_partial_target(
     ):
         lifecycle.clone_project_source(plan)
     assert (target / "partial.data").read_text(encoding="utf-8") == "inspect"
+
+
+@pytest.mark.parametrize(
+    ("stderr", "reason_code"),
+    [
+        ("fatal: Authentication failed for private source TOKEN-CANARY", "repository_access_denied"),
+        ("fatal: transport closed unexpectedly at /PRIVATE/repo", "clone_failed"),
+    ],
+)
+def test_failed_source_clone_returns_only_bounded_reason_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stderr: str,
+    reason_code: str,
+) -> None:
+    target = tmp_path / "new-checkout"
+
+    def fail_clone(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 1, "", stderr)
+
+    monkeypatch.setattr(lifecycle.subprocess, "run", fail_clone)
+    plan = {
+        "source": {
+            "git_mode": "clone",
+            "path": str(target),
+            "repository_url": "https://example.invalid/demo.git",
+            "integration_ref": "main",
+        }
+    }
+
+    with pytest.raises(lifecycle.ProjectLifecycleCloneError) as raised:
+        lifecycle.clone_project_source(plan)
+
+    assert raised.value.reason_code == reason_code
+    assert stderr not in str(raised.value)
+    assert "TOKEN-CANARY" not in str(raised.value)
+    assert "/PRIVATE/repo" not in str(raised.value)

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import copy
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
@@ -349,6 +350,350 @@ def test_active_mode_requires_separate_private_authorization(
         butler.parse_args(
             [*base, "--active-authorization-file", str(authorization)]
         )
+
+
+def test_intake_onboarding_config_is_private_bounded_and_absolute(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "intake-onboarding.json"
+    config.write_text(
+        json.dumps(
+            {
+                "sources": {
+                    "sonarqube": {
+                        "domain": "work",
+                        "projects_root": str(tmp_path / "projects"),
+                        "auto_onboard": True,
+                        "per_cycle_cap": 2,
+                        "retry_limit": 3,
+                        "retry_backoff_s": 30,
+                        "repositories": {
+                            "alpha": {
+                                "repository_url": "https://example.invalid/alpha.git",
+                                "integration_ref": "main",
+                            }
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    parsed = butler.parse_args(
+        [*cli_args(tmp_path), "--intake-onboarding-config", str(config)]
+    )
+
+    assert parsed.intake_onboarding_config == config
+    policies = butler.load_project_onboarding_policies(config)
+    assert set(policies) == {"sonarqube"}
+    assert policies["sonarqube"].auto_onboard is True
+
+
+def test_pending_project_items_consumes_only_generic_unknown_project_findings() -> None:
+    items = butler.pending_project_items(
+        {
+            "source-board": {
+                "findings": [
+                    {
+                        "kind": "intake_unroutable_project",
+                        "status": "pending",
+                        "item_id": "SQ-7",
+                        "source_id": "sonarqube",
+                        "project_hint": "alpha",
+                    },
+                    {
+                        "kind": "butler_observation",
+                        "item_id": "ignored",
+                        "source_id": "sonarqube",
+                        "project_hint": "beta",
+                    },
+                ]
+            }
+        }
+    )
+
+    assert [(item.item_id, item.source_id, item.project_hint) for item in items] == [
+        ("SQ-7", "sonarqube", "alpha")
+    ]
+
+
+def test_central_project_registry_adds_board_registry_and_bounded_audit() -> None:
+    initial = json.dumps(
+        {"schema_version": 1, "projects": {}}, sort_keys=True, separators=(",", ":")
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.values = {"project_registry": initial}
+            self.onboarded: list[tuple[str, Mapping[str, Any]]] = []
+
+        async def board_state_get(self, key: str) -> Mapping[str, Any]:
+            if key not in self.values:
+                raise RuntimeError("state key not found")
+            return {"state": {"key": key, "value": self.values[key]}}
+
+        async def board_state_update(
+            self, key: str, value: str, *, expected_sha256: str | None = None
+        ) -> Mapping[str, Any]:
+            current = self.values.get(key)
+            expected = (
+                hashlib.sha256(current.encode("utf-8")).hexdigest()
+                if current is not None
+                else None
+            )
+            assert expected_sha256 == expected
+            self.values[key] = value
+            return {"ok": True}
+
+        async def board_onboard(self, **arguments: Any) -> Mapping[str, Any]:
+            self.onboarded.append(("alpha-board", arguments))
+            return {"ok": True}
+
+    client = Client()
+    backend = SimpleNamespace(client=client)
+
+    @contextlib.asynccontextmanager
+    async def client_for_board(_board_id: str):
+        yield client
+
+    backend._client_for_board = client_for_board
+    adapter = butler.CentralProjectRegistry(backend)
+    loaded_retry: dict[tuple[str, str], Any] = {}
+
+    async def exercise() -> None:
+        _registry, digest = await adapter.snapshot()
+        await adapter.ensure_board("alpha-board", "work")
+        await adapter.add_project(
+            "alpha",
+            {
+                "board_id": "alpha-board",
+                "work_dir": "/PATH/TO/alpha",
+                "status": "active",
+                "repository_url": "https://example.invalid/alpha.git",
+                "integration_ref": "main",
+                "domain": "work",
+            },
+            expected_sha256=digest,
+        )
+        await adapter.audit_project_onboarding(
+            {
+                "schema_version": 1,
+                "kind": "project_auto_onboarding",
+                "item_id": "SQ-7",
+                "source_id": "sonarqube",
+                "project_hint": "alpha",
+                "status": "onboarded",
+                "board_id": "alpha-board",
+                "at": NOW.isoformat(),
+            }
+        )
+        await adapter.audit_project_onboarding(
+            {
+                "schema_version": 1,
+                "kind": "project_auto_onboarding",
+                "item_id": "SQ-8",
+                "source_id": "sonarqube",
+                "project_hint": "private",
+                "status": "access_denied",
+                "board_id": None,
+                "retry_attempts": 2,
+                "retry_at": (NOW + butler.timedelta(seconds=60)).isoformat(),
+                "at": NOW.isoformat(),
+            }
+        )
+        await adapter.flush_audits()
+        loaded_retry.update(
+            await adapter.load_retry_state(
+                butler._project_onboarding_api(), [("sonarqube", "private")]
+            )
+        )
+
+    asyncio.run(exercise())
+
+    stored = json.loads(client.values["project_registry"])
+    assert stored["projects"]["alpha"]["domain"] == "work"
+    assert stored["projects"]["alpha"]["integration_ref"] == "main"
+    audit = json.loads(client.values[butler.PROJECT_ONBOARDING_AUDIT_KEY])
+    assert audit["events"][0] == (
+        {
+            "schema_version": 1,
+            "kind": "project_auto_onboarding",
+            "item_id": "SQ-7",
+            "source_id": "sonarqube",
+            "project_hint": "alpha",
+            "status": "onboarded",
+            "board_id": "alpha-board",
+            "at": NOW.isoformat(),
+        }
+    )
+    assert len(audit["events"]) == 2
+    restored = loaded_retry[("sonarqube", "private")]
+    assert restored.attempts == 2
+    assert restored.retry_at == NOW + butler.timedelta(seconds=60)
+    assert len(client.onboarded) == 1
+
+
+def test_project_onboarding_retry_state_survives_bounded_audit_and_restart() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+
+        async def board_state_get(self, key: str) -> Mapping[str, Any]:
+            if key not in self.values:
+                raise RuntimeError("state key not found")
+            return {"state": {"key": key, "value": self.values[key]}}
+
+        async def board_state_update(
+            self, key: str, value: str, *, expected_sha256: str | None = None
+        ) -> Mapping[str, Any]:
+            current = self.values.get(key)
+            expected = (
+                hashlib.sha256(current.encode("utf-8")).hexdigest()
+                if current is not None
+                else None
+            )
+            assert expected_sha256 == expected
+            self.values[key] = value
+            return {"ok": True}
+
+    client = Client()
+    api = butler._project_onboarding_api()
+    retry_at = (NOW + butler.timedelta(hours=1)).isoformat()
+    retry_keys = [
+        ("sonarqube", f"private-project-{index:03d}") for index in range(50)
+    ]
+
+    async def exercise() -> tuple[
+        dict[tuple[str, str], Any], dict[tuple[str, str], Any]
+    ]:
+        adapter = butler.CentralProjectRegistry(SimpleNamespace(client=client))
+        for index in range(50):
+            await adapter.audit_project_onboarding(
+                {
+                    "schema_version": 1,
+                    "kind": "project_auto_onboarding",
+                    "item_id": f"SQ-{index:03d}",
+                    "source_id": "sonarqube",
+                    "project_hint": f"private-project-{index:03d}",
+                    "status": "access_denied",
+                    "board_id": None,
+                    "retry_attempts": 2,
+                    "retry_at": retry_at,
+                    "at": NOW.isoformat(),
+                }
+            )
+        await adapter.flush_audits()
+
+        restarted = butler.CentralProjectRegistry(SimpleNamespace(client=client))
+        before_success = await restarted.load_retry_state(api, retry_keys)
+        await restarted.audit_project_onboarding(
+            {
+                "schema_version": 1,
+                "kind": "project_auto_onboarding",
+                "item_id": "SQ-000",
+                "source_id": "sonarqube",
+                "project_hint": "private-project-000",
+                "status": "already_registered",
+                "board_id": "private-project-000-board",
+                "at": NOW.isoformat(),
+            }
+        )
+        await restarted.flush_audits()
+
+        restarted_again = butler.CentralProjectRegistry(SimpleNamespace(client=client))
+        return before_success, await restarted_again.load_retry_state(api, retry_keys)
+
+    before_success, after_success = asyncio.run(exercise())
+
+    audit = json.loads(client.values[butler.PROJECT_ONBOARDING_AUDIT_KEY])
+    retry_values = [
+        value
+        for key, value in client.values.items()
+        if key.startswith(butler.PROJECT_ONBOARDING_RETRY_KEY_PREFIX)
+    ]
+    assert len(audit["events"]) < 50
+    assert len(retry_values) == 50
+    assert sum(map(len, retry_values)) > butler.MAX_STATE_CHARS
+    assert all(len(value) <= 5_000 for value in retry_values)
+    assert len(before_success) == 50
+    assert before_success[("sonarqube", "private-project-000")].attempts == 2
+    assert before_success[("sonarqube", "private-project-049")].retry_at == (
+        NOW + butler.timedelta(hours=1)
+    )
+    assert ("sonarqube", "private-project-000") not in after_success
+    assert len(after_success) == 49
+
+
+def test_project_onboarding_retry_cas_merge_never_reduces_attempts() -> None:
+    source_id = "sonarqube"
+    project_hint = "private"
+    local_retry_at = (NOW + butler.timedelta(seconds=30)).isoformat()
+    concurrent_retry_at = (NOW + butler.timedelta(seconds=90)).isoformat()
+
+    def event(attempts: int, retry_at: str) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "kind": "project_auto_onboarding",
+            "item_id": "SQ-private",
+            "source_id": source_id,
+            "project_hint": project_hint,
+            "status": "access_denied",
+            "board_id": None,
+            "retry_attempts": attempts,
+            "retry_at": retry_at,
+            "at": NOW.isoformat(),
+        }
+
+    concurrent_value = butler.CentralProjectRegistry._merge_retry_events(
+        None, source_id, project_hint, [event(3, concurrent_retry_at)]
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.values: dict[str, str] = {}
+            self.inject_conflict = True
+
+        async def board_state_get(self, key: str) -> Mapping[str, Any]:
+            if key not in self.values:
+                raise RuntimeError("state key not found")
+            return {"state": {"key": key, "value": self.values[key]}}
+
+        async def board_state_update(
+            self, key: str, value: str, *, expected_sha256: str | None = None
+        ) -> Mapping[str, Any]:
+            if (
+                self.inject_conflict
+                and key.startswith(butler.PROJECT_ONBOARDING_RETRY_KEY_PREFIX)
+            ):
+                self.inject_conflict = False
+                self.values[key] = concurrent_value
+                raise RuntimeError("state precondition failed")
+            current = self.values.get(key)
+            expected = (
+                hashlib.sha256(current.encode("utf-8")).hexdigest()
+                if current is not None
+                else None
+            )
+            assert expected_sha256 == expected
+            self.values[key] = value
+            return {"ok": True}
+
+    client = Client()
+    adapter = butler.CentralProjectRegistry(SimpleNamespace(client=client))
+
+    async def exercise() -> Any:
+        await adapter.audit_project_onboarding(event(2, local_retry_at))
+        await adapter.flush_audits()
+        restored = await adapter.load_retry_state(
+            butler._project_onboarding_api(), [(source_id, project_hint)]
+        )
+        return restored[(source_id, project_hint)]
+
+    restored = asyncio.run(exercise())
+
+    assert restored.attempts == 3
+    assert restored.retry_at == NOW + butler.timedelta(seconds=90)
 
 
 def test_autonomous_answering_requires_private_active_runtime_authority(

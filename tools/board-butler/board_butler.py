@@ -71,6 +71,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 STATE_KEY = "coordinator_findings"
 SUBSCRIPTION_HEALTH_KEY = "board_butler_subscription_health"
 FLEET_STATE_KEY = "autonomous_butler_state"
+PROJECT_ONBOARDING_AUDIT_KEY = "board_butler_project_onboarding"
+PROJECT_ONBOARDING_RETRY_KEY_PREFIX = "butler_retry."
 EVALUATION_STATE_PREFIX = "board_butler_evaluation."
 CONFIG_KEY = "coordinator_config"
 SCHEMA_VERSION = 1
@@ -94,6 +96,7 @@ MECHANICAL_ACTION_CLASSES = (
 )
 MAX_FINDINGS = 50
 MAX_STATE_CHARS = 4_800
+MAX_PROJECT_ONBOARDING_AUDITS = 25
 MAX_PROVIDER_RESPONSE_BYTES = 1_000_000
 MAX_PROVIDER_DRAFT_CHARS = 2_000
 MAX_PROVIDER_PROMPT_CHARS = 12_000
@@ -7729,6 +7732,86 @@ def _stranded_approvals_api() -> dict[str, Any]:
     return _STRANDED_APPROVALS_API
 
 
+_PROJECT_ONBOARDING_API: dict[str, Any] | None = None
+_REGISTRY_ADMIN_API: dict[str, Any] | None = None
+
+
+def _project_onboarding_api() -> dict[str, Any]:
+    global _PROJECT_ONBOARDING_API
+    if _PROJECT_ONBOARDING_API is None:
+        path = Path(__file__).with_name("project_onboarding.py")
+        _PROJECT_ONBOARDING_API = runpy.run_path(
+            str(path), run_name="board_butler_project_onboarding"
+        )
+    return _PROJECT_ONBOARDING_API
+
+
+def _registry_admin_api() -> dict[str, Any]:
+    global _REGISTRY_ADMIN_API
+    if _REGISTRY_ADMIN_API is None:
+        path = Path(__file__).resolve().parents[1] / "wait-bridge" / "registry_admin.py"
+        _REGISTRY_ADMIN_API = runpy.run_path(
+            str(path), run_name="board_butler_registry_admin"
+        )
+    return _REGISTRY_ADMIN_API
+
+
+def load_project_onboarding_policies(path: Path | None) -> Mapping[str, Any]:
+    """Load the private operator config without projecting its paths or URLs."""
+    if path is None:
+        return {}
+    if not path.is_absolute() or not path.is_file():
+        raise ValueError("--intake-onboarding-config must name an existing absolute file")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("intake onboarding config is unreadable") from exc
+    if not isinstance(document, Mapping):
+        raise ValueError("intake onboarding config must be an object")
+    return _project_onboarding_api()["parse_source_policies"](document)
+
+
+def pending_project_items(
+    previous: Mapping[str, Mapping[str, Any]],
+) -> list[Any]:
+    """Decode only the bounded generic-intake unknown-project finding contract."""
+    api = _project_onboarding_api()
+    item_type = api["PendingProjectItem"]
+    selected: dict[tuple[str, str], Any] = {}
+    supported_kinds = {
+        "intake_unroutable",
+        "intake-unroutable",
+        "intake_unroutable_project",
+    }
+    for board_id, document in sorted(previous.items()):
+        findings = document.get("findings") if isinstance(document, Mapping) else None
+        if not isinstance(findings, list):
+            continue
+        for index, finding in enumerate(findings):
+            if not isinstance(finding, Mapping):
+                continue
+            if (
+                finding.get("kind") not in supported_kinds
+                and finding.get("reason_code") != "unknown_project"
+            ):
+                continue
+            if finding.get("status", "pending") not in {"pending", "unroutable"}:
+                continue
+            source_id = finding.get("source_id", finding.get("source"))
+            project_hint = finding.get("project_hint")
+            item_id = finding.get("item_id", finding.get("finding_id"))
+            if not isinstance(item_id, str) or not item_id:
+                item_id = f"{board_id}:{index}"
+            if not isinstance(source_id, str) or not isinstance(project_hint, str):
+                continue
+            selected[(source_id, item_id)] = item_type(
+                item_id=item_id,
+                source_id=source_id,
+                project_hint=project_hint,
+            )
+    return list(selected.values())
+
+
 def _local_main_ref(repo: Path) -> str | None:
     for reference in ("refs/remotes/origin/main", "refs/heads/main"):
         completed = subprocess.run(
@@ -9445,6 +9528,317 @@ def plan_mechanical_actions(
     return actions
 
 
+class CentralProjectRegistry:
+    """Central-backed registry/board adapter used only by the onboarding core."""
+
+    def __init__(self, backend: "CentralBackend") -> None:
+        self.backend = backend
+        self.audit_events: list[dict[str, Any]] = []
+
+    async def snapshot(self) -> tuple[Mapping[str, Any], str]:
+        raw = await self.backend.client.board_state_get("project_registry")
+        state = raw.get("state", {})
+        value = state.get("value") if isinstance(state, Mapping) else None
+        if not isinstance(value, str):
+            raise RuntimeError("project registry state is malformed")
+        try:
+            document = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("project registry state is malformed") from exc
+        validated = _registry_admin_api()["validate_registry"](document)
+        return validated, hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    async def ensure_board(self, board_id: str, _domain: str) -> None:
+        async with self.backend._client_for_board(board_id) as client:
+            await client.board_onboard(
+                role="coordinator",
+                capabilities=dict(BOARD_BUTLER_CAPABILITIES),
+                allow_takeover=True,
+            )
+
+    async def add_project(
+        self,
+        name: str,
+        entry: Mapping[str, Any],
+        *,
+        expected_sha256: str,
+    ) -> None:
+        registry, current_sha256 = await self.snapshot()
+        if current_sha256 != expected_sha256:
+            raise RuntimeError("project registry changed during onboarding")
+        projects = registry.get("projects")
+        if not isinstance(projects, dict):
+            raise RuntimeError("project registry projects are malformed")
+        existing = projects.get(name)
+        proposed = copy.deepcopy(dict(entry))
+        if existing == proposed:
+            return
+        if existing is not None:
+            raise RuntimeError("project registry name already exists")
+        projects[name] = proposed
+        validated = _registry_admin_api()["validate_registry"](registry)
+        encoded = json.dumps(validated, sort_keys=True, separators=(",", ":"))
+        await self.backend.client.board_state_update(
+            "project_registry", encoded, expected_sha256=expected_sha256
+        )
+
+    async def audit_project_onboarding(self, event: Mapping[str, Any]) -> None:
+        self.audit_events.append(copy.deepcopy(dict(event)))
+
+    async def _state_value(self, key: str) -> str | None:
+        try:
+            raw = await self.backend.client.board_state_get(key)
+        except Exception as exc:
+            if "state key not found" in str(exc).casefold():
+                return None
+            raise
+        state = raw.get("state", {})
+        value = state.get("value") if isinstance(state, Mapping) else None
+        if not isinstance(value, str):
+            raise RuntimeError(f"{key} state value is malformed")
+        return value
+
+    @staticmethod
+    def _retry_state_key(source_id: str, project_hint: str) -> str:
+        material = json.dumps(
+            [source_id, project_hint], ensure_ascii=True, separators=(",", ":")
+        )
+        return PROJECT_ONBOARDING_RETRY_KEY_PREFIX + hashlib.sha256(
+            material.encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _retry_row(
+        value: str | None, source_id: str, project_hint: str
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        try:
+            document = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("project onboarding retry state is malformed") from exc
+        if (
+            not isinstance(document, Mapping)
+            or document.get("schema_version") != 1
+            or document.get("source_id") != source_id
+            or document.get("project_hint") != project_hint
+        ):
+            raise RuntimeError("project onboarding retry state is malformed")
+        retry = document.get("retry")
+        if retry is None:
+            return None
+        if not isinstance(retry, Mapping):
+            raise RuntimeError("project onboarding retry state is malformed")
+        attempts = retry.get("attempts")
+        retry_at = retry.get("retry_at")
+        if (
+            not isinstance(attempts, int)
+            or isinstance(attempts, bool)
+            or attempts < 1
+            or (retry_at is not None and parse_time(retry_at) is None)
+        ):
+            raise RuntimeError("project onboarding retry state is malformed")
+        return {"attempts": attempts, "retry_at": retry_at}
+
+    @classmethod
+    def _merge_retry_events(
+        cls,
+        value: str | None,
+        source_id: str,
+        project_hint: str,
+        events: Sequence[Mapping[str, Any]],
+    ) -> str:
+        row = cls._retry_row(value, source_id, project_hint)
+        for event in events:
+            if (
+                event.get("source_id") != source_id
+                or event.get("project_hint") != project_hint
+            ):
+                continue
+            if event.get("status") in {"onboarded", "already_registered"}:
+                row = None
+                continue
+            attempts = event.get("retry_attempts")
+            retry_at = event.get("retry_at")
+            if (
+                not isinstance(attempts, int)
+                or isinstance(attempts, bool)
+                or attempts < 1
+                or (retry_at is not None and parse_time(retry_at) is None)
+            ):
+                continue
+            if row is not None:
+                current_attempts = row["attempts"]
+                current_retry_at = parse_time(row.get("retry_at"))
+                proposed_retry_at = parse_time(retry_at)
+                if attempts < current_attempts or (
+                    attempts == current_attempts
+                    and current_retry_at is not None
+                    and (
+                        proposed_retry_at is None
+                        or proposed_retry_at <= current_retry_at
+                    )
+                ):
+                    continue
+            row = {"attempts": attempts, "retry_at": retry_at}
+        candidate = {
+            "schema_version": 1,
+            "source_id": source_id,
+            "project_hint": project_hint,
+            "retry": row,
+        }
+        encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+        if len(encoded) > 5_000:
+            raise RuntimeError("project onboarding retry state capacity exceeded")
+        return encoded
+
+    async def _legacy_retry_events(self) -> list[Mapping[str, Any]]:
+        value = await self._state_value(PROJECT_ONBOARDING_AUDIT_KEY)
+        if value is None:
+            return []
+        try:
+            document = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        raw_events = document.get("events") if isinstance(document, Mapping) else None
+        if not isinstance(raw_events, list):
+            return []
+        return [row for row in raw_events if isinstance(row, Mapping)]
+
+    async def _flush_retry_key(
+        self,
+        source_id: str,
+        project_hint: str,
+        events: Sequence[Mapping[str, Any]],
+    ) -> None:
+        state_key = self._retry_state_key(source_id, project_hint)
+        expected_value = await self._state_value(state_key)
+        for attempt in range(STATE_WRITE_MAX_ATTEMPTS):
+            candidate = self._merge_retry_events(
+                expected_value, source_id, project_hint, events
+            )
+            if candidate == expected_value:
+                return
+            expected_digest = (
+                hashlib.sha256(expected_value.encode("utf-8")).hexdigest()
+                if expected_value is not None
+                else None
+            )
+            try:
+                await self.backend.client.board_state_update(
+                    state_key,
+                    candidate,
+                    expected_sha256=expected_digest,
+                )
+                return
+            except Exception as exc:
+                if "state precondition failed" not in str(exc).casefold():
+                    raise
+                if attempt + 1 >= STATE_WRITE_MAX_ATTEMPTS:
+                    raise StateWriteConflict(
+                        state_key, STATE_WRITE_MAX_ATTEMPTS
+                    ) from exc
+                expected_value = await self._state_value(state_key)
+                delay = STATE_WRITE_RETRY_BASE_DELAY_S * (2**attempt)
+                delay += random.uniform(0.0, STATE_WRITE_RETRY_BASE_DELAY_S)
+                await asyncio.sleep(delay)
+
+    async def _flush_retry_state(self, events: Sequence[Mapping[str, Any]]) -> None:
+        keys = sorted(
+            {
+                (event.get("source_id"), event.get("project_hint"))
+                for event in events
+                if isinstance(event.get("source_id"), str)
+                and isinstance(event.get("project_hint"), str)
+                and (
+                    event.get("status") in {"onboarded", "already_registered"}
+                    or (
+                        isinstance(event.get("retry_attempts"), int)
+                        and not isinstance(event.get("retry_attempts"), bool)
+                        and event.get("retry_attempts") >= 1
+                    )
+                )
+            }
+        )
+        for source_id, project_hint in keys:
+            await self._flush_retry_key(source_id, project_hint, events)
+
+    async def load_retry_state(
+        self,
+        api: Mapping[str, Any],
+        keys: Sequence[tuple[str, str]],
+    ) -> dict[tuple[str, str], Any]:
+        legacy_events = await self._legacy_retry_events()
+        result: dict[tuple[str, str], Any] = {}
+        retry_type = api["RetryState"]
+        for source_id, project_hint in sorted(set(keys)):
+            state_key = self._retry_state_key(source_id, project_hint)
+            value = await self._state_value(state_key)
+            if value is None:
+                value = self._merge_retry_events(
+                    None, source_id, project_hint, legacy_events
+                )
+            row = self._retry_row(value, source_id, project_hint)
+            if row is None:
+                continue
+            key = (source_id, project_hint)
+            result[key] = retry_type(
+                attempts=row["attempts"], retry_at=parse_time(row.get("retry_at"))
+            )
+        return result
+
+    async def flush_audits(self) -> None:
+        if not self.audit_events:
+            return
+        pending_events = copy.deepcopy(self.audit_events)
+        await self._flush_retry_state(pending_events)
+        try:
+            raw = await self.backend.client.board_state_get(
+                PROJECT_ONBOARDING_AUDIT_KEY
+            )
+        except Exception as exc:
+            if "state key not found" not in str(exc).casefold():
+                raise
+            previous_value = None
+            document: dict[str, Any] = {"schema_version": 1, "events": []}
+        else:
+            state = raw.get("state", {})
+            previous_value = state.get("value") if isinstance(state, Mapping) else None
+            try:
+                parsed = json.loads(previous_value) if isinstance(previous_value, str) else {}
+            except json.JSONDecodeError:
+                parsed = {}
+            document = (
+                dict(parsed)
+                if isinstance(parsed, Mapping) and parsed.get("schema_version") == 1
+                else {"schema_version": 1, "events": []}
+            )
+        rows = [
+            dict(item)
+            for item in document.get("events", [])
+            if isinstance(item, Mapping)
+        ]
+        rows.extend(pending_events)
+        rows = rows[-MAX_PROJECT_ONBOARDING_AUDITS:]
+        candidate = {"schema_version": 1, "events": rows}
+        encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+        while len(encoded) > MAX_STATE_CHARS and rows:
+            rows.pop(0)
+            candidate["events"] = rows
+            encoded = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
+        expected = (
+            hashlib.sha256(previous_value.encode("utf-8")).hexdigest()
+            if previous_value is not None
+            else None
+        )
+        await self.backend.client.board_state_update(
+            PROJECT_ONBOARDING_AUDIT_KEY,
+            encoded,
+            expected_sha256=expected,
+        )
+        self.audit_events.clear()
+
+
 class CentralBackend:
     """Central adapter for push waits, real derivation, reads, and bounded CAS writes."""
 
@@ -9458,8 +9852,70 @@ class CentralBackend:
         self.project_name: str | None = None
         self._coordinator: dict[str, Any] | None = None
         self._registry_failures: dict[str, list[dict[str, str]]] = {}
+        self._project_onboarding_policies = load_project_onboarding_policies(
+            getattr(args, "intake_onboarding_config", None)
+        )
+        self._project_registry_adapter: CentralProjectRegistry | None = None
+        self._project_onboarder: Any = None
+        self._project_onboarding_retry_keys: set[tuple[str, str]] = set()
         self.subscription_healthy = True
         self._subscription_failure_active = False
+
+    async def _auto_onboard_unknown_projects(
+        self,
+        previous: Mapping[str, Mapping[str, Any]],
+        now: datetime,
+    ) -> list[dict[str, Any]]:
+        items = pending_project_items(previous)
+        if not self._project_onboarding_policies or not items:
+            return []
+        if getattr(self.args, "runtime_mode", "shadow") != "active":
+            return [
+                {
+                    "item_id": item.item_id,
+                    "source_id": item.source_id,
+                    "project_hint": item.project_hint,
+                    "status": "shadow",
+                    "finding": (
+                        f"project {item.project_hint} requires onboarding; "
+                        "Butler active mode is disabled"
+                    )[:240],
+                }
+                for item in items
+            ]
+        if self._project_registry_adapter is None:
+            self._project_registry_adapter = CentralProjectRegistry(self)
+        item_keys = {(item.source_id, item.project_hint) for item in items}
+        new_retry_keys = sorted(item_keys - self._project_onboarding_retry_keys)
+        retry_state: dict[tuple[str, str], Any] = {}
+        if new_retry_keys:
+            retry_state = await self._project_registry_adapter.load_retry_state(
+                _project_onboarding_api(), new_retry_keys
+            )
+        if self._project_onboarder is None:
+            api = _project_onboarding_api()
+            self._project_onboarder = api["ProjectOnboarder"](
+                self._project_registry_adapter,
+                self._project_onboarding_policies,
+                clock=utc_now,
+                retry_state=retry_state,
+            )
+        else:
+            self._project_onboarder.retry_state.update(retry_state)
+        self._project_onboarding_retry_keys.update(new_retry_keys)
+        results = await self._project_onboarder.run_cycle(items)
+        await self._project_registry_adapter.flush_audits()
+        return [
+            {
+                "item_id": result.item_id,
+                "source_id": result.source_id,
+                "project_hint": result.project_hint,
+                "status": result.status,
+                "board_id": result.board_id,
+                "finding": result.finding,
+            }
+            for result in results
+        ]
 
     async def __aenter__(self) -> "CentralBackend":
         from pursers_client import BoardClient
@@ -10571,6 +11027,7 @@ class CentralBackend:
             projects, snapshots, previous = await coordinator["read_cycle"](
                 reader, self.args.home_board
             )
+        project_onboarding = await self._auto_onboard_unknown_projects(previous, now)
         active_boards = {project.board_id for project in projects}
         fleet = await self._reconcile_fleet(
             sorted(active_boards), snapshots, now
@@ -10673,6 +11130,7 @@ class CentralBackend:
                 for board_id in sorted(active_boards)
             },
             "fleet": dict(fleet),
+            "project_onboarding": project_onboarding,
             "board_failures": {
                 board_id: list(rows)
                 for board_id, rows in sorted(self._registry_failures.items())
@@ -11402,6 +11860,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             / "secrets"
         ),
     )
+    parser.add_argument(
+        "--intake-onboarding-config",
+        type=Path,
+        default=(
+            Path(os.environ["PURSERS_BUTLER_INTAKE_ONBOARDING_CONFIG"]).expanduser()
+            if os.environ.get("PURSERS_BUTLER_INTAKE_ONBOARDING_CONFIG")
+            else None
+        ),
+        help="private operator JSON declaring per-source repository resolution and limits",
+    )
     parser.add_argument("--drafts-per-hour", type=int, default=DEFAULT_DRAFTS_PER_HOUR)
     parser.add_argument("--drafts-per-ticket", type=int, default=DEFAULT_DRAFTS_PER_TICKET)
     parser.add_argument("--drafts-per-board", type=int, default=DEFAULT_DRAFTS_PER_BOARD)
@@ -11483,10 +11951,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "fleet_state_file",
         "fleet_executor_socket",
         "fleet_executor_private_key",
+        "intake_onboarding_config",
     ):
         value = getattr(args, name)
         if value is not None and not value.is_absolute():
             parser.error(f"--{name.replace('_', '-')} must be absolute")
+    if args.intake_onboarding_config is not None:
+        try:
+            load_project_onboarding_policies(args.intake_onboarding_config)
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.repo is not None and not args.repo.is_dir():
         parser.error("--repo must name an existing directory")
     if not 1 <= args.drafts_per_hour <= 100:

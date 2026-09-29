@@ -319,6 +319,37 @@ class RegistryAdminTests(unittest.TestCase):
             "https://example.test/acme/beta-v2",
         )
 
+    def test_add_accepts_domain_and_integration_ref_for_intake_onboarding(self) -> None:
+        client = FakeClient()
+
+        invoke(
+            client,
+            "add",
+            "beta",
+            "--board-id",
+            "beta-board",
+            "--work-dir",
+            "/operator/beta",
+            "--repository-url",
+            "https://example.test/acme/beta",
+            "--integration-ref",
+            "release/next",
+            "--domain",
+            "work",
+        )
+
+        self.assertEqual(
+            client.document()["projects"]["beta"],
+            {
+                "board_id": "beta-board",
+                "work_dir": "/operator/beta",
+                "repository_url": "https://example.test/acme/beta",
+                "integration_ref": "release/next",
+                "domain": "work",
+                "status": "active",
+            },
+        )
+
     def test_repository_url_validation_and_same_board_uniqueness(self) -> None:
         client = FakeClient()
         with self.assertRaisesRegex(registry_admin.RegistryError, "HTTPS"):
