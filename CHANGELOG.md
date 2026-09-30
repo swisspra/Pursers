@@ -27,6 +27,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Reserve 1,600 output tokens for intake decisions so reasoning models can finish their JSON response; report truncation separately from transport failures without increasing call frequency.
+
 - Intake provider failures retain safe exception classes and HTTP status codes through backoff without logging credentials or upstream error bodies.
 
 - Project registry parsing preserves the configured integration branch for PR

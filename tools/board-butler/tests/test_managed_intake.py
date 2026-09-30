@@ -765,3 +765,23 @@ def test_intake_cache_reports_truncated_json_without_response_text(monkeypatch):
             await cache.decide(runtime, {"ceiling": 15}, NOW)
         assert cache.failure == {"error_class": "JSONDecodeError", "response_chars": 8, "response_truncated": True}
     asyncio.run(scenario())
+
+
+def test_intake_request_reserves_reasoning_and_json_output_budget(monkeypatch):
+    async def scenario():
+        async def post(_runtime, body, **_kwargs):
+            request = json.loads(body)
+            assert request["max_tokens"] == 1600
+            return {"choices": [{"finish_reason": "stop", "message": {"content": '{"pull": 1, "source_ids": ["source"]}'}}],
+                    "usage": {"prompt_tokens": 289, "completion_tokens": 207, "total_tokens": 496,
+                              "completion_tokens_details": {"reasoning_tokens": 162}, "private": "not-public"}}
+        monkeypatch.setattr(butler, "_post_provider_json", post)
+        runtime = butler.ProviderRuntime("https://model.invalid", "model", "secret", draft_protocol="openai_chat_completions_v1")
+        cache = butler.IntakeDecisionCache()
+        assert (await cache.decide(runtime, {"ceiling": 1}, NOW))["pull"] == 1
+        assert cache.evidence["provider_usage"] == {"prompt_tokens": 289, "completion_tokens": 207,
+                                                    "total_tokens": 496, "reasoning_tokens": 162}
+        assert (await cache.decide(runtime, {"ceiling": 1}, NOW))["pull"] == 1
+        assert not cache.model_called
+        assert cache.evidence == {}  # Cached reads are not new usage.
+    asyncio.run(scenario())

@@ -427,3 +427,7 @@ migration. Retain existing intake state and the Butler issue index during upgrad
 A retry can publish prepared intake entries without creating duplicate tickets.
 
 Intake decisions that report `provider_unavailable` include a bounded `error_class` and, for HTTP failures, `http_status`. The original metadata remains visible during the 15-minute backoff; raw provider messages and credentials are never included.
+
+Intake decisions reserve up to 1,600 completion tokens, shared by model reasoning and the final JSON object. This is a per-response ceiling, not a fixed charge. Empty truncated responses report `provider_response_truncated`; malformed JSON reports `provider_response_invalid`. Both fail closed and retain the existing 15-minute retry backoff. Observed empty sources still skip the model, and unchanged decision inputs still reuse the cache.
+
+When the provider reports token usage, intake audit metadata includes `provider_usage` with prompt, completion, total, and reasoning token counts. Successful cached decisions do not emit new usage. Failure metadata is retained during backoff: count usage only when `model_called` is true, using `provider_response_id` to deduplicate. Missing usage means unreported, not zero.

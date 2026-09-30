@@ -5926,7 +5926,8 @@ async def decide_intake_with_provider(
                 {"role": "system", "content": INTAKE_DECISION_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 400,
+            # Reasoning models share this budget with the final JSON response.
+            "max_tokens": 1600,
             "response_format": {"type": "json_object"},
         },
         separators=(",", ":"),
@@ -5937,6 +5938,19 @@ async def decide_intake_with_provider(
         timeout_s=PROVIDER_TIMEOUT_S,
         max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES,
     )
+    evidence: dict[str, Any] = {}
+    response_id = document.get("id") if isinstance(document, Mapping) else None
+    if isinstance(response_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,120}", response_id):
+        evidence["provider_response_id"] = response_id
+    usage = document.get("usage") if isinstance(document, Mapping) else None
+    if isinstance(usage, Mapping):
+        safe_usage = {key: usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                      if type(usage.get(key)) is int and 0 <= usage[key] <= 10_000_000}
+        details = usage.get("completion_tokens_details")
+        reasoning = details.get("reasoning_tokens") if isinstance(details, Mapping) else None
+        if type(reasoning) is int and 0 <= reasoning <= 10_000_000:
+            safe_usage["reasoning_tokens"] = reasoning
+        evidence["provider_usage"] = safe_usage
     text = _openai_chat_draft_text(document)
     if text is None:
         raise ValueError("intake decision response is malformed")
@@ -5946,6 +5960,7 @@ async def decide_intake_with_provider(
         # Inspect response shape without retaining model text in public findings.
         finish_reason = document["choices"][0].get("finish_reason")
         exc.intake_response_metadata = {
+            **evidence,
             "response_chars": len(text),
             "response_truncated": finish_reason == "length",
         }
@@ -5954,9 +5969,7 @@ async def decide_intake_with_provider(
         raise ValueError("intake decision must be a JSON object")
     decision = dict(decision)
     decision.pop("_provider_evidence", None)
-    response_id = document.get("id") if isinstance(document, Mapping) else None
-    if isinstance(response_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,120}", response_id):
-        decision["_provider_evidence"] = {"provider_response_id": response_id}
+    decision["_provider_evidence"] = evidence
     return decision
 
 
@@ -6465,7 +6478,7 @@ class SourceIntakePoller:
             decision, ceiling=ceiling, source_ids=source_ids
         )
         metadata = {"mode": "decided", "ceiling": ceiling, "pull": pull, "reason": reason}
-        for key in ("model_called", "cache_reused", "retry_after", "provider_response_id", "elapsed_ms", "model", "error_class", "http_status", "response_chars", "response_truncated"):
+        for key in ("model_called", "cache_reused", "retry_after", "provider_response_id", "elapsed_ms", "model", "error_class", "http_status", "response_chars", "response_truncated", "provider_usage"):
             if key in decision:
                 metadata[key] = decision[key]
         return pull, order, metadata
@@ -12217,7 +12230,10 @@ class CentralBackend:
         try:
             decision = await cache.decide(runtime, {**context, "board_load": self._source_board_load}, utc_now())
         except Exception:
-            return {"pull": 0, "source_ids": [], "reason": "provider_unavailable",
+            reason = ("provider_response_truncated" if cache.failure.get("response_truncated") else
+                      "provider_response_invalid" if cache.failure.get("error_class") == "JSONDecodeError" else
+                      "provider_unavailable")
+            return {"pull": 0, "source_ids": [], "reason": reason,
                     "model_called": cache.model_called, "cache_reused": False,
                     "retry_after": cache._retry_after.isoformat() if cache._retry_after else None,
                     **cache.failure}
