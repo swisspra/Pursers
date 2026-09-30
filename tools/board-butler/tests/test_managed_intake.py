@@ -910,3 +910,17 @@ def test_ado_recovers_annotation_failure_without_second_create(tmp_path):
         assert len([n for n,a in calls if n=='ado_pull_request_create'])==1
         assert poller.index.get('sonar','one')['status']=='delivered'
     asyncio.run(scenario())
+
+
+def test_intake_fleet_reports_busy_capacity_for_queue_planning():
+    worker = {'agent_name':'worker','principal_id':'worker-principal','role':'worker',
+              'status':'busy','last_activity_at':NOW.isoformat(),'capabilities_explicit':True,
+              'lease_expires_at':(NOW+timedelta(minutes=5)).isoformat(),
+              'capabilities':{'can_work':True,'can_review':False}}
+    snapshots={'home':{'agents':[worker]},'project':{'agents':[dict(worker)]}}
+    load=butler.source_intake_fleet_load(snapshots,NOW)
+    assert load['workers']==1 and load['idle_workers']==0
+    snapshots['project']['agents'][0]['last_activity_at']=(NOW-timedelta(minutes=6)).isoformat()
+    assert butler.source_intake_fleet_load(snapshots,NOW)['workers']==0
+    snapshots['project']['agents'][0].update(last_activity_at=NOW.isoformat(),status='offline')
+    assert butler.source_intake_fleet_load(snapshots,NOW)['workers']==0

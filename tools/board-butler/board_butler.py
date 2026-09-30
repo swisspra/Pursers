@@ -5922,7 +5922,7 @@ def source_intake_board_load(
 def source_intake_fleet_load(
     snapshots: Mapping[str, Mapping[str, Any]], now: datetime
 ) -> dict[str, int]:
-    """Count registry seats once; a busy membership makes that seat unavailable."""
+    """Count fresh fleet capacity once, distinguishing busy from immediately idle."""
     seats: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
     for snapshot in snapshots.values():
         agents = snapshot.get("agents", [])
@@ -5934,18 +5934,30 @@ def source_intake_fleet_load(
                 continue
             key = (str(agent.get("principal_id", "")), name)
             seats.setdefault(key, []).append(agent)
-    return {
+    counts = {
         label: sum(all(_available_for(row, capability, now) for row in rows)
                    for rows in seats.values())
         for label, capability in (("idle_workers", "can_work"), ("idle_reviewers", "can_review"))
     }
+    for label, capability in (("workers", "can_work"), ("reviewers", "can_review")):
+        counts[label] = sum(all(
+            row.get("status") not in {"offline", "retired"}
+            and _available_for({**row, "status": "idle", "lease_expires_at": None}, capability, now)
+            for row in rows
+        ) for rows in seats.values())
+    return counts
 
 
 INTAKE_DECISION_SYSTEM_PROMPT = (
     "You are the Board Butler deciding whether to pull new work from external "
-    "sources onto the board. Pull only what the board can actually run now: "
-    "consider idle capacity, work already in flight, and the review queue (do not "
-    "pull more when reviews are backing up). fleet_load counts unique physical "
+    "sources onto the board. Keep a small ready queue for the available fleet: "
+    "consider fresh worker/reviewer capacity, queued open tickets, work already "
+    "in flight, and the review queue. Busy workers are still capacity for the "
+    "next task; when the open queue is empty, consider preparing the next work "
+    "while current work is running or under review. Do not wait for every worker "
+    "to become idle before replenishing, and do not overfill a backed-up review "
+    "queue. Decide the pull count from this context, not a fixed quota. "
+    "fleet_load counts unique physical "
     "seats and takes precedence over per-board idle counts; never sum idle "
     "counts across boards because seats can belong to several boards. "
     "Prefer higher-risk sources first "
@@ -6546,10 +6558,11 @@ class SourceIntakePoller:
                 reserved.add(entry.get("external_id"))
             if entry.get("group_item") and entry.get("status") == "prepared":
                 prepared.append(json.loads(entry["group_item"]))
-            if entry.get("status") in {"asked", "delivering", "delivered"}:
-                # A PR still edits the branch until it is landed. Preserve the overlap hold.
+            if entry.get("status") in {"asked", "delivering"}:
+                # Serialize active repairs, including uncertain PR delivery. Once
+                # delivered, distinct issues may use another branch in the same file.
                 busy_paths.update((entry.get("scope_key", entry.get("project_hint")), path) for path in json.loads(entry.get("paths", "[]")))
-                if entry.get("status") != "delivered":active_groups += 1
+                active_groups += 1
         if active_groups >= source.grouping.get("max_in_flight", 15):
             return prepared
         api = runpy.run_path(str(Path(__file__).with_name("source_grouping.py")))
