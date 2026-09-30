@@ -772,7 +772,7 @@ Response fields: `ok, board_id, agents, claim_ttl_s, stale_after_days, journal_r
 
 ### `board_state_update`
 
-Atomically set one project-scoped board state value.
+Atomically set one project-scoped value, up to 262,144 characters.
 
 Required authorization: `board:write`, or restricted `board:coordinate`/`board:intake`.
 
