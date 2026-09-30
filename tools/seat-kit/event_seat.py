@@ -26,7 +26,10 @@ def validate_config(config):
         raise ValueError('invalid seat or board identity')
     for key in ('seat_dir','board_script','state_file','token_file','goose','mcp','repository_root'):
         if not Path(config[key]).is_absolute(): raise ValueError('runtime paths must be absolute')
-    for key, default, ceiling in (('max_runs_per_hour',5,100),('max_turns',30,100),('turn_timeout_s',1800,3600)):
+    hourly_limit=config.get('max_runs_per_hour',5)
+    if hourly_limit is not None and (type(hourly_limit) is not int or not 1 <= hourly_limit <= 100):
+        raise ValueError('invalid hourly run limit')
+    for key, default, ceiling in (('max_turns',30,100),('turn_timeout_s',1800,3600)):
         value=config.get(key,default)
         if type(value) is not int or not 1 <= value <= ceiling: raise ValueError('invalid turn limit')
     tier = config.get('tier_max',2)
@@ -107,9 +110,15 @@ class EventSeatRunner:
         PUBLISH(self.path,self.state)
         while pending:
             runs=[r for r in self.state['runs'] if now-r<3600]
-            if len(runs)>=self.config.get('max_runs_per_hour',5): raise ValueError('model turn budget exhausted; pending events retained')
+            limit=self.config.get('max_runs_per_hour',5)
+            if limit is not None and len(runs)>=limit:
+                self.state['runs']=runs
+                self.state['rate_limited_until']=min(runs)+3600
+                PUBLISH(self.path,self.state)
+                return max(0,self.state['rate_limited_until']-now)
+            self.state.pop('rate_limited_until',None)
             event=pending.pop(0)
-            self.state['runs']=runs+[now]
+            self.state['runs']=(runs+[now])[-200:]
             self.state['seen']=(self.state['seen']+[event['marker']])[-200:]
             PUBLISH(self.path,self.state)  # reserve before a potentially uncertain model execution
             c=self.config
@@ -162,7 +171,10 @@ class EventSeatRunner:
                 time.sleep(delay)
                 continue
             if self.state['pending']:
-                self.process({'new_seq':self.state['cursor'],'events':[]},time.time())
+                delay=self.process({'new_seq':self.state['cursor'],'events':[]},time.time())
+                if delay is not None and delay>0:
+                    time.sleep(min(60,delay))
+                    continue
             command=[self.config['board_script'],'wait','--since',json.dumps(self.state['cursor']),
                      '--timeout','270','--boards',','.join(self.active_boards)]
             if self.config['role']=='reviewer':command.insert(2,'--submitted')

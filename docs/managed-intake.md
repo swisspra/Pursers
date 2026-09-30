@@ -450,3 +450,20 @@ seat identity, credentials and event cursors. Worker helpers validate required
 `branch_and_commit` metadata before submission, including older tickets that
 require only `commit_hash`, avoiding review cycles caused
 by malformed evidence.
+
+### Seat capacity versus model execution frequency
+
+`host_seat_cap` and the executor's `host_cap` limit concurrent fleet seats.
+A cap of 20 permits at most 20 seats; it does not limit a seat to 20 model
+executions per hour and does not request 20 running seats. Existing role,
+resource, board and template limits still apply.
+
+`max_runs_per_hour` is an independent, optional event-seat throttle. Set it to
+JSON `null` to disable that throttle. Omitting the field retains the legacy
+default of 5; an explicit integer from 1 through 100 enables the hourly limit.
+When enabled, exhaustion retains pending events and cursors, waits for the
+rolling-hour window, and resumes without restarting or replaying completed
+events. State exposes `rate_limited_until` while deferred. Per-execution
+`max_turns`, timeouts, event deduplication and empty-source/cache checks remain
+independent of this throttle. These are execution counts, not provider token
+quota or billing limits.

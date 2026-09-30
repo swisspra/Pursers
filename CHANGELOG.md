@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Separate seat capacity from optional hourly model-run throttles; allow `max_runs_per_hour: null` and wait/resume on explicit limits instead of crashing with pending work.
+
 - Apply submission preflight to legacy code tickets requiring `commit_hash`, catching malformed branch evidence before independent review.
 - Verify every repair commit against the registered integration branch, including cumulative changed paths and leak scanning, instead of checking only the last commit.
 
