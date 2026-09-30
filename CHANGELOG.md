@@ -24,6 +24,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Generated review seats accept complete successful Jest/Vitest evidence for
+  JavaScript projects and keep approved branches available for Butler PR delivery.
+
 - Noncritical source findings respect the Central state size bound even when no
   question is being preserved; unknown grouped projects emit one onboarding hint.
 

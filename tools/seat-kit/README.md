@@ -308,3 +308,9 @@ subscriptions/listen, using zero model turns except the re-arm.
 See [configuration, feature behavior, migration and rollback](../../docs/managed-intake.md)
 for `tools/board-butler/deployment.py`, `tools/seat-kit/event_seat.py` and
 `tools/ado-connector/git_credential.py`.
+
+Generated review seats also accept complete successful Jest/Vitest suite-and-test
+summary pairs with positive passing counts equal to totals. Partial, failing and
+zero-test summaries remain rejected; SHA, leak-scan and model evidence stay required.
+Upgrade existing managed seats with `seat_new.py --upgrade` to receive this gate.
+Workers retain approved branches until the delivery PR is confirmed merged.

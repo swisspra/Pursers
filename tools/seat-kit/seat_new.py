@@ -43,7 +43,7 @@ Before approval:
 
 Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
 
-Approval notes must contain a full 40-hex SHA, an unambiguously successful pytest `N passed` tail or paired unittest `Ran N tests` plus `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
+Approval notes must contain a full 40-hex SHA, an unambiguously successful pytest `N passed` tail or paired unittest `Ran N tests` plus `OK` tail, or a complete Jest/Vitest suite-and-test summary (positive passing counts equal totals), `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
 
 Rejecting is normal and cheap; a wrong approval is expensive."""
 
@@ -109,6 +109,14 @@ PYTEST_SUCCESS_RE = re.compile(
 )
 UNITTEST_SUCCESS_RE = re.compile(
     r"(?im)^Ran [1-9]\d* tests? in [^\n]+\n(?:\n)?OK(?:\s+\([^\n)]*\))?\s*$"
+)
+JEST_SUCCESS_RE = re.compile(
+    r"(?im)^\s*Test Suites:\s*([1-9]\d*) passed,\s*\1 total\s*\n"
+    r"\s*Tests:\s*([1-9]\d*) passed,\s*\2 total\s*$"
+)
+VITEST_SUCCESS_RE = re.compile(
+    r"(?im)^\s*Test Files\s+([1-9]\d*) passed\s*\(\1\)\s*\n"
+    r"\s*Tests\s+([1-9]\d*) passed\s*\(\2\)\s*$"
 )
 TEST_FAILURE_RE = re.compile(
     r"(?im)(?:\b(?:failed|failures?|errors?|interrupted)\b|"
@@ -339,6 +347,7 @@ def _leak_rule_names(text: str) -> list[str]:
 def _has_successful_test_tail(notes: str) -> bool:
     return not TEST_FAILURE_RE.search(notes) and bool(
         PYTEST_SUCCESS_RE.search(notes) or UNITTEST_SUCCESS_RE.search(notes)
+        or JEST_SUCCESS_RE.search(notes) or VITEST_SUCCESS_RE.search(notes)
     )
 
 
@@ -360,7 +369,7 @@ def _approve_notes(notes: str, force: bool) -> str:
     if not SHA_RE.search(notes):
         missing.append("full 40-hex sha")
     if not _has_successful_test_tail(notes):
-        missing.append("pytest/unittest tail")
+        missing.append("pytest/unittest tail or complete Jest/Vitest summary")
     if not LEAK_SCAN_RE.search(notes):
         missing.append("leak-scan: clean|N matches")
     if not MODEL_RE.search(notes):
@@ -2161,7 +2170,7 @@ bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>
 5. **SUBMIT** -- Push the candidate, put exactly one `branch_and_commit: platform/branch @ <full-40-hex-sha>` line in code-ticket notes, then run `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Preflight verifies the exact remote tip before `ticket_submit` and adds machine-derived metadata. Correct any preflight error and retry. Normal `board_join` may renew an already-held lease. Notes are capped at 5000 characters.
 6. **RE-ARM** -- After a successful submit, leave its branch immutable and return immediately to WAIT for the next eligible ticket; do not wait for review.
 7. **RETRY CUES** -- On a later rejection cue, GET the ticket, reuse its existing branch when the fix allows it, follow the fix instructions, resubmit, then re-arm again. Do not create a remote branch per rejection attempt.
-8. **CLEAN UP** -- After the ticket closes, delete your own remote ticket branch. Never delete a live ticket branch or a submitted branch awaiting review.
+8. **CLEAN UP** -- After the ticket closes, retain the remote branch for Butler delivery. You may delete your own remote ticket branch only after the PR is confirmed merged or the operator authorizes cleanup; review approval alone is not landing.
 
 Never poll `bin/board.sh list` in a loop. Polling exists only behind the explicit `wait --poll` fallback. The default wait blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
     else:

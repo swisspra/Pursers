@@ -3771,3 +3771,27 @@ def test_generated_main_real_listen_event_exits_zero_without_stderr(
     assert stderr.getvalue() == ""
     assert result["timed_out"] is False
     assert result["events"][0]["ticket_id"] == ticket_id
+
+
+@pytest.mark.parametrize('tail',[
+    'Test Suites: 2 passed, 2 total\nTests: 5 passed, 5 total',
+    'Test Files  1 passed (1)\nTests  3 passed (3)',
+])
+def test_approve_gate_accepts_javascript_test_summaries(tmp_path,tail):
+    dest=seat_new.generate(args(tmp_path,role='reviewer'))
+    generated=load_generated(dest/'bin/board.py','js_review_evidence')
+    notes='sha: '+'a'*40+'\n'+tail+'\nleak-scan: clean\nmodel: test-model'
+    assert generated._approve_notes(notes,False)==notes
+
+
+@pytest.mark.parametrize('tail',[
+    'Test Suites: 1 passed, 2 total\nTests: 3 passed, 3 total',
+    'Test Suites: 2 passed, 2 total\nTests: 0 passed, 0 total',
+    'Test Files 1 passed (2)\nTests 3 passed (3)',
+    'Test Suites: 1 failed, 1 passed, 2 total\nTests: 3 passed, 3 total',
+])
+def test_approve_gate_rejects_incomplete_javascript_summaries(tmp_path,tail):
+    dest=seat_new.generate(args(tmp_path,role='reviewer'))
+    generated=load_generated(dest/'bin/board.py','invalid_js_evidence')
+    notes='sha: '+'a'*40+'\n'+tail+'\nleak-scan: clean\nmodel: test-model'
+    with pytest.raises(ValueError):generated._approve_notes(notes,False)
