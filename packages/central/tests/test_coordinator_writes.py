@@ -1026,6 +1026,45 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(evaluations.is_error)
         self.assertFalse(digest.is_error)
 
+    async def test_large_intake_state_roundtrips_and_preserves_cas(self):
+        self.principal = self.admin
+        value = '{"asks":["' + ('x' * 12_000) + '"]}'
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key="coordinator_intake", value=value, expected_absent=True,
+        )
+        result = await self.call("board_state_get", key="coordinator_intake")
+        self.assertEqual(result.structured_content["state"]["value"], value)
+        replacement = value.replace("x", "y")
+        with self.assertRaisesRegex(ToolError, "state precondition failed"):
+            await self.call(
+                "board_state_update", agent_name="admin-agent",
+                key="coordinator_intake", value=replacement,
+                expected_sha256="0" * 64,
+            )
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key="coordinator_intake", value=replacement,
+            expected_sha256=hashlib.sha256(value.encode()).hexdigest(),
+        )
+        stored = await self.call("board_state_get", key="coordinator_intake")
+        self.assertEqual(stored.structured_content["state"]["value"], replacement)
+
+    async def test_board_state_size_boundary_does_not_truncate_or_mutate_on_failure(self):
+        self.principal = self.admin
+        value = "x" * 262_144
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key="coordinator_intake", value=value,
+        )
+        with self.assertRaisesRegex(ToolError, "value must be at most 262144 characters"):
+            await self.call(
+                "board_state_update", agent_name="admin-agent",
+                key="coordinator_intake", value=value + "x",
+            )
+        stored = await self.call("board_state_get", key="coordinator_intake")
+        self.assertEqual(stored.structured_content["state"]["value"], value)
+
     async def test_routing_state_changes_emit_bounded_cues_without_findings_feedback(self):
         self.principal = self.admin
         start = self.service.journal.read_after("pursers", 0, 1000)["next_cursor"]

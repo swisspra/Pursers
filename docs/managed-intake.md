@@ -412,3 +412,16 @@ Add `{issue_ids}` to the configured writeback description to include every membe
 ID in the single approved PR. Existing remote repository/branch/SHA preflight and
 once-only delivery protection still apply. Review approval and PR creation do not
 prove Sonar closure; confirm a subsequent Sonar analysis after integration.
+
+### Structured state capacity
+
+Central accepts up to 262,144 characters per `board_state_update` value. This
+separate storage limit accommodates multi-item intake queues and project
+registries; it is not a model context budget. Ticket descriptions and submission
+notes retain their existing limits. Oversized state writes fail atomically rather
+than truncating queued work. Scrubbing, authorization and compare-and-swap
+preconditions still apply. Read a specific state key when inspecting large queues.
+
+Upgrade Central to obtain this limit; there is no deployment flag or database
+migration. Retain existing intake state and the Butler issue index during upgrade.
+A retry can publish prepared intake entries without creating duplicate tickets.

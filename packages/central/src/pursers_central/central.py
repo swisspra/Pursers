@@ -38,6 +38,9 @@ from mcp_types import INTERNAL_ERROR, INVALID_REQUEST
 from pydantic import AnyHttpUrl, StrictInt
 from pydantic.fields import FieldInfo
 
+# Structured board state holds queues/registries, not a single ticket text field.
+BOARD_STATE_MAX_CHARS = 262_144
+
 types.ToolAnnotations.model_fields["deprecated"] = FieldInfo(
     annotation=bool | None, default=None
 )
@@ -14502,7 +14505,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         expected_sha256: str | None = None,
         expected_absent: bool = False,
     ) -> dict[str, Any]:
-        """Atomically set one project-scoped board state value."""
+        """Atomically set one project-scoped value, up to 262,144 characters."""
         board_id = require_id("board_id", board_id)
         key = require_id("key", key)
         principal = current_principal()
@@ -14544,7 +14547,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             safe_value = clean_text(
                 "value",
                 value,
-                max_length=5_000,
+                max_length=BOARD_STATE_MAX_CHARS,
                 scrub_profile=board_scrub_profile(document),
             )
             assert safe_value is not None
