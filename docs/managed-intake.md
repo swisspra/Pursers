@@ -158,7 +158,9 @@ The worker helper writes `branch_and_commit: pursers/<ticket_id>@<full-40-hex-sh
 Whitespace around `@` is accepted when reading older submissions. Conflicting or
 malformed identities fail validation. Central verifies the provided remote-tip
 proof and persists `branch`, `commit_hash`, `test_output` and `submission_preflight`
-with the submission, including legacy `commit_hash` tickets. Reviewers still check
+with the submission, including legacy `commit_hash` tickets. Both labeled
+`test_output: ...` and inline `test_output=...` evidence are extracted; quoted
+test summaries retain their semicolons. Reviewers still check
 the exact code and test evidence; spacing alone is not a rejection criterion.
 
 Two consecutive retryable rejections of the same SHA with the same feedback

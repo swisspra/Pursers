@@ -52,7 +52,15 @@ def submission_test_output(notes: str | None) -> str:
         r"(?=^[ \t]*(?:branch_and_commit|commit_hash|submission_preflight|model)[ \t]*:|\Z)",
         notes or "",
     )
-    return match.group(1).strip() if match else ""
+    if match:
+        return match.group(1).strip()
+    # Older seats put required fields on one line. Keep semicolons inside the
+    # quoted Jest/Vitest summary instead of splitting that evidence into fields.
+    assignment = re.search(
+        r"(?i)(?<![\w])test_output[ \t]*=[ \t]*(`[^`]*`|[^;\n]+)",
+        notes or "",
+    )
+    return assignment.group(1).strip().strip("`") if assignment else ""
 
 
 def rejection_fingerprint(reason: str | None) -> str:

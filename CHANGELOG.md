@@ -9,6 +9,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Persist verified branch, SHA and test evidence on submissions; accept legacy
   whitespace around `@` consistently across workers, Butler and the dashboard.
+  Preserve inline `test_output=...` evidence from legacy seats.
 - Reconcile approved ADO delivery against existing PRs before creation; recover
   lost responses without duplicate PRs and distinguish approval from delivery.
 - Park repeated reviews of the same SHA with unchanged feedback, recording a

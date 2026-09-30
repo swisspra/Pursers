@@ -18,3 +18,15 @@ def test_rejection_fingerprint_normalizes_layout_but_not_different_work():
     assert rejection_fingerprint('Fix  the\nTEST')==rejection_fingerprint('fix the test')
     assert rejection_fingerprint('fix test')!=rejection_fingerprint('fix authentication')
     assert rejection_fingerprint(None)==''
+
+
+@pytest.mark.parametrize('notes,expected', [
+    ('test_output: 4 passed\nbranch_and_commit: pursers/TK-one@' + 'a'*40, '4 passed'),
+    ('Required fields: commit_hash=' + 'a'*40 + '; test_output=`PASS spec.ts — Test Suites: 1 passed, 1 total; Tests: 4 passed, 4 total`.',
+     'PASS spec.ts — Test Suites: 1 passed, 1 total; Tests: 4 passed, 4 total'),
+    ('test_output=4 passed; model=runner', '4 passed'),
+    ('No test evidence supplied', ''),
+])
+def test_test_output_accepts_labeled_and_legacy_assignment(notes, expected):
+    from pursers_client.submission_evidence import submission_test_output
+    assert submission_test_output(notes) == expected
