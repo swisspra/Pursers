@@ -131,3 +131,16 @@ def test_wait_authentication_failure_stops_without_retry(tmp_path, monkeypatch):
     monkeypatch.setattr(module['time'],'sleep',lambda _:pytest.fail('auth must not retry'))
     with pytest.raises(subprocess.CalledProcessError): runner.run()
     assert runner.state['cursor']=={'home':42}
+
+
+def test_distinct_reoffers_without_updated_at_are_not_suppressed(tmp_path):
+    cfg=config(tmp_path);cfg['max_runs_per_hour']=5
+    runner=api()['EventSeatRunner'](cfg);calls=[]
+    runner.run_command=lambda argv,**kwargs:calls.append(argv)
+    event={'kind':'ticket_offered','board_id':'home','ticket_id':'TK-one','id':'event-one','seq':42}
+    runner.process({'new_seq':{'home':42},'events':[event]},100)
+    runner.process({'new_seq':{'home':43},'events':[dict(event,id='event-two',seq=43)]},101)
+    assert len(calls)==2
+    resumed=api()['EventSeatRunner'](cfg)
+    resumed.run_command=lambda *_a,**_k:pytest.fail('replayed reoffer must not run again')
+    resumed.process({'new_seq':{'home':43},'events':[dict(event,id='event-two',seq=43)]},102)

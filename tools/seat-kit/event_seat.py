@@ -94,7 +94,12 @@ class EventSeatRunner:
             board,ticket=event.get('board_id'),event.get('ticket_id')
             if not isinstance(board,str) or not SAFE_ID.fullmatch(board) or not isinstance(ticket,str) or not re.fullmatch(r'TK-[A-Za-z0-9-]+',ticket):
                 raise ValueError('event missing exact board and ticket')
-            marker=[board,ticket,event.get('updated_at'),kind]
+            # Journal offers have event IDs/sequences, not ticket updated_at values.
+            # A later reoffer must wake the seat while replaying the same event must not.
+            stamp=event.get('updated_at')
+            if stamp is None:
+                stamp=event.get('id') or event.get('seq')
+            marker=[board,ticket,stamp,kind]
             if marker not in self.state['seen'] and not any(p['marker']==marker for p in pending):
                 pending.append({'marker':marker,'board':board,'ticket':ticket})
         if len(pending)>100: raise ValueError('event queue exceeds bound')

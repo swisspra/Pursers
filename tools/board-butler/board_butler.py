@@ -5898,11 +5898,36 @@ def source_intake_board_load(
     return counts
 
 
+def source_intake_fleet_load(
+    snapshots: Mapping[str, Mapping[str, Any]], now: datetime
+) -> dict[str, int]:
+    """Count registry seats once; a busy membership makes that seat unavailable."""
+    seats: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for snapshot in snapshots.values():
+        agents = snapshot.get("agents", [])
+        for agent in agents if isinstance(agents, list) else []:
+            if not isinstance(agent, Mapping):
+                continue
+            name = agent.get("agent_name")
+            if not isinstance(name, str) or not name:
+                continue
+            key = (str(agent.get("principal_id", "")), name)
+            seats.setdefault(key, []).append(agent)
+    return {
+        label: sum(all(_available_for(row, capability, now) for row in rows)
+                   for rows in seats.values())
+        for label, capability in (("idle_workers", "can_work"), ("idle_reviewers", "can_review"))
+    }
+
+
 INTAKE_DECISION_SYSTEM_PROMPT = (
     "You are the Board Butler deciding whether to pull new work from external "
     "sources onto the board. Pull only what the board can actually run now: "
     "consider idle capacity, work already in flight, and the review queue (do not "
-    "pull more when reviews are backing up). Prefer higher-risk sources first "
+    "pull more when reviews are backing up). fleet_load counts unique physical "
+    "seats and takes precedence over per-board idle counts; never sum idle "
+    "counts across boards because seats can belong to several boards. "
+    "Prefer higher-risk sources first "
     "(blocker, then security, then reliability, then maintainability) unless the "
     "context says otherwise. Never exceed the ceiling. Return exactly one JSON "
     'object: {"pull": <int>, "source_ids": [<source ids in pull order>], '
@@ -11911,6 +11936,7 @@ class CentralBackend:
         self._subscription_failure_active = False
         self._source_registry_projects: dict[str, str] = {}
         self._source_board_load: dict[str, dict[str, int]] = {}
+        self._source_fleet_load: dict[str, int] = {}
         self._intake_decision_cache = IntakeDecisionCache()
         connector_runtimes = tuple(
             getattr(args, "_connector_runtimes", ()) or ()
@@ -12228,7 +12254,8 @@ class CentralBackend:
             raise ButlerConfigError("no Butler model is configured for intake decisions")
         cache = self._intake_decision_cache
         try:
-            decision = await cache.decide(runtime, {**context, "board_load": self._source_board_load}, utc_now())
+            decision = await cache.decide(runtime, {**context, "board_load": self._source_board_load,
+                                                    "fleet_load": self._source_fleet_load}, utc_now())
         except Exception:
             reason = ("provider_response_truncated" if cache.failure.get("response_truncated") else
                       "provider_response_invalid" if cache.failure.get("error_class") == "JSONDecodeError" else
@@ -13794,6 +13821,7 @@ class CentralBackend:
             board_id: source_intake_board_load(snapshot, now)
             for board_id, snapshot in snapshots.items()
         }
+        self._source_fleet_load = source_intake_fleet_load(snapshots, now)
         project_onboarding = await self._auto_onboard_unknown_projects(previous, now)
         active_boards = {project.board_id for project in projects}
         self._harvest_approval_scan(sorted(active_boards))

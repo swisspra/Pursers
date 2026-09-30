@@ -785,3 +785,13 @@ def test_intake_request_reserves_reasoning_and_json_output_budget(monkeypatch):
         assert not cache.model_called
         assert cache.evidence == {}  # Cached reads are not new usage.
     asyncio.run(scenario())
+
+
+def test_intake_fleet_load_deduplicates_registry_memberships():
+    worker = {"agent_name": "worker", "principal_id": "worker-principal", "role": "worker",
+              "status": "idle", "last_activity_at": NOW.isoformat(), "capabilities_explicit": True,
+              "capabilities": {"can_work": True, "can_review": False}}
+    snapshots = {"home": {"agents": [worker]}, "project": {"agents": [dict(worker)]}}
+    assert butler.source_intake_fleet_load(snapshots, NOW)["idle_workers"] == 1
+    snapshots["project"]["agents"][0]["status"] = "busy"
+    assert butler.source_intake_fleet_load(snapshots, NOW)["idle_workers"] == 0

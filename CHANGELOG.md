@@ -27,6 +27,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Deduplicate idle fleet capacity across registry boards before intake decisions; a busy seat is not counted as spare capacity on another board.
+
+- Event seats deduplicate journal offers by event identity when `updated_at` is absent, allowing later reoffers and review rounds without repeating the same event after reconnect.
+
+- Deliver routing-state journal cues to authorized coordinators through `board_catchup`, so new intake wakes the coordinator without restarting it; ordinary worker visibility remains unchanged.
+
 - Reserve 1,600 output tokens for intake decisions so reasoning models can finish their JSON response; report truncation separately from transport failures without increasing call frequency.
 
 - Intake provider failures retain safe exception classes and HTTP status codes through backoff without logging credentials or upstream error bodies.

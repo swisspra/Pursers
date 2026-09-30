@@ -14901,6 +14901,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             and (
                 actor["agent_id"] in event.get("recipient_identities", [])
                 or is_currently_open_ticket_event(event)
+                or (
+                    event.get("kind") == "board_state_changed"
+                    and COORDINATOR_SCOPE in principal.scopes
+                )
             )
         ]
         returned = list(visible)

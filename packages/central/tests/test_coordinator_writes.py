@@ -1079,6 +1079,27 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         from pursers_client.client import DEFAULT_EVENT_KINDS
         self.assertIn("board_state_changed", DEFAULT_EVENT_KINDS)
 
+    async def test_routing_cues_reach_coordinator_catchup_without_exposing_state(self):
+        import asyncio
+        from mcp import Client
+        start = self.service.journal.read_after("pursers", 0, 1000)["next_cursor"]
+        self.principal = self.coordinator
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as listener:
+            async with listener.listen(resource_subscriptions=["board://pursers/journal"]) as cues:
+                self.principal = self.admin
+                await self.call("board_state_update", agent_name="admin-agent", key="coordinator_intake", value='{"private":"not a journal payload"}')
+                await asyncio.wait_for(anext(cues), timeout=1)
+                self.principal = self.coordinator
+                caught = await self.call("board_catchup", agent_name="coordinator-1", cursor=start, ack=False, touch=False)
+        events = caught.structured_content["events"]
+        self.assertEqual([e["kind"] for e in events], ["board_state_changed"])
+        self.assertEqual(events[0]["state_key"], "coordinator_intake")
+        self.assertNotIn("not a journal payload", str(events))
+        self.principal = self.worker
+        hidden = await self.call("board_catchup", agent_name="worker-agent", cursor=start, ack=False, touch=False)
+        self.assertEqual(hidden.structured_content["events"], [])
+        self.assertGreater(hidden.structured_content["next_cursor"], start)
+
     async def test_native_intake_caller_joins_separate_principal_on_new_board(self):
         import runpy
         from pursers_client.client import BoardClient
