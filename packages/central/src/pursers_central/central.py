@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pursers_client.submission_evidence import submission_identity, submission_test_output, rejection_fingerprint
+
 import argparse
 import asyncio
 import copy
@@ -37,6 +39,9 @@ from mcp import types
 from mcp_types import INTERNAL_ERROR, INVALID_REQUEST
 from pydantic import AnyHttpUrl, StrictInt
 from pydantic.fields import FieldInfo
+
+# Structured board state holds queues/registries, not a single ticket text field.
+BOARD_STATE_MAX_CHARS = 262_144
 
 types.ToolAnnotations.model_fields["deprecated"] = FieldInfo(
     annotation=bool | None, default=None
@@ -9585,6 +9590,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             park_changed = parked is not None and ticket.get("parked", False) != parked
             if park_changed:
                 ticket["parked"] = parked
+                if not parked:
+                    ticket.pop("workflow_blocker", None)
                 state_name = "parked" if parked else "unparked"
                 append_bounded_history(document, ticket, "dispatch_history",
                     {
@@ -11701,7 +11708,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if (
                 isinstance(required_fields, (list, tuple, set))
                 and "branch_and_commit" in required_fields
-            ):
+            ) or submission_preflight is not None:
                 branch_lines = BRANCH_AND_COMMIT_RE.findall(safe_notes or "")
                 exact_lines = SUBMIT_BRANCH_AND_COMMIT_RE.findall(safe_notes or "")
                 if len(branch_lines) != 1 or len(exact_lines) != 1:
@@ -11788,6 +11795,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "submitted_at": iso_at(now),
             }
             if verified_preflight is not None:
+                submission["branch"] = verified_preflight["branch"]
+                submission["commit_hash"] = verified_preflight["commit"]
+                submission["test_output"] = submission_test_output(safe_notes)
                 submission["submission_preflight"] = copy.deepcopy(
                     verified_preflight
                 )
@@ -12276,6 +12286,33 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 else "open" if retryable_rejection
                 else "rejected"
             )
+            submission_history = ticket.get("submission_history", [])
+            submitted = submission_history[-1] if submission_history else ticket
+            _, reviewed_sha = submission_identity(submitted)
+            feedback_key = rejection_fingerprint(safe_fix or safe_notes) if verdict == "reject" else ""
+            previous_reviews = ticket.get("review_history", [])
+            previous_review = previous_reviews[-1] if previous_reviews else {}
+            repeat_without_progress = bool(
+                retryable_rejection and reviewed_sha and feedback_key
+                and previous_review.get("verdict") == "reject"
+                and previous_review.get("submission_commit") == reviewed_sha
+                and previous_review.get("rejection_fingerprint") == feedback_key
+            )
+            if repeat_without_progress:
+                ticket["parked"] = True
+                ticket["workflow_blocker"] = {
+                    "reason": "repeated_same_commit_and_feedback",
+                    "commit_hash": reviewed_sha, "detected_at": iso_at(now),
+                }
+                ticket.setdefault("annotations", []).append({
+                    "annotation_id": allocate_annotation_id(document), "kind": "decision",
+                    "text": "Workflow paused: the same candidate and review feedback repeated. "
+                            "Check submission validation and review evidence before un-parking this ticket.",
+                    "at": iso_at(now), "by": {
+                        "agent_id": actor["agent_id"], "agent_name": actor["agent_name"],
+                        "principal_id": principal.principal_id,
+                    },
+                })
             ticket["status"] = new_status
             if verdict == "reject":
                 ticket["rejection_count"] = int(ticket.get("rejection_count", 0)) + 1
@@ -12314,6 +12351,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "reviewed_by_principal_id": principal.principal_id,
                 "reviewed_at": iso_at(now),
                 "status_to": new_status,
+                "submission_commit": reviewed_sha,
+                "rejection_fingerprint": feedback_key,
+                "workflow_paused": repeat_without_progress,
             }
             review_usage = model_usage_record(
                 model_usage,
@@ -14502,7 +14542,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         expected_sha256: str | None = None,
         expected_absent: bool = False,
     ) -> dict[str, Any]:
-        """Atomically set one project-scoped board state value."""
+        """Atomically set one project-scoped value, up to 262,144 characters."""
         board_id = require_id("board_id", board_id)
         key = require_id("key", key)
         principal = current_principal()
@@ -14544,11 +14584,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             safe_value = clean_text(
                 "value",
                 value,
-                max_length=5_000,
+                max_length=BOARD_STATE_MAX_CHARS,
                 scrub_profile=board_scrub_profile(document),
             )
             assert safe_value is not None
             state = document.setdefault("state", {})
+            previous = state.get(key)
+            previous_value = previous.get("value") if isinstance(previous, dict) else None
             if expected_absent:
                 if key in state:
                     raise ValueError("state precondition failed")
@@ -14588,6 +14630,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             return {
                 "actor": actor,
                 "entry": copy.deepcopy(entry),
+                "routing_changed": (
+                    key in {"project_registry", "coordinator_intake", "coordinator_config"}
+                    and previous_value != safe_value
+                ),
                 "released": released,
                 "renewed": renewed,
             }
@@ -14596,6 +14642,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         release_events = await publish_releases(
             board_id, result["released"], principal, ctx
         )
+        if result["routing_changed"]:
+            await append_and_publish(
+                board_id, result["actor"], "board_state_changed",
+                f"board://{board_id}/journal", [], ctx, state_key=key,
+            )
         return {
             "ok": True,
             "key": key,
@@ -14887,6 +14938,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             and (
                 actor["agent_id"] in event.get("recipient_identities", [])
                 or is_currently_open_ticket_event(event)
+                or (
+                    event.get("kind") == "board_state_changed"
+                    and COORDINATOR_SCOPE in principal.scopes
+                )
             )
         ]
         returned = list(visible)

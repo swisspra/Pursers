@@ -805,8 +805,9 @@ def _review_verification_fixture(
     return author, clone, generated, ticket, sha
 
 
+@pytest.mark.parametrize("integration_ref", ["main", "dev"])
 def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, integration_ref: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _author, routed, generated, ticket, sha = _review_verification_fixture(tmp_path)
@@ -817,6 +818,9 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
         resolve_registry_target,
     )
 
+    if integration_ref != "main":
+        subprocess.run(["git", "push", "origin", f"main:refs/heads/{integration_ref}"],
+                       cwd=_author, check=True, capture_output=True)
     ticket["target_url"] = "https://example.test/acme/sample"
     registry = {
         "schema_version": 1,
@@ -826,6 +830,7 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
                 "work_dir": str(routed),
                 "work_dir_owner": "fleet",
                 "repository_url": ticket["target_url"],
+                "integration_ref": integration_ref,
                 "status": "active",
             }
         },
@@ -853,11 +858,12 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
     verified_paths: list[Path] = []
     verify_ticket = generated._verify_ticket
 
-    def track_verification(ticket_value, repo, *, run_suites=False):
+    def track_verification(ticket_value, repo, *, run_suites=False, integration_ref="main"):
         verified_paths.append(repo)
         assert repo != routed
         assert repo.is_relative_to(seat_root)
-        return verify_ticket(ticket_value, repo, run_suites=run_suites)
+        assert integration_ref == registry["projects"]["sample"]["integration_ref"]
+        return verify_ticket(ticket_value, repo, run_suites=run_suites, integration_ref=integration_ref)
 
     generated._verify_ticket = track_verification
 
@@ -1218,7 +1224,7 @@ def test_verify_suite_replay_discards_inherited_execution_controls(
         "test-command: python3 -m unittest discover -s . -p test_safe.py",
     ]
     ticket["submission_history"] = [{
-        "files_changed": ["test_safe.py"],
+        "files_changed": ["change.txt", "test_safe.py"],
         "notes": f"branch_and_commit: {branch} @ {sha}",
     }]
 
@@ -2860,8 +2866,10 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("commit_field", ["branch_and_commit", "commit_hash"])
 def test_generated_submit_preflights_exact_remote_tip_before_board_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    commit_field: str
 ) -> None:
     origin = tmp_path / "origin.git"
     author = tmp_path / "author"
@@ -2924,7 +2932,7 @@ def test_generated_submit_preflights_exact_remote_tip_before_board_mutation(
     ticket = {
         "ticket_id": "TK-submit",
         "target_url": "origin/tools/seat-kit",
-        "required_fields": ["branch_and_commit", "test_output"],
+        "required_fields": [commit_field, "test_output"],
     }
     submissions: list[dict[str, object]] = []
 
@@ -3031,7 +3039,7 @@ def test_generated_submit_preflights_exact_remote_tip_before_board_mutation(
         "remote_ref": f"origin/{branch}",
         "remote_tip": current_sha,
     }
-    assert f"branch_and_commit: {branch} @ {current_sha}" in str(
+    assert f"branch_and_commit: {branch}@{current_sha}" in str(
         submissions[0]["notes"]
     )
 
@@ -3771,3 +3779,69 @@ def test_generated_main_real_listen_event_exits_zero_without_stderr(
     assert stderr.getvalue() == ""
     assert result["timed_out"] is False
     assert result["events"][0]["ticket_id"] == ticket_id
+
+
+@pytest.mark.parametrize('tail',[
+    'Test Suites: 2 passed, 2 total\nTests: 5 passed, 5 total',
+    'Test Files  1 passed (1)\nTests  3 passed (3)',
+])
+def test_approve_gate_accepts_javascript_test_summaries(tmp_path,tail):
+    dest=seat_new.generate(args(tmp_path,role='reviewer'))
+    generated=load_generated(dest/'bin/board.py','js_review_evidence')
+    notes='sha: '+'a'*40+'\n'+tail+'\nleak-scan: clean\nmodel: test-model'
+    assert generated._approve_notes(notes,False)==notes
+
+
+@pytest.mark.parametrize('tail',[
+    'Test Suites: 1 passed, 2 total\nTests: 3 passed, 3 total',
+    'Test Suites: 2 passed, 2 total\nTests: 0 passed, 0 total',
+    'Test Files 1 passed (2)\nTests 3 passed (3)',
+    'Test Suites: 1 failed, 1 passed, 2 total\nTests: 3 passed, 3 total',
+])
+def test_approve_gate_rejects_incomplete_javascript_summaries(tmp_path,tail):
+    dest=seat_new.generate(args(tmp_path,role='reviewer'))
+    generated=load_generated(dest/'bin/board.py','invalid_js_evidence')
+    notes='sha: '+'a'*40+'\n'+tail+'\nleak-scan: clean\nmodel: test-model'
+    with pytest.raises(ValueError):generated._approve_notes(notes,False)
+
+
+def test_verify_checks_cumulative_repair_diff_on_configured_integration_branch(tmp_path):
+    author, clone, generated, ticket, _old_sha = _review_verification_fixture(tmp_path)
+    def git(*arguments):
+        return subprocess.run(['git', *arguments], cwd=author, check=True, capture_output=True, text=True).stdout.strip()
+    git('switch', '-c', 'dev', 'main')
+    (author/'dev-only.txt').write_text('integration baseline\n')
+    git('add', 'dev-only.txt');git('commit', '-m', 'dev baseline');git('push', 'origin', 'dev')
+    git('switch', 'codex/TK-review');git('rebase', 'dev')
+    (author/'second.txt').write_text('review correction\n')
+    git('add', 'second.txt');git('commit', '-m', 'review correction')
+    sha=git('rev-parse', 'HEAD');git('push', '--force-with-lease', 'origin', 'codex/TK-review')
+    ticket['submission_history'][-1].update(files_changed=['change.txt','second.txt'],notes=f'branch_and_commit: codex/TK-review@{sha}')
+    result=generated._verify_ticket(ticket, clone, integration_ref='dev')
+    assert result['files_changed_match'] is True
+    assert result['integration_ref']=='dev'
+    assert result['verification_base']==git('rev-parse','dev')
+    ticket['submission_history'][-1]['files_changed']=['second.txt']
+    with pytest.raises(ValueError,match='files_changed mismatch'):
+        generated._verify_ticket(ticket, clone, integration_ref='dev')
+
+
+def test_verify_scans_leaks_in_earlier_repair_commit(tmp_path):
+    author, clone, generated, ticket, _sha = _review_verification_fixture(tmp_path)
+    def git(*arguments):
+        return subprocess.run(["git", *arguments], cwd=author, check=True,
+                              capture_output=True, text=True).stdout.strip()
+    (author / "change.txt").write_text("api_key=" + "Z" * 24 + "\n")
+    git("add", "change.txt")
+    git("commit", "-m", "earlier repair")
+    (author / "second.txt").write_text("followup\n")
+    git("add", "second.txt")
+    git("commit", "-m", "later correction")
+    sha = git("rev-parse", "HEAD")
+    git("push", "origin", "codex/TK-review")
+    ticket["submission_history"][-1].update(
+        files_changed=["change.txt", "second.txt"],
+        notes=f"branch_and_commit: codex/TK-review @ {sha}",
+    )
+    with pytest.raises(ValueError, match="credential leak scan matched: api-key"):
+        generated._verify_ticket(ticket, clone)

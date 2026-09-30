@@ -33,17 +33,18 @@ HARD_VERIFY_CHECKLIST = """## HARD-verify checklist
 
 Before approval:
 1. Resolve origin from the routed project, then fetch and detach the exact submitted 40-hex SHA in a reviewer-owned temporary clone. Never mutate the routed checkout.
-2. Compare git show --stat and changed paths with files_changed and ticket scope.
+2. Compare the cumulative diff from the merge-base of the registry integration_ref (default main) to the submitted SHA with files_changed and ticket scope. Include all repair commits.
 3. Confirm the SHA is on `origin/<submitted-branch>` and never on `origin/main`.
 4. Re-run every claimed suite and compare the real result tails.
 5. Review the diff against the ticket and its dependencies, including exact field, parameter, and event names.
 6. Run the credential leak scan and report clean or the bounded match count.
 7. Confirm every required_field is present and truthful.
 8. Put the SHA, re-run tails, leak-scan result, and model in review_notes.
+9. Branch/SHA spacing is not a review criterion. Use structured submission fields and the verifier; never reject solely for spaces around @ when identity verification passes.
 
 Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
 
-Approval notes must contain a full 40-hex SHA, an unambiguously successful pytest `N passed` tail or paired unittest `Ran N tests` plus `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
+Approval notes must contain a full 40-hex SHA, an unambiguously successful pytest `N passed` tail or paired unittest `Ran N tests` plus `OK` tail, or a complete Jest/Vitest suite-and-test summary (positive passing counts equal totals), `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
 
 Rejecting is normal and cheap; a wrong approval is expensive."""
 
@@ -109,6 +110,14 @@ PYTEST_SUCCESS_RE = re.compile(
 )
 UNITTEST_SUCCESS_RE = re.compile(
     r"(?im)^Ran [1-9]\d* tests? in [^\n]+\n(?:\n)?OK(?:\s+\([^\n)]*\))?\s*$"
+)
+JEST_SUCCESS_RE = re.compile(
+    r"(?im)^\s*Test Suites:\s*([1-9]\d*) passed,\s*\1 total\s*\n"
+    r"\s*Tests:\s*([1-9]\d*) passed,\s*\2 total\s*$"
+)
+VITEST_SUCCESS_RE = re.compile(
+    r"(?im)^\s*Test Files\s+([1-9]\d*) passed\s*\(\1\)\s*\n"
+    r"\s*Tests\s+([1-9]\d*) passed\s*\(\2\)\s*$"
 )
 TEST_FAILURE_RE = re.compile(
     r"(?im)(?:\b(?:failed|failures?|errors?|interrupted)\b|"
@@ -339,6 +348,7 @@ def _leak_rule_names(text: str) -> list[str]:
 def _has_successful_test_tail(notes: str) -> bool:
     return not TEST_FAILURE_RE.search(notes) and bool(
         PYTEST_SUCCESS_RE.search(notes) or UNITTEST_SUCCESS_RE.search(notes)
+        or JEST_SUCCESS_RE.search(notes) or VITEST_SUCCESS_RE.search(notes)
     )
 
 
@@ -360,7 +370,7 @@ def _approve_notes(notes: str, force: bool) -> str:
     if not SHA_RE.search(notes):
         missing.append("full 40-hex sha")
     if not _has_successful_test_tail(notes):
-        missing.append("pytest/unittest tail")
+        missing.append("pytest/unittest tail or complete Jest/Vitest summary")
     if not LEAK_SCAN_RE.search(notes):
         missing.append("leak-scan: clean|N matches")
     if not MODEL_RE.search(notes):
@@ -375,25 +385,17 @@ def _submission(ticket: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     submission = history[-1] if isinstance(history, list) and history else ticket
     if not isinstance(submission, dict):
         submission = ticket
-    evidence = "\n".join(
-        str(submission.get(key) or ticket.get(key) or "")
-        for key in ("branch_and_commit", "notes", "summary")
-    )
-    sha_match = SHA_RE.search(str(submission.get("commit_hash") or "")) or SHA_RE.search(evidence)
-    branch_value = str(submission.get("branch") or "").strip()
-    branch_match = BRANCH_RE.search(evidence)
-    branch = branch_value if BRANCH_VALUE_RE.fullmatch(branch_value) else (
-        branch_match.group(1) if branch_match else ""
-    )
+    from pursers_client.submission_evidence import submission_identity
+    branch, sha = submission_identity(submission)
     branch_valid = bool(branch) and subprocess.run(
         ["git", "check-ref-format", "--branch", branch],
         check=False, text=True, capture_output=True,
     ).returncode == 0
-    if sha_match is None or not branch_valid:
+    if not sha or not branch_valid:
         raise ValueError(
             "verify requires submitted branch_and_commit with a valid platform/branch and full SHA"
         )
-    return submission, sha_match.group(0).lower(), branch
+    return submission, sha, branch
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -442,15 +444,19 @@ def _submit_source_repo(
     )
 
 
+def _requires_git_submission(ticket: dict[str, Any]) -> bool:
+    return bool({"branch_and_commit", "commit_hash"} & _required_field_names(ticket))
+
+
 def _submit_preflight(
     ticket: dict[str, Any], repo: Path, *, summary: str, notes: str
 ) -> dict[str, str] | None:
-    if "branch_and_commit" not in _required_field_names(ticket):
+    if not _requires_git_submission(ticket):
         return None
     if not (repo / ".git").exists():
         raise ValueError(
             "submission preflight requires the routed git seat clone; "
-            "research-only tickets must omit branch_and_commit from required_fields"
+            "research-only tickets must omit commit fields from required_fields"
         )
     evidence = f"{summary}\n{notes}"
     matches = list(SUBMIT_BRANCH_COMMIT_RE.finditer(evidence))
@@ -504,7 +510,7 @@ def _submit_preflight(
 def _canonical_submit_notes(notes: str, preflight: dict[str, str]) -> str:
     remainder = SUBMIT_BRANCH_COMMIT_RE.sub("", notes).lstrip("\r\n")
     lines = [
-        f"branch_and_commit: {preflight['branch']} @ {preflight['commit']}",
+        f"branch_and_commit: {preflight['branch']}@{preflight['commit']}",
         (
             "submission_preflight: "
             f"remote_ref={preflight['remote_ref']} "
@@ -792,18 +798,22 @@ def _suite_argv(
 
 
 def _verify_ticket(
-    ticket: dict[str, Any], repo: Path, *, run_suites: bool = False
+    ticket: dict[str, Any], repo: Path, *, run_suites: bool = False,
+    integration_ref: str = "main",
 ) -> dict[str, Any]:
     if not (repo / ".git").exists():
         raise ValueError(f"verify requires a git seat clone: {repo}")
     submission, sha, branch = _submission(ticket)
+    _git(repo, "check-ref-format", f"refs/heads/{integration_ref}")
     _git(repo, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
     _git(repo, "cat-file", "-e", f"{sha}^{{commit}}")
     _git(repo, "switch", "--detach", sha)
-    stat = _git(repo, "show", "--stat", "--oneline", "--no-renames", sha).stdout.rstrip()
+    integration_remote = f"refs/remotes/origin/{integration_ref}"
+    base = _git(repo, "merge-base", integration_remote, sha).stdout.strip()
+    stat = _git(repo, "diff", "--stat", "--no-renames", base, sha).stdout.rstrip()
     actual_files = [
         line for line in _git(
-            repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha
+            repo, "diff", "--name-only", "--no-renames", base, sha
         ).stdout.splitlines() if line
     ]
     submitted_files = submission.get("files_changed", ticket.get("files_changed", []))
@@ -823,11 +833,13 @@ def _verify_ticket(
         remote for remote in contains
         if remote.startswith("origin/") and remote != expected_remote
     )
-    diff = _git(repo, "show", "--format=", "--no-ext-diff", sha).stdout
+    diff = _git(repo, "diff", "--no-ext-diff", "--no-renames", base, sha).stdout
     leak_rules, marker_count = _leak_scan(diff)
     leak_line = "leak-scan: clean" if not leak_rules else f"leak-scan: {len(leak_rules)} matches"
     print(f"verified-sha: {sha}")
     print(f"submitted-branch: {branch}")
+    print(f"integration-ref: {integration_ref}")
+    print(f"verification-base: {base}")
     print(stat)
     print("files-changed-diff: " + json.dumps(
         {"only_actual": only_actual, "only_submitted": only_submitted}, sort_keys=True
@@ -886,6 +898,8 @@ def _verify_ticket(
         failures.append(f"SHA is not on {expected_remote}")
     if main_contains:
         failures.append("SHA is already on origin/main")
+    if integration_ref != "main" and f"origin/{integration_ref}" in contains:
+        failures.append(f"SHA is already on origin/{integration_ref}")
     non_main_others = [remote for remote in other_remotes if remote != "origin/main"]
     if non_main_others:
         failures.append("SHA is also on other remote branches: " + ", ".join(non_main_others))
@@ -895,6 +909,7 @@ def _verify_ticket(
         raise ValueError("verify failed: " + "; ".join(failures))
     return {
         "ok": True, "sha": sha, "branch": branch,
+        "integration_ref": integration_ref, "verification_base": base,
         "files_changed_match": True, "origin_main_contains": False,
         "leak_scan": "clean", "operator_markers_loaded": marker_count,
         "suites": suites,
@@ -1803,7 +1818,7 @@ async def _execute(args: argparse.Namespace) -> None:
                     if not isinstance(ticket, dict):
                         raise ValueError("submission preflight requires a valid ticket response")
                     routed, operator_dir, route_error = ticket_route(ticket_result)
-                    needs_git = "branch_and_commit" in _required_field_names(ticket)
+                    needs_git = _requires_git_submission(ticket)
                     source_repo = seat_repo
                     if needs_git:
                         source_repo = _submit_source_repo(
@@ -1925,6 +1940,14 @@ async def _execute(args: argparse.Namespace) -> None:
                     ).stdout.strip()
                     if not origin_url:
                         raise ValueError("verify requires an origin remote")
+                    integration_ref = "main"
+                    if registry is not None and target_resolver is not None:
+                        route = target_resolver(
+                            registry, target_board, str(ticket.get("target_url", ""))
+                        )
+                        integration_ref = registry["projects"][route["project"]].get(
+                            "integration_ref", "main"
+                        )
                     with tempfile.TemporaryDirectory(
                         prefix=".verify-", dir=seat_root
                     ) as temporary:
@@ -1937,7 +1960,8 @@ async def _execute(args: argparse.Namespace) -> None:
                             check=True, text=True, capture_output=True,
                         )
                         verification = _verify_ticket(
-                            ticket, repo, run_suites=bool(args.run_suites)
+                            ticket, repo, run_suites=bool(args.run_suites),
+                            integration_ref=integration_ref,
                         )
                     emit({"ticket": ticket, "verification": verification})
                     return
@@ -2161,7 +2185,7 @@ bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>
 5. **SUBMIT** -- Push the candidate, put exactly one `branch_and_commit: platform/branch @ <full-40-hex-sha>` line in code-ticket notes, then run `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Preflight verifies the exact remote tip before `ticket_submit` and adds machine-derived metadata. Correct any preflight error and retry. Normal `board_join` may renew an already-held lease. Notes are capped at 5000 characters.
 6. **RE-ARM** -- After a successful submit, leave its branch immutable and return immediately to WAIT for the next eligible ticket; do not wait for review.
 7. **RETRY CUES** -- On a later rejection cue, GET the ticket, reuse its existing branch when the fix allows it, follow the fix instructions, resubmit, then re-arm again. Do not create a remote branch per rejection attempt.
-8. **CLEAN UP** -- After the ticket closes, delete your own remote ticket branch. Never delete a live ticket branch or a submitted branch awaiting review.
+8. **CLEAN UP** -- After the ticket closes, retain the remote branch for Butler delivery. You may delete your own remote ticket branch only after the PR is confirmed merged or the operator authorizes cleanup; review approval alone is not landing.
 
 Never poll `bin/board.sh list` in a loop. Polling exists only behind the explicit `wait --poll` fallback. The default wait blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
     else:

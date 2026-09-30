@@ -5,6 +5,13 @@ source tickets, and open a pull request after independent approval. Local Git
 performs checkout, edits, tests and push. MCP performs source reads and PR creation.
 The native resident no longer requires a deployment-specific backend subclass.
 
+Central emits `board_state_changed` when `project_registry`, `coordinator_intake`,
+or `coordinator_config` values change. The event identifies only the state key;
+subscribed coordinators reread authorized state and discover new project boards.
+Identical writes and findings refreshes emit no routing event. Deploy Central and
+the coordinator's client together to enable this event contract; older clients
+may filter the new event kind and leave intake waiting for an unrelated event.
+
 ## Choose the operator interface and runner
 
 Zed is the primary GUI/IDE workflow for this integration. Use the existing
@@ -30,6 +37,12 @@ credential, access to the source projects, and repository access for clone/push/
 A successful MCP connection does not grant Azure DevOps permissions. Missing or
 expired credentials remain an external prerequisite. Preserve WORK and personal
 project boundaries and resolve duplicate repository names explicitly.
+
+The coordinator's separate intake credential needs `board:read`, `board:intake`,
+and `board:coordinate`, with no `board:write`. It joins admitted projects as a
+non-working coordinator before creating a generation-fenced ticket. Admission
+must grant that credential's principal membership, separately from the main
+coordinator principal when they differ.
 
 ## Source counts and model use
 
@@ -119,13 +132,48 @@ and response paths. A missing branch, moved head or mismatched target blocks PR
 creation. Prevent concurrent writes to an approved branch: the read and PR-create
 requests are separate upstream operations, not an atomic branch lock.
 
-All writeback paths record `delivering` before the external mutation. A timeout,
-crash or failed completion annotation leaves an uncertain attempt for operator
-reconciliation; it is never retried automatically, including when source revisions
-change. Confirm whether a PR exists before changing that state. Writeback runs
-before intake gating, so zero issues or no remaining capacity does not prevent
-approved delivery. The worker's submission uses
-`branch_and_commit: pursers/<ticket_id>@<full-40-hex-sha>`.
+All writeback paths record `delivering` before the external mutation. For Azure
+DevOps, also declare `ado_pull_requests_list` as a read-only connector tool. Butler
+checks all returned pages for the exact repository, source branch, target branch
+and approved SHA before creating a PR. An existing active or completed PR is
+recorded as delivered without creating another. Abandoned PRs, a moved source SHA,
+ambiguous matches, failed reads and incomplete pagination block creation.
+
+Lookup and preflight failures are retried after at least 60 seconds, without an
+LLM call. After a create timeout, crash or failed completion annotation, Butler
+reconciles the existing PR automatically. If lookup still finds no PR, the state
+remains `pr_uncertain`: an empty read cannot prove that an earlier mutation failed.
+It does not repeat that create. An operator must establish the upstream outcome
+before resetting the private attempt state. Other connectors retain the durable
+once-only mutation guard. Preserve the private index across upgrades.
+
+Writeback runs before intake gating, so zero issues or no remaining capacity does
+not prevent approved delivery. Ticket evidence and the dashboard distinguish
+`pr_pending`, `pr_blocked`, `pr_uncertain` and `pr_created`; legacy completion
+markers appear as delivery recorded without inventing a PR identifier.
+
+### Submission evidence and repeated review
+
+The worker helper writes `branch_and_commit: pursers/<ticket_id>@<full-40-hex-sha>`.
+Whitespace around `@` is accepted when reading older submissions. Conflicting or
+malformed identities fail validation. Central verifies the provided remote-tip
+proof and persists `branch`, `commit_hash`, `test_output` and `submission_preflight`
+with the submission, including legacy `commit_hash` tickets. Both labeled
+`test_output: ...` and inline `test_output=...` evidence are extracted; quoted
+test summaries retain their semicolons. Reviewers still check
+the exact code and test evidence; spacing alone is not a rejection criterion.
+
+Two consecutive retryable rejections of the same SHA with the same feedback
+(case and whitespace normalized) park the ticket with a workflow blocker. The
+coordinator cannot offer it and workers cannot claim it while parked. This avoids
+repeating the same model work; it does not approve the candidate. Changed SHA or
+changed feedback is not caught by this guard. Older review records without a
+fingerprint establish a new baseline on the next review.
+
+Inspect the submission validator, review evidence and recorded blocker, resolve
+the cause, then use the existing authorized `ticket_update(parked=false)` operation
+to resume. Resuming clears the blocker. This feature does not change seat capacity
+or impose an hourly model-run budget.
 
 ## Native local fleet evidence
 
@@ -290,3 +338,188 @@ the newest source index, delivery attempts and cursor state. Reverting those dat
 files could replay an uncertain external mutation. Do not combine source-ID or
 index-format migration with this cutover. Publishing a package release remains a
 separate release-train operation built from its tested tag.
+
+## Discover projects and onboard fleet members
+
+The optional onboarding policy below refreshes Sonar and Azure DevOps inventories
+through declared read-only MCP tools. Exact unique repository names can match;
+ambiguous names stay unresolved. Explicit mappings must still point to a repository
+visible in the current PAT inventory. Record both the ADO project and repository,
+exact target branch casing, and Sonar project/analysis branch. Grouped intake additionally verifies that the Sonar main analysis branch name and
+commit match the exact configured ADO target ref before planning. Stale analyses or
+branch mismatches admit no new work. This mode currently uses the main Sonar
+analysis branch; non-main branch analysis requires a separate supported adapter.
+
+```json
+{
+  "sources": {
+    "sonar-all": {
+      "domain": "work",
+      "projects_root": "/PATH/TO/fleet/clones",
+      "auto_onboard": true,
+      "per_cycle_cap": 2,
+      "retry_limit": 3,
+      "retry_backoff_s": 300,
+      "default_ticket_tier": 2,
+      "discovery": {"kind": "sonar_ado", "refresh_seconds": 900},
+      "member_roles": {
+        "PR-worker": "member",
+        "PR-reviewer": "reviewer",
+        "PR-coordinator": "member",
+        "PR-intake": "member"
+      },
+      "repositories": {
+        "example_backend": {
+          "repository_url": "https://dev.azure.com/example/Backend/_git/api",
+          "integration_ref": "dev"
+        }
+      }
+    }
+  }
+}
+```
+
+Use real verified principal IDs from `board_members`; agent names are not principal
+IDs. The Butler credential needs `board:read`, `board:write`, and
+`board:coordinate`, and must be allowed to bootstrap a new board. It joins initially
+with work/review capabilities disabled, provisions the configured members and tier,
+and publishes the fleet-owned clone in the project registry. Worker/reviewer token
+scopes remain necessary; membership does not grant token scopes. The coordinator
+intake principal additionally needs `board:intake`. No existing board admission is
+silently elevated. Bootstrap, clone or admission failures back off and leave the
+project unregistered for intake.
+
+Inventory refresh is bounded: at most 2,000 Sonar projects, 200 ADO projects, and
+5,000 repositories. Incomplete inventory does not publish a partial scope. Keep the
+Git credential helper's repository allowlist consistent with authorized discovered
+mappings; inventory access alone does not authorize a clone or push.
+
+## Group Sonar occurrences into repair tickets
+
+Add this fragment to a paged Sonar source in `butler-connectors.json`:
+
+```json
+{
+  "grouping": {
+    "kind": "sonar",
+    "canary_project": "example_backend",
+    "max_in_flight": 1,
+    "max_admitted_groups": 1
+  }
+}
+```
+
+`canary_project` limits the source snapshot and observation to one project during
+discovery. `max_admitted_groups` is a durable total admission cap for this source,
+including completed groups; one completed PR does not start a second canary.
+Exhausted group limits skip source observation and intake model calls while the
+independent delivery pass continues.
+Raise or remove that cap deliberately after inspecting the first result. Remove
+`canary_project` to cover all resolved projects. `max_in_flight` defaults to 15 and
+is also bounded by the host seat ceiling and Butler's model-directed allowance.
+
+Butler reads the complete paged snapshot before planning (at most 2,000 issues).
+Rule, path and line metadata let its configured drafting model propose compatible
+repair groups, objectives and validation. These are planning suggestions: the worker
+must inspect actual code and preserve behavior, and the reviewer independently
+checks the repair. Code validates that every issue appears exactly once, splits
+oversized groups to at most 12 issues/3 files, and preserves all IDs in ticket text.
+Severity is not the grouping key; related rules may share one repair, while unrelated
+changes within a file may need separate tickets.
+
+Plans and their membership use private mode-0600 files next to
+`--source-intake-index-file`. Unchanged snapshots reuse the durable plan across
+restarts. Up to 12 omitted occurrences receive one bounded model repair request; the final
+partition must still cover all occurrences exactly once. A failed plan backs off
+for 15 minutes. Intake uses a durable prepared
+reservation before the Central CAS write, so an interrupted write can recover the
+same ask without losing or duplicating members. New analysis does not expand an
+already admitted ticket. Capacity counts groups, not raw Sonar occurrences.
+
+Groups sharing a repository, target branch and file are serialized, including
+different Sonar keys mapped to the same repository. An approved/open PR retains its file hold;
+this release does not automatically infer merge/landing or clear that hold. Keep
+the index when deploying or restarting. Do not delete it to rerun a canary: that
+would remove deduplication and delivery guards. Operator reconciliation of completed
+PRs and their landing remains required before releasing overlapping work.
+
+Add `{issue_ids}` to the configured writeback description to include every member
+ID in the single approved PR. Existing remote repository/branch/SHA preflight and
+once-only delivery protection still apply. Review approval and PR creation do not
+prove Sonar closure; confirm a subsequent Sonar analysis after integration.
+
+### Structured state capacity
+
+Central accepts up to 262,144 characters per `board_state_update` value. This
+separate storage limit accommodates multi-item intake queues and project
+registries; it is not a model context budget. Ticket descriptions and submission
+notes retain their existing limits. Oversized state writes fail atomically rather
+than truncating queued work. Scrubbing, authorization and compare-and-swap
+preconditions still apply. Read a specific state key when inspecting large queues.
+
+Upgrade Central to obtain this limit; there is no deployment flag or database
+migration. Retain existing intake state and the Butler issue index during upgrade.
+A retry can publish prepared intake entries without creating duplicate tickets.
+
+Intake decisions that report `provider_unavailable` include a bounded `error_class` and, for HTTP failures, `http_status`. The original metadata remains visible during the 15-minute backoff; raw provider messages and credentials are never included.
+
+Intake decisions reserve up to 1,600 completion tokens, shared by model reasoning and the final JSON object. This is a per-response ceiling, not a fixed charge. Empty truncated responses report `provider_response_truncated`; malformed JSON reports `provider_response_invalid`. Both fail closed and retain the existing 15-minute retry backoff. Observed empty sources still skip the model, and unchanged decision inputs still reuse the cache.
+
+When the provider reports token usage, intake audit metadata includes `provider_usage` with prompt, completion, total, and reasoning token counts. Successful cached decisions do not emit new usage. Failure metadata is retained during backoff: count usage only when `model_called` is true, using `provider_response_id` to deduplicate. Missing usage means unreported, not zero.
+
+The intake model receives `fleet_load` with unique idle worker/reviewer counts across registry boards. Per-board membership counts can overlap and must not be added together. A seat busy on any observed board is unavailable to admit more work. Routing-state events are visible through catchup to principals with `board:coordinate`; workers retain their existing event visibility.
+
+### Review evidence across repair commits
+
+A submission's `files_changed` must list the complete candidate diff, including
+review corrections in earlier commits. Generated reviewer helpers fetch the
+registered project's `integration_ref` (default `main`), compute its merge-base
+with the exact submitted SHA, and verify changed paths and credentials across
+that whole diff. They print `integration-ref` and `verification-base` as evidence.
+Missing or invalid integration refs fail verification; workers cannot supply an
+alternative base in submission notes. Suite replay remains on the exact SHA.
+
+When upgrading existing seats, regenerate their `bin/board.py` helpers and update
+`pursers-client` together so registry `integration_ref` survives parsing. Preserve
+seat identity, credentials and event cursors. Worker helpers validate required
+`branch_and_commit` metadata before submission, including older tickets that
+require only `commit_hash`, avoiding review cycles caused
+by malformed evidence.
+
+### Seat capacity versus model execution frequency
+
+`host_seat_cap` and the executor's `host_cap` limit concurrent fleet seats.
+A cap of 20 permits at most 20 seats; it does not limit a seat to 20 model
+executions per hour and does not request 20 running seats. Existing role,
+resource, board and template limits still apply.
+
+`max_runs_per_hour` is an independent, optional event-seat throttle. Set it to
+JSON `null` to disable that throttle. Omitting the field retains the legacy
+default of 5; an explicit integer from 1 through 100 enables the hourly limit.
+When enabled, exhaustion retains pending events and cursors, waits for the
+rolling-hour window, and resumes without restarting or replaying completed
+events. State exposes `rate_limited_until` while deferred. Per-execution
+`max_turns`, timeouts, event deduplication and empty-source/cache checks remain
+independent of this throttle. These are execution counts, not provider token
+quota or billing limits.
+
+
+### Fleet recovery and provider probes
+
+A reachable model endpoint does not prove that a seat can work. The reconciler
+keeps service health separate from provider health: an `unhealthy` process still
+occupies hard host, board and role limits, but cannot replace usable capacity.
+It is not automatically stopped when its identity is uncertain. A stopped seat must also have complete registry identity and membership evidence
+on every selected board before it is eligible. A healthy, authorized stopped seat can fill the remaining capacity within those limits.
+
+For recovery, an eligible seat with the most recent successful start is preferred
+to an unused or older seat before comparing provider probe latency. A failed
+provider probe prevents new starts on that provider; it does not turn a known
+running seat into zero capacity or drain the configured minimum by itself.
+Independent human maxima and approved-template checks still apply.
+
+An idle `draining` seat finishes its stop after the configured grace period, even
+when capacity is needed again. A subsequent observation can start it afresh.
+Live leases and busy work prevent this stop. This avoids treating a draining
+process as a ready replacement forever. No model requests are needed for this
+reconciliation, and no seat or hourly execution limit changes are required.

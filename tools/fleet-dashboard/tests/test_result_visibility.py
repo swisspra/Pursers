@@ -44,6 +44,7 @@ def test_projects_pending_submission_and_safe_artifact_references() -> None:
 
     assert result == {
         "state": "pending",
+        "delivery": None,
         "summary": "Implemented the result card",
         "branch": "codex/TK-result",
         "commit": "0123456789abcdef0123456789abcdef01234567",
@@ -168,3 +169,34 @@ def test_board_detail_registers_the_result_projection() -> None:
         "tools/feature.py",
         "docs/feature.md",
     ]
+
+
+def test_delivery_distinguishes_approved_pending_and_confirmed_pr():
+    import json
+    value=ticket(status='closed', review_verdict='approve', reviewed_at='2030-01-01T11:00:00+00:00',
+                 description='Structured external-source intake.')
+    assert feature.project_delivery(value)['state']=='pr_pending'
+    value['annotations']=[{'text':'pursers-delivery: '+json.dumps({
+        'state':'pr_created','pr_id':31,'url':'https://dev.azure.com/example/project/_git/repo/pullrequest/31'})}]
+    delivery=feature.project_ticket_result(value)['delivery']
+    assert delivery['state']=='pr_created' and delivery['pr_id']==31
+    assert dashboard._detail_ticket(value)['status_label']=='Approved · PR created'
+    value['annotations']=[{'text':'pursers-delivery: '+json.dumps({'state':'pr_uncertain','url':'javascript:alert(1)'})}]
+    assert feature.project_delivery(value)=={'state':'pr_uncertain','pr_id':None,'url':None}
+    value['status']='submitted'
+    assert feature.project_delivery(value) is None
+
+
+def test_result_accepts_unspaced_and_structured_submission_identity():
+    value=ticket()
+    value['submission_history'][-1].update(branch='pursers/TK-one',commit_hash='a'*40,notes='')
+    assert feature.project_ticket_result(value)['commit']=='a'*40
+    value['submission_history'][-1]={'notes':'branch_and_commit: pursers/TK-one@'+'b'*40}
+    assert feature.project_ticket_result(value)['commit']=='b'*40
+
+
+def test_legacy_writeback_marker_is_not_reported_pending() -> None:
+    result = feature.project_delivery(ticket(status="closed", review_verdict="approve",
+        description="Structured external-source intake.",
+        annotations=[{"text": "source-writeback-sha256:" + "a" * 64 + "\nCompleted"}]))
+    assert result == {"state": "delivery_recorded", "pr_id": None, "url": None}

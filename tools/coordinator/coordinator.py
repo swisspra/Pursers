@@ -55,7 +55,7 @@ INTAKE_RATE_WINDOW_SECONDS = 3_600
 INTAKE_BREAKER_FAILURES = 3
 INTAKE_SCOPE = "board:intake"
 MAIN_REQUIRED_SCOPES = frozenset({"board:read", "board:write", "board:coordinate"})
-INTAKE_REQUIRED_SCOPES = frozenset({"board:read", "board:intake"})
+INTAKE_REQUIRED_SCOPES = frozenset({"board:read", "board:intake", "board:coordinate"})
 INTAKE_FORBIDDEN_SCOPES = frozenset({"board:write"})
 BOARD_FAILURE_LOG_COOLDOWN_SECONDS = 300
 HOME_BACKOFF_MAX_SECONDS = 300
@@ -753,7 +753,9 @@ def deterministic_intake_draft(ask: IntakeAsk, project: Project) -> IntakeDraft:
                     f"Delivery: fix it on a new branch named pursers/{ticket_id} "
                     f"created from {project.integration_ref}, push that branch to "
                     "origin, and include `branch_and_commit: <branch>@<full sha>` in "
-                    "the submission notes. Do not open a pull request yourself; "
+                    "the submission notes. Spaces around @ are equivalent; the platform "
+                    "verifies branch and SHA. Do not reject formatting alone. "
+                    "Do not open a pull request yourself; "
                     "Board Butler opens it after independent approval."
                 ),
                 f"Intake op-key: {op_key}",
@@ -2651,6 +2653,7 @@ class IntakeCaller(RawReader):
     def __init__(self, url: str, token: str):
         super().__init__(url, token)
         self._generation_token: str | None = None
+        self._joined_board: str | None = None
 
     async def rejoin(self, board_id: str, agent_name: str) -> None:
         if self._client is None or self._decode is None:
@@ -2658,13 +2661,20 @@ class IntakeCaller(RawReader):
         joined = self._decode(
             await self._client.call_tool(
                 "board_join",
-                {"board_id": board_id, "agent_name": agent_name},
+                {"board_id": board_id, "agent_name": agent_name,
+                 "role": "coordinator", "allow_takeover": True,
+                 "capabilities": {"can_work": False, "can_review": False}},
             )
         )
         generation = joined.get("generation_token")
-        if not isinstance(generation, str) or not generation:
-            raise RuntimeError("board_join returned no generation_token")
+        if generation is not None and (
+            not isinstance(generation, str) or not generation
+            or generation != generation.strip() or len(generation) > 256
+            or any(ord(c) < 0x20 or ord(c) == 0x7F for c in generation)
+        ):
+            raise RuntimeError("board_join returned an invalid generation_token")
         self._generation_token = generation
+        self._joined_board = board_id
 
     async def call(
         self, name: str, board_id: str, **arguments: Any
@@ -2672,16 +2682,16 @@ class IntakeCaller(RawReader):
         if name not in self.ALLOWED or self._client is None or self._decode is None:
             raise RuntimeError("intake caller rejected a non-create tool")
         payload = {"board_id": board_id, **arguments}
-        if self._generation_token is None:
-            result = await self._client.call_tool(name, payload)
-        else:
-            from pursers_client import GENERATION_META_KEY
+        if self._joined_board != board_id:
+            await self.rejoin(board_id, arguments["agent_name"])
+        from pursers_client import GENERATION_META_KEY
 
-            result = await self._client.call_tool(
-                name,
-                payload,
-                meta={GENERATION_META_KEY: self._generation_token},
-            )
+        result = await self._client.call_tool(
+            name,
+            payload,
+            **({"meta": {GENERATION_META_KEY: self._generation_token}}
+               if self._generation_token is not None else {}),
+        )
         return self._decode(result)
 
 
@@ -3907,7 +3917,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--intake-token-path",
         default=os.environ.get("PURSERS_COORDINATOR_INTAKE_TOKEN_PATH"),
-        help="Write-less board:read + board:intake credential used only for ticket_create",
+        help="Write-less board:read + board:intake + board:coordinate credential for joining and ticket_create",
     )
     parser.add_argument("--home-board", default=os.environ.get("ONBOARD_BOARD_ID", "pursers"))
     parser.add_argument("--agent-name", default="coordinator-1")

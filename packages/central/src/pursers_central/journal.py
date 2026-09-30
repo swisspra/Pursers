@@ -15,6 +15,7 @@ KINDS = CORE_EVENT_KINDS
 MIN_COMPACTION_RETAIN_LAST = 500
 SEMANTIC_FIELDS = frozenset(
     {
+        "state_key",
         "ticket_id",
         "annotation_id",
         "annotation_kind",

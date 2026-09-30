@@ -1704,3 +1704,82 @@ def test_model_specific_providers_preserve_worker_and_reviewer_targets(worker_st
     if worker_state == 'ready':
         assert plan.provider_desired['pursers']['fast'] == 1
         assert [(op.action,op.seat_id) for op in plan.operations] == [('start','reviewer')]
+
+
+def test_unhealthy_seat_does_not_replace_a_serving_worker() -> None:
+    policy = board_policy(provider_maximums={'fast': 1, 'working': 1})
+    current = snapshot({'pursers': demand(work=1,
+        health={'fast': 'healthy', 'working': 'healthy'},
+        latency={'fast': 1, 'working': 50})}, [
+        seat('unknown-worker', 'worker', provider='fast', lifecycle='unhealthy'),
+        seat('working-worker', 'worker', provider='working', lifecycle='ready'),
+    ])
+    plan = reconciler({'pursers': policy}).plan(current, {})
+    assert plan.provider_desired['pursers'] == {'fast': 0, 'working': 1}
+    assert plan.operations == ()
+
+
+def test_unhealthy_seat_does_not_block_an_authorized_stopped_fallback() -> None:
+    policy = board_policy(provider_maximums={'fast': 1, 'working': 1})
+    current = snapshot({'pursers': demand(work=1,
+        health={'fast': 'healthy', 'working': 'healthy'},
+        latency={'fast': 1, 'working': 50})}, [
+        seat('unknown-worker', 'worker', provider='fast', lifecycle='unhealthy'),
+        seat('working-worker', 'worker', provider='working'),
+    ])
+    plan = reconciler({'pursers': policy}).plan(current, {})
+    assert [(o.action, o.seat_id) for o in plan.operations] == [('start', 'working-worker')]
+    # Unknown processes still occupy the hard host ceiling.
+    limited = reconciler({'pursers': policy}, host_cap=1).plan(current, {})
+    assert limited.operations == ()
+    from dataclasses import replace
+    role_limited = replace(policy, roles={**policy.roles,
+        'worker': butler.FleetRolePolicy(0, 1, 1, 1)})
+    assert reconciler({'pursers': role_limited}).plan(current, {}).operations == ()
+
+
+def test_provider_probe_failure_does_not_drain_minimum_live_capacity() -> None:
+    from dataclasses import replace
+    policy = board_policy()
+    policy = replace(policy, roles={**policy.roles,
+        'reviewer': butler.FleetRolePolicy(1, 1, 1, 1)})
+    prior = {'boards': {'pursers': {'desired': {'reviewer': 1},
+        'idle_since': (NOW-timedelta(hours=1)).isoformat()}}}
+    current = snapshot({'pursers': demand(health={'direct': 'unavailable'})}, [
+        seat('reviewer', 'reviewer', lifecycle='ready'),
+        seat('worker', 'worker'),
+    ])
+    plan = reconciler({'pursers': policy}).plan(current, prior)
+    assert plan.desired['pursers']['reviewer'] == 1
+    assert plan.operations == ()
+
+
+def test_draining_seat_finishes_then_recovers_when_capacity_is_still_needed() -> None:
+    engine = reconciler()
+    current = snapshot({'pursers': demand(review=1)}, [
+        seat('reviewer', 'reviewer', lifecycle='draining'),
+    ])
+    plan = engine.plan(current, {})
+    assert [(o.action, o.seat_id) for o in plan.operations] == [('stop', 'reviewer')]
+    stopped = snapshot(current.demands, [seat('reviewer', 'reviewer')])
+    assert [(o.action, o.seat_id) for o in engine.plan(stopped, {}).operations] == [('start', 'reviewer')]
+    ready = snapshot(current.demands, [seat('reviewer', 'reviewer', lifecycle='ready')])
+    assert engine.plan(ready, {}).operations == ()
+    protected = snapshot(current.demands, [seat('reviewer', 'reviewer', lifecycle='draining', live=True)])
+    assert engine.plan(protected, {}).operations == ()
+
+
+@pytest.mark.parametrize('warm_health,expected', [('healthy', 'warm'), ('unavailable', 'cold')])
+def test_recovery_prefers_last_successful_seat_over_probe_latency(warm_health, expected) -> None:
+    policy = board_policy(provider_maximums={'warm-provider': 1, 'cold-provider': 1})
+    current = snapshot({'pursers': demand(work=1,
+        health={'warm-provider': warm_health, 'cold-provider': 'healthy'},
+        latency={'warm-provider': 50, 'cold-provider': 1})}, [
+        seat('warm', 'worker', provider='warm-provider'),
+        seat('cold', 'worker', provider='cold-provider'),
+    ])
+    prior = {'operations': {'fleet:'+'0'*64: {'action': 'start', 'status': 'terminal',
+        'outcome': 'succeeded', 'board_id': 'pursers', 'seat_id': 'warm',
+        'last_attempt_at': (NOW-timedelta(hours=1)).isoformat()}}}
+    plan = reconciler({'pursers': policy}).plan(current, prior)
+    assert [(o.action, o.seat_id) for o in plan.operations] == [('start', expected)]

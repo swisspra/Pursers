@@ -78,7 +78,7 @@ from seat_config import (  # noqa: I001
 from release_ops import ReleaseOpsManager
 import runtime_environment
 from warm_home import apply_warm_guided_home
-from result_visibility import project_ticket_result
+from result_visibility import project_ticket_result, project_delivery
 from case_study import aggregate_case_studies
 from evidence_trace import CORRELATION_HEADERS, EvidenceTrace, EvidenceTraceConfigError
 from butler_settings import (
@@ -2673,6 +2673,13 @@ def _closed_today(ticket: dict[str, Any], today: datetime) -> bool:
 
 def _ticket_status_label(ticket: dict[str, Any], now: datetime) -> str:
     status = str(ticket.get("status") or "unknown")
+    if ticket.get("workflow_blocker") and ticket.get("parked"):
+        return "Paused: repeated review without progress"
+    delivery = project_delivery(ticket)
+    if delivery:
+        labels = {"delivery_recorded": "Approved · delivery recorded", "pr_pending": "Approved · PR pending", "pr_created": "Approved · PR created",
+                  "pr_blocked": "Approved · PR blocked", "pr_uncertain": "Approved · PR outcome unconfirmed"}
+        return labels[delivery["state"]]
     lease = ticket.get("review_lease")
     expires = _parse_time(lease.get("expires_at")) if isinstance(lease, dict) else None
     if status in SUBMITTED_STATES and expires is not None and expires > now:
@@ -3249,7 +3256,9 @@ def _detail_ticket(
             MAX_SUBMISSION_CHARS,
         )
         or None,
+        "status_label": _ticket_status_label(ticket, datetime.now(timezone.utc)),
         "result": project_ticket_result(ticket),
+        "delivery": project_delivery(ticket),
         "review_label": _clip(ticket.get("review_label"), MAX_LABEL_CHARS) or None,
         "annotations": annotations,
         "annotation_count": max(
@@ -4225,6 +4234,7 @@ def aggregate_fleet(
                         ),
                         "status": _clip(status, 32),
                         "status_label": _clip(_ticket_status_label(ticket, now), 64),
+                        "delivery": project_delivery(ticket),
                         "claimed_by": _clip(claimed_by, MAX_LABEL_CHARS) or None,
                         "claim_age_s": _nonnegative_int(
                             ticket.get("claim_age_s")

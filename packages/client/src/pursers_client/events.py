@@ -86,6 +86,7 @@ REVIEWER_WAIT_KINDS = SUBMITTED_RELEVANT_KINDS | HELD_TICKET_KINDS
 
 CORE_EVENT_KINDS = frozenset(
     {
+        "board_state_changed",
         TICKET_STATUS_CHANGED,
         "ticket_created",
         TICKET_ANNOTATED,

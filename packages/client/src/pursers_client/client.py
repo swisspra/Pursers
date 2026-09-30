@@ -256,6 +256,7 @@ class CentralInstanceMismatchError(BoardClientError):
 
 DEFAULT_EVENT_KINDS = frozenset(
     {
+        "board_state_changed",
         "ticket_created",
         "ticket_status_changed",
         "ticket_assigned",

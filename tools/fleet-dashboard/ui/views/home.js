@@ -70,7 +70,7 @@
       <div class="home-panel-head"><h3 id="home-attention-title">Needs attention now</h3><span class="status" data-tone="danger">${esc(items.length)} surfaced</span></div>
       <div class="home-attention-list">${visible.map(item => `<div class="home-attention-row">
         <span class="home-severity ${item.level === 'critical' ? 'critical' : ''}" aria-hidden="true"></span>
-        <div><b>${esc(item.title)}</b><p>${esc(item.text)}</p><span class="meta">${esc(item.central)} · ${esc(item.board.label)} · first seen ${esc(fmt(item.first_seen))}</span><div class="attention-actions"><button type="button" data-attention-action="ack" data-attention-key="${esc(item.key)}">Acknowledge</button><button type="button" data-attention-action="snooze" data-attention-key="${esc(item.key)}">Snooze 24h</button></div></div>
+        <div><b>${esc(item.title)}</b><p>${esc(item.text)}</p><span class="meta">${esc(item.central)} · ${esc(item.board.label)} · first seen ${esc(fmt(item.first_seen))}</span><div class="attention-actions">${item.ask_id?`<button type="button" data-intake-decline data-central="${esc(item.central)}" data-board="${esc(item.board.board_id)}" data-ask-id="${esc(item.ask_id)}">Decline</button><span role="status" aria-live="polite" data-intake-result></span>`:''}<button type="button" data-attention-action="ack" data-attention-key="${esc(item.key)}">Acknowledge</button><button type="button" data-attention-action="snooze" data-attention-key="${esc(item.key)}">Snooze 24h</button></div></div>
         ${attentionLink(item)}
       </div>`).join('')}</div>
       ${items.length > visible.length ? `<p class="meta">${esc(items.length - visible.length)} more source-backed signals remain after this one-glance view.</p>` : ''}

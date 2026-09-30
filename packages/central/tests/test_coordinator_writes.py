@@ -1026,6 +1026,104 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(evaluations.is_error)
         self.assertFalse(digest.is_error)
 
+    async def test_large_intake_state_roundtrips_and_preserves_cas(self):
+        self.principal = self.admin
+        value = '{"asks":["' + ('x' * 12_000) + '"]}'
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key="coordinator_intake", value=value, expected_absent=True,
+        )
+        result = await self.call("board_state_get", key="coordinator_intake")
+        self.assertEqual(result.structured_content["state"]["value"], value)
+        replacement = value.replace("x", "y")
+        with self.assertRaisesRegex(ToolError, "state precondition failed"):
+            await self.call(
+                "board_state_update", agent_name="admin-agent",
+                key="coordinator_intake", value=replacement,
+                expected_sha256="0" * 64,
+            )
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key="coordinator_intake", value=replacement,
+            expected_sha256=hashlib.sha256(value.encode()).hexdigest(),
+        )
+        stored = await self.call("board_state_get", key="coordinator_intake")
+        self.assertEqual(stored.structured_content["state"]["value"], replacement)
+
+    async def test_board_state_size_boundary_does_not_truncate_or_mutate_on_failure(self):
+        self.principal = self.admin
+        value = "x" * 262_144
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key="coordinator_intake", value=value,
+        )
+        with self.assertRaisesRegex(ToolError, "value must be at most 262144 characters"):
+            await self.call(
+                "board_state_update", agent_name="admin-agent",
+                key="coordinator_intake", value=value + "x",
+            )
+        stored = await self.call("board_state_get", key="coordinator_intake")
+        self.assertEqual(stored.structured_content["state"]["value"], value)
+
+    async def test_routing_state_changes_emit_bounded_cues_without_findings_feedback(self):
+        self.principal = self.admin
+        start = self.service.journal.read_after("pursers", 0, 1000)["next_cursor"]
+        for key in ("project_registry", "coordinator_intake", "coordinator_config"):
+            await self.call("board_state_update", agent_name="admin-agent", key=key, value='{"private":"do not journal"}')
+            await self.call("board_state_update", agent_name="admin-agent", key=key, value='{"private":"do not journal"}')
+        await self.call("board_state_update", agent_name="admin-agent", key="coordinator_findings", value="{}")
+        events = self.service.journal.read_after("pursers", start, 1000)["events"]
+        cues = [e for e in events if e["kind"] == "board_state_changed"]
+        self.assertEqual([e["state_key"] for e in cues], ["project_registry", "coordinator_intake", "coordinator_config"])
+        self.assertNotIn("do not journal", str(cues))
+        from pursers_client.client import DEFAULT_EVENT_KINDS
+        self.assertIn("board_state_changed", DEFAULT_EVENT_KINDS)
+
+    async def test_routing_cues_reach_coordinator_catchup_without_exposing_state(self):
+        import asyncio
+        from mcp import Client
+        start = self.service.journal.read_after("pursers", 0, 1000)["next_cursor"]
+        self.principal = self.coordinator
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as listener:
+            async with listener.listen(resource_subscriptions=["board://pursers/journal"]) as cues:
+                self.principal = self.admin
+                await self.call("board_state_update", agent_name="admin-agent", key="coordinator_intake", value='{"private":"not a journal payload"}')
+                await asyncio.wait_for(anext(cues), timeout=1)
+                self.principal = self.coordinator
+                caught = await self.call("board_catchup", agent_name="coordinator-1", cursor=start, ack=False, touch=False)
+        events = caught.structured_content["events"]
+        self.assertEqual([e["kind"] for e in events], ["board_state_changed"])
+        self.assertEqual(events[0]["state_key"], "coordinator_intake")
+        self.assertNotIn("not a journal payload", str(events))
+        self.principal = self.worker
+        hidden = await self.call("board_catchup", agent_name="worker-agent", cursor=start, ack=False, touch=False)
+        self.assertEqual(hidden.structured_content["events"], [])
+        self.assertGreater(hidden.structured_content["next_cursor"], start)
+
+    async def test_native_intake_caller_joins_separate_principal_on_new_board(self):
+        import runpy
+        from pursers_client.client import BoardClient
+        api = runpy.run_path(str(PACKAGE_ROOT.parents[1] / "tools/coordinator/coordinator.py"))
+        caller = api["IntakeCaller"]("https://board.invalid/mcp", "opaque")
+        caller._client = self.mcp
+        caller._decode = BoardClient._decode
+        self.principal = self.intake_runtime
+        result = await caller.call(
+            "ticket_create", "pursers", agent_name="fresh-intake",
+            ticket_id="TK-intake-fresh", title="Update the operator guide",
+            description="Structured coordinator intake.", target_url="pursers/docs",
+            scope="interactive-no-send", required_fields=["commit_hash", "test_output"],
+            tags=["coordinator-intake"], unassigned=True,
+            coordinator_op_key="coord-intake-fresh",
+        )
+        self.assertEqual(result["ticket"]["ticket_id"], "TK-intake-fresh")
+        self.assertEqual(result["ticket"]["origin"], "coordinator-intake")
+        members = self.service.load("pursers")["members"].values()
+        joined = next(m for m in members if m["agent_name"] == "fresh-intake")
+        self.assertEqual(joined["role"], "coordinator")
+        self.assertFalse(joined["capabilities"]["can_work"])
+        self.assertFalse(joined["capabilities"]["can_review"])
+
     async def test_intake_scope_creates_origin_journaled_unassigned_ticket(self) -> None:
         self.principal = self.intake
         created = await self.call(

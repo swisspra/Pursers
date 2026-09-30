@@ -58,6 +58,10 @@ const attention = [{{
   key:'finding|north|alpha',level:'critical',title:'Evidence stale',
   text:'Refresh the bounded snapshot.',central:'north',board:{{board_id:'alpha',label:'Alpha'}},
   ticket_id:'TK-ATTN',first_seen:'2030-01-01T00:00:00Z',
+}}, {{
+  key:'intake|north|alpha',level:'warning',title:'Approved intake',text:'Waiting for dispatch.',
+  central:'north',board:{{board_id:'alpha',label:'Alpha'}},ask_id:'ask-1',
+  first_seen:'2030-01-01T00:00:00Z',
 }}];
 const base = {{
   esc,fmt:value=>value,centralHref:central=>`#/${{central}}`,
@@ -94,6 +98,8 @@ console.log(JSON.stringify({{high,calm}}));
     assert "Choose a safe window" in high
     assert "Needs attention now" in high
     assert "Evidence stale" in high
+    assert high.count("data-intake-decline") == 1
+    assert 'data-ask-id="ask-1"' in high
     assert "In progress</dt><dd>1" in high
     assert "Blocked</dt><dd>1" in high
     assert "Review ready</dt><dd>1" in high

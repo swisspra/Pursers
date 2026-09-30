@@ -15,6 +15,8 @@ that cannot work.
 
 from __future__ import annotations
 
+from pursers_client.submission_evidence import submission_identity
+
 import argparse
 import asyncio
 import base64
@@ -49,7 +51,7 @@ from contextlib import (
     contextmanager,
     suppress,
 )
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -126,6 +128,7 @@ SOURCE_WRITEBACK_PLACEHOLDERS = frozenset(
     {
         "source_id",
         "external_id",
+        "issue_ids",
         "revision",
         "link",
         "ticket_id",
@@ -726,6 +729,14 @@ class FleetSeat:
     @property
     def active(self) -> bool:
         return self.lifecycle in {"starting", "ready", "busy", "draining", "unhealthy"}
+
+    @property
+    def serving(self) -> bool:
+        """Usable running capacity; uncertain processes still count against caps."""
+        return self.active and (
+            self.live_lease or self.busy
+            or self.lifecycle in {"starting", "ready", "busy"}
+        )
 
 
 @dataclass(frozen=True)
@@ -2087,7 +2098,9 @@ class FleetReconciler:
                     if seat.managed
                     and seat.role == role
                     and seat.template_id in policy.approved_template_ids
-                    and _healthy_provider(demand, policy, seat.provider)
+                    and (seat.serving or (
+                        seat.lifecycle in {"stopped", "draining"}
+                        and _healthy_provider(demand, policy, seat.provider)))
                 )
                 if pressure:
                     requested = max(
@@ -2104,7 +2117,7 @@ class FleetReconciler:
                     active_count = sum(
                         1
                         for seat in seats
-                        if seat.managed and seat.role == role and seat.active
+                        if seat.managed and seat.role == role and seat.serving
                     )
                     if idle_since is None:
                         # The first zero-demand observation starts the durable
@@ -2158,7 +2171,9 @@ class FleetReconciler:
                         if seat.managed
                         and seat.template_id in policy.approved_template_ids
                         and seat.provider == provider
-                        and _healthy_provider(demand, policy, provider)
+                        and (seat.serving or (
+                            seat.lifecycle in {"stopped", "draining"}
+                            and _healthy_provider(demand, policy, provider)))
                     ),
                 )
                 for provider, maximum in policy.provider_maximums.items()
@@ -2227,10 +2242,26 @@ class FleetReconciler:
             _, board_id, role = min(candidates)
             requested[board_id][role] -= 1
 
+    @staticmethod
+    def _start_priority(seat: FleetSeat, demand: FleetDemand, prior: Mapping[str, Any]) -> tuple[float, int, str]:
+        """Recover a proven seat before switching providers on probe timing alone."""
+        operations = prior.get("operations", {})
+        last_success = 0.0
+        for row in operations.values() if isinstance(operations, Mapping) else ():
+            if (not isinstance(row, Mapping) or row.get("action") != "start"
+                    or row.get("status") != "terminal" or row.get("outcome") != "succeeded"
+                    or row.get("board_id") != seat.board_id or row.get("seat_id") != seat.seat_id):
+                continue
+            at = parse_time(row.get("last_attempt_at"))
+            if at is not None:
+                last_success = max(last_success, at.timestamp())
+        return (-last_success, demand.provider_latency_ms.get(seat.provider, 10**9), seat.seat_id)
+
     def _provider_desired(
         self,
         requested: Mapping[str, Mapping[str, int]],
         snapshot: FleetSnapshot,
+        prior: Mapping[str, Any],
     ) -> dict[str, dict[str, int]]:
         result: dict[str, dict[str, int]] = {}
         for board_id, counts in requested.items():
@@ -2246,7 +2277,7 @@ class FleetReconciler:
             # cannot consume the budget needed by a reviewer-only model.
             for role in FLEET_ROLES:
                 active = sorted(
-                    (seat for seat in inventory if seat.role == role and seat.active),
+                    (seat for seat in inventory if seat.role == role and seat.serving),
                     key=lambda seat: (not seat.live_lease, not seat.busy,
                         demand.provider_latency_ms.get(seat.provider, 10**9), seat.seat_id),
                 )[:counts[role]]
@@ -2255,9 +2286,9 @@ class FleetReconciler:
                 remaining[role] -= len(active)
             for role in FLEET_ROLES:
                 candidates = sorted(
-                    (seat for seat in inventory if seat.role == role and not seat.active
+                    (seat for seat in inventory if seat.role == role and seat.lifecycle == "stopped"
                      and _healthy_provider(demand, policy, seat.provider)),
-                    key=lambda seat: (demand.provider_latency_ms.get(seat.provider, 10**9), seat.seat_id),
+                    key=lambda seat: self._start_priority(seat, demand, prior),
                 )
                 for seat in candidates:
                     if remaining[role] <= 0:
@@ -2336,7 +2367,7 @@ class FleetReconciler:
                 # Live holders and busy seats are stable first choices, then
                 # healthy low-latency providers.
                 keep = sorted(
-                    active,
+                    (seat for seat in active if seat.serving),
                     key=lambda seat: (
                         not seat.live_lease,
                         not seat.busy,
@@ -2347,18 +2378,15 @@ class FleetReconciler:
                 selected.update(seat.seat_id for seat in keep)
                 for seat in keep:
                     provider_started[seat.provider] = provider_started.get(seat.provider, 0) + 1
-                needed = max(0, target - len(active))
+                needed = max(0, target - len(keep))
                 candidates = sorted(
                     (
                         seat
                         for seat in role_seats
-                        if not seat.active
+                        if seat.lifecycle == "stopped"
                         and _healthy_provider(demand, policy, seat.provider)
                     ),
-                    key=lambda seat: (
-                        demand.provider_latency_ms.get(seat.provider, 10**9),
-                        seat.seat_id,
-                    ),
+                    key=lambda seat: self._start_priority(seat, demand, prior),
                 )
                 for seat in candidates:
                     if (
@@ -2386,6 +2414,7 @@ class FleetReconciler:
                     seat
                     for seat in active
                     if seat.seat_id not in selected
+                    and seat.lifecycle != "unhealthy"
                     and not seat.live_lease
                     and not seat.busy
                 ]
@@ -2447,7 +2476,7 @@ class FleetReconciler:
             raise ValueError("snapshot does not cover the configured registry")
         desired, explanations = self._requested_counts(snapshot, prior)
         self._apply_host_cap(desired, snapshot)
-        provider_desired = self._provider_desired(desired, snapshot)
+        provider_desired = self._provider_desired(desired, snapshot, prior)
         operations = self._operations(
             desired, provider_desired, snapshot, prior
         )
@@ -3581,6 +3610,7 @@ class SourceDeclaration:
     page_arg: str | None = None
     max_pages: int = 1
     observation: Any = None
+    grouping: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(
@@ -3605,6 +3635,7 @@ class SourceDeclaration:
             "page_arg",
             "max_pages",
             "observation",
+            "grouping",
         }
         _connector_keys(value, allowed, "source")
         if not required.issubset(value):
@@ -3659,6 +3690,16 @@ class SourceDeclaration:
                            if "observation" in value else None)
         except ValueError as exc:
             raise ConnectorConfigError(str(exc)) from None
+        grouping = value.get("grouping")
+        if grouping is not None:
+            if not isinstance(grouping, Mapping) or set(grouping) - {"kind", "canary_project", "max_in_flight", "max_admitted_groups"} or grouping.get("kind") != "sonar":
+                raise ConnectorConfigError("source.grouping is invalid")
+            if type(grouping.get("max_in_flight", 15)) is not int or not 1 <= grouping.get("max_in_flight", 15) <= 100:
+                raise ConnectorConfigError("source.grouping.max_in_flight is invalid")
+            if "max_admitted_groups" in grouping and (type(grouping["max_admitted_groups"]) is not int or not 1 <= grouping["max_admitted_groups"] <= 100):
+                raise ConnectorConfigError("source.grouping.max_admitted_groups is invalid")
+            if "canary_project" in grouping and (not isinstance(grouping["canary_project"], str) or not grouping["canary_project"]):
+                raise ConnectorConfigError("source.grouping.canary_project is invalid")
         return cls(
             source_id,
             connector_id,
@@ -3680,6 +3721,7 @@ class SourceDeclaration:
             page_arg,
             max_pages,
             observation,
+            copy.deepcopy(grouping),
         )
 
 
@@ -5710,7 +5752,7 @@ class SourceIntakeIndex:
     Dedupe happens here, without a Central call per item, so paging through a
     large source stays cheap. Entries move asked -> delivering -> delivered, or
     asked -> closed. "delivering" is written before a non-idempotent writeback
-    call and is never retried automatically.
+    call and is never blindly repeated. ADO recovery reconciles existing PRs.
     """
 
     def __init__(self, path: Path | None = None) -> None:
@@ -5791,9 +5833,6 @@ def _ticket_approved(ticket: Mapping[str, Any]) -> bool:
     )
 
 
-_BRANCH_AND_COMMIT_RE = re.compile(
-    r"branch_and_commit\s*:\s*([A-Za-z0-9._/+-]{1,240})@([0-9a-f]{40})"
-)
 _ADO_REPOSITORY_RE = re.compile(
     r"^https://(?:[^@/]+@)?dev\.azure\.com/([^/]+)/([^/]+)/_git/([^/?#]+)/?$"
 )
@@ -5805,11 +5844,15 @@ def _approved_submission(ticket: Mapping[str, Any]) -> tuple[str, str]:
     if not isinstance(submission, Mapping):
         history = ticket.get("submission_history")
         submission = history[-1] if isinstance(history, list) and history else None
-    notes = str(submission.get("notes", "")) if isinstance(submission, Mapping) else ""
-    match = _BRANCH_AND_COMMIT_RE.search(notes)
-    if match is None:
-        return "", ""
-    return match.group(1), match.group(2)
+    return submission_identity(submission) if isinstance(submission, Mapping) else ("", "")
+
+
+def _repository_identity(url: str) -> tuple[str, str, str]:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.password or parsed.query or parsed.fragment:
+        raise ConnectorDenied("repository URL is not a credential-free HTTPS identity")
+    return (parsed.scheme, parsed.hostname.lower() + (f":{parsed.port}" if parsed.port else ""),
+            urllib.parse.unquote(parsed.path).rstrip("/"))
 
 
 def _repository_fields(project: Mapping[str, Any] | None) -> dict[str, str]:
@@ -5876,11 +5919,36 @@ def source_intake_board_load(
     return counts
 
 
+def source_intake_fleet_load(
+    snapshots: Mapping[str, Mapping[str, Any]], now: datetime
+) -> dict[str, int]:
+    """Count registry seats once; a busy membership makes that seat unavailable."""
+    seats: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for snapshot in snapshots.values():
+        agents = snapshot.get("agents", [])
+        for agent in agents if isinstance(agents, list) else []:
+            if not isinstance(agent, Mapping):
+                continue
+            name = agent.get("agent_name")
+            if not isinstance(name, str) or not name:
+                continue
+            key = (str(agent.get("principal_id", "")), name)
+            seats.setdefault(key, []).append(agent)
+    return {
+        label: sum(all(_available_for(row, capability, now) for row in rows)
+                   for rows in seats.values())
+        for label, capability in (("idle_workers", "can_work"), ("idle_reviewers", "can_review"))
+    }
+
+
 INTAKE_DECISION_SYSTEM_PROMPT = (
     "You are the Board Butler deciding whether to pull new work from external "
     "sources onto the board. Pull only what the board can actually run now: "
     "consider idle capacity, work already in flight, and the review queue (do not "
-    "pull more when reviews are backing up). Prefer higher-risk sources first "
+    "pull more when reviews are backing up). fleet_load counts unique physical "
+    "seats and takes precedence over per-board idle counts; never sum idle "
+    "counts across boards because seats can belong to several boards. "
+    "Prefer higher-risk sources first "
     "(blocker, then security, then reliability, then maintainability) unless the "
     "context says otherwise. Never exceed the ceiling. Return exactly one JSON "
     'object: {"pull": <int>, "source_ids": [<source ids in pull order>], '
@@ -5904,7 +5972,8 @@ async def decide_intake_with_provider(
                 {"role": "system", "content": INTAKE_DECISION_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            "max_tokens": 400,
+            # Reasoning models share this budget with the final JSON response.
+            "max_tokens": 1600,
             "response_format": {"type": "json_object"},
         },
         separators=(",", ":"),
@@ -5915,17 +5984,38 @@ async def decide_intake_with_provider(
         timeout_s=PROVIDER_TIMEOUT_S,
         max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES,
     )
+    evidence: dict[str, Any] = {}
+    response_id = document.get("id") if isinstance(document, Mapping) else None
+    if isinstance(response_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,120}", response_id):
+        evidence["provider_response_id"] = response_id
+    usage = document.get("usage") if isinstance(document, Mapping) else None
+    if isinstance(usage, Mapping):
+        safe_usage = {key: usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                      if type(usage.get(key)) is int and 0 <= usage[key] <= 10_000_000}
+        details = usage.get("completion_tokens_details")
+        reasoning = details.get("reasoning_tokens") if isinstance(details, Mapping) else None
+        if type(reasoning) is int and 0 <= reasoning <= 10_000_000:
+            safe_usage["reasoning_tokens"] = reasoning
+        evidence["provider_usage"] = safe_usage
     text = _openai_chat_draft_text(document)
     if text is None:
         raise ValueError("intake decision response is malformed")
-    decision = json.loads(text)
+    try:
+        decision = json.loads(text)
+    except json.JSONDecodeError as exc:
+        # Inspect response shape without retaining model text in public findings.
+        finish_reason = document["choices"][0].get("finish_reason")
+        exc.intake_response_metadata = {
+            **evidence,
+            "response_chars": len(text),
+            "response_truncated": finish_reason == "length",
+        }
+        raise
     if not isinstance(decision, Mapping):
         raise ValueError("intake decision must be a JSON object")
     decision = dict(decision)
     decision.pop("_provider_evidence", None)
-    response_id = document.get("id") if isinstance(document, Mapping) else None
-    if isinstance(response_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,120}", response_id):
-        decision["_provider_evidence"] = {"provider_response_id": response_id}
+    decision["_provider_evidence"] = evidence
     return decision
 
 
@@ -5941,6 +6031,7 @@ class IntakeDecisionCache:
         self.model_called = False
         self.cache_reused = False
         self.evidence: dict[str, Any] = {}
+        self.failure: dict[str, Any] = {}
 
     def forget_decision(self) -> None:
         """Invalidate a decision after an empty-source observation, retaining backoff."""
@@ -5983,9 +6074,17 @@ class IntakeDecisionCache:
                     )
                 ):
                     raise ValueError("invalid intake decision")
-            except Exception:
+            except Exception as exc:
+                # Preserve only bounded metadata: upstream messages may contain secrets.
+                error_class = type(exc).__name__
+                self.failure = {"error_class": error_class if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", error_class) else "Exception"}
+                if isinstance(exc, urllib.error.HTTPError) and 100 <= exc.code <= 599:
+                    self.failure["http_status"] = exc.code
+                if isinstance(exc, json.JSONDecodeError):
+                    self.failure.update(getattr(exc, "intake_response_metadata", {}))
                 self._retry_after = now + timedelta(minutes=15)
                 raise
+            self.failure = {}
             self._context = encoded
             self._decision = copy.deepcopy(dict(decision))
             self._retry_after = None
@@ -6021,6 +6120,9 @@ class SourceIntakePoller:
         ) = None,
     ) -> None:
         self.sources = tuple(source for source in sources if source.enabled)
+        self.group_choose = None
+        self.group_scope = None
+        self._group_retry_after: dict[str, datetime] = {}
         if not 1 <= per_source_cap <= SOURCE_INTAKE_MAX_ITEMS_PER_SOURCE:
             raise ConnectorConfigError("source per-cycle cap is invalid")
         if not per_source_cap <= cycle_cap <= SOURCE_INTAKE_MAX_ITEMS_PER_CYCLE:
@@ -6133,6 +6235,7 @@ class SourceIntakePoller:
         return {
             "source_id": source.source_id,
             "external_id": item["external_id"],
+            "issue_ids": ", ".join(json.loads(item["member_ids"]) if isinstance(item.get("member_ids"), str) else item.get("member_ids", [])),
             "revision": item["revision"],
             "link": item.get("link", ""),
             "ticket_id": ticket_id,
@@ -6142,6 +6245,58 @@ class SourceIntakePoller:
             "approved_sha": sha,
             **_repository_fields(project),
         }
+
+    async def _existing_ado_pr(self, runtime, fields):
+        if not any(t.name == "ado_pull_requests_list" and t.effect == "read_only"
+                   for t in runtime.declaration.tools):
+            raise ConnectorDenied("PR delivery requires read-only PR reconciliation")
+        expected_source = "refs/heads/" + fields["source_branch"]
+        expected_target = "refs/heads/" + fields["target_branch"]
+        matches = []
+        # A negative result must cover every page; exceeding the transport bound fails closed.
+        for page in range(10):
+            args = {"project": fields["repository_project"], "repositoryId": fields["repository_name"],
+                    "sourceRefName": expected_source, "targetRefName": expected_target,
+                    "status": "all", "top": 100, "skip": page * 100}
+            result = await runtime.call_tool("source-pr-lookup-" + hashlib.sha256(_canonical_json(args)).hexdigest()[:32],
+                                             "ado_pull_requests_list", args)
+            document = _source_payload_document(result.payload)
+            rows = document.get("value") if isinstance(document, Mapping) else None
+            if not isinstance(rows, list) or len(rows) > 100 or any(not isinstance(r, Mapping) for r in rows):
+                raise ConnectorResultError("PR lookup returned incomplete evidence")
+            for row in rows:
+                if row.get("sourceRefName") != expected_source or row.get("targetRefName") != expected_target:
+                    continue
+                repository = row.get("repository", {})
+                if (not isinstance(repository, Mapping)
+                        or str(repository.get("name", "")).casefold() != fields["repository_name"].casefold()
+                        or str(repository.get("project", {}).get("name", "")).casefold() != fields["repository_project"].casefold()):
+                    raise ConnectorDenied("existing PR repository does not match the registered project")
+                if (row.get("status") not in {"active", "completed"}
+                        or row.get("lastMergeSourceCommit", {}).get("commitId") != fields["approved_sha"]):
+                    raise ConnectorDenied("existing PR is abandoned or does not contain the approved candidate")
+                if type(row.get("pullRequestId")) is not int or row["pullRequestId"] < 1:
+                    raise ConnectorResultError("existing PR identifier is invalid")
+                matches.append(dict(row))
+            if len(rows) < 100:
+                if len(matches) > 1:
+                    raise ConnectorDenied("multiple PRs match the approved candidate")
+                return matches[0] if matches else None
+        raise ConnectorResultError("PR reconciliation pagination is incomplete")
+
+    async def _delivery_notice(self, entry, state, *, pr_id=None, url=None, reason=None):
+        delivery = {"state": state}
+        if pr_id is not None: delivery["pr_id"] = pr_id
+        if url: delivery["url"] = url
+        if reason: delivery["reason"] = reason
+        if entry.get("approved_sha"): delivery["commit_hash"] = entry["approved_sha"]
+        text = "pursers-delivery: " + json.dumps(delivery, sort_keys=True, separators=(",", ":"))
+        if entry.get("delivery_notice") != text:
+            await self.ticket_annotator(entry["board_id"], entry["ticket_id"], text)
+            entry["delivery_notice"] = text
+        entry["delivery_state"] = state
+        self.index.dirty = True
+        self.index.save()
 
     async def _preflight_writeback(self, runtime, writeback, fields, arguments):
         expected = {"project": fields["repository_project"], "repositoryId": fields["repository_name"],
@@ -6163,7 +6318,7 @@ class SourceIntakePoller:
             raise ConnectorDenied("repository-details preflight requires repository_url_path")
         if repository_path is not None:
             observed_url = _source_value(document, repository_path)
-            if not isinstance(observed_url, str) or urllib.parse.unquote(observed_url).rstrip("/") != urllib.parse.unquote(fields["repository_url"]).rstrip("/"):
+            if not isinstance(observed_url, str) or _repository_identity(observed_url) != _repository_identity(fields["repository_url"]):
                 raise ConnectorDenied("remote repository identity does not match the registered project")
         rows = _source_value(document, policy["refs_path"])
         if not isinstance(rows, list):
@@ -6202,6 +6357,36 @@ class SourceIntakePoller:
             return False
         fields = await self._writeback_fields(source, board_id, ticket_id, ticket, item)
         arguments = _render_source_template(writeback.arg_template, fields)
+        key = self.index.key(source.source_id, item["external_id"])
+        entry = self.index.entries.get(key)
+        ado = writeback.tool == "ado_pull_request_create"
+        if ado:
+            if entry is not None:
+                entry["approved_sha"] = fields["approved_sha"]
+                self.index.dirty = True
+            expected = {"project": fields["repository_project"], "repositoryId": fields["repository_name"],
+                        "sourceRefName": "refs/heads/" + fields["source_branch"],
+                        "targetRefName": "refs/heads/" + fields["target_branch"]}
+            if any(arguments.get(k) != v for k, v in expected.items()):
+                raise ConnectorDenied("PR arguments do not match the registered project")
+            if not fields["source_branch"] or not fields["approved_sha"]:
+                raise ConnectorDenied("approved submission identity is missing or conflicting")
+            existing = await self._existing_ado_pr(runtime, fields)
+            if existing is not None:
+                pr_id = existing["pullRequestId"]
+                url = fields["repository_url"].rstrip("/") + f"/pullrequest/{pr_id}"
+                if entry is not None:
+                    await self._delivery_notice(entry, "pr_created", pr_id=pr_id, url=url)
+                await self.ticket_annotator(board_id, ticket_id,
+                    f"{marker}\nConnector writeback completed for the approved intake ticket. PR #{pr_id} reconciled.")
+                self.index.set_status(key, "delivered")
+                self.index.save()
+                return True
+            if entry is not None and entry.get("status") == "delivering":
+                await self._delivery_notice(entry, "pr_uncertain", reason="create_outcome_unconfirmed")
+                raise ConnectorResultError("previous PR creation outcome is unconfirmed; no duplicate create attempted")
+            if entry is not None:
+                await self._delivery_notice(entry, "pr_pending")
         if writeback.preflight is not None:
             await self._preflight_writeback(runtime, writeback, fields, arguments)
         elif writeback.tool == "ado_pull_request_create":
@@ -6226,7 +6411,14 @@ class SourceIntakePoller:
         self.index.save()
         self._writeback_grants.add(grant)
         try:
-            await runtime.call_tool(operation, writeback.tool, arguments)
+            result = await runtime.call_tool(operation, writeback.tool, arguments)
+            if ado:
+                created = _source_payload_document(result.payload)
+                pr_id = created.get("pullRequestId") if isinstance(created, Mapping) else None
+                if type(pr_id) is not int or pr_id < 1:
+                    raise ConnectorResultError("PR creation response has no confirmed identifier")
+                await self._delivery_notice(self.index.entries[key], "pr_created", pr_id=pr_id,
+                    url=fields["repository_url"].rstrip("/") + f"/pullrequest/{pr_id}")
         finally:
             self._writeback_grants.discard(grant)
         await self.ticket_annotator(
@@ -6248,7 +6440,7 @@ class SourceIntakePoller:
         keys = sorted(
             key
             for key, entry in self.index.entries.items()
-            if entry.get("status") == "asked" and entry.get("source_id") in sources
+            if entry.get("status") in {"asked", "delivering"} and entry.get("source_id") in sources
         )
         if not keys:
             return 0
@@ -6259,6 +6451,12 @@ class SourceIntakePoller:
         for key in batch:
             entry = self.index.entries[key]
             source = sources[entry["source_id"]]
+            now = getattr(self, "_writeback_now", datetime.now(timezone.utc))
+            if entry.get("retry_after") and now.timestamp() < float(entry["retry_after"]):
+                findings.append({"kind": "source-intake-delivery-pending", "level": "warn",
+                    "ticket_id": entry["ticket_id"], "delivery_state": entry.get("delivery_state", "pr_pending"),
+                    "message": "Approved delivery is waiting for its next reconciliation attempt."})
+                continue
             board_id, ticket_id = entry["board_id"], entry["ticket_id"]
             ticket = await self.ticket_reader(board_id, ticket_id)
             if ticket is None:
@@ -6278,6 +6476,17 @@ class SourceIntakePoller:
                     source, runtime, board_id, ticket_id, ticket, entry
                 )
             except Exception as exc:
+                if source.writeback.tool == "ado_pull_request_create":
+                    state = "pr_uncertain" if entry.get("status") == "delivering" else "pr_blocked"
+                    entry["retry_after"] = str(now.timestamp() + 60)
+                    entry["delivery_state"] = state
+                    entry["last_error_class"] = type(exc).__name__
+                    self.index.dirty = True
+                    self.index.save()
+                    try:
+                        await self._delivery_notice(entry, state, reason=type(exc).__name__)
+                    except Exception:
+                        pass  # Delivery remains durable even if Central is temporarily unavailable.
                 findings.append(
                     {
                         "kind": "source-intake-writeback-failed",
@@ -6287,8 +6496,8 @@ class SourceIntakePoller:
                         "ticket_id": ticket_id,
                         "error_class": type(exc).__name__,
                         "message": (
-                            "Writeback failed after being attempted once; it is not "
-                            "retried automatically."
+                            "Delivery is blocked or unconfirmed; inspect its delivery state. "
+                            "ADO reconciliation checks existing PRs before any new create."
                         ),
                     }
                 )
@@ -6297,11 +6506,94 @@ class SourceIntakePoller:
                 writebacks += 1
         return writebacks
 
+    async def _grouped_items(self, source: SourceDeclaration, now: datetime) -> list[dict[str, Any]]:
+        if self.index.path is None or self.group_choose is None or self.group_scope is None:
+            raise ConnectorConfigError("grouped intake needs a durable index and configured planner")
+        if now < self._group_retry_after.get(source.source_id, now):
+            raise ConnectorResultError("group planner is waiting for retry backoff")
+        runtime = self.runtimes[source.connector_id]
+        rows = []
+        total = None
+        for page in range(1, source.max_pages + 1):
+            args = {**source.fixed_args, source.page_arg or "pageIndex": page}
+            if source.grouping.get("canary_project"):
+                args["projectKeys"] = [source.grouping["canary_project"]]
+            result = await runtime.call_tool("group-snapshot-" + hashlib.sha256(_canonical_json([source.source_id, now.isoformat(), page])).hexdigest()[:32], source.list_tool, args)
+            payload = _source_payload_document(result.payload)
+            items = _source_value(payload, source.items_path)
+            page_total = payload.get("paging", {}).get("total")
+            if total is not None and page_total != total:
+                raise ConnectorResultError("group snapshot changed during pagination")
+            total = page_total
+            if not isinstance(items, list) or type(total) is not int or total < 0 or total > 2000:
+                raise ConnectorResultError("group snapshot is incomplete or exceeds 2000 issues")
+            rows.extend(items)
+            if len(rows) == total:
+                break
+            if not items or len(rows) > total:
+                raise ConnectorResultError("group snapshot pagination is inconsistent")
+        if total != len(rows) or len({x.get("key") for x in rows}) != len(rows):
+            raise ConnectorResultError("group snapshot is incomplete or duplicated")
+        reserved = set()
+        prepared = []
+        busy_paths = set()
+        active_groups = 0
+        for entry in self.index.entries.values():
+            if entry.get("source_id") != source.source_id:
+                continue
+            reserved.update(json.loads(entry.get("member_ids", "[]")))
+            if not entry.get("group_item"):
+                reserved.add(entry.get("external_id"))
+            if entry.get("group_item") and entry.get("status") == "prepared":
+                prepared.append(json.loads(entry["group_item"]))
+            if entry.get("status") in {"asked", "delivering", "delivered"}:
+                # A PR still edits the branch until it is landed. Preserve the overlap hold.
+                busy_paths.update((entry.get("scope_key", entry.get("project_hint")), path) for path in json.loads(entry.get("paths", "[]")))
+                if entry.get("status") != "delivered":active_groups += 1
+        if active_groups >= source.grouping.get("max_in_flight", 15):
+            return prepared
+        api = runpy.run_path(str(Path(__file__).with_name("source_grouping.py")))
+        projects = sorted({r["project"] for r in rows})
+        grouped = []
+        for project in projects:
+            scope = await self.group_scope(source.source_id, project)
+            if scope is None:
+                raise ConnectorResultError("group project has no verified repository mapping")
+            cache = self.index.path.with_name("groups-" + hashlib.sha256(_canonical_json([source.source_id, project])).hexdigest()[:20] + ".json")
+            try:
+                groups = await api["plan_groups"]([r for r in rows if r["project"] == project], scope, self.group_choose, cache)
+            except Exception:
+                self._group_retry_after[source.source_id] = now + timedelta(minutes=15)
+                raise
+            for group in groups:
+                remaining = [i for i in group["member_ids"] if i not in reserved]
+                if not remaining:
+                    continue
+                if len(remaining) != len(group["member_ids"]):
+                    # Preserve already admitted membership when a new analysis regroups issues.
+                    group = api["render"](group, [r for r in rows if r["key"] in remaining], scope)
+                if any((key, path) in busy_paths for path in group["paths"] for key in (project, group.get("scope_key", project))):continue
+                grouped.append(group)
+        return prepared + grouped
+
     async def _allowance(
         self, findings: list[dict[str, Any]], now: datetime
     ) -> tuple[int | None, tuple[str, ...], dict[str, Any]]:
         """Ask the Butler decision-maker how much to pull, within the hard ceiling."""
-        source_ids = tuple(source.source_id for source in self.sources)
+        eligible = []
+        for source in self.sources:
+            if source.grouping is not None:
+                entries = [e for e in self.index.entries.values() if e.get("source_id") == source.source_id]
+                active = sum(e.get("status") in {"asked", "delivering"} for e in entries)
+                admitted = sum(bool(e.get("group_item")) and e.get("status") != "prepared" for e in entries)
+                if active >= source.grouping.get("max_in_flight", 15) or (
+                    "max_admitted_groups" in source.grouping and admitted >= source.grouping["max_admitted_groups"]
+                ):
+                    continue
+            eligible.append(source)
+        source_ids = tuple(source.source_id for source in eligible)
+        if not source_ids:
+            return 0, (), {"mode": "decided", "pull": 0, "reason": "group_capacity_exhausted", "model_called": False}
         if self.decide is None:
             return None, source_ids, {"mode": "unbounded"}
         in_flight = self.index.in_flight()
@@ -6310,7 +6602,7 @@ class SourceIntakePoller:
             return 0, (), {"mode": "decided", "ceiling": ceiling or 0, "pull": 0,
                            "reason": "no_capacity"}
         observations = []
-        for source in self.sources:
+        for source in eligible:
             runtime = self.runtimes[source.connector_id]
             async def read(tool, arguments):
                 operation = hashlib.sha256(f"{source.source_id}:{now.isoformat()}".encode()).hexdigest()
@@ -6338,7 +6630,7 @@ class SourceIntakePoller:
             decision, ceiling=ceiling, source_ids=source_ids
         )
         metadata = {"mode": "decided", "ceiling": ceiling, "pull": pull, "reason": reason}
-        for key in ("model_called", "cache_reused", "retry_after", "provider_response_id", "elapsed_ms", "model"):
+        for key in ("model_called", "cache_reused", "retry_after", "provider_response_id", "elapsed_ms", "model", "error_class", "http_status", "response_chars", "response_truncated", "provider_usage"):
             if key in decision:
                 metadata[key] = decision[key]
         return pull, order, metadata
@@ -6347,6 +6639,7 @@ class SourceIntakePoller:
         if not self.sources:
             return {"processed": 0, "findings": [], "writebacks": 0}
         findings: list[dict[str, Any]] = []
+        self._writeback_now = now
         writebacks = await self._writeback_pass(findings) if self.active else 0
         allowance, order, decision = await self._allowance(findings, now)
         by_id = {source.source_id: source for source in self.sources}
@@ -6363,6 +6656,7 @@ class SourceIntakePoller:
         attempted_sources: list[str] = []
         states: dict[str, tuple[list[dict[str, Any]], list[Any], str | None]] = {}
         dirty: set[str] = set()
+        unknown_projects: set[tuple[str, str]] = set()
 
         def exhausted() -> bool:
             return processed >= self.cycle_cap or (
@@ -6376,8 +6670,27 @@ class SourceIntakePoller:
             runtime = self.runtimes[source.connector_id]
             source_new = 0
             source_ok = True
-            for page in range(1, source.max_pages + 1):
-                if exhausted() or source_new >= self.per_source_cap:
+            groups = None
+            if source.grouping is not None:
+                try:
+                    groups = await self._grouped_items(source, now)
+                except Exception as exc:
+                    findings.append({"kind": "source-grouping-unavailable", "source_id": source.source_id, "error_class": type(exc).__name__, "message": "No grouped tickets were admitted; snapshot or plan was unavailable."})
+                    continue
+            group_capacity = self.per_source_cap
+            if groups is not None:
+                active_groups = sum(1 for entry in self.index.entries.values()
+                                    if entry.get("source_id") == source.source_id
+                                    and entry.get("status") in {"asked", "delivering"})
+                group_capacity = max(0, min(group_capacity, source.grouping.get("max_in_flight", 15) - active_groups))
+                if "max_admitted_groups" in source.grouping:
+                    admitted = sum(1 for entry in self.index.entries.values()
+                                   if entry.get("source_id") == source.source_id and entry.get("group_item")
+                                   and entry.get("status") != "prepared")
+                    group_capacity = max(0, min(group_capacity, source.grouping["max_admitted_groups"] - admitted))
+            admitted_paths: set[tuple[str, str]] = set()
+            for page in range(1, 2 if groups is not None else source.max_pages + 1):
+                if exhausted() or source_new >= group_capacity:
                     break
                 arguments = dict(source.fixed_args)
                 if source.page_arg is not None:
@@ -6386,17 +6699,20 @@ class SourceIntakePoller:
                     f"{source.source_id}\0{page}\0{now.isoformat()}".encode()
                 ).hexdigest()
                 try:
-                    result = await runtime.call_tool(
-                        "source-poll-" + operation_digest[:32],
-                        source.list_tool,
-                        arguments,
-                    )
-                    document = _source_payload_document(result.payload)
-                    raw_items = _source_value(document, source.items_path)
-                    if not isinstance(raw_items, list):
-                        raise ConnectorResultError(
-                            "source items_path did not resolve to a list"
+                    if groups is not None:
+                        raw_items = groups
+                    else:
+                        result = await runtime.call_tool(
+                            "source-poll-" + operation_digest[:32],
+                            source.list_tool,
+                            arguments,
                         )
+                        document = _source_payload_document(result.payload)
+                        raw_items = _source_value(document, source.items_path)
+                        if not isinstance(raw_items, list):
+                            raise ConnectorResultError(
+                                "source items_path did not resolve to a list"
+                            )
                 except ConnectorError as exc:
                     findings.append(
                         {
@@ -6413,10 +6729,10 @@ class SourceIntakePoller:
                 if not raw_items:
                     break
                 for offset, raw_item in enumerate(raw_items):
-                    if exhausted() or source_new >= self.per_source_cap:
+                    if exhausted() or source_new >= group_capacity:
                         break
                     try:
-                        item = self._normalize(source, raw_item)
+                        item = dict(raw_item) if groups is not None else self._normalize(source, raw_item)
                     except ConnectorResultError as exc:
                         findings.append(
                             {
@@ -6431,11 +6747,17 @@ class SourceIntakePoller:
                         )
                         continue
                     seen = self.index.get(source.source_id, item["external_id"])
-                    if seen is not None and seen.get("revision") == item["revision"]:
+                    if seen is not None and seen.get("revision") == item["revision"] and seen.get("status") != "prepared":
                         continue  # already taken: no Central call
+                    if groups is not None and any((item.get("scope_key", item["project_hint"]), path) in admitted_paths for path in item["paths"]):
+                        continue
                     processed += 1
                     board_id = self._route(source, item["project_hint"])
                     if board_id is None:
+                        project_key = (source.source_id, item["project_hint"])
+                        if groups is not None and project_key in unknown_projects:
+                            continue
+                        unknown_projects.add(project_key)
                         findings.append(
                             {
                                 "kind": SOURCE_UNKNOWN_PROJECT_KIND,
@@ -6457,13 +6779,17 @@ class SourceIntakePoller:
                         "project_hint": item["project_hint"],
                         "board_id": board_id,
                         "ticket_id": ticket_id,
-                        "status": (seen or {}).get("status", "asked"),
+                        "status": "asked" if (seen or {}).get("status") == "prepared" else (seen or {}).get("status", "asked"),
                     }
+                    if groups is not None:
+                        index_entry.update({"scope_key": item.get("scope_key", item["project_hint"]), "member_ids": json.dumps(item["member_ids"]), "paths": json.dumps(item["paths"]), "group_item": json.dumps(item)})
                     ticket = await self.ticket_reader(board_id, ticket_id)
                     revision_marker = _source_revision_marker(
                         source.source_id, item["revision"]
                     )
                     if ticket is not None:
+                        if groups is not None and (seen or {}).get("status") == "prepared":
+                            source_new += 1
                         if self.active and revision_marker not in _ticket_text(ticket):
                             await self.ticket_annotator(
                                 board_id,
@@ -6526,11 +6852,18 @@ class SourceIntakePoller:
                     if source_row is not None and source_row.get("source", {}).get(
                         "revision"
                     ) == item["revision"]:
+                        if groups is not None and (seen or {}).get("status") == "prepared":
+                            source_new += 1
                         if self.active:
                             self.index.put(source.source_id, item["external_id"], index_entry)
                         continue
                     new_asks += 1
                     source_new += 1
+                    if groups is not None:
+                        admitted_paths.update((item.get("scope_key", item["project_hint"]), path) for path in item["paths"])
+                        if self.active:
+                            self.index.put(source.source_id, item["external_id"], {**index_entry, "status": "prepared"})
+                            self.index.save()
                     if self.active:
                         if source_row is None:
                             rows.append(ask)
@@ -6569,7 +6902,10 @@ class SourceIntakePoller:
         except BaseException:
             # An ask that never reached Central must not be remembered as taken.
             attempts = {k: dict(v) for k, v in self.index.entries.items()
-                        if v.get("status") in {"delivering", "delivered"}}
+                        if v.get("status") in {"delivering", "delivered"} or v.get("group_item")}
+            for k, entry in attempts.items():
+                if entry.get("group_item") and entry.get("status") == "asked" and index_snapshot.get(k, {}).get("status") != "asked":
+                    entry["status"] = "prepared"
             self.index.entries = {**index_snapshot, **attempts}
             self.index.dirty = index_dirty or bool(attempts)
             self.index.save()
@@ -10173,10 +10509,8 @@ def _observe_rejection_loops(
 ) -> list[Mapping[str, Any]]:
     ranked: list[tuple[int, Mapping[str, Any]]] = []
     for ticket_id, ticket in sorted(_ticket_row_map(context).items()):
-        count = ticket.get("rejection_count")
-        if count is None and isinstance(ticket.get("counts"), Mapping):
-            count = ticket["counts"].get("rejections", 0)
-        if not isinstance(count, int) or isinstance(count, bool) or count < REJECTION_NAG_COUNT:
+        count = _active_rejection_count(ticket)
+        if count < REJECTION_NAG_COUNT:
             continue
         escalated = count >= REJECTION_ESCALATE_COUNT
         ranked.append(
@@ -10231,7 +10565,10 @@ def _ticket_dispatch_state(ticket: Mapping[str, Any]) -> Mapping[str, Any]:
     )
 
 
-def _rejection_count(ticket: Mapping[str, Any]) -> int:
+def _active_rejection_count(ticket: Mapping[str, Any]) -> int:
+    """Count current rework, excluding Central's terminal ticket states."""
+    if ticket.get("status") in {"closed", "rejected", "canceled", "terminated"}:
+        return 0
     value = ticket.get("rejection_count")
     if value is None and isinstance(ticket.get("counts"), Mapping):
         value = ticket["counts"].get("rejections", 0)
@@ -10243,7 +10580,7 @@ def _fleet_demand_snapshot(context: ObservationContext) -> dict[str, Any]:
     unassignable_ages = {"work": [], "review": []}
     rejections: list[int] = []
     for ticket in context.ticket_rows:
-        count = _rejection_count(ticket)
+        count = _active_rejection_count(ticket)
         if count:
             rejections.append(count)
         dispatch = _ticket_dispatch_state(ticket)
@@ -10963,7 +11300,7 @@ def _bound_control_state(
                 for index, item in enumerate(findings)
                 if isinstance(item, Mapping)
                 and item.get("level") != "critical"
-                and item.get("question_id") != preserve_question_id
+                and (preserve_question_id is None or item.get("question_id") != preserve_question_id)
             ),
             None,
         )
@@ -11375,7 +11712,7 @@ class CentralProjectRegistry:
     async def ensure_board(
         self, board_id: str, _domain: str, default_ticket_tier: int | None = None
     ) -> None:
-        async with self.backend._client_for_board(board_id) as client:
+        async with self.backend._client_for_board(board_id, onboarding=True) as client:
             await client.board_onboard(
                 role="coordinator",
                 capabilities=dict(BOARD_BUTLER_CAPABILITIES),
@@ -11406,6 +11743,17 @@ class CentralProjectRegistry:
                     "default_ticket_tier": default_ticket_tier,
                 },
             )
+
+    async def ensure_members(self, board_id: str, roles: Mapping[str, str]) -> None:
+        async with self.backend._client_for_board(board_id) as client:
+            current = await client._call("board_members", {})
+            members = {m.get("principal_id"): m.get("role") for m in current.get("members", [])}
+            for principal, role in roles.items():
+                if members.get(principal) == role:
+                    continue
+                if principal in members:
+                    raise RuntimeError("onboarding membership role conflicts with existing admission")
+                await client._call("board_member_add", {"agent_name": client.agent_name, "principal_id": principal, "role": role})
 
     async def add_project(
         self,
@@ -11709,10 +12057,14 @@ class CentralBackend:
         self._project_registry_adapter: CentralProjectRegistry | None = None
         self._project_onboarder: Any = None
         self._project_onboarding_retry_keys: set[tuple[str, str]] = set()
+        self._source_discovery_next: dict[str, datetime] = {}
+        self._source_discovery_results: dict[str, Any] = {}
+        self._source_discovery_base = dict(self._project_onboarding_policies)
         self.subscription_healthy = True
         self._subscription_failure_active = False
         self._source_registry_projects: dict[str, str] = {}
         self._source_board_load: dict[str, dict[str, int]] = {}
+        self._source_fleet_load: dict[str, int] = {}
         self._intake_decision_cache = IntakeDecisionCache()
         connector_runtimes = tuple(
             getattr(args, "_connector_runtimes", ()) or ()
@@ -11737,6 +12089,9 @@ class CentralBackend:
             if connector_sources
             else None
         )
+        if self.source_intake_poller is not None:
+            self.source_intake_poller.group_choose = self._source_group_choose
+            self.source_intake_poller.group_scope = self._source_group_scope
         self._source_intake_task: asyncio.Task[dict[str, Any]] | None = None
         startup_findings = [
             dict(item)
@@ -11874,11 +12229,56 @@ class CentralBackend:
             return dict(self._source_intake_last)
         if self._source_intake_task is None:
             self._source_intake_task = asyncio.create_task(
-                self.source_intake_poller.run_cycle(now),
+                self._run_source_intake_cycle(now),
                 name="board-butler-source-intake",
             )
             return {"status": "scheduled", "previous": dict(self._source_intake_last)}
         return {"status": "running", "previous": dict(self._source_intake_last)}
+
+    async def _run_source_intake_cycle(self, now: datetime) -> dict[str, Any]:
+        assert self.source_intake_poller is not None
+        poller = self.source_intake_poller
+        findings = []
+        for source in poller.sources:
+            policy = self._source_discovery_base.get(source.source_id)
+            if policy is None or policy.discovery is None:
+                continue
+            api = runpy.run_path(str(Path(__file__).with_name("source_discovery.py")))
+            runtime = poller.runtimes[source.connector_id]
+            if any(not any(t.name == tool and t.effect == "read_only" for t in runtime.declaration.tools) for tool in api["READ_TOOLS"]):
+                raise ConnectorConfigError("discovery requires declared read-only inventory tools")
+            if now >= self._source_discovery_next.get(source.source_id, now):
+                self._source_discovery_next[source.source_id] = now + timedelta(seconds=policy.discovery["refresh_seconds"])
+                async def read(tool, arguments):
+                    op = hashlib.sha256(_canonical_json([source.source_id, now.isoformat(), tool, arguments])).hexdigest()
+                    result = await runtime.call_tool("discovery-" + op[:32], tool, arguments)
+                    return _source_payload_document(result.payload)
+                try:
+                    explicit = {key: {"repository_url": value.repository_url, "integration_ref": value.integration_ref} for key, value in policy.repositories.items()}
+                    result = await api["discover"](read, explicit)
+                    self._source_discovery_results[source.source_id] = result
+                except Exception:
+                    self._source_discovery_results.pop(source.source_id, None)
+                    raise
+            result = self._source_discovery_results.get(source.source_id)
+            if result is None:
+                return {"new_asks": 0, "findings": [{"kind": "source-discovery-unavailable", "source_id": source.source_id}], "decision": {"pull": 0, "model_called": False}}
+            for item in result.findings:
+                findings.append({"kind": "source-discovery-unresolved", "source_id": source.source_id, **item})
+            if not result.repositories:
+                return {"new_asks": 0, "findings": findings[:50], "decision": {"pull": 0, "model_called": False, "reason": "no_matched_projects"}}
+            api_onboard = _project_onboarding_api()
+            resolutions = {key: api_onboard["RepositoryResolution"](**value) for key, value in result.repositories.items()}
+            self._project_onboarding_policies[source.source_id] = replace(policy, repositories=resolutions)
+            if self._project_onboarder is not None:
+                self._project_onboarder.policies[source.source_id] = self._project_onboarding_policies[source.source_id]
+            keys = [source.grouping["canary_project"]] if source.grouping and source.grouping.get("canary_project") else sorted(resolutions)
+            observation = replace(source.observation, arguments={**source.observation.arguments, "projectKeys": keys}) if source.observation else None
+            updated = replace(source, fixed_args={**source.fixed_args, "projectKeys": keys}, observation=observation)
+            poller.sources = tuple(updated if x.source_id == source.source_id else x for x in poller.sources)
+        result = await poller.run_cycle(now)
+        result["discovery_findings"] = findings[:50]
+        return result
 
     def _managed_intake_options(self, args: argparse.Namespace) -> dict[str, Any]:
         """Butler-managed intake: a private index, a seat ceiling and an LLM decision."""
@@ -11902,6 +12302,58 @@ class CentralBackend:
         if type(cap) is not int or cap <= 0:
             return 0
         return cap - sum(in_flight.values())
+
+    async def _source_group_scope(self, source_id: str, project: str) -> Mapping[str, Any] | None:
+        policy = self._project_onboarding_policies.get(source_id)
+        resolution = policy.repositories.get(project) if policy else None
+        if resolution is None:
+            return None
+        poller = self.source_intake_poller
+        source = next(item for item in poller.sources if item.source_id == source_id)
+        runtime = poller.runtimes[source.connector_id]
+        fields = _repository_fields({"repository_url": resolution.repository_url})
+        async def read(tool, arguments):
+            if not any(t.name == tool and t.effect == "read_only" for t in runtime.declaration.tools):
+                raise ConnectorConfigError("group scope verification requires declared read-only tools")
+            operation = hashlib.sha256(_canonical_json([source_id, tool, arguments])).hexdigest()[:32]
+            result = await runtime.call_tool("group-scope-" + operation, tool, arguments)
+            return _source_payload_document(result.payload)
+        sonar = await read("sonar_list_branches", {"projectKey": project})
+        branches = [row for row in sonar.get("branches", []) if row.get("isMain") is True]
+        if len(branches) != 1 or branches[0].get("name") != resolution.integration_ref:
+            raise ConnectorDenied("Sonar analyzed branch does not match the registered target branch")
+        sha = branches[0].get("commit", {}).get("sha")
+        if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise ConnectorDenied("Sonar analyzed commit is unavailable")
+        ado = await read("ado_repository_details_get", {
+            "project": fields["repository_project"], "repositoryId": fields["repository_name"],
+            "includeRefs": True, "includeStatistics": False, "refFilter": "heads/" + resolution.integration_ref})
+        if _repository_identity(ado.get("repository", {}).get("remoteUrl", "")) != _repository_identity(resolution.repository_url):
+            raise ConnectorDenied("Sonar mapping repository identity differs from the ADO response")
+        refs = [row for row in ado.get("refs", {}).get("value", []) if row.get("name") == "refs/heads/" + resolution.integration_ref]
+        if len(refs) != 1 or refs[0].get("objectId") != sha:
+            raise ConnectorDenied("Sonar analysis is not the current target branch commit")
+        return {"project": project, "repository_url": resolution.repository_url,
+                "branch": resolution.integration_ref, "analysis_sha": sha}
+
+    async def _source_group_choose(self, context: Mapping[str, Any]) -> dict[str, Any]:
+        document = await self.coordinator_config()
+        config = resolve_config(document, self.args, {}, utc_now(), project_name=self.project_name)
+        runtime = resolve_provider_runtime(config, "drafting", getattr(self.args, "provider_secrets_dir", None))
+        if runtime is None or runtime.draft_protocol != "openai_chat_completions_v1":
+            raise ButlerConfigError("group planner needs a configured chat provider")
+        api = runpy.run_path(str(Path(__file__).with_name("source_grouping.py")))
+        prompt = json.dumps(context, separators=(",", ":"))
+        if len(prompt) > 32_000:raise ValueError("group planning context exceeded bound")
+        body = json.dumps({"model": runtime.model, "messages": [{"role": "system", "content": api["SYSTEM_PROMPT"]}, {"role": "user", "content": prompt}], "max_tokens": 9000, "response_format": {"type": "json_object"}}).encode()
+        response = await _post_provider_json(runtime, body, timeout_s=60, max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES)
+        text = _openai_chat_draft_text(response)
+        if text is None:raise ValueError("group response is malformed")
+        document = json.loads(text)
+        if isinstance(document, dict):
+            document["evidence"] = {"provider_response_id": str(response.get("id", ""))[:200],
+                                    "model": runtime.model[:120], "issue_count": context.get("issue_count", 0)}
+        return document
 
     async def _source_intake_decide(
         self, context: Mapping[str, Any]
@@ -11930,11 +12382,16 @@ class CentralBackend:
             raise ButlerConfigError("no Butler model is configured for intake decisions")
         cache = self._intake_decision_cache
         try:
-            decision = await cache.decide(runtime, {**context, "board_load": self._source_board_load}, utc_now())
+            decision = await cache.decide(runtime, {**context, "board_load": self._source_board_load,
+                                                    "fleet_load": self._source_fleet_load}, utc_now())
         except Exception:
-            return {"pull": 0, "source_ids": [], "reason": "provider_unavailable",
+            reason = ("provider_response_truncated" if cache.failure.get("response_truncated") else
+                      "provider_response_invalid" if cache.failure.get("error_class") == "JSONDecodeError" else
+                      "provider_unavailable")
+            return {"pull": 0, "source_ids": [], "reason": reason,
                     "model_called": cache.model_called, "cache_reused": False,
-                    "retry_after": cache._retry_after.isoformat() if cache._retry_after else None}
+                    "retry_after": cache._retry_after.isoformat() if cache._retry_after else None,
+                    **cache.failure}
         evidence = cache.evidence if cache.model_called else {}
         return {**decision, "model_called": cache.model_called, "cache_reused": cache.cache_reused,
                 "model": runtime.model[:120], **evidence}
@@ -12144,7 +12601,7 @@ class CentralBackend:
             if isinstance(item, Mapping)
             and (
                 item.get("reason_code") == SOURCE_UNKNOWN_PROJECT_KIND
-                or str(item.get("kind", "")).startswith("source-intake-")
+                or str(item.get("kind", "")).startswith(("source-intake-", "source-grouping-", "source-discovery-"))
             )
         ]
         async with self._client_for_board(self.args.home_board) as client:
@@ -12165,7 +12622,7 @@ class CentralBackend:
                         and item.get("source_id") in successful
                     )
                     or (
-                        str(item.get("kind", "")).startswith("source-intake-")
+                        str(item.get("kind", "")).startswith(("source-intake-", "source-grouping-", "source-discovery-"))
                         and (
                             item.get("source_id") in attempted
                             or item.get("source_id") is None
@@ -12197,7 +12654,7 @@ class CentralBackend:
         self._source_intake_findings_pending = False
 
     @asynccontextmanager
-    async def _client_for_board(self, board_id: str) -> AsyncIterator[Any]:
+    async def _client_for_board(self, board_id: str, *, onboarding: bool = False) -> AsyncIterator[Any]:
         """Yield a client whose immutable board context matches the operation."""
         if board_id == self.args.home_board:
             yield self.client
@@ -12209,7 +12666,9 @@ class CentralBackend:
             self.token,
             board_id,
             agent_name=self.args.agent_name,
-            role="coordinator",
+            # A fresh board requires creator admission before coordinator-only joins.
+            # Explicit false capabilities keep this provisioning identity out of work.
+            role="worker" if onboarding else "coordinator",
             capabilities=dict(BOARD_BUTLER_CAPABILITIES),
             allow_takeover=True,
         ) as client:
@@ -13490,6 +13949,7 @@ class CentralBackend:
             board_id: source_intake_board_load(snapshot, now)
             for board_id, snapshot in snapshots.items()
         }
+        self._source_fleet_load = source_intake_fleet_load(snapshots, now)
         project_onboarding = await self._auto_onboard_unknown_projects(previous, now)
         active_boards = {project.board_id for project in projects}
         self._harvest_approval_scan(sorted(active_boards))

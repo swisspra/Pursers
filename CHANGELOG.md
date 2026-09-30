@@ -7,7 +7,32 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Keep unhealthy seats out of usable fleet capacity while retaining hard process
+  limits; recover eligible proven seats before switching on provider probe timing.
+- Preserve running minimum capacity through provider probe failures and let idle
+  draining seats finish before recovery, preventing drain/stop/start churn.
+
+- Persist verified branch, SHA and test evidence on submissions; accept legacy
+  whitespace around `@` consistently across workers, Butler and the dashboard.
+  Preserve inline `test_output=...` evidence from legacy seats.
+- Reconcile approved ADO delivery against existing PRs before creation; recover
+  lost responses without duplicate PRs and distinguish approval from delivery.
+- Park repeated reviews of the same SHA with unchanged feedback, recording a
+  workflow blocker until an authorized operator resolves and resumes the ticket.
+
+- Separate seat capacity from optional hourly model-run throttles; allow `max_runs_per_hour: null` and wait/resume on explicit limits instead of crashing with pending work.
+
+- Apply submission preflight to legacy code tickets requiring `commit_hash`, catching malformed branch evidence before independent review.
+- Verify every repair commit against the registered integration branch, including cumulative changed paths and leak scanning, instead of checking only the last commit.
+
+- Raise structured board-state capacity to 262,144 characters so multi-item intake queues no longer fail at the ticket-text limit; preserve atomic validation and concurrency checks.
+- Reconnect event seats after temporary Central transport failures with bounded backoff and preserved cursors, without repeating model runs.
+
 ### Added
+
+- Optional Sonar/ADO inventory discovery, explicit fleet member onboarding, and
+  durable model-planned multi-issue repair groups with bounded canary admission.
+  See [managed intake configuration](docs/managed-intake.md).
 
 - Native managed source counts: confirmed empty sources skip model calls, unchanged
   inputs reuse decisions, and provider failures back off for 15 minutes.
@@ -19,6 +44,44 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   GUI/IDE workflow using the existing integration.
 
 ### Fixed
+
+- Deduplicate idle fleet capacity across registry boards before intake decisions; a busy seat is not counted as spare capacity on another board.
+
+- Event seats deduplicate journal offers by event identity when `updated_at` is absent, allowing later reoffers and review rounds without repeating the same event after reconnect.
+
+- Deliver routing-state journal cues to authorized coordinators through `board_catchup`, so new intake wakes the coordinator without restarting it; ordinary worker visibility remains unchanged.
+
+- Reserve 1,600 output tokens for intake decisions so reasoning models can finish their JSON response; report truncation separately from transport failures without increasing call frequency.
+
+- Intake provider failures retain safe exception classes and HTTP status codes through backoff without logging credentials or upstream error bodies.
+
+- Project registry parsing preserves the configured integration branch for PR
+  delivery instead of silently falling back to `main`.
+- Central journals routing-state changes so subscribed coordinators discover new
+  projects and intake without a restart. Identical writes and findings refreshes
+  do not emit these events; state values are excluded from the journal.
+- Intake joins each admitted board as a non-working coordinator before the first
+  generation-fenced ticket creation, including when its credential is separate.
+- Grouped intake verifies the analyzed branch and commit, reuses plans across
+  irrelevant transport changes, and skips model calls when its canary cap is full.
+
+- Generated review seats accept complete successful Jest/Vitest evidence for
+  JavaScript projects and keep approved branches available for Butler PR delivery.
+
+- Noncritical source findings respect the Central state size bound even when no
+  question is being preserved; unknown grouped projects emit one onboarding hint.
+
+- Automatic intake board creation bootstraps a non-working identity before joining
+  as coordinator, grants configured member roles, and backs off on failed setup.
+- ADO delivery preflight accepts organization usernames in remote URLs while
+  still checking repository identity and the exact approved branch SHA.
+
+- Fleet Dashboard keeps Decline available for approved intake until consumption
+  and exposes it on intake attention findings, with fresh queue checks and
+  existing audit records. System health alerts remain separate.
+
+- Butler excludes terminal tickets from rejection-loop alerts, overflow summaries,
+  and current rework demand, so completed reviews no longer appear as active loops.
 
 - Approved source delivery shares a durable attempt guard across refresh and revision
   paths, checks the configured remote branch SHA before Azure DevOps PR creation,

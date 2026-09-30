@@ -475,10 +475,13 @@ def test_intake_decision_cache_backs_off_provider_failures(monkeypatch):
         monkeypatch.setattr(butler, "decide_intake_with_provider", decide)
         with pytest.raises(TimeoutError):
             await cache.decide(runtime, {"ceiling": 15}, NOW)
+        assert cache.failure == {"error_class": "TimeoutError"}
         with pytest.raises(butler.ButlerConfigError, match="retry is deferred"):
             await cache.decide(runtime, {"ceiling": 14}, NOW + timedelta(minutes=1))
         assert len(calls) == 1
+        assert cache.failure == {"error_class": "TimeoutError"}
         assert await cache.decide(runtime, {"ceiling": 14}, NOW + timedelta(minutes=15)) == {"pull": 1}
+        assert cache.failure == {}
         assert len(calls) == 2
     asyncio.run(scenario())
 
@@ -696,4 +699,214 @@ def test_preflight_rejects_same_named_repository_in_another_organization(tmp_pat
         result=await poller.run_cycle(NOW)
         assert not [name for name,_ in calls if name=='pr_create']
         assert result['findings']
+    asyncio.run(scenario())
+
+
+def test_repository_identity_accepts_ado_organization_username_only():
+    expected='https://dev.azure.com/example-org/example%20project/_git/repo'
+    observed='https://example-org@dev.azure.com/example-org/example%20project/_git/repo'
+    assert butler._repository_identity(expected)==butler._repository_identity(observed)
+    with pytest.raises(butler.ConnectorDenied):
+        butler._repository_identity('https://user:password@dev.azure.com/example-org/project/_git/repo')
+
+
+def test_resident_project_reader_preserves_nondefault_delivery_branch():
+    row = {"board_id": "alpha", "work_dir": "/repo/alpha", "status": "active",
+           "repository_url": "https://dev.azure.com/example/team/_git/backend",
+           "integration_ref": "dev"}
+    class Client:
+        async def board_state_get(self, key):
+            assert key == "project_registry"
+            return {"state": {"value": json.dumps({"schema_version": 1, "projects": {"alpha": row}})}}
+    @contextlib.asynccontextmanager
+    async def client_for_board(board_id):
+        assert board_id == "home"
+        yield Client()
+    backend = object.__new__(butler.CentralBackend)
+    backend.args = SimpleNamespace(home_board="home")
+    backend._client_for_board = client_for_board
+    result = asyncio.run(backend._source_project_reader("alpha"))
+    assert butler._repository_fields(result)["target_branch"] == "dev"
+
+
+def test_resident_reports_safe_provider_failure_through_backoff(monkeypatch):
+    async def scenario():
+        backend = butler.CentralBackend(SimpleNamespace(), "opaque")
+        async def config():
+            return {}
+        async def fail(*_args):
+            raise butler.urllib.error.HTTPError(
+                "https://model.invalid/private", 429, "credential=do-not-log", {}, None
+            )
+        monkeypatch.setattr(backend, "coordinator_config", config)
+        monkeypatch.setattr(butler, "resolve_config", lambda *_a, **_kw: None)
+        runtime = butler.ProviderRuntime("https://model.invalid", "model", "secret")
+        monkeypatch.setattr(butler, "resolve_provider_runtime", lambda *_a, **_kw: runtime)
+        monkeypatch.setattr(butler, "decide_intake_with_provider", fail)
+        for expected_called in (True, False):
+            result = await backend._source_intake_decide({"ceiling": 15})
+            assert result["pull"] == 0
+            assert result["model_called"] is expected_called
+            assert result["error_class"] == "HTTPError"
+            assert result["http_status"] == 429
+            assert "do-not-log" not in json.dumps(result)
+            assert "model.invalid" not in json.dumps(result)
+    asyncio.run(scenario())
+
+
+def test_intake_cache_reports_truncated_json_without_response_text(monkeypatch):
+    async def scenario():
+        async def post(*args, **kwargs):
+            return {"choices": [{"finish_reason": "length", "message": {"content": '{"pull":'}}]}
+        monkeypatch.setattr(butler, "_post_provider_json", post)
+        runtime = butler.ProviderRuntime("https://model.invalid", "model", "secret", draft_protocol="openai_chat_completions_v1")
+        cache = butler.IntakeDecisionCache()
+        with pytest.raises(json.JSONDecodeError):
+            await cache.decide(runtime, {"ceiling": 15}, NOW)
+        assert cache.failure == {"error_class": "JSONDecodeError", "response_chars": 8, "response_truncated": True}
+    asyncio.run(scenario())
+
+
+def test_intake_request_reserves_reasoning_and_json_output_budget(monkeypatch):
+    async def scenario():
+        async def post(_runtime, body, **_kwargs):
+            request = json.loads(body)
+            assert request["max_tokens"] == 1600
+            return {"choices": [{"finish_reason": "stop", "message": {"content": '{"pull": 1, "source_ids": ["source"]}'}}],
+                    "usage": {"prompt_tokens": 289, "completion_tokens": 207, "total_tokens": 496,
+                              "completion_tokens_details": {"reasoning_tokens": 162}, "private": "not-public"}}
+        monkeypatch.setattr(butler, "_post_provider_json", post)
+        runtime = butler.ProviderRuntime("https://model.invalid", "model", "secret", draft_protocol="openai_chat_completions_v1")
+        cache = butler.IntakeDecisionCache()
+        assert (await cache.decide(runtime, {"ceiling": 1}, NOW))["pull"] == 1
+        assert cache.evidence["provider_usage"] == {"prompt_tokens": 289, "completion_tokens": 207,
+                                                    "total_tokens": 496, "reasoning_tokens": 162}
+        assert (await cache.decide(runtime, {"ceiling": 1}, NOW))["pull"] == 1
+        assert not cache.model_called
+        assert cache.evidence == {}  # Cached reads are not new usage.
+    asyncio.run(scenario())
+
+
+def test_intake_fleet_load_deduplicates_registry_memberships():
+    worker = {"agent_name": "worker", "principal_id": "worker-principal", "role": "worker",
+              "status": "idle", "last_activity_at": NOW.isoformat(), "capabilities_explicit": True,
+              "capabilities": {"can_work": True, "can_review": False}}
+    snapshots = {"home": {"agents": [worker]}, "project": {"agents": [dict(worker)]}}
+    assert butler.source_intake_fleet_load(snapshots, NOW)["idle_workers"] == 1
+    snapshots["project"]["agents"][0]["status"] = "busy"
+    assert butler.source_intake_fleet_load(snapshots, NOW)["idle_workers"] == 0
+
+
+def _ado_reconciliation_setup(tmp_path, *, existing=False, lose_response=False, lookup_fails=False):
+    from dataclasses import replace
+    poller, calls = _delivery_setup(tmp_path)
+    rows = []
+    row = {'pullRequestId': 31, 'status': 'active',
+        'sourceRefName': 'refs/heads/pursers/TK-test', 'targetRefName': 'refs/heads/main',
+        'lastMergeSourceCommit': {'commitId': 'b'*40},
+        'repository': {'name': 'example-repo', 'project': {'name': 'example-project'}}}
+    if existing: rows.append(row)
+    class Client(PagedClient):
+        async def list_tools(self, **kwargs):
+            result = await super().list_tools(**kwargs)
+            result.tools[1].name = 'ado_pull_request_create'
+            for name in ['refs', 'ado_pull_requests_list']:
+                result.tools.append(SimpleNamespace(name=name, input_schema={'type':'object'}))
+            return result
+        async def call_tool(self, name, arguments, **kwargs):
+            calls.append((name, dict(arguments)))
+            if name == 'ado_pull_requests_list':
+                if self.lookup_fails: raise RuntimeError('lookup unavailable')
+                return Model(structured_content={'value':list(rows),'count':len(rows)})
+            if name == 'refs':
+                return Model(structured_content={'value':[{'name':row['sourceRefName'],'objectId':'b'*40}]})
+            if name == 'ado_pull_request_create':
+                rows.append(row)
+                if lose_response: raise RuntimeError('response lost after commit')
+                return Model(structured_content=row)
+            return Model(structured_content={'issues':[]})
+    client=Client({},calls);client.lookup_fails=lookup_fails
+    original=poller.runtimes['connector:sonar'].declaration
+    tools=tuple(replace(t,name='ado_pull_request_create') if t.name=='pr_create' else t for t in original.tools)
+    declaration=replace(original,tools=(*tools,replace(tools[0],name='ado_pull_requests_list')),
+                        risky_tools=frozenset({'ado_pull_request_create'}))
+    poller.runtimes={'connector:sonar':_runtime(declaration,client)}
+    source=poller.sources[0]
+    poller.sources=(replace(source,writeback=replace(source.writeback,tool='ado_pull_request_create')),)
+    return poller,calls,rows,client
+
+
+def test_spaced_legacy_candidate_is_delivered(tmp_path):
+    async def scenario():
+        poller,calls=_delivery_setup(tmp_path)
+        ticket=await poller.ticket_reader('board-a','TK-test')
+        ticket['latest_submission']['notes']='branch_and_commit: pursers/TK-test @ '+'b'*40
+        assert (await poller.run_cycle(NOW))['writebacks']==1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('existing,lose_response',[(True,False),(False,False),(False,True)])
+def test_ado_reconciles_existing_and_uncertain_create_without_duplicates(tmp_path,existing,lose_response):
+    async def scenario():
+        poller,calls,rows,_client=_ado_reconciliation_setup(tmp_path,existing=existing,lose_response=lose_response)
+        await poller.run_cycle(NOW)
+        poller.index=butler.SourceIntakeIndex(poller.index.path)
+        await poller.run_cycle(NOW+timedelta(minutes=2))
+        assert len([n for n,a in calls if n=='ado_pull_request_create'])==(0 if existing else 1)
+        assert len(rows)==1
+        entry=poller.index.get('sonar','one')
+        assert entry['status']=='delivered'
+        assert entry['delivery_state']=='pr_created'
+        assert '31' in entry['delivery_notice']
+    asyncio.run(scenario())
+
+
+def test_ado_read_failure_retries_lookup_before_create(tmp_path):
+    async def scenario():
+        poller,calls,rows,client=_ado_reconciliation_setup(tmp_path,lookup_fails=True)
+        await poller.run_cycle(NOW)
+        assert not rows
+        assert poller.index.get('sonar','one')['delivery_state']=='pr_blocked'
+        client.lookup_fails=False
+        await poller.run_cycle(NOW+timedelta(minutes=2))
+        assert len(rows)==1
+    asyncio.run(scenario())
+
+
+def test_uncertain_create_without_remote_proof_does_not_create_again(tmp_path):
+    async def scenario():
+        poller,calls,rows,_client=_ado_reconciliation_setup(tmp_path,lose_response=True)
+        await poller.run_cycle(NOW)
+        rows.clear()  # A missing/eventually-consistent read is not proof of failed creation.
+        await poller.run_cycle(NOW+timedelta(minutes=2))
+        assert len([n for n,a in calls if n=='ado_pull_request_create'])==1
+        assert poller.index.get('sonar','one')['delivery_state']=='pr_uncertain'
+    asyncio.run(scenario())
+
+
+def test_existing_pr_with_different_sha_blocks_duplicate_creation(tmp_path):
+    async def scenario():
+        poller,calls,rows,_client=_ado_reconciliation_setup(tmp_path,existing=True)
+        rows[0]['lastMergeSourceCommit']['commitId']='c'*40
+        await poller.run_cycle(NOW)
+        assert not [n for n,a in calls if n=='ado_pull_request_create']
+        assert poller.index.get('sonar','one')['delivery_state']=='pr_blocked'
+    asyncio.run(scenario())
+
+
+def test_ado_recovers_annotation_failure_without_second_create(tmp_path):
+    async def scenario():
+        poller,calls,rows,_client=_ado_reconciliation_setup(tmp_path)
+        original=poller.ticket_annotator
+        async def annotate(board,ticket,text):
+            if text.startswith('source-writeback-'):raise RuntimeError('Central temporarily unavailable')
+            return await original(board,ticket,text)
+        poller.ticket_annotator=annotate
+        await poller.run_cycle(NOW)
+        assert len(rows)==1
+        poller.index=butler.SourceIntakeIndex(poller.index.path)
+        poller.ticket_annotator=original
+        await poller.run_cycle(NOW+timedelta(minutes=2))
+        assert len([n for n,a in calls if n=='ado_pull_request_create'])==1
+        assert poller.index.get('sonar','one')['status']=='delivered'
     asyncio.run(scenario())

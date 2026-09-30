@@ -1029,6 +1029,8 @@ def test_central_source_scheduler_never_awaits_the_poller() -> None:
         release = asyncio.Event()
 
         class SlowPoller:
+            sources = ()
+
             async def run_cycle(self, _now: datetime) -> dict[str, Any]:
                 await release.wait()
                 return {"processed": 1, "findings": [], "writebacks": 0}

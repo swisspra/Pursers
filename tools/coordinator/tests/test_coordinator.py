@@ -3187,7 +3187,8 @@ def test_intake_persistent_stale_generation_retries_at_most_once(
     assert rejoins == 1
 
 
-def test_intake_caller_rejoin_fences_next_create_with_generation() -> None:
+@pytest.mark.parametrize("generation", [None, "GEN-current"])
+def test_intake_caller_joins_nonworking_coordinator_before_first_create(generation) -> None:
     calls: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
 
     class FakeTransport:
@@ -3196,7 +3197,7 @@ def test_intake_caller_rejoin_fences_next_create_with_generation() -> None:
         ) -> dict[str, Any]:
             calls.append((name, arguments, kwargs))
             if name == "board_join":
-                return {"generation_token": "GEN-current"}
+                return {"generation_token": generation}
             return {"ticket": {"ticket_id": "TK-created"}}
 
     caller = coordinator.IntakeCaller("https://board.invalid/mcp", "opaque")
@@ -3204,7 +3205,6 @@ def test_intake_caller_rejoin_fences_next_create_with_generation() -> None:
     caller._decode = lambda result: result
 
     async def exercise() -> dict[str, Any]:
-        await caller.rejoin("board-a", "coordinator-test")
         return await caller.call(
             "ticket_create", "board-a", agent_name="coordinator-test"
         )
@@ -3213,13 +3213,15 @@ def test_intake_caller_rejoin_fences_next_create_with_generation() -> None:
     assert calls == [
         (
             "board_join",
-            {"board_id": "board-a", "agent_name": "coordinator-test"},
+            {"board_id": "board-a", "agent_name": "coordinator-test",
+             "role": "coordinator", "allow_takeover": True,
+             "capabilities": {"can_work": False, "can_review": False}},
             {},
         ),
         (
             "ticket_create",
             {"board_id": "board-a", "agent_name": "coordinator-test"},
-            {"meta": {"io.onboard/expected-generation": "GEN-current"}},
+            {"meta": {"io.onboard/expected-generation": generation}} if generation else {},
         ),
     ]
 
@@ -3884,6 +3886,12 @@ def test_write_scoped_intake_token_is_refused_with_central_reason(
     assert "Central rejects coordinator op-key usage" in note
 
 
+def test_intake_token_without_join_scope_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "intake.jwt"
+    path.write_text(_token_with_scopes("board:read", "board:intake"), encoding="utf-8")
+    assert coordinator.load_intake_credential(str(path)) == (None, "missing-board-intake-grant")
+
+
 @pytest.mark.parametrize(
     ("approved", "credential_issue", "expected_kind", "expected_rule"),
     [
@@ -4022,7 +4030,7 @@ def test_dual_credential_approved_ask_fake_e2e(
     main_path = tmp_path / "main.jwt"
     intake_path = tmp_path / "intake.jwt"
     main_token = _token_with_scopes("board:read", "board:write", "board:coordinate")
-    intake_token = _token_with_scopes("board:read", "board:intake")
+    intake_token = _token_with_scopes("board:read", "board:intake", "board:coordinate")
     main_path.write_text(main_token, encoding="utf-8")
     intake_path.write_text(intake_token, encoding="utf-8")
     approved = {
@@ -4137,6 +4145,7 @@ def test_scope_preflight_enforces_main_and_intake_matrix() -> None:
     )
     assert issues == (
         "coordinator-main missing required scope board:coordinate",
+        "coordinator-intake missing required scope board:coordinate",
         "coordinator-intake carries forbidden scope board:write",
     )
 

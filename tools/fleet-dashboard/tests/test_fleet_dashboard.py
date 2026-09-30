@@ -6729,6 +6729,27 @@ def test_intake_approve_and_decline_are_cas_guarded() -> None:
     assert all("expected_sha256" in call[2] for call in central.calls[1:])
 
 
+
+def test_approved_intake_can_be_declined_before_consumption() -> None:
+    central = FakeIntakeCentral()
+    fetcher = intake_fetcher(central)
+    created = asyncio.run(fetcher.save_intake("pursers", "Obsolete request"))
+    seed_intake_draft(central, created["ask"])
+    asyncio.run(fetcher.decide_intake(
+        "pursers", created["ask"]["id"], "approve", created["expected_sha256"],
+        "Approved request",
+    ))
+    current = asyncio.run(fetcher.fetch_intake("pursers"))
+    declined = asyncio.run(fetcher.decide_intake(
+        "pursers", created["ask"]["id"], "decline", current["expected_sha256"],
+    ))
+    current = asyncio.run(fetcher.fetch_intake("pursers"))
+    assert current["waiting"] == []
+    assert current["declined"] == [declined["tombstone"]]
+    assert declined["tombstone"]["id"] == created["ask"]["id"]
+    assert {call[2]["key"] for call in central.calls} == {"coordinator_intake"}
+
+
 def test_intake_decision_endpoint_returns_conflict_for_stale_cas() -> None:
     central = FakeIntakeCentral()
     fetcher = intake_fetcher(central)
@@ -6864,10 +6885,10 @@ def test_intake_approval_waits_for_matching_validated_coordinator_draft() -> Non
         )
     assert len(central.calls) == 1
     assert "Waiting for the coordinator draft" in dashboard.HTML
-    assert "${x.draft?'<button type=\"button\" class=\"approve\"" in dashboard.HTML
+    assert "${x.draft&&!x.approved?'<button type=\"button\" class=\"approve\"" in dashboard.HTML
     assert "data-intake-action=\"decline\"" in dashboard.HTML
     assert "actionable:false,intake_status:'consumed (gone)'" in dashboard.HTML
-    assert "${x.actionable&&!x.approved?" in dashboard.HTML
+    assert "${x.actionable?" in dashboard.HTML
 
     seed_intake_draft(central, ask, title="Coordinator release draft")
     approved = asyncio.run(

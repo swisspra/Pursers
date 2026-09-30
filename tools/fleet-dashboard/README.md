@@ -1,6 +1,6 @@
 # Fleet Dashboard
 
-A standalone, loopback-only web dashboard for the active boards in the live project registry and their shared agent pool. It is a read-only viewer and does not require a browser extension, build step, or desktop host.
+A standalone, loopback-only web dashboard for the active boards in the live project registry and their shared agent pool. It includes explicit operator actions and does not require a browser extension, build step, or desktop host.
 
 Local dashboard state defaults to `~/.pursers`. Set `PURSERS_STATE_DIR` to an
 absolute writable directory to relocate the entire state root, including
@@ -8,6 +8,25 @@ absolute writable directory to relocate the entire state root, including
 worker directories are created only when worker state is first written. If the
 host denies process inspection, status and Doctor surfaces report `process
 inspection unavailable` instead of failing the dashboard.
+
+## Decline queued intake
+
+Open a project's board and find its intake queue. **Decline** remains available
+for every queued request, including **Approved** requests that the coordinator
+has not consumed. It removes the request from the queue and keeps a declined
+audit record. It does not cancel a ticket that has already been created.
+
+Intake findings in **Needs attention now** also offer **Decline** when they
+identify a queued request. The action reads the current queue before submitting
+its decision; concurrent changes produce a conflict instead of overwriting
+another decision. Refresh and review the current state before retrying.
+
+No additional configuration is required. The dashboard's existing Central
+credential must already be allowed to update `coordinator_intake` state.
+System findings such as **coordinator findings stale > 15 min** or an incomplete
+landing scan have no Decline action: inspect the coordinator/Butler service and
+allow it to publish a fresh scan. **Acknowledge** and **Snooze 24h** affect alert
+visibility only.
 
 ## Configure seats in the dashboard
 
