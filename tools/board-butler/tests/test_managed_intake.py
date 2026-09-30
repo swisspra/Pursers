@@ -752,3 +752,16 @@ def test_resident_reports_safe_provider_failure_through_backoff(monkeypatch):
             assert "do-not-log" not in json.dumps(result)
             assert "model.invalid" not in json.dumps(result)
     asyncio.run(scenario())
+
+
+def test_intake_cache_reports_truncated_json_without_response_text(monkeypatch):
+    async def scenario():
+        async def post(*args, **kwargs):
+            return {"choices": [{"finish_reason": "length", "message": {"content": '{"pull":'}}]}
+        monkeypatch.setattr(butler, "_post_provider_json", post)
+        runtime = butler.ProviderRuntime("https://model.invalid", "model", "secret", draft_protocol="openai_chat_completions_v1")
+        cache = butler.IntakeDecisionCache()
+        with pytest.raises(json.JSONDecodeError):
+            await cache.decide(runtime, {"ceiling": 15}, NOW)
+        assert cache.failure == {"error_class": "JSONDecodeError", "response_chars": 8, "response_truncated": True}
+    asyncio.run(scenario())

@@ -5940,7 +5940,16 @@ async def decide_intake_with_provider(
     text = _openai_chat_draft_text(document)
     if text is None:
         raise ValueError("intake decision response is malformed")
-    decision = json.loads(text)
+    try:
+        decision = json.loads(text)
+    except json.JSONDecodeError as exc:
+        # Inspect response shape without retaining model text in public findings.
+        finish_reason = document["choices"][0].get("finish_reason")
+        exc.intake_response_metadata = {
+            "response_chars": len(text),
+            "response_truncated": finish_reason == "length",
+        }
+        raise
     if not isinstance(decision, Mapping):
         raise ValueError("intake decision must be a JSON object")
     decision = dict(decision)
@@ -6012,6 +6021,8 @@ class IntakeDecisionCache:
                 self.failure = {"error_class": error_class if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", error_class) else "Exception"}
                 if isinstance(exc, urllib.error.HTTPError) and 100 <= exc.code <= 599:
                     self.failure["http_status"] = exc.code
+                if isinstance(exc, json.JSONDecodeError):
+                    self.failure.update(getattr(exc, "intake_response_metadata", {}))
                 self._retry_after = now + timedelta(minutes=15)
                 raise
             self.failure = {}
@@ -6454,7 +6465,7 @@ class SourceIntakePoller:
             decision, ceiling=ceiling, source_ids=source_ids
         )
         metadata = {"mode": "decided", "ceiling": ceiling, "pull": pull, "reason": reason}
-        for key in ("model_called", "cache_reused", "retry_after", "provider_response_id", "elapsed_ms", "model", "error_class", "http_status"):
+        for key in ("model_called", "cache_reused", "retry_after", "provider_response_id", "elapsed_ms", "model", "error_class", "http_status", "response_chars", "response_truncated"):
             if key in decision:
                 metadata[key] = decision[key]
         return pull, order, metadata
