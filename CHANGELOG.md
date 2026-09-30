@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Apply submission preflight to legacy code tickets requiring `commit_hash`, catching malformed branch evidence before independent review.
+- Verify every repair commit against the registered integration branch, including cumulative changed paths and leak scanning, instead of checking only the last commit.
+
 - Raise structured board-state capacity to 262,144 characters so multi-item intake queues no longer fail at the ticket-text limit; preserve atomic validation and concurrency checks.
 - Reconnect event seats after temporary Central transport failures with bounded backoff and preserved cursors, without repeating model runs.
 

@@ -33,7 +33,7 @@ HARD_VERIFY_CHECKLIST = """## HARD-verify checklist
 
 Before approval:
 1. Resolve origin from the routed project, then fetch and detach the exact submitted 40-hex SHA in a reviewer-owned temporary clone. Never mutate the routed checkout.
-2. Compare git show --stat and changed paths with files_changed and ticket scope.
+2. Compare the cumulative diff from the merge-base of the registry integration_ref (default main) to the submitted SHA with files_changed and ticket scope. Include all repair commits.
 3. Confirm the SHA is on `origin/<submitted-branch>` and never on `origin/main`.
 4. Re-run every claimed suite and compare the real result tails.
 5. Review the diff against the ticket and its dependencies, including exact field, parameter, and event names.
@@ -451,15 +451,19 @@ def _submit_source_repo(
     )
 
 
+def _requires_git_submission(ticket: dict[str, Any]) -> bool:
+    return bool({"branch_and_commit", "commit_hash"} & _required_field_names(ticket))
+
+
 def _submit_preflight(
     ticket: dict[str, Any], repo: Path, *, summary: str, notes: str
 ) -> dict[str, str] | None:
-    if "branch_and_commit" not in _required_field_names(ticket):
+    if not _requires_git_submission(ticket):
         return None
     if not (repo / ".git").exists():
         raise ValueError(
             "submission preflight requires the routed git seat clone; "
-            "research-only tickets must omit branch_and_commit from required_fields"
+            "research-only tickets must omit commit fields from required_fields"
         )
     evidence = f"{summary}\n{notes}"
     matches = list(SUBMIT_BRANCH_COMMIT_RE.finditer(evidence))
@@ -801,18 +805,22 @@ def _suite_argv(
 
 
 def _verify_ticket(
-    ticket: dict[str, Any], repo: Path, *, run_suites: bool = False
+    ticket: dict[str, Any], repo: Path, *, run_suites: bool = False,
+    integration_ref: str = "main",
 ) -> dict[str, Any]:
     if not (repo / ".git").exists():
         raise ValueError(f"verify requires a git seat clone: {repo}")
     submission, sha, branch = _submission(ticket)
+    _git(repo, "check-ref-format", f"refs/heads/{integration_ref}")
     _git(repo, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
     _git(repo, "cat-file", "-e", f"{sha}^{{commit}}")
     _git(repo, "switch", "--detach", sha)
-    stat = _git(repo, "show", "--stat", "--oneline", "--no-renames", sha).stdout.rstrip()
+    integration_remote = f"refs/remotes/origin/{integration_ref}"
+    base = _git(repo, "merge-base", integration_remote, sha).stdout.strip()
+    stat = _git(repo, "diff", "--stat", "--no-renames", base, sha).stdout.rstrip()
     actual_files = [
         line for line in _git(
-            repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha
+            repo, "diff", "--name-only", "--no-renames", base, sha
         ).stdout.splitlines() if line
     ]
     submitted_files = submission.get("files_changed", ticket.get("files_changed", []))
@@ -832,11 +840,13 @@ def _verify_ticket(
         remote for remote in contains
         if remote.startswith("origin/") and remote != expected_remote
     )
-    diff = _git(repo, "show", "--format=", "--no-ext-diff", sha).stdout
+    diff = _git(repo, "diff", "--no-ext-diff", "--no-renames", base, sha).stdout
     leak_rules, marker_count = _leak_scan(diff)
     leak_line = "leak-scan: clean" if not leak_rules else f"leak-scan: {len(leak_rules)} matches"
     print(f"verified-sha: {sha}")
     print(f"submitted-branch: {branch}")
+    print(f"integration-ref: {integration_ref}")
+    print(f"verification-base: {base}")
     print(stat)
     print("files-changed-diff: " + json.dumps(
         {"only_actual": only_actual, "only_submitted": only_submitted}, sort_keys=True
@@ -895,6 +905,8 @@ def _verify_ticket(
         failures.append(f"SHA is not on {expected_remote}")
     if main_contains:
         failures.append("SHA is already on origin/main")
+    if integration_ref != "main" and f"origin/{integration_ref}" in contains:
+        failures.append(f"SHA is already on origin/{integration_ref}")
     non_main_others = [remote for remote in other_remotes if remote != "origin/main"]
     if non_main_others:
         failures.append("SHA is also on other remote branches: " + ", ".join(non_main_others))
@@ -904,6 +916,7 @@ def _verify_ticket(
         raise ValueError("verify failed: " + "; ".join(failures))
     return {
         "ok": True, "sha": sha, "branch": branch,
+        "integration_ref": integration_ref, "verification_base": base,
         "files_changed_match": True, "origin_main_contains": False,
         "leak_scan": "clean", "operator_markers_loaded": marker_count,
         "suites": suites,
@@ -1812,7 +1825,7 @@ async def _execute(args: argparse.Namespace) -> None:
                     if not isinstance(ticket, dict):
                         raise ValueError("submission preflight requires a valid ticket response")
                     routed, operator_dir, route_error = ticket_route(ticket_result)
-                    needs_git = "branch_and_commit" in _required_field_names(ticket)
+                    needs_git = _requires_git_submission(ticket)
                     source_repo = seat_repo
                     if needs_git:
                         source_repo = _submit_source_repo(
@@ -1934,6 +1947,14 @@ async def _execute(args: argparse.Namespace) -> None:
                     ).stdout.strip()
                     if not origin_url:
                         raise ValueError("verify requires an origin remote")
+                    integration_ref = "main"
+                    if registry is not None and target_resolver is not None:
+                        route = target_resolver(
+                            registry, target_board, str(ticket.get("target_url", ""))
+                        )
+                        integration_ref = registry["projects"][route["project"]].get(
+                            "integration_ref", "main"
+                        )
                     with tempfile.TemporaryDirectory(
                         prefix=".verify-", dir=seat_root
                     ) as temporary:
@@ -1946,7 +1967,8 @@ async def _execute(args: argparse.Namespace) -> None:
                             check=True, text=True, capture_output=True,
                         )
                         verification = _verify_ticket(
-                            ticket, repo, run_suites=bool(args.run_suites)
+                            ticket, repo, run_suites=bool(args.run_suites),
+                            integration_ref=integration_ref,
                         )
                     emit({"ticket": ticket, "verification": verification})
                     return

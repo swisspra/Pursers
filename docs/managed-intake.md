@@ -433,3 +433,20 @@ Intake decisions reserve up to 1,600 completion tokens, shared by model reasonin
 When the provider reports token usage, intake audit metadata includes `provider_usage` with prompt, completion, total, and reasoning token counts. Successful cached decisions do not emit new usage. Failure metadata is retained during backoff: count usage only when `model_called` is true, using `provider_response_id` to deduplicate. Missing usage means unreported, not zero.
 
 The intake model receives `fleet_load` with unique idle worker/reviewer counts across registry boards. Per-board membership counts can overlap and must not be added together. A seat busy on any observed board is unavailable to admit more work. Routing-state events are visible through catchup to principals with `board:coordinate`; workers retain their existing event visibility.
+
+### Review evidence across repair commits
+
+A submission's `files_changed` must list the complete candidate diff, including
+review corrections in earlier commits. Generated reviewer helpers fetch the
+registered project's `integration_ref` (default `main`), compute its merge-base
+with the exact submitted SHA, and verify changed paths and credentials across
+that whole diff. They print `integration-ref` and `verification-base` as evidence.
+Missing or invalid integration refs fail verification; workers cannot supply an
+alternative base in submission notes. Suite replay remains on the exact SHA.
+
+When upgrading existing seats, regenerate their `bin/board.py` helpers and update
+`pursers-client` together so registry `integration_ref` survives parsing. Preserve
+seat identity, credentials and event cursors. Worker helpers validate required
+`branch_and_commit` metadata before submission, including older tickets that
+require only `commit_hash`, avoiding review cycles caused
+by malformed evidence.
