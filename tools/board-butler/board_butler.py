@@ -6365,7 +6365,7 @@ class SourceIntakePoller:
                 prepared.append(json.loads(entry["group_item"]))
             if entry.get("status") in {"asked", "delivering", "delivered"}:
                 # A PR still edits the branch until it is landed. Preserve the overlap hold.
-                busy_paths.update((entry.get("project_hint"), path) for path in json.loads(entry.get("paths", "[]")))
+                busy_paths.update((entry.get("scope_key", entry.get("project_hint")), path) for path in json.loads(entry.get("paths", "[]")))
                 if entry.get("status") != "delivered":active_groups += 1
         if active_groups >= source.grouping.get("max_in_flight", 15):
             return prepared
@@ -6389,7 +6389,7 @@ class SourceIntakePoller:
                 if len(remaining) != len(group["member_ids"]):
                     # Preserve already admitted membership when a new analysis regroups issues.
                     group = api["render"](group, [r for r in rows if r["key"] in remaining], scope)
-                if any((project, path) in busy_paths for path in group["paths"]):continue
+                if any((key, path) in busy_paths for path in group["paths"] for key in (project, group.get("scope_key", project))):continue
                 grouped.append(group)
         return prepared + grouped
 
@@ -6397,7 +6397,20 @@ class SourceIntakePoller:
         self, findings: list[dict[str, Any]], now: datetime
     ) -> tuple[int | None, tuple[str, ...], dict[str, Any]]:
         """Ask the Butler decision-maker how much to pull, within the hard ceiling."""
-        source_ids = tuple(source.source_id for source in self.sources)
+        eligible = []
+        for source in self.sources:
+            if source.grouping is not None:
+                entries = [e for e in self.index.entries.values() if e.get("source_id") == source.source_id]
+                active = sum(e.get("status") in {"asked", "delivering"} for e in entries)
+                admitted = sum(bool(e.get("group_item")) and e.get("status") != "prepared" for e in entries)
+                if active >= source.grouping.get("max_in_flight", 15) or (
+                    "max_admitted_groups" in source.grouping and admitted >= source.grouping["max_admitted_groups"]
+                ):
+                    continue
+            eligible.append(source)
+        source_ids = tuple(source.source_id for source in eligible)
+        if not source_ids:
+            return 0, (), {"mode": "decided", "pull": 0, "reason": "group_capacity_exhausted", "model_called": False}
         if self.decide is None:
             return None, source_ids, {"mode": "unbounded"}
         in_flight = self.index.in_flight()
@@ -6406,7 +6419,7 @@ class SourceIntakePoller:
             return 0, (), {"mode": "decided", "ceiling": ceiling or 0, "pull": 0,
                            "reason": "no_capacity"}
         observations = []
-        for source in self.sources:
+        for source in eligible:
             runtime = self.runtimes[source.connector_id]
             async def read(tool, arguments):
                 operation = hashlib.sha256(f"{source.source_id}:{now.isoformat()}".encode()).hexdigest()
@@ -6552,7 +6565,7 @@ class SourceIntakePoller:
                     seen = self.index.get(source.source_id, item["external_id"])
                     if seen is not None and seen.get("revision") == item["revision"] and seen.get("status") != "prepared":
                         continue  # already taken: no Central call
-                    if groups is not None and any((item["project_hint"], path) in admitted_paths for path in item["paths"]):
+                    if groups is not None and any((item.get("scope_key", item["project_hint"]), path) in admitted_paths for path in item["paths"]):
                         continue
                     processed += 1
                     board_id = self._route(source, item["project_hint"])
@@ -6585,7 +6598,7 @@ class SourceIntakePoller:
                         "status": "asked" if (seen or {}).get("status") == "prepared" else (seen or {}).get("status", "asked"),
                     }
                     if groups is not None:
-                        index_entry.update({"member_ids": json.dumps(item["member_ids"]), "paths": json.dumps(item["paths"]), "group_item": json.dumps(item)})
+                        index_entry.update({"scope_key": item.get("scope_key", item["project_hint"]), "member_ids": json.dumps(item["member_ids"]), "paths": json.dumps(item["paths"]), "group_item": json.dumps(item)})
                     ticket = await self.ticket_reader(board_id, ticket_id)
                     revision_marker = _source_revision_marker(
                         source.source_id, item["revision"]
@@ -6663,7 +6676,7 @@ class SourceIntakePoller:
                     new_asks += 1
                     source_new += 1
                     if groups is not None:
-                        admitted_paths.update((item["project_hint"], path) for path in item["paths"])
+                        admitted_paths.update((item.get("scope_key", item["project_hint"]), path) for path in item["paths"])
                         if self.active:
                             self.index.put(source.source_id, item["external_id"], {**index_entry, "status": "prepared"})
                             self.index.save()
@@ -12108,8 +12121,35 @@ class CentralBackend:
     async def _source_group_scope(self, source_id: str, project: str) -> Mapping[str, Any] | None:
         policy = self._project_onboarding_policies.get(source_id)
         resolution = policy.repositories.get(project) if policy else None
-        if resolution is None:return None
-        return {"project": project, "repository_url": resolution.repository_url, "branch": resolution.integration_ref}
+        if resolution is None:
+            return None
+        poller = self.source_intake_poller
+        source = next(item for item in poller.sources if item.source_id == source_id)
+        runtime = poller.runtimes[source.connector_id]
+        fields = _repository_fields({"repository_url": resolution.repository_url})
+        async def read(tool, arguments):
+            if not any(t.name == tool and t.effect == "read_only" for t in runtime.declaration.tools):
+                raise ConnectorConfigError("group scope verification requires declared read-only tools")
+            operation = hashlib.sha256(_canonical_json([source_id, tool, arguments])).hexdigest()[:32]
+            result = await runtime.call_tool("group-scope-" + operation, tool, arguments)
+            return _source_payload_document(result.payload)
+        sonar = await read("sonar_list_branches", {"projectKey": project})
+        branches = [row for row in sonar.get("branches", []) if row.get("isMain") is True]
+        if len(branches) != 1 or branches[0].get("name") != resolution.integration_ref:
+            raise ConnectorDenied("Sonar analyzed branch does not match the registered target branch")
+        sha = branches[0].get("commit", {}).get("sha")
+        if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise ConnectorDenied("Sonar analyzed commit is unavailable")
+        ado = await read("ado_repository_details_get", {
+            "project": fields["repository_project"], "repositoryId": fields["repository_name"],
+            "includeRefs": True, "includeStatistics": False, "refFilter": "heads/" + resolution.integration_ref})
+        if _repository_identity(ado.get("repository", {}).get("remoteUrl", "")) != _repository_identity(resolution.repository_url):
+            raise ConnectorDenied("Sonar mapping repository identity differs from the ADO response")
+        refs = [row for row in ado.get("refs", {}).get("value", []) if row.get("name") == "refs/heads/" + resolution.integration_ref]
+        if len(refs) != 1 or refs[0].get("objectId") != sha:
+            raise ConnectorDenied("Sonar analysis is not the current target branch commit")
+        return {"project": project, "repository_url": resolution.repository_url,
+                "branch": resolution.integration_ref, "analysis_sha": sha}
 
     async def _source_group_choose(self, context: Mapping[str, Any]) -> dict[str, Any]:
         document = await self.coordinator_config()

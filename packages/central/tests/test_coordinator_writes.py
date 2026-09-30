@@ -1026,6 +1026,20 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(evaluations.is_error)
         self.assertFalse(digest.is_error)
 
+    async def test_routing_state_changes_emit_bounded_cues_without_findings_feedback(self):
+        self.principal = self.admin
+        start = self.service.journal.read_after("pursers", 0, 1000)["next_cursor"]
+        for key in ("project_registry", "coordinator_intake", "coordinator_config"):
+            await self.call("board_state_update", agent_name="admin-agent", key=key, value='{"private":"do not journal"}')
+            await self.call("board_state_update", agent_name="admin-agent", key=key, value='{"private":"do not journal"}')
+        await self.call("board_state_update", agent_name="admin-agent", key="coordinator_findings", value="{}")
+        events = self.service.journal.read_after("pursers", start, 1000)["events"]
+        cues = [e for e in events if e["kind"] == "board_state_changed"]
+        self.assertEqual([e["state_key"] for e in cues], ["project_registry", "coordinator_intake", "coordinator_config"])
+        self.assertNotIn("do not journal", str(cues))
+        from pursers_client.client import DEFAULT_EVENT_KINDS
+        self.assertIn("board_state_changed", DEFAULT_EVENT_KINDS)
+
     async def test_intake_scope_creates_origin_journaled_unassigned_ticket(self) -> None:
         self.principal = self.intake
         created = await self.call(

@@ -24,6 +24,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Central journals routing-state changes so subscribed coordinators discover new
+  projects and intake without a restart. Identical writes and findings refreshes
+  do not emit these events; state values are excluded from the journal.
+- Grouped intake verifies the analyzed branch and commit, reuses plans across
+  irrelevant transport changes, and skips model calls when its canary cap is full.
+
 - Generated review seats accept complete successful Jest/Vitest evidence for
   JavaScript projects and keep approved branches available for Butler PR delivery.
 

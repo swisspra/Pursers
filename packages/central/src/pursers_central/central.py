@@ -14549,6 +14549,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
             assert safe_value is not None
             state = document.setdefault("state", {})
+            previous = state.get(key)
+            previous_value = previous.get("value") if isinstance(previous, dict) else None
             if expected_absent:
                 if key in state:
                     raise ValueError("state precondition failed")
@@ -14588,6 +14590,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             return {
                 "actor": actor,
                 "entry": copy.deepcopy(entry),
+                "routing_changed": (
+                    key in {"project_registry", "coordinator_intake", "coordinator_config"}
+                    and previous_value != safe_value
+                ),
                 "released": released,
                 "renewed": renewed,
             }
@@ -14596,6 +14602,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         release_events = await publish_releases(
             board_id, result["released"], principal, ctx
         )
+        if result["routing_changed"]:
+            await append_and_publish(
+                board_id, result["actor"], "board_state_changed",
+                f"board://{board_id}/journal", [], ctx, state_key=key,
+            )
         return {
             "ok": True,
             "key": key,

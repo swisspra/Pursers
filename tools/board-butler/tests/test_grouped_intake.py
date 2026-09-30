@@ -150,3 +150,27 @@ def test_source_findings_can_be_bounded_without_preserved_question():
     import json
     assert len(json.dumps(result,sort_keys=True,separators=(',',':')))<=butler.MAX_STATE_CHARS
     assert result['findings'] and result['truncation']['findings']>0
+
+
+def test_reached_canary_cap_skips_reads_and_model_but_runs_delivery(tmp_path):
+    from dataclasses import replace
+    board=Board();rows=[issue(i,project='alpha') for i in range(2)]
+    poller,calls=grouped_poller(tmp_path,board,rows,[[0,1]])
+    poller.sources=(replace(poller.sources[0],grouping={'kind':'sonar','max_admitted_groups':1}),)
+    asyncio.run(poller.run_cycle(NOW));before=len(calls);delivered=[]
+    async def delivery(_):delivered.append(True);return 0
+    poller._writeback_pass=delivery
+    result=asyncio.run(poller.run_cycle(NOW+timedelta(minutes=1)))
+    assert len(calls)==before and delivered==[True]
+    assert result['decision']['model_called'] is False
+    assert result['decision']['reason']=='group_capacity_exhausted'
+
+
+def test_transport_only_changes_do_not_replan(tmp_path):
+    m=module();calls=[]
+    async def choose(_):
+        calls.append(1)
+        return {'groups':[{'title':'Clean imports','objective':'Remove unused import','validation':'Build','issues':[0]}]}
+    asyncio.run(m.plan_groups([issue(0,impacts={'value':1})],{'project':'org_api','analysis_sha':'a'*40},choose,tmp_path/'cache'))
+    asyncio.run(m.plan_groups([issue(0,impacts={'value':1.0})],{'project':'org_api','analysis_sha':'b'*40},choose,tmp_path/'cache'))
+    assert calls==[1]

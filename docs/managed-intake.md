@@ -5,6 +5,13 @@ source tickets, and open a pull request after independent approval. Local Git
 performs checkout, edits, tests and push. MCP performs source reads and PR creation.
 The native resident no longer requires a deployment-specific backend subclass.
 
+Central emits `board_state_changed` when `project_registry`, `coordinator_intake`,
+or `coordinator_config` values change. The event identifies only the state key;
+subscribed coordinators reread authorized state and discover new project boards.
+Identical writes and findings refreshes emit no routing event. Deploy Central and
+the coordinator's client together to enable this event contract; older clients
+may filter the new event kind and leave intake waiting for an unrelated event.
+
 ## Choose the operator interface and runner
 
 Zed is the primary GUI/IDE workflow for this integration. Use the existing
@@ -297,8 +304,10 @@ The optional onboarding policy below refreshes Sonar and Azure DevOps inventorie
 through declared read-only MCP tools. Exact unique repository names can match;
 ambiguous names stay unresolved. Explicit mappings must still point to a repository
 visible in the current PAT inventory. Record both the ADO project and repository,
-exact target branch casing, and Sonar project/analysis branch. Verify the analyzed
-commit against the target branch before enabling an unfamiliar mapping.
+exact target branch casing, and Sonar project/analysis branch. Grouped intake additionally verifies that the Sonar main analysis branch name and
+commit match the exact configured ADO target ref before planning. Stale analyses or
+branch mismatches admit no new work. This mode currently uses the main Sonar
+analysis branch; non-main branch analysis requires a separate supported adapter.
 
 ```json
 {
@@ -362,6 +371,8 @@ Add this fragment to a paged Sonar source in `butler-connectors.json`:
 `canary_project` limits the source snapshot and observation to one project during
 discovery. `max_admitted_groups` is a durable total admission cap for this source,
 including completed groups; one completed PR does not start a second canary.
+Exhausted group limits skip source observation and intake model calls while the
+independent delivery pass continues.
 Raise or remove that cap deliberately after inspecting the first result. Remove
 `canary_project` to cover all resolved projects. `max_in_flight` defaults to 15 and
 is also bounded by the host seat ceiling and Butler's model-directed allowance.
@@ -384,7 +395,8 @@ reservation before the Central CAS write, so an interrupted write can recover th
 same ask without losing or duplicating members. New analysis does not expand an
 already admitted ticket. Capacity counts groups, not raw Sonar occurrences.
 
-Groups sharing a file are serialized. An approved/open PR retains its file hold;
+Groups sharing a repository, target branch and file are serialized, including
+different Sonar keys mapped to the same repository. An approved/open PR retains its file hold;
 this release does not automatically infer merge/landing or clear that hold. Keep
 the index when deploying or restarting. Do not delete it to rerun a canary: that
 would remove deduplication and delivery guards. Operator reconciliation of completed

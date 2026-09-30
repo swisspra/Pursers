@@ -138,3 +138,25 @@ def test_real_central_bootstrap_and_member_admission(tmp_path, monkeypatch):
             'PR-butler':'admin','PR-worker':'member','PR-reviewer':'reviewer','PR-intake':'member'}
         assert (await client._call('board_status',{}))['dispatch_policy']['default_ticket_tier']==2
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('wrong_branch,wrong_sha',[(False,False),(True,False),(False,True)])
+def test_group_scope_requires_matching_analyzed_branch_and_commit(wrong_branch,wrong_sha):
+    from types import SimpleNamespace as NS
+    from test_source_intake import butler
+    url='https://dev.azure.com/org/team/_git/api';sha='a'*40;calls=[]
+    async def call(operation,tool,args):
+        calls.append(tool)
+        if tool=='sonar_list_branches':
+            d={'branches':[{'name':'main' if wrong_branch else 'dev','isMain':True,'commit':{'sha':sha}}]}
+        else:d={'repository':{'remoteUrl':url},'refs':{'value':[{'name':'refs/heads/dev','objectId':'b'*40 if wrong_sha else sha}]}}
+        return NS(payload={'structured_content':d})
+    backend=butler.CentralBackend(NS(),'unused')
+    backend._project_onboarding_policies={'sonar':NS(repositories={'org_api':NS(repository_url=url,integration_ref='dev')})}
+    runtime=NS(call_tool=call,declaration=NS(tools=[NS(name=n,effect='read_only') for n in ['sonar_list_branches','ado_repository_details_get']]))
+    backend.source_intake_poller=NS(sources=[NS(source_id='sonar',connector_id='one')],runtimes={'one':runtime})
+    if wrong_branch or wrong_sha:
+        with pytest.raises(butler.ConnectorDenied):asyncio.run(backend._source_group_scope('sonar','org_api'))
+    else:
+        scope=asyncio.run(backend._source_group_scope('sonar','org_api'))
+        assert scope['analysis_sha']==sha and len(calls)==2

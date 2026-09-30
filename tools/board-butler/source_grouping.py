@@ -21,6 +21,13 @@ def digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
 
+def fingerprint(rows, scope):
+    # Cache only planning inputs; MCP transports may serialize unused numbers differently.
+    fields = ('key', 'project', 'rule', 'component', 'line', 'message', 'updateDate', 'severity', 'type')
+    return digest({'scope': {k: v for k, v in scope.items() if k != 'analysis_sha'},
+                   'rows': [{k: row.get(k) for k in fields} for row in sorted(rows, key=lambda x: x['key'])]})
+
+
 def save_private(path, value):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     fd,tmp=tempfile.mkstemp(prefix='.group-plan-',dir=path.parent)
@@ -43,6 +50,7 @@ def render(group, rows, scope):
             'revision':digest([(x['key'],x.get('updateDate')) for x in rows]),
             'title':group['title'],'objective':group['objective'],'validation':group['validation'],'body':body,'member_ids':members,
             'paths':files,'project_hint':scope['project'],'link':'',
+            'scope_key':digest([scope.get('repository_url', scope['project']), scope.get('branch')]),
             'members':[{'id':x['key'],'revision':x.get('updateDate',''),'rule':x['rule'],'path':x['component'].split(':',1)[1],'line':x.get('line')} for x in rows]}
 
 
@@ -53,13 +61,13 @@ async def plan_groups(rows,scope,choose,cache_path):
     for x in rows:
         if x.get('project')!=scope['project'] or not isinstance(x.get('rule'),str) or not isinstance(x.get('component'),str) or ':' not in x['component']:
             raise ValueError('issue snapshot crosses project boundaries or is malformed')
-    snapshot=digest({'scope':scope,'rows':rows})
+    snapshot=fingerprint(rows,scope)
     path=Path(cache_path)
     document=None
     if path.exists():
         if path.is_symlink() or path.stat().st_mode & 0o077 or path.stat().st_size>16*1024*1024:raise ValueError('group cache must be a bounded private file')
         saved=json.loads(path.read_text())
-        if saved.get('snapshot')==snapshot:document=saved.get('plan')
+        if saved.get('snapshot')==snapshot or (isinstance(saved.get('issues'), list) and isinstance(saved.get('scope'), dict) and fingerprint(saved['issues'], saved['scope'])==snapshot):document=saved.get('plan')
     if document is None:
         candidates = {}
         for i, row in enumerate(rows):
