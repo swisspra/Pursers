@@ -356,6 +356,69 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
             sha,
         )
 
+    async def test_legacy_commit_field_stores_verified_structured_evidence(self) -> None:
+        ticket_id = await self.create_and_claim(required_fields=["commit_hash", "test_output"])
+        sha = "b" * 40
+        result = await self.call(
+            "ticket_submit", agent_name="member-agent", ticket_id=ticket_id,
+            summary="verified legacy code", notes=f"branch_and_commit: pursers/TK-one @ {sha}\ntest_output: 2 passed",
+            submission_preflight=self.submission_preflight(ticket_id, "pursers/TK-one", sha),
+        )
+        submission = result.structured_content["ticket"]["submission_history"][-1]
+        self.assertEqual(submission["branch"], "pursers/TK-one")
+        self.assertEqual(submission["commit_hash"], sha)
+        self.assertEqual(submission["test_output"], "2 passed")
+
+    async def test_repeated_same_commit_and_feedback_parks_before_redispatch(self) -> None:
+        ticket_id = await self.create_and_claim(required_fields=["branch_and_commit"])
+        sha = "a" * 40
+        for attempt in range(2):
+            self.principal = self.member
+            if attempt:
+                await self.call("ticket_claim", agent_name="member-agent", ticket_id=ticket_id)
+            await self.call(
+                "ticket_submit", agent_name="member-agent", ticket_id=ticket_id,
+                summary="same candidate", notes=f"branch_and_commit: pursers/TK-one@{sha}",
+                submission_preflight=self.submission_preflight(ticket_id, "pursers/TK-one", sha),
+            )
+            self.principal = self.admin
+            result = await self.call(
+                "ticket_review", agent_name="admin-agent", ticket_id=ticket_id,
+                verdict="reject", review_notes="Independent review needs repair",
+                fix_instructions="Fix  the test" if attempt == 0 else "fix the test",
+            )
+            self.assertFalse(result.is_error)
+            self.assertEqual(result.structured_content["ticket"].get("parked", False), attempt == 1)
+        ticket = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertEqual(ticket["workflow_blocker"]["reason"], "repeated_same_commit_and_feedback")
+        self.assertNotIn("work_offer", ticket)
+        self.assertEqual(ticket["review_verdict"], "reject")
+        self.principal = self.member
+        with self.assertRaisesRegex(ToolError, "parked"):
+            await self.call("ticket_claim", agent_name="member-agent", ticket_id=ticket_id)
+        self.assertEqual(self.service.load("pursers")["tickets"][ticket_id]["status"], "open")
+        self.principal = self.admin
+        resumed = await self.call("ticket_update", agent_name="admin-agent", ticket_id=ticket_id, parked=False)
+        self.assertFalse(resumed.structured_content["ticket"]["parked"])
+        self.assertNotIn("workflow_blocker", resumed.structured_content["ticket"])
+
+    async def test_changed_candidate_or_feedback_does_not_park(self) -> None:
+        for change_sha in (True, False):
+            ticket_id = await self.create_and_claim(required_fields=["branch_and_commit"])
+            for attempt in range(2):
+                self.principal = self.member
+                if attempt:
+                    await self.call("ticket_claim", agent_name="member-agent", ticket_id=ticket_id)
+                sha = ("b" if change_sha and attempt else "a") * 40
+                await self.call("ticket_submit", agent_name="member-agent", ticket_id=ticket_id,
+                    summary="candidate", notes=f"branch_and_commit: pursers/TK-one@{sha}",
+                    submission_preflight=self.submission_preflight(ticket_id, "pursers/TK-one", sha))
+                self.principal = self.admin
+                result = await self.call("ticket_review", agent_name="admin-agent", ticket_id=ticket_id,
+                    verdict="reject", review_notes="needs repair",
+                    fix_instructions="different repair" if not change_sha and attempt else "fix the test")
+                self.assertFalse(result.structured_content["ticket"].get("parked", False))
+
     async def test_ticket_submit_rejects_fabricated_matching_preflight(self) -> None:
         ticket_id = await self.create_and_claim(
             required_fields=["branch_and_commit", "test_output"]

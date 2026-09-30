@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Persist verified branch, SHA and test evidence on submissions; accept legacy
+  whitespace around `@` consistently across workers, Butler and the dashboard.
+- Reconcile approved ADO delivery against existing PRs before creation; recover
+  lost responses without duplicate PRs and distinguish approval from delivery.
+- Park repeated reviews of the same SHA with unchanged feedback, recording a
+  workflow blocker until an authorized operator resolves and resumes the ticket.
+
 - Separate seat capacity from optional hourly model-run throttles; allow `max_runs_per_hour: null` and wait/resume on explicit limits instead of crashing with pending work.
 
 - Apply submission preflight to legacy code tickets requiring `commit_hash`, catching malformed branch evidence before independent review.

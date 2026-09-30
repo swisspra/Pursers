@@ -3039,7 +3039,7 @@ def test_generated_submit_preflights_exact_remote_tip_before_board_mutation(
         "remote_ref": f"origin/{branch}",
         "remote_tip": current_sha,
     }
-    assert f"branch_and_commit: {branch} @ {current_sha}" in str(
+    assert f"branch_and_commit: {branch}@{current_sha}" in str(
         submissions[0]["notes"]
     )
 

@@ -132,13 +132,46 @@ and response paths. A missing branch, moved head or mismatched target blocks PR
 creation. Prevent concurrent writes to an approved branch: the read and PR-create
 requests are separate upstream operations, not an atomic branch lock.
 
-All writeback paths record `delivering` before the external mutation. A timeout,
-crash or failed completion annotation leaves an uncertain attempt for operator
-reconciliation; it is never retried automatically, including when source revisions
-change. Confirm whether a PR exists before changing that state. Writeback runs
-before intake gating, so zero issues or no remaining capacity does not prevent
-approved delivery. The worker's submission uses
-`branch_and_commit: pursers/<ticket_id>@<full-40-hex-sha>`.
+All writeback paths record `delivering` before the external mutation. For Azure
+DevOps, also declare `ado_pull_requests_list` as a read-only connector tool. Butler
+checks all returned pages for the exact repository, source branch, target branch
+and approved SHA before creating a PR. An existing active or completed PR is
+recorded as delivered without creating another. Abandoned PRs, a moved source SHA,
+ambiguous matches, failed reads and incomplete pagination block creation.
+
+Lookup and preflight failures are retried after at least 60 seconds, without an
+LLM call. After a create timeout, crash or failed completion annotation, Butler
+reconciles the existing PR automatically. If lookup still finds no PR, the state
+remains `pr_uncertain`: an empty read cannot prove that an earlier mutation failed.
+It does not repeat that create. An operator must establish the upstream outcome
+before resetting the private attempt state. Other connectors retain the durable
+once-only mutation guard. Preserve the private index across upgrades.
+
+Writeback runs before intake gating, so zero issues or no remaining capacity does
+not prevent approved delivery. Ticket evidence and the dashboard distinguish
+`pr_pending`, `pr_blocked`, `pr_uncertain` and `pr_created`; legacy completion
+markers appear as delivery recorded without inventing a PR identifier.
+
+### Submission evidence and repeated review
+
+The worker helper writes `branch_and_commit: pursers/<ticket_id>@<full-40-hex-sha>`.
+Whitespace around `@` is accepted when reading older submissions. Conflicting or
+malformed identities fail validation. Central verifies the provided remote-tip
+proof and persists `branch`, `commit_hash`, `test_output` and `submission_preflight`
+with the submission, including legacy `commit_hash` tickets. Reviewers still check
+the exact code and test evidence; spacing alone is not a rejection criterion.
+
+Two consecutive retryable rejections of the same SHA with the same feedback
+(case and whitespace normalized) park the ticket with a workflow blocker. The
+coordinator cannot offer it and workers cannot claim it while parked. This avoids
+repeating the same model work; it does not approve the candidate. Changed SHA or
+changed feedback is not caught by this guard. Older review records without a
+fingerprint establish a new baseline on the next review.
+
+Inspect the submission validator, review evidence and recorded blocker, resolve
+the cause, then use the existing authorized `ticket_update(parked=false)` operation
+to resume. Resuming clears the blocker. This feature does not change seat capacity
+or impose an hourly model-run budget.
 
 ## Native local fleet evidence
 

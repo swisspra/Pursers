@@ -15,6 +15,8 @@ that cannot work.
 
 from __future__ import annotations
 
+from pursers_client.submission_evidence import submission_identity
+
 import argparse
 import asyncio
 import base64
@@ -5724,7 +5726,7 @@ class SourceIntakeIndex:
     Dedupe happens here, without a Central call per item, so paging through a
     large source stays cheap. Entries move asked -> delivering -> delivered, or
     asked -> closed. "delivering" is written before a non-idempotent writeback
-    call and is never retried automatically.
+    call and is never blindly repeated. ADO recovery reconciles existing PRs.
     """
 
     def __init__(self, path: Path | None = None) -> None:
@@ -5805,9 +5807,6 @@ def _ticket_approved(ticket: Mapping[str, Any]) -> bool:
     )
 
 
-_BRANCH_AND_COMMIT_RE = re.compile(
-    r"branch_and_commit\s*:\s*([A-Za-z0-9._/+-]{1,240})@([0-9a-f]{40})"
-)
 _ADO_REPOSITORY_RE = re.compile(
     r"^https://(?:[^@/]+@)?dev\.azure\.com/([^/]+)/([^/]+)/_git/([^/?#]+)/?$"
 )
@@ -5819,11 +5818,7 @@ def _approved_submission(ticket: Mapping[str, Any]) -> tuple[str, str]:
     if not isinstance(submission, Mapping):
         history = ticket.get("submission_history")
         submission = history[-1] if isinstance(history, list) and history else None
-    notes = str(submission.get("notes", "")) if isinstance(submission, Mapping) else ""
-    match = _BRANCH_AND_COMMIT_RE.search(notes)
-    if match is None:
-        return "", ""
-    return match.group(1), match.group(2)
+    return submission_identity(submission) if isinstance(submission, Mapping) else ("", "")
 
 
 def _repository_identity(url: str) -> tuple[str, str, str]:
@@ -6225,6 +6220,58 @@ class SourceIntakePoller:
             **_repository_fields(project),
         }
 
+    async def _existing_ado_pr(self, runtime, fields):
+        if not any(t.name == "ado_pull_requests_list" and t.effect == "read_only"
+                   for t in runtime.declaration.tools):
+            raise ConnectorDenied("PR delivery requires read-only PR reconciliation")
+        expected_source = "refs/heads/" + fields["source_branch"]
+        expected_target = "refs/heads/" + fields["target_branch"]
+        matches = []
+        # A negative result must cover every page; exceeding the transport bound fails closed.
+        for page in range(10):
+            args = {"project": fields["repository_project"], "repositoryId": fields["repository_name"],
+                    "sourceRefName": expected_source, "targetRefName": expected_target,
+                    "status": "all", "top": 100, "skip": page * 100}
+            result = await runtime.call_tool("source-pr-lookup-" + hashlib.sha256(_canonical_json(args)).hexdigest()[:32],
+                                             "ado_pull_requests_list", args)
+            document = _source_payload_document(result.payload)
+            rows = document.get("value") if isinstance(document, Mapping) else None
+            if not isinstance(rows, list) or len(rows) > 100 or any(not isinstance(r, Mapping) for r in rows):
+                raise ConnectorResultError("PR lookup returned incomplete evidence")
+            for row in rows:
+                if row.get("sourceRefName") != expected_source or row.get("targetRefName") != expected_target:
+                    continue
+                repository = row.get("repository", {})
+                if (not isinstance(repository, Mapping)
+                        or str(repository.get("name", "")).casefold() != fields["repository_name"].casefold()
+                        or str(repository.get("project", {}).get("name", "")).casefold() != fields["repository_project"].casefold()):
+                    raise ConnectorDenied("existing PR repository does not match the registered project")
+                if (row.get("status") not in {"active", "completed"}
+                        or row.get("lastMergeSourceCommit", {}).get("commitId") != fields["approved_sha"]):
+                    raise ConnectorDenied("existing PR is abandoned or does not contain the approved candidate")
+                if type(row.get("pullRequestId")) is not int or row["pullRequestId"] < 1:
+                    raise ConnectorResultError("existing PR identifier is invalid")
+                matches.append(dict(row))
+            if len(rows) < 100:
+                if len(matches) > 1:
+                    raise ConnectorDenied("multiple PRs match the approved candidate")
+                return matches[0] if matches else None
+        raise ConnectorResultError("PR reconciliation pagination is incomplete")
+
+    async def _delivery_notice(self, entry, state, *, pr_id=None, url=None, reason=None):
+        delivery = {"state": state}
+        if pr_id is not None: delivery["pr_id"] = pr_id
+        if url: delivery["url"] = url
+        if reason: delivery["reason"] = reason
+        if entry.get("approved_sha"): delivery["commit_hash"] = entry["approved_sha"]
+        text = "pursers-delivery: " + json.dumps(delivery, sort_keys=True, separators=(",", ":"))
+        if entry.get("delivery_notice") != text:
+            await self.ticket_annotator(entry["board_id"], entry["ticket_id"], text)
+            entry["delivery_notice"] = text
+        entry["delivery_state"] = state
+        self.index.dirty = True
+        self.index.save()
+
     async def _preflight_writeback(self, runtime, writeback, fields, arguments):
         expected = {"project": fields["repository_project"], "repositoryId": fields["repository_name"],
                     "sourceRefName": "refs/heads/" + fields["source_branch"],
@@ -6284,6 +6331,36 @@ class SourceIntakePoller:
             return False
         fields = await self._writeback_fields(source, board_id, ticket_id, ticket, item)
         arguments = _render_source_template(writeback.arg_template, fields)
+        key = self.index.key(source.source_id, item["external_id"])
+        entry = self.index.entries.get(key)
+        ado = writeback.tool == "ado_pull_request_create"
+        if ado:
+            if entry is not None:
+                entry["approved_sha"] = fields["approved_sha"]
+                self.index.dirty = True
+            expected = {"project": fields["repository_project"], "repositoryId": fields["repository_name"],
+                        "sourceRefName": "refs/heads/" + fields["source_branch"],
+                        "targetRefName": "refs/heads/" + fields["target_branch"]}
+            if any(arguments.get(k) != v for k, v in expected.items()):
+                raise ConnectorDenied("PR arguments do not match the registered project")
+            if not fields["source_branch"] or not fields["approved_sha"]:
+                raise ConnectorDenied("approved submission identity is missing or conflicting")
+            existing = await self._existing_ado_pr(runtime, fields)
+            if existing is not None:
+                pr_id = existing["pullRequestId"]
+                url = fields["repository_url"].rstrip("/") + f"/pullrequest/{pr_id}"
+                if entry is not None:
+                    await self._delivery_notice(entry, "pr_created", pr_id=pr_id, url=url)
+                await self.ticket_annotator(board_id, ticket_id,
+                    f"{marker}\nConnector writeback completed for the approved intake ticket. PR #{pr_id} reconciled.")
+                self.index.set_status(key, "delivered")
+                self.index.save()
+                return True
+            if entry is not None and entry.get("status") == "delivering":
+                await self._delivery_notice(entry, "pr_uncertain", reason="create_outcome_unconfirmed")
+                raise ConnectorResultError("previous PR creation outcome is unconfirmed; no duplicate create attempted")
+            if entry is not None:
+                await self._delivery_notice(entry, "pr_pending")
         if writeback.preflight is not None:
             await self._preflight_writeback(runtime, writeback, fields, arguments)
         elif writeback.tool == "ado_pull_request_create":
@@ -6308,7 +6385,14 @@ class SourceIntakePoller:
         self.index.save()
         self._writeback_grants.add(grant)
         try:
-            await runtime.call_tool(operation, writeback.tool, arguments)
+            result = await runtime.call_tool(operation, writeback.tool, arguments)
+            if ado:
+                created = _source_payload_document(result.payload)
+                pr_id = created.get("pullRequestId") if isinstance(created, Mapping) else None
+                if type(pr_id) is not int or pr_id < 1:
+                    raise ConnectorResultError("PR creation response has no confirmed identifier")
+                await self._delivery_notice(self.index.entries[key], "pr_created", pr_id=pr_id,
+                    url=fields["repository_url"].rstrip("/") + f"/pullrequest/{pr_id}")
         finally:
             self._writeback_grants.discard(grant)
         await self.ticket_annotator(
@@ -6330,7 +6414,7 @@ class SourceIntakePoller:
         keys = sorted(
             key
             for key, entry in self.index.entries.items()
-            if entry.get("status") == "asked" and entry.get("source_id") in sources
+            if entry.get("status") in {"asked", "delivering"} and entry.get("source_id") in sources
         )
         if not keys:
             return 0
@@ -6341,6 +6425,12 @@ class SourceIntakePoller:
         for key in batch:
             entry = self.index.entries[key]
             source = sources[entry["source_id"]]
+            now = getattr(self, "_writeback_now", datetime.now(timezone.utc))
+            if entry.get("retry_after") and now.timestamp() < float(entry["retry_after"]):
+                findings.append({"kind": "source-intake-delivery-pending", "level": "warn",
+                    "ticket_id": entry["ticket_id"], "delivery_state": entry.get("delivery_state", "pr_pending"),
+                    "message": "Approved delivery is waiting for its next reconciliation attempt."})
+                continue
             board_id, ticket_id = entry["board_id"], entry["ticket_id"]
             ticket = await self.ticket_reader(board_id, ticket_id)
             if ticket is None:
@@ -6360,6 +6450,17 @@ class SourceIntakePoller:
                     source, runtime, board_id, ticket_id, ticket, entry
                 )
             except Exception as exc:
+                if source.writeback.tool == "ado_pull_request_create":
+                    state = "pr_uncertain" if entry.get("status") == "delivering" else "pr_blocked"
+                    entry["retry_after"] = str(now.timestamp() + 60)
+                    entry["delivery_state"] = state
+                    entry["last_error_class"] = type(exc).__name__
+                    self.index.dirty = True
+                    self.index.save()
+                    try:
+                        await self._delivery_notice(entry, state, reason=type(exc).__name__)
+                    except Exception:
+                        pass  # Delivery remains durable even if Central is temporarily unavailable.
                 findings.append(
                     {
                         "kind": "source-intake-writeback-failed",
@@ -6369,8 +6470,8 @@ class SourceIntakePoller:
                         "ticket_id": ticket_id,
                         "error_class": type(exc).__name__,
                         "message": (
-                            "Writeback failed after being attempted once; it is not "
-                            "retried automatically."
+                            "Delivery is blocked or unconfirmed; inspect its delivery state. "
+                            "ADO reconciliation checks existing PRs before any new create."
                         ),
                     }
                 )
@@ -6512,6 +6613,7 @@ class SourceIntakePoller:
         if not self.sources:
             return {"processed": 0, "findings": [], "writebacks": 0}
         findings: list[dict[str, Any]] = []
+        self._writeback_now = now
         writebacks = await self._writeback_pass(findings) if self.active else 0
         allowance, order, decision = await self._allowance(findings, now)
         by_id = {source.source_id: source for source in self.sources}

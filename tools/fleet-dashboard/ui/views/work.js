@@ -7,7 +7,7 @@
     {key: 'review', label: 'Being reviewed', statuses: ['submitted', 'reviewing', 'in_review']},
     {key: 'working', label: 'In progress', statuses: ['claimed', 'in_progress', 'creating_report']},
     {key: 'finding', label: 'Finding a teammate', statuses: ['open', 'offered', 'assigned']},
-    {key: 'complete', label: 'Reviewed and complete', statuses: ['closed']},
+    {key: 'complete', label: 'Review approved', statuses: ['closed']},
     {key: 'ended', label: 'Ended', statuses: ['canceled', 'terminated']},
   ];
   const knownStatuses = new Set(statusGroups.flatMap(group => group.statuses));
@@ -40,7 +40,13 @@
     return statusGroups.find(group => group.key === key)?.label || 'Other reported state';
   }
 
-  function nextAction(status) {
+  function nextAction(ticket) {
+    const status = ticket.status;
+    if (ticket.delivery?.state === 'delivery_recorded') return 'Delivery recorded; inspect ticket evidence';
+    if (ticket.delivery?.state === 'pr_pending') return 'Butler is preparing the pull request';
+    if (ticket.delivery?.state === 'pr_created') return 'Review the pull request';
+    if (['pr_blocked', 'pr_uncertain'].includes(ticket.delivery?.state)) return 'Check delivery evidence in ticket details';
+    if (ticket.dispatch_state?.state === 'parked') return 'Resolve the workflow blocker before resuming';
     if (status === 'needs_human') return 'A human decision is needed';
     if (status === 'rejected') return 'Address the reviewer feedback';
     if (['submitted', 'reviewing', 'in_review'].includes(status)) return 'Independent review is the next gate';
@@ -165,11 +171,12 @@
       </div>
       <div class="work-next-cell">
         <span class="work-cell-label">Next</span>
-        <strong>${esc(nextAction(ticket.status))}</strong>
+        <strong>${esc(nextAction(ticket))}</strong>
         <span>Tier ${esc(ticket.tier || 2)}${skills.length ? ` · ${esc(skills.length)} required skill${skills.length === 1 ? '' : 's'}` : ''}</span>
       </div>
       <div class="work-actions-cell">
         <a class="primary-action" href="${detailHref}">Open details</a>
+        ${ticket.delivery?.url && /^https:\/\//i.test(ticket.delivery.url) ? `<a href="${esc(ticket.delivery.url)}" target="_blank" rel="noopener noreferrer">Open PR${ticket.delivery.pr_id ? ` #${esc(ticket.delivery.pr_id)}` : ''}</a>` : ''}
         <details class="work-evidence">
           <summary>Evidence and flow</summary>
           <nav aria-label="Evidence for ${esc(ticket.id)}">

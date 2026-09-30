@@ -753,7 +753,9 @@ def deterministic_intake_draft(ask: IntakeAsk, project: Project) -> IntakeDraft:
                     f"Delivery: fix it on a new branch named pursers/{ticket_id} "
                     f"created from {project.integration_ref}, push that branch to "
                     "origin, and include `branch_and_commit: <branch>@<full sha>` in "
-                    "the submission notes. Do not open a pull request yourself; "
+                    "the submission notes. Spaces around @ are equivalent; the platform "
+                    "verifies branch and SHA. Do not reject formatting alone. "
+                    "Do not open a pull request yourself; "
                     "Board Butler opens it after independent approval."
                 ),
                 f"Intake op-key: {op_key}",

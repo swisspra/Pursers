@@ -795,3 +795,118 @@ def test_intake_fleet_load_deduplicates_registry_memberships():
     assert butler.source_intake_fleet_load(snapshots, NOW)["idle_workers"] == 1
     snapshots["project"]["agents"][0]["status"] = "busy"
     assert butler.source_intake_fleet_load(snapshots, NOW)["idle_workers"] == 0
+
+
+def _ado_reconciliation_setup(tmp_path, *, existing=False, lose_response=False, lookup_fails=False):
+    from dataclasses import replace
+    poller, calls = _delivery_setup(tmp_path)
+    rows = []
+    row = {'pullRequestId': 31, 'status': 'active',
+        'sourceRefName': 'refs/heads/pursers/TK-test', 'targetRefName': 'refs/heads/main',
+        'lastMergeSourceCommit': {'commitId': 'b'*40},
+        'repository': {'name': 'example-repo', 'project': {'name': 'example-project'}}}
+    if existing: rows.append(row)
+    class Client(PagedClient):
+        async def list_tools(self, **kwargs):
+            result = await super().list_tools(**kwargs)
+            result.tools[1].name = 'ado_pull_request_create'
+            for name in ['refs', 'ado_pull_requests_list']:
+                result.tools.append(SimpleNamespace(name=name, input_schema={'type':'object'}))
+            return result
+        async def call_tool(self, name, arguments, **kwargs):
+            calls.append((name, dict(arguments)))
+            if name == 'ado_pull_requests_list':
+                if self.lookup_fails: raise RuntimeError('lookup unavailable')
+                return Model(structured_content={'value':list(rows),'count':len(rows)})
+            if name == 'refs':
+                return Model(structured_content={'value':[{'name':row['sourceRefName'],'objectId':'b'*40}]})
+            if name == 'ado_pull_request_create':
+                rows.append(row)
+                if lose_response: raise RuntimeError('response lost after commit')
+                return Model(structured_content=row)
+            return Model(structured_content={'issues':[]})
+    client=Client({},calls);client.lookup_fails=lookup_fails
+    original=poller.runtimes['connector:sonar'].declaration
+    tools=tuple(replace(t,name='ado_pull_request_create') if t.name=='pr_create' else t for t in original.tools)
+    declaration=replace(original,tools=(*tools,replace(tools[0],name='ado_pull_requests_list')),
+                        risky_tools=frozenset({'ado_pull_request_create'}))
+    poller.runtimes={'connector:sonar':_runtime(declaration,client)}
+    source=poller.sources[0]
+    poller.sources=(replace(source,writeback=replace(source.writeback,tool='ado_pull_request_create')),)
+    return poller,calls,rows,client
+
+
+def test_spaced_legacy_candidate_is_delivered(tmp_path):
+    async def scenario():
+        poller,calls=_delivery_setup(tmp_path)
+        ticket=await poller.ticket_reader('board-a','TK-test')
+        ticket['latest_submission']['notes']='branch_and_commit: pursers/TK-test @ '+'b'*40
+        assert (await poller.run_cycle(NOW))['writebacks']==1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('existing,lose_response',[(True,False),(False,False),(False,True)])
+def test_ado_reconciles_existing_and_uncertain_create_without_duplicates(tmp_path,existing,lose_response):
+    async def scenario():
+        poller,calls,rows,_client=_ado_reconciliation_setup(tmp_path,existing=existing,lose_response=lose_response)
+        await poller.run_cycle(NOW)
+        poller.index=butler.SourceIntakeIndex(poller.index.path)
+        await poller.run_cycle(NOW+timedelta(minutes=2))
+        assert len([n for n,a in calls if n=='ado_pull_request_create'])==(0 if existing else 1)
+        assert len(rows)==1
+        entry=poller.index.get('sonar','one')
+        assert entry['status']=='delivered'
+        assert entry['delivery_state']=='pr_created'
+        assert '31' in entry['delivery_notice']
+    asyncio.run(scenario())
+
+
+def test_ado_read_failure_retries_lookup_before_create(tmp_path):
+    async def scenario():
+        poller,calls,rows,client=_ado_reconciliation_setup(tmp_path,lookup_fails=True)
+        await poller.run_cycle(NOW)
+        assert not rows
+        assert poller.index.get('sonar','one')['delivery_state']=='pr_blocked'
+        client.lookup_fails=False
+        await poller.run_cycle(NOW+timedelta(minutes=2))
+        assert len(rows)==1
+    asyncio.run(scenario())
+
+
+def test_uncertain_create_without_remote_proof_does_not_create_again(tmp_path):
+    async def scenario():
+        poller,calls,rows,_client=_ado_reconciliation_setup(tmp_path,lose_response=True)
+        await poller.run_cycle(NOW)
+        rows.clear()  # A missing/eventually-consistent read is not proof of failed creation.
+        await poller.run_cycle(NOW+timedelta(minutes=2))
+        assert len([n for n,a in calls if n=='ado_pull_request_create'])==1
+        assert poller.index.get('sonar','one')['delivery_state']=='pr_uncertain'
+    asyncio.run(scenario())
+
+
+def test_existing_pr_with_different_sha_blocks_duplicate_creation(tmp_path):
+    async def scenario():
+        poller,calls,rows,_client=_ado_reconciliation_setup(tmp_path,existing=True)
+        rows[0]['lastMergeSourceCommit']['commitId']='c'*40
+        await poller.run_cycle(NOW)
+        assert not [n for n,a in calls if n=='ado_pull_request_create']
+        assert poller.index.get('sonar','one')['delivery_state']=='pr_blocked'
+    asyncio.run(scenario())
+
+
+def test_ado_recovers_annotation_failure_without_second_create(tmp_path):
+    async def scenario():
+        poller,calls,rows,_client=_ado_reconciliation_setup(tmp_path)
+        original=poller.ticket_annotator
+        async def annotate(board,ticket,text):
+            if text.startswith('source-writeback-'):raise RuntimeError('Central temporarily unavailable')
+            return await original(board,ticket,text)
+        poller.ticket_annotator=annotate
+        await poller.run_cycle(NOW)
+        assert len(rows)==1
+        poller.index=butler.SourceIntakeIndex(poller.index.path)
+        poller.ticket_annotator=original
+        await poller.run_cycle(NOW+timedelta(minutes=2))
+        assert len([n for n,a in calls if n=='ado_pull_request_create'])==1
+        assert poller.index.get('sonar','one')['status']=='delivered'
+    asyncio.run(scenario())

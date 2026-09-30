@@ -244,7 +244,10 @@ closed with an approval, so delivery never waits for a pull. Its
 `arg_template` may use `repository_project`, `repository_name`,
 `target_branch`, `source_branch`, `approved_sha` and `ticket_title` (e.g. an
 Azure DevOps `pull_request_create`); a tool without a stable call id is
-attempted once and never retried automatically.
+attempted once. ADO delivery reconciles existing PRs through the declared read-only
+`ado_pull_requests_list` tool, including after uncertain outcomes; it never blindly
+repeats a create. Read/preflight failures back off for at least 60 seconds. See
+[delivery states and recovery](../../docs/managed-intake.md#approved-delivery-and-remote-sha-preflight).
 
 `--connector-probe` is a one-shot, token-free check. It connects, lists tools,
 prints secret-free JSON, and exits non-zero when an enabled classified tool is

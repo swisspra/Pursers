@@ -40,6 +40,7 @@ Before approval:
 6. Run the credential leak scan and report clean or the bounded match count.
 7. Confirm every required_field is present and truthful.
 8. Put the SHA, re-run tails, leak-scan result, and model in review_notes.
+9. Branch/SHA spacing is not a review criterion. Use structured submission fields and the verifier; never reject solely for spaces around @ when identity verification passes.
 
 Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
 
@@ -384,25 +385,17 @@ def _submission(ticket: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     submission = history[-1] if isinstance(history, list) and history else ticket
     if not isinstance(submission, dict):
         submission = ticket
-    evidence = "\n".join(
-        str(submission.get(key) or ticket.get(key) or "")
-        for key in ("branch_and_commit", "notes", "summary")
-    )
-    sha_match = SHA_RE.search(str(submission.get("commit_hash") or "")) or SHA_RE.search(evidence)
-    branch_value = str(submission.get("branch") or "").strip()
-    branch_match = BRANCH_RE.search(evidence)
-    branch = branch_value if BRANCH_VALUE_RE.fullmatch(branch_value) else (
-        branch_match.group(1) if branch_match else ""
-    )
+    from pursers_client.submission_evidence import submission_identity
+    branch, sha = submission_identity(submission)
     branch_valid = bool(branch) and subprocess.run(
         ["git", "check-ref-format", "--branch", branch],
         check=False, text=True, capture_output=True,
     ).returncode == 0
-    if sha_match is None or not branch_valid:
+    if not sha or not branch_valid:
         raise ValueError(
             "verify requires submitted branch_and_commit with a valid platform/branch and full SHA"
         )
-    return submission, sha_match.group(0).lower(), branch
+    return submission, sha, branch
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -517,7 +510,7 @@ def _submit_preflight(
 def _canonical_submit_notes(notes: str, preflight: dict[str, str]) -> str:
     remainder = SUBMIT_BRANCH_COMMIT_RE.sub("", notes).lstrip("\r\n")
     lines = [
-        f"branch_and_commit: {preflight['branch']} @ {preflight['commit']}",
+        f"branch_and_commit: {preflight['branch']}@{preflight['commit']}",
         (
             "submission_preflight: "
             f"remote_ref={preflight['remote_ref']} "
