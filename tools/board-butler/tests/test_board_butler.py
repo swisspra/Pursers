@@ -5103,6 +5103,43 @@ def test_rejection_loop_observer_bounds_per_ticket_detail() -> None:
     assert "omitted=6" in loops[-1]["evidence"]
 
 
+
+@pytest.mark.parametrize("status", ["closed", "canceled", "rejected", "terminated"])
+@pytest.mark.parametrize("compact", [False, True])
+def test_terminal_rejections_do_not_create_alerts_or_rework(status, compact):
+    ticket = {"ticket_id": "TK-finished", "status": status}
+    ticket.update({"counts": {"rejections": 8}} if compact else {"rejection_count": 8})
+    context = butler.ObservationContext(
+        board_id="pursers", tickets={} if compact else {"TK-finished": ticket},
+        ticket_rows=(ticket,), questions=(), now=NOW,
+    )
+    assert butler._observe_rejection_loops(context) == []
+    assert butler._fleet_demand_snapshot(context)["rework"] == {
+        "tickets": 0, "rejections": 0, "loops": 0,
+    }
+
+
+def test_completed_rejections_do_not_displace_live_loops_or_inflate_overflow():
+    completed = tuple(
+        {"ticket_id": f"TK-done-{i}", "status": "closed", "rejection_count": 20}
+        for i in range(9)
+    )
+    active = tuple(
+        {"ticket_id": f"TK-active-{i}", "status": status, "rejection_count": 3}
+        for i, status in enumerate(("open", "claimed", "submitted", "needs_human"))
+    )
+    context = butler.ObservationContext(
+        board_id="pursers", tickets={}, ticket_rows=completed + active,
+        questions=(), now=NOW,
+    )
+    loops = butler._observe_rejection_loops(context)
+    assert len(loops) == 4
+    assert all(row["ticket_id"].startswith("TK-active-") for row in loops[:3])
+    assert "omitted=1; worst_rejection_count=3; total_loops=4" == loops[-1]["evidence"]
+    assert butler._fleet_demand_snapshot(context)["rework"] == {
+        "tickets": 4, "rejections": 12, "loops": 4,
+    }
+
 def test_role_imbalance_observer_surfaces_critical_work_queue() -> None:
     tickets = tuple(
         {

@@ -92,7 +92,9 @@ The current duties are directly traceable:
    equivalent-content check. An approval not proven landed after one hour is
    reported; 24 hours, or an unknown approval time, requests human attention.
 10. `rejection_loop` reports two review rejections and requests human attention
-    at three. `role_imbalance` compares unassignable work/review demand with
+    at three. Terminal tickets (`closed`, `rejected`, `canceled`, `terminated`)
+    are excluded from both the alert/overflow count and current fleet rework
+    demand. Historical rejection counts remain on the tickets. `role_imbalance` compares unassignable work/review demand with
     idle opposite-role capacity, escalating at eight tickets or any critical
     unassignable review. Per-ticket detail is capped at three rows per signal;
     an aggregate row records any omitted backlog.

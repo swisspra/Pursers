@@ -20,6 +20,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Butler excludes terminal tickets from rejection-loop alerts, overflow summaries,
+  and current rework demand, so completed reviews no longer appear as active loops.
+
 - Approved source delivery shares a durable attempt guard across refresh and revision
   paths, checks the configured remote branch SHA before Azure DevOps PR creation,
   and reads Central's actual submission history.

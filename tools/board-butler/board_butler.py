@@ -10173,10 +10173,8 @@ def _observe_rejection_loops(
 ) -> list[Mapping[str, Any]]:
     ranked: list[tuple[int, Mapping[str, Any]]] = []
     for ticket_id, ticket in sorted(_ticket_row_map(context).items()):
-        count = ticket.get("rejection_count")
-        if count is None and isinstance(ticket.get("counts"), Mapping):
-            count = ticket["counts"].get("rejections", 0)
-        if not isinstance(count, int) or isinstance(count, bool) or count < REJECTION_NAG_COUNT:
+        count = _active_rejection_count(ticket)
+        if count < REJECTION_NAG_COUNT:
             continue
         escalated = count >= REJECTION_ESCALATE_COUNT
         ranked.append(
@@ -10231,7 +10229,10 @@ def _ticket_dispatch_state(ticket: Mapping[str, Any]) -> Mapping[str, Any]:
     )
 
 
-def _rejection_count(ticket: Mapping[str, Any]) -> int:
+def _active_rejection_count(ticket: Mapping[str, Any]) -> int:
+    """Count current rework, excluding Central's terminal ticket states."""
+    if ticket.get("status") in {"closed", "rejected", "canceled", "terminated"}:
+        return 0
     value = ticket.get("rejection_count")
     if value is None and isinstance(ticket.get("counts"), Mapping):
         value = ticket["counts"].get("rejections", 0)
@@ -10243,7 +10244,7 @@ def _fleet_demand_snapshot(context: ObservationContext) -> dict[str, Any]:
     unassignable_ages = {"work": [], "review": []}
     rejections: list[int] = []
     for ticket in context.ticket_rows:
-        count = _rejection_count(ticket)
+        count = _active_rejection_count(ticket)
         if count:
             rejections.append(count)
         dispatch = _ticket_dispatch_state(ticket)
