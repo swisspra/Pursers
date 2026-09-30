@@ -425,3 +425,5 @@ preconditions still apply. Read a specific state key when inspecting large queue
 Upgrade Central to obtain this limit; there is no deployment flag or database
 migration. Retain existing intake state and the Butler issue index during upgrade.
 A retry can publish prepared intake entries without creating duplicate tickets.
+
+Intake decisions that report `provider_unavailable` include a bounded `error_class` and, for HTTP failures, `http_status`. The original metadata remains visible during the 15-minute backoff; raw provider messages and credentials are never included.

@@ -27,6 +27,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Intake provider failures retain safe exception classes and HTTP status codes through backoff without logging credentials or upstream error bodies.
+
 - Project registry parsing preserves the configured integration branch for PR
   delivery instead of silently falling back to `main`.
 - Central journals routing-state changes so subscribed coordinators discover new

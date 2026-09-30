@@ -475,10 +475,13 @@ def test_intake_decision_cache_backs_off_provider_failures(monkeypatch):
         monkeypatch.setattr(butler, "decide_intake_with_provider", decide)
         with pytest.raises(TimeoutError):
             await cache.decide(runtime, {"ceiling": 15}, NOW)
+        assert cache.failure == {"error_class": "TimeoutError"}
         with pytest.raises(butler.ButlerConfigError, match="retry is deferred"):
             await cache.decide(runtime, {"ceiling": 14}, NOW + timedelta(minutes=1))
         assert len(calls) == 1
+        assert cache.failure == {"error_class": "TimeoutError"}
         assert await cache.decide(runtime, {"ceiling": 14}, NOW + timedelta(minutes=15)) == {"pull": 1}
+        assert cache.failure == {}
         assert len(calls) == 2
     asyncio.run(scenario())
 
@@ -724,3 +727,28 @@ def test_resident_project_reader_preserves_nondefault_delivery_branch():
     backend._client_for_board = client_for_board
     result = asyncio.run(backend._source_project_reader("alpha"))
     assert butler._repository_fields(result)["target_branch"] == "dev"
+
+
+def test_resident_reports_safe_provider_failure_through_backoff(monkeypatch):
+    async def scenario():
+        backend = butler.CentralBackend(SimpleNamespace(), "opaque")
+        async def config():
+            return {}
+        async def fail(*_args):
+            raise butler.urllib.error.HTTPError(
+                "https://model.invalid/private", 429, "credential=do-not-log", {}, None
+            )
+        monkeypatch.setattr(backend, "coordinator_config", config)
+        monkeypatch.setattr(butler, "resolve_config", lambda *_a, **_kw: None)
+        runtime = butler.ProviderRuntime("https://model.invalid", "model", "secret")
+        monkeypatch.setattr(butler, "resolve_provider_runtime", lambda *_a, **_kw: runtime)
+        monkeypatch.setattr(butler, "decide_intake_with_provider", fail)
+        for expected_called in (True, False):
+            result = await backend._source_intake_decide({"ceiling": 15})
+            assert result["pull"] == 0
+            assert result["model_called"] is expected_called
+            assert result["error_class"] == "HTTPError"
+            assert result["http_status"] == 429
+            assert "do-not-log" not in json.dumps(result)
+            assert "model.invalid" not in json.dumps(result)
+    asyncio.run(scenario())

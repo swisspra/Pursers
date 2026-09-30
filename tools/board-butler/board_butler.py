@@ -5963,6 +5963,7 @@ class IntakeDecisionCache:
         self.model_called = False
         self.cache_reused = False
         self.evidence: dict[str, Any] = {}
+        self.failure: dict[str, Any] = {}
 
     def forget_decision(self) -> None:
         """Invalidate a decision after an empty-source observation, retaining backoff."""
@@ -6005,9 +6006,15 @@ class IntakeDecisionCache:
                     )
                 ):
                     raise ValueError("invalid intake decision")
-            except Exception:
+            except Exception as exc:
+                # Preserve only bounded metadata: upstream messages may contain secrets.
+                error_class = type(exc).__name__
+                self.failure = {"error_class": error_class if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", error_class) else "Exception"}
+                if isinstance(exc, urllib.error.HTTPError) and 100 <= exc.code <= 599:
+                    self.failure["http_status"] = exc.code
                 self._retry_after = now + timedelta(minutes=15)
                 raise
+            self.failure = {}
             self._context = encoded
             self._decision = copy.deepcopy(dict(decision))
             self._retry_after = None
@@ -6447,7 +6454,7 @@ class SourceIntakePoller:
             decision, ceiling=ceiling, source_ids=source_ids
         )
         metadata = {"mode": "decided", "ceiling": ceiling, "pull": pull, "reason": reason}
-        for key in ("model_called", "cache_reused", "retry_after", "provider_response_id", "elapsed_ms", "model"):
+        for key in ("model_called", "cache_reused", "retry_after", "provider_response_id", "elapsed_ms", "model", "error_class", "http_status"):
             if key in decision:
                 metadata[key] = decision[key]
         return pull, order, metadata
@@ -12201,7 +12208,8 @@ class CentralBackend:
         except Exception:
             return {"pull": 0, "source_ids": [], "reason": "provider_unavailable",
                     "model_called": cache.model_called, "cache_reused": False,
-                    "retry_after": cache._retry_after.isoformat() if cache._retry_after else None}
+                    "retry_after": cache._retry_after.isoformat() if cache._retry_after else None,
+                    **cache.failure}
         evidence = cache.evidence if cache.model_called else {}
         return {**decision, "model_called": cache.model_called, "cache_reused": cache.cache_reused,
                 "model": runtime.model[:120], **evidence}
