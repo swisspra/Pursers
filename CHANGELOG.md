@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Keep unhealthy seats out of usable fleet capacity while retaining hard process
+  limits; recover eligible proven seats before switching on provider probe timing.
+- Preserve running minimum capacity through provider probe failures and let idle
+  draining seats finish before recovery, preventing drain/stop/start churn.
+
 - Persist verified branch, SHA and test evidence on submissions; accept legacy
   whitespace around `@` consistently across workers, Butler and the dashboard.
   Preserve inline `test_output=...` evidence from legacy seats.

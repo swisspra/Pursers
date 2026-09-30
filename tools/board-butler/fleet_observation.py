@@ -100,7 +100,7 @@ class LocalFleetObserver:
             lifecycle = ('ready' if service.ready else 'starting') if service.running else 'stopped'
             if service.running and previous.get('lifecycle') == 'draining': lifecycle = 'draining'
             if busy and lifecycle == 'ready': lifecycle = 'busy'
-            if ((service.exists and not service.identity_verified) or (service.running and not known)
+            if ((service.exists and not service.identity_verified) or not known
                     or not binding or board_id not in active_boards): lifecycle = 'unhealthy'
             if board_id not in active_boards:
                 raise ValueError('template binding targets an inactive board')

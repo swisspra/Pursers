@@ -127,3 +127,15 @@ def test_stopped_seat_uses_current_membership_without_requiring_a_live_heartbeat
     _,readiness,leases=observer.collect(['a','b'],boards,members,NOW,{}, {})
     assert 'seat' not in readiness['boards']['b']['seats']
     assert all('seat' not in leases['boards'][b]['seats'] for b in ('a','b'))
+
+
+def test_stopped_seat_missing_registry_membership_is_not_a_start_candidate():
+    template, boards, members, _ = fixture()
+    services = SimpleNamespace(inspect=lambda *_: fleet_executor.ServiceObservation(True, False, False, True))
+    members['b']['members'] = []
+    observer = observer_api()['LocalFleetObserver']({'t': template}, services, {},
+        {'t': {'board_id': 'a', 'provider': 'worker'}})
+    observation, _, leases = observer.collect(['a', 'b'], boards, members, NOW,
+        {'worker': {'status': 'healthy', 'latency_ms': 1}}, {})
+    assert observation['executor_seats'][0]['lifecycle'] == 'unhealthy'
+    assert all('seat' not in leases['boards'][b]['seats'] for b in ('a', 'b'))

@@ -730,6 +730,14 @@ class FleetSeat:
     def active(self) -> bool:
         return self.lifecycle in {"starting", "ready", "busy", "draining", "unhealthy"}
 
+    @property
+    def serving(self) -> bool:
+        """Usable running capacity; uncertain processes still count against caps."""
+        return self.active and (
+            self.live_lease or self.busy
+            or self.lifecycle in {"starting", "ready", "busy"}
+        )
+
 
 @dataclass(frozen=True)
 class FleetSnapshot:
@@ -2090,7 +2098,9 @@ class FleetReconciler:
                     if seat.managed
                     and seat.role == role
                     and seat.template_id in policy.approved_template_ids
-                    and _healthy_provider(demand, policy, seat.provider)
+                    and (seat.serving or (
+                        seat.lifecycle in {"stopped", "draining"}
+                        and _healthy_provider(demand, policy, seat.provider)))
                 )
                 if pressure:
                     requested = max(
@@ -2107,7 +2117,7 @@ class FleetReconciler:
                     active_count = sum(
                         1
                         for seat in seats
-                        if seat.managed and seat.role == role and seat.active
+                        if seat.managed and seat.role == role and seat.serving
                     )
                     if idle_since is None:
                         # The first zero-demand observation starts the durable
@@ -2161,7 +2171,9 @@ class FleetReconciler:
                         if seat.managed
                         and seat.template_id in policy.approved_template_ids
                         and seat.provider == provider
-                        and _healthy_provider(demand, policy, provider)
+                        and (seat.serving or (
+                            seat.lifecycle in {"stopped", "draining"}
+                            and _healthy_provider(demand, policy, provider)))
                     ),
                 )
                 for provider, maximum in policy.provider_maximums.items()
@@ -2230,10 +2242,26 @@ class FleetReconciler:
             _, board_id, role = min(candidates)
             requested[board_id][role] -= 1
 
+    @staticmethod
+    def _start_priority(seat: FleetSeat, demand: FleetDemand, prior: Mapping[str, Any]) -> tuple[float, int, str]:
+        """Recover a proven seat before switching providers on probe timing alone."""
+        operations = prior.get("operations", {})
+        last_success = 0.0
+        for row in operations.values() if isinstance(operations, Mapping) else ():
+            if (not isinstance(row, Mapping) or row.get("action") != "start"
+                    or row.get("status") != "terminal" or row.get("outcome") != "succeeded"
+                    or row.get("board_id") != seat.board_id or row.get("seat_id") != seat.seat_id):
+                continue
+            at = parse_time(row.get("last_attempt_at"))
+            if at is not None:
+                last_success = max(last_success, at.timestamp())
+        return (-last_success, demand.provider_latency_ms.get(seat.provider, 10**9), seat.seat_id)
+
     def _provider_desired(
         self,
         requested: Mapping[str, Mapping[str, int]],
         snapshot: FleetSnapshot,
+        prior: Mapping[str, Any],
     ) -> dict[str, dict[str, int]]:
         result: dict[str, dict[str, int]] = {}
         for board_id, counts in requested.items():
@@ -2249,7 +2277,7 @@ class FleetReconciler:
             # cannot consume the budget needed by a reviewer-only model.
             for role in FLEET_ROLES:
                 active = sorted(
-                    (seat for seat in inventory if seat.role == role and seat.active),
+                    (seat for seat in inventory if seat.role == role and seat.serving),
                     key=lambda seat: (not seat.live_lease, not seat.busy,
                         demand.provider_latency_ms.get(seat.provider, 10**9), seat.seat_id),
                 )[:counts[role]]
@@ -2258,9 +2286,9 @@ class FleetReconciler:
                 remaining[role] -= len(active)
             for role in FLEET_ROLES:
                 candidates = sorted(
-                    (seat for seat in inventory if seat.role == role and not seat.active
+                    (seat for seat in inventory if seat.role == role and seat.lifecycle == "stopped"
                      and _healthy_provider(demand, policy, seat.provider)),
-                    key=lambda seat: (demand.provider_latency_ms.get(seat.provider, 10**9), seat.seat_id),
+                    key=lambda seat: self._start_priority(seat, demand, prior),
                 )
                 for seat in candidates:
                     if remaining[role] <= 0:
@@ -2339,7 +2367,7 @@ class FleetReconciler:
                 # Live holders and busy seats are stable first choices, then
                 # healthy low-latency providers.
                 keep = sorted(
-                    active,
+                    (seat for seat in active if seat.serving),
                     key=lambda seat: (
                         not seat.live_lease,
                         not seat.busy,
@@ -2350,18 +2378,15 @@ class FleetReconciler:
                 selected.update(seat.seat_id for seat in keep)
                 for seat in keep:
                     provider_started[seat.provider] = provider_started.get(seat.provider, 0) + 1
-                needed = max(0, target - len(active))
+                needed = max(0, target - len(keep))
                 candidates = sorted(
                     (
                         seat
                         for seat in role_seats
-                        if not seat.active
+                        if seat.lifecycle == "stopped"
                         and _healthy_provider(demand, policy, seat.provider)
                     ),
-                    key=lambda seat: (
-                        demand.provider_latency_ms.get(seat.provider, 10**9),
-                        seat.seat_id,
-                    ),
+                    key=lambda seat: self._start_priority(seat, demand, prior),
                 )
                 for seat in candidates:
                     if (
@@ -2389,6 +2414,7 @@ class FleetReconciler:
                     seat
                     for seat in active
                     if seat.seat_id not in selected
+                    and seat.lifecycle != "unhealthy"
                     and not seat.live_lease
                     and not seat.busy
                 ]
@@ -2450,7 +2476,7 @@ class FleetReconciler:
             raise ValueError("snapshot does not cover the configured registry")
         desired, explanations = self._requested_counts(snapshot, prior)
         self._apply_host_cap(desired, snapshot)
-        provider_desired = self._provider_desired(desired, snapshot)
+        provider_desired = self._provider_desired(desired, snapshot, prior)
         operations = self._operations(
             desired, provider_desired, snapshot, prior
         )

@@ -502,3 +502,24 @@ events. State exposes `rate_limited_until` while deferred. Per-execution
 `max_turns`, timeouts, event deduplication and empty-source/cache checks remain
 independent of this throttle. These are execution counts, not provider token
 quota or billing limits.
+
+
+### Fleet recovery and provider probes
+
+A reachable model endpoint does not prove that a seat can work. The reconciler
+keeps service health separate from provider health: an `unhealthy` process still
+occupies hard host, board and role limits, but cannot replace usable capacity.
+It is not automatically stopped when its identity is uncertain. A stopped seat must also have complete registry identity and membership evidence
+on every selected board before it is eligible. A healthy, authorized stopped seat can fill the remaining capacity within those limits.
+
+For recovery, an eligible seat with the most recent successful start is preferred
+to an unused or older seat before comparing provider probe latency. A failed
+provider probe prevents new starts on that provider; it does not turn a known
+running seat into zero capacity or drain the configured minimum by itself.
+Independent human maxima and approved-template checks still apply.
+
+An idle `draining` seat finishes its stop after the configured grace period, even
+when capacity is needed again. A subsequent observation can start it afresh.
+Live leases and busy work prevent this stop. This avoids treating a draining
+process as a ready replacement forever. No model requests are needed for this
+reconciliation, and no seat or hourly execution limit changes are required.
