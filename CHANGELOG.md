@@ -27,6 +27,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Central journals routing-state changes so subscribed coordinators discover new
   projects and intake without a restart. Identical writes and findings refreshes
   do not emit these events; state values are excluded from the journal.
+- Intake joins each admitted board as a non-working coordinator before the first
+  generation-fenced ticket creation, including when its credential is separate.
 - Grouped intake verifies the analyzed branch and commit, reuses plans across
   irrelevant transport changes, and skips model calls when its canary cap is full.
 

@@ -55,7 +55,7 @@ INTAKE_RATE_WINDOW_SECONDS = 3_600
 INTAKE_BREAKER_FAILURES = 3
 INTAKE_SCOPE = "board:intake"
 MAIN_REQUIRED_SCOPES = frozenset({"board:read", "board:write", "board:coordinate"})
-INTAKE_REQUIRED_SCOPES = frozenset({"board:read", "board:intake"})
+INTAKE_REQUIRED_SCOPES = frozenset({"board:read", "board:intake", "board:coordinate"})
 INTAKE_FORBIDDEN_SCOPES = frozenset({"board:write"})
 BOARD_FAILURE_LOG_COOLDOWN_SECONDS = 300
 HOME_BACKOFF_MAX_SECONDS = 300
@@ -2658,7 +2658,9 @@ class IntakeCaller(RawReader):
         joined = self._decode(
             await self._client.call_tool(
                 "board_join",
-                {"board_id": board_id, "agent_name": agent_name},
+                {"board_id": board_id, "agent_name": agent_name,
+                 "role": "coordinator", "allow_takeover": True,
+                 "capabilities": {"can_work": False, "can_review": False}},
             )
         )
         generation = joined.get("generation_token")
@@ -2673,15 +2675,14 @@ class IntakeCaller(RawReader):
             raise RuntimeError("intake caller rejected a non-create tool")
         payload = {"board_id": board_id, **arguments}
         if self._generation_token is None:
-            result = await self._client.call_tool(name, payload)
-        else:
-            from pursers_client import GENERATION_META_KEY
+            await self.rejoin(board_id, arguments["agent_name"])
+        from pursers_client import GENERATION_META_KEY
 
-            result = await self._client.call_tool(
-                name,
-                payload,
-                meta={GENERATION_META_KEY: self._generation_token},
-            )
+        result = await self._client.call_tool(
+            name,
+            payload,
+            meta={GENERATION_META_KEY: self._generation_token},
+        )
         return self._decode(result)
 
 
@@ -3907,7 +3908,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--intake-token-path",
         default=os.environ.get("PURSERS_COORDINATOR_INTAKE_TOKEN_PATH"),
-        help="Write-less board:read + board:intake credential used only for ticket_create",
+        help="Write-less board:read + board:intake + board:coordinate credential for joining and ticket_create",
     )
     parser.add_argument("--home-board", default=os.environ.get("ONBOARD_BOARD_ID", "pursers"))
     parser.add_argument("--agent-name", default="coordinator-1")

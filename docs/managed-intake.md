@@ -38,6 +38,12 @@ A successful MCP connection does not grant Azure DevOps permissions. Missing or
 expired credentials remain an external prerequisite. Preserve WORK and personal
 project boundaries and resolve duplicate repository names explicitly.
 
+The coordinator's separate intake credential needs `board:read`, `board:intake`,
+and `board:coordinate`, with no `board:write`. It joins admitted projects as a
+non-working coordinator before creating a generation-fenced ticket. Admission
+must grant that credential's principal membership, separately from the main
+coordinator principal when they differ.
+
 ## Source counts and model use
 
 Add `observation` to each source in the connector configuration:
