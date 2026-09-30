@@ -1040,6 +1040,30 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         from pursers_client.client import DEFAULT_EVENT_KINDS
         self.assertIn("board_state_changed", DEFAULT_EVENT_KINDS)
 
+    async def test_native_intake_caller_joins_separate_principal_on_new_board(self):
+        import runpy
+        from pursers_client.client import BoardClient
+        api = runpy.run_path(str(PACKAGE_ROOT.parents[1] / "tools/coordinator/coordinator.py"))
+        caller = api["IntakeCaller"]("https://board.invalid/mcp", "opaque")
+        caller._client = self.mcp
+        caller._decode = BoardClient._decode
+        self.principal = self.intake_runtime
+        result = await caller.call(
+            "ticket_create", "pursers", agent_name="fresh-intake",
+            ticket_id="TK-intake-fresh", title="Update the operator guide",
+            description="Structured coordinator intake.", target_url="pursers/docs",
+            scope="interactive-no-send", required_fields=["commit_hash", "test_output"],
+            tags=["coordinator-intake"], unassigned=True,
+            coordinator_op_key="coord-intake-fresh",
+        )
+        self.assertEqual(result["ticket"]["ticket_id"], "TK-intake-fresh")
+        self.assertEqual(result["ticket"]["origin"], "coordinator-intake")
+        members = self.service.load("pursers")["members"].values()
+        joined = next(m for m in members if m["agent_name"] == "fresh-intake")
+        self.assertEqual(joined["role"], "coordinator")
+        self.assertFalse(joined["capabilities"]["can_work"])
+        self.assertFalse(joined["capabilities"]["can_review"])
+
     async def test_intake_scope_creates_origin_journaled_unassigned_ticket(self) -> None:
         self.principal = self.intake
         created = await self.call(

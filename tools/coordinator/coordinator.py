@@ -2651,6 +2651,7 @@ class IntakeCaller(RawReader):
     def __init__(self, url: str, token: str):
         super().__init__(url, token)
         self._generation_token: str | None = None
+        self._joined_board: str | None = None
 
     async def rejoin(self, board_id: str, agent_name: str) -> None:
         if self._client is None or self._decode is None:
@@ -2664,9 +2665,14 @@ class IntakeCaller(RawReader):
             )
         )
         generation = joined.get("generation_token")
-        if not isinstance(generation, str) or not generation:
-            raise RuntimeError("board_join returned no generation_token")
+        if generation is not None and (
+            not isinstance(generation, str) or not generation
+            or generation != generation.strip() or len(generation) > 256
+            or any(ord(c) < 0x20 or ord(c) == 0x7F for c in generation)
+        ):
+            raise RuntimeError("board_join returned an invalid generation_token")
         self._generation_token = generation
+        self._joined_board = board_id
 
     async def call(
         self, name: str, board_id: str, **arguments: Any
@@ -2674,14 +2680,15 @@ class IntakeCaller(RawReader):
         if name not in self.ALLOWED or self._client is None or self._decode is None:
             raise RuntimeError("intake caller rejected a non-create tool")
         payload = {"board_id": board_id, **arguments}
-        if self._generation_token is None:
+        if self._joined_board != board_id:
             await self.rejoin(board_id, arguments["agent_name"])
         from pursers_client import GENERATION_META_KEY
 
         result = await self._client.call_tool(
             name,
             payload,
-            meta={GENERATION_META_KEY: self._generation_token},
+            **({"meta": {GENERATION_META_KEY: self._generation_token}}
+               if self._generation_token is not None else {}),
         )
         return self._decode(result)
 

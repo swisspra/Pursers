@@ -3187,7 +3187,8 @@ def test_intake_persistent_stale_generation_retries_at_most_once(
     assert rejoins == 1
 
 
-def test_intake_caller_joins_nonworking_coordinator_before_first_create() -> None:
+@pytest.mark.parametrize("generation", [None, "GEN-current"])
+def test_intake_caller_joins_nonworking_coordinator_before_first_create(generation) -> None:
     calls: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
 
     class FakeTransport:
@@ -3196,7 +3197,7 @@ def test_intake_caller_joins_nonworking_coordinator_before_first_create() -> Non
         ) -> dict[str, Any]:
             calls.append((name, arguments, kwargs))
             if name == "board_join":
-                return {"generation_token": "GEN-current"}
+                return {"generation_token": generation}
             return {"ticket": {"ticket_id": "TK-created"}}
 
     caller = coordinator.IntakeCaller("https://board.invalid/mcp", "opaque")
@@ -3220,7 +3221,7 @@ def test_intake_caller_joins_nonworking_coordinator_before_first_create() -> Non
         (
             "ticket_create",
             {"board_id": "board-a", "agent_name": "coordinator-test"},
-            {"meta": {"io.onboard/expected-generation": "GEN-current"}},
+            {"meta": {"io.onboard/expected-generation": generation}} if generation else {},
         ),
     ]
 
