@@ -20,6 +20,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Fleet Dashboard keeps Decline available for approved intake until consumption
+  and exposes it on intake attention findings, with fresh queue checks and
+  existing audit records. System health alerts remain separate.
+
 - Butler excludes terminal tickets from rejection-loop alerts, overflow summaries,
   and current rework demand, so completed reviews no longer appear as active loops.
 
