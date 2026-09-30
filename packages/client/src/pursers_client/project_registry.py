@@ -197,6 +197,17 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             normalized[name]["fleet"] = project["fleet"]
         if repository_url is not None:
             normalized[name]["repository_url"] = repository_url
+        if "integration_ref" in project:
+            ref = project["integration_ref"]
+            if (
+                not isinstance(ref, str) or not ref or ref != ref.strip()
+                or any(ord(c) < 0x20 or ord(c) == 0x7F for c in ref)
+            ):
+                raise ValueError(
+                    f"project_registry project {name!r} integration_ref must be "
+                    "a non-empty, trimmed ref"
+                )
+            normalized[name]["integration_ref"] = ref
     return {"schema_version": PROJECT_REGISTRY_SCHEMA_VERSION, "projects": normalized}
 
 

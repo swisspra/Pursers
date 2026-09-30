@@ -24,6 +24,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Project registry parsing preserves the configured integration branch for PR
+  delivery instead of silently falling back to `main`.
 - Central journals routing-state changes so subscribed coordinators discover new
   projects and intake without a restart. Identical writes and findings refreshes
   do not emit these events; state values are excluded from the journal.

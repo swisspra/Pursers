@@ -705,3 +705,22 @@ def test_repository_identity_accepts_ado_organization_username_only():
     assert butler._repository_identity(expected)==butler._repository_identity(observed)
     with pytest.raises(butler.ConnectorDenied):
         butler._repository_identity('https://user:password@dev.azure.com/example-org/project/_git/repo')
+
+
+def test_resident_project_reader_preserves_nondefault_delivery_branch():
+    row = {"board_id": "alpha", "work_dir": "/repo/alpha", "status": "active",
+           "repository_url": "https://dev.azure.com/example/team/_git/backend",
+           "integration_ref": "dev"}
+    class Client:
+        async def board_state_get(self, key):
+            assert key == "project_registry"
+            return {"state": {"value": json.dumps({"schema_version": 1, "projects": {"alpha": row}})}}
+    @contextlib.asynccontextmanager
+    async def client_for_board(board_id):
+        assert board_id == "home"
+        yield Client()
+    backend = object.__new__(butler.CentralBackend)
+    backend.args = SimpleNamespace(home_board="home")
+    backend._client_for_board = client_for_board
+    result = asyncio.run(backend._source_project_reader("alpha"))
+    assert butler._repository_fields(result)["target_branch"] == "dev"

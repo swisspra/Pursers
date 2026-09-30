@@ -938,3 +938,19 @@ def test_registry_wait_still_retries_transient_join_failures() -> None:
 
     assert joins == ["fullplatts", "fullplatts"]
     assert "fullplatts" not in client._registry_wait_sessions
+
+
+@pytest.mark.parametrize('ref', ['dev', 'release/stable'])
+def test_registry_preserves_integration_branch(ref):
+    parsed = parse_project_registry(state({'schema_version': 1, 'projects': {
+        'alpha': {'board_id': 'alpha', 'work_dir': '/repo/alpha', 'status': 'active',
+                  'integration_ref': ref}}}))
+    assert parsed['projects']['alpha']['integration_ref'] == ref
+
+
+@pytest.mark.parametrize('ref', [None, '', ' dev ', 123, 'dev\nnext'])
+def test_registry_rejects_invalid_integration_branch(ref):
+    with pytest.raises(ValueError, match='integration_ref'):
+        parse_project_registry(state({'schema_version': 1, 'projects': {
+            'alpha': {'board_id': 'alpha', 'work_dir': '/repo/alpha', 'status': 'active',
+                      'integration_ref': ref}}}))
