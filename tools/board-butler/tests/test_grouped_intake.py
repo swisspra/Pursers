@@ -142,3 +142,11 @@ def test_group_writeback_contains_every_issue_once(tmp_path):
     assert asyncio.run(poller.run_cycle(NOW))['writebacks']==1
     assert [args['description'] for name,args in calls if name=='pr_create']==['Issues: I-1, I-2, I-3']
     assert asyncio.run(poller.run_cycle(NOW+timedelta(minutes=1)))['writebacks']==0
+
+
+def test_source_findings_can_be_bounded_without_preserved_question():
+    state={'findings':[{'kind':'unknown_project','item_id':str(i),'detail':'x'*400} for i in range(30)]}
+    result=butler._bound_control_state(state)
+    import json
+    assert len(json.dumps(result,sort_keys=True,separators=(',',':')))<=butler.MAX_STATE_CHARS
+    assert result['findings'] and result['truncation']['findings']>0

@@ -6459,6 +6459,7 @@ class SourceIntakePoller:
         attempted_sources: list[str] = []
         states: dict[str, tuple[list[dict[str, Any]], list[Any], str | None]] = {}
         dirty: set[str] = set()
+        unknown_projects: set[tuple[str, str]] = set()
 
         def exhausted() -> bool:
             return processed >= self.cycle_cap or (
@@ -6556,6 +6557,10 @@ class SourceIntakePoller:
                     processed += 1
                     board_id = self._route(source, item["project_hint"])
                     if board_id is None:
+                        project_key = (source.source_id, item["project_hint"])
+                        if groups is not None and project_key in unknown_projects:
+                            continue
+                        unknown_projects.add(project_key)
                         findings.append(
                             {
                                 "kind": SOURCE_UNKNOWN_PROJECT_KIND,
@@ -11098,7 +11103,7 @@ def _bound_control_state(
                 for index, item in enumerate(findings)
                 if isinstance(item, Mapping)
                 and item.get("level") != "critical"
-                and item.get("question_id") != preserve_question_id
+                and (preserve_question_id is None or item.get("question_id") != preserve_question_id)
             ),
             None,
         )
@@ -12366,7 +12371,7 @@ class CentralBackend:
             if isinstance(item, Mapping)
             and (
                 item.get("reason_code") == SOURCE_UNKNOWN_PROJECT_KIND
-                or str(item.get("kind", "")).startswith("source-intake-")
+                or str(item.get("kind", "")).startswith(("source-intake-", "source-grouping-", "source-discovery-"))
             )
         ]
         async with self._client_for_board(self.args.home_board) as client:
@@ -12387,7 +12392,7 @@ class CentralBackend:
                         and item.get("source_id") in successful
                     )
                     or (
-                        str(item.get("kind", "")).startswith("source-intake-")
+                        str(item.get("kind", "")).startswith(("source-intake-", "source-grouping-", "source-discovery-"))
                         and (
                             item.get("source_id") in attempted
                             or item.get("source_id") is None

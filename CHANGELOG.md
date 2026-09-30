@@ -24,6 +24,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Noncritical source findings respect the Central state size bound even when no
+  question is being preserved; unknown grouped projects emit one onboarding hint.
+
 - Automatic intake board creation bootstraps a non-working identity before joining
   as coordinator, grants configured member roles, and backs off on failed setup.
 - ADO delivery preflight accepts organization usernames in remote URLs while
