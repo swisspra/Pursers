@@ -92,3 +92,42 @@ def test_invalid_event_tier_is_rejected(tmp_path,tier):
     cfg=config(tmp_path);cfg["tier_max"]=tier
     with pytest.raises(ValueError,match="tier"):
         api()["validate_config"](cfg)
+
+
+def test_transport_reconnect_preserves_cursor_and_only_runs_after_an_offer(tmp_path, monkeypatch):
+    import subprocess
+    module=api();runner=module['EventSeatRunner'](config(tmp_path))
+    runner.state['cursor']={'home':42}
+    calls=[];delays=[];waits=[]
+    async def bootstrap(): runner.active_boards=['home']
+    runner.bootstrap=bootstrap
+    runner.run_command=lambda *args,**kwargs:calls.append(args)
+    def wait(command,**kwargs):
+        waits.append(json.loads(command[command.index('--since')+1]))
+        if len(waits)<=2:
+            raise subprocess.CalledProcessError(1,command,stderr='ConnectError: All connection attempts failed')
+        if len(waits)==3:
+            return subprocess.CompletedProcess(command,0,stdout=json.dumps({'new_seq':{'home':43},'events':[
+                {'kind':'ticket_offered','board_id':'home','ticket_id':'TK-one','updated_at':'one'}]}))
+        raise KeyboardInterrupt
+    monkeypatch.setattr(module['subprocess'],'run',wait)
+    monkeypatch.setattr(module['time'],'sleep',delays.append)
+    with pytest.raises(KeyboardInterrupt): runner.run()
+    assert delays==[5,10]
+    assert waits==[{'home':42},{'home':42},{'home':42},{'home':43}]
+    assert len(calls)==1
+    assert runner.state['cursor']=={'home':43}
+
+
+def test_wait_authentication_failure_stops_without_retry(tmp_path, monkeypatch):
+    import subprocess
+    module=api();runner=module['EventSeatRunner'](config(tmp_path))
+    runner.state['cursor']={'home':42}
+    async def bootstrap(): runner.active_boards=['home']
+    runner.bootstrap=bootstrap
+    def wait(*args,**kwargs):
+        raise subprocess.CalledProcessError(1,['wait'],stderr='HTTP 401 Unauthorized')
+    monkeypatch.setattr(module['subprocess'],'run',wait)
+    monkeypatch.setattr(module['time'],'sleep',lambda _:pytest.fail('auth must not retry'))
+    with pytest.raises(subprocess.CalledProcessError): runner.run()
+    assert runner.state['cursor']=={'home':42}

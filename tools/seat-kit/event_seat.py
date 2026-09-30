@@ -34,6 +34,24 @@ def validate_config(config):
     return config
 
 
+def transient_wait_failure(exc):
+    """Only retry transport failures; never repeat a model execution here."""
+    if isinstance(exc, (ConnectionError, TimeoutError, subprocess.TimeoutExpired)):
+        return True
+    message = str(exc).lower()
+    if isinstance(exc, subprocess.CalledProcessError):
+        message = str(exc.stderr or "").lower() + " " + str(exc.stdout or "").lower()
+    if any(text in message for text in (
+        "unauthorized", "forbidden", "authentication", "permission denied", "401", "403",
+    )):
+        return False
+    return any(text in message for text in (
+        "connection refused", "all connection attempts failed", "connection reset",
+        "server disconnected", "connection closed", "stream closed", "read timed out",
+        "connect timeout", "502 bad gateway", "503 service unavailable", "504 gateway timeout",
+    ))
+
+
 class EventSeatRunner:
     def __init__(self, config):
         self.config=validate_config(config)
@@ -127,15 +145,33 @@ class EventSeatRunner:
         PUBLISH(self.path,self.state)
 
     def run(self):
+        failures=0
         while True:
-            asyncio.run(self.bootstrap())
+            try:
+                asyncio.run(self.bootstrap())
+            except Exception as exc:
+                if not transient_wait_failure(exc): raise
+                failures+=1
+                delay=min(60,5*2**min(failures-1,4))
+                print(f"event-seat: transport unavailable; reconnect in {delay}s",file=sys.stderr)
+                time.sleep(delay)
+                continue
             if self.state['pending']:
                 self.process({'new_seq':self.state['cursor'],'events':[]},time.time())
             command=[self.config['board_script'],'wait','--since',json.dumps(self.state['cursor']),
                      '--timeout','270','--boards',','.join(self.active_boards)]
             if self.config['role']=='reviewer':command.insert(2,'--submitted')
-            result=subprocess.run(command,env=self.environment(),cwd=self.config['seat_dir'],
-                                  capture_output=True,text=True,check=True,timeout=300)
+            try:
+                result=subprocess.run(command,env=self.environment(),cwd=self.config['seat_dir'],
+                                      capture_output=True,text=True,check=True,timeout=300)
+            except (subprocess.CalledProcessError,subprocess.TimeoutExpired) as exc:
+                if not transient_wait_failure(exc): raise
+                failures+=1
+                delay=min(60,5*2**min(failures-1,4))
+                print(f"event-seat: transport unavailable; reconnect in {delay}s",file=sys.stderr)
+                time.sleep(delay)
+                continue
+            failures=0
             self.process(json.loads(result.stdout),time.time())
 
 

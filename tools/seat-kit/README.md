@@ -314,3 +314,9 @@ summary pairs with positive passing counts equal to totals. Partial, failing and
 zero-test summaries remain rejected; SHA, leak-scan and model evidence stay required.
 Upgrade existing managed seats with `seat_new.py --upgrade` to receive this gate.
 Workers retain approved branches until the delivery PR is confirmed merged.
+
+Event seats reconnect after recognized temporary Central transport failures with
+5, 10, 20, 40, then at most 60 seconds between attempts. Saved positive cursors and
+pending events are retained; reconnecting does not itself invoke a model.
+Authentication/authorization failures, malformed responses and model execution
+failures remain visible failures rather than being blindly retried.
