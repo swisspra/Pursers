@@ -9,6 +9,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Optional Sonar/ADO inventory discovery, explicit fleet member onboarding, and
+  durable model-planned multi-issue repair groups with bounded canary admission.
+  See [managed intake configuration](docs/managed-intake.md).
+
 - Native managed source counts: confirmed empty sources skip model calls, unchanged
   inputs reuse decisions, and provider failures back off for 15 minutes.
 - Configurable local fleet observations, scoped Azure DevOps Git credentials,
@@ -19,6 +23,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   GUI/IDE workflow using the existing integration.
 
 ### Fixed
+
+- Automatic intake board creation bootstraps a non-working identity before joining
+  as coordinator, grants configured member roles, and backs off on failed setup.
+- ADO delivery preflight accepts organization usernames in remote URLs while
+  still checking repository identity and the exact approved branch SHA.
 
 - Fleet Dashboard keeps Decline available for approved intake until consumption
   and exposes it on intake attention findings, with fresh queue checks and

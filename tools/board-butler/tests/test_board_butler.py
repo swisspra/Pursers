@@ -474,7 +474,7 @@ def test_central_project_registry_adds_board_registry_and_bounded_audit() -> Non
     backend = SimpleNamespace(client=client)
 
     @contextlib.asynccontextmanager
-    async def client_for_board(_board_id: str):
+    async def client_for_board(_board_id: str, **_kwargs):
         yield client
 
     backend._client_for_board = client_for_board

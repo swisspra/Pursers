@@ -290,3 +290,107 @@ the newest source index, delivery attempts and cursor state. Reverting those dat
 files could replay an uncertain external mutation. Do not combine source-ID or
 index-format migration with this cutover. Publishing a package release remains a
 separate release-train operation built from its tested tag.
+
+## Discover projects and onboard fleet members
+
+The optional onboarding policy below refreshes Sonar and Azure DevOps inventories
+through declared read-only MCP tools. Exact unique repository names can match;
+ambiguous names stay unresolved. Explicit mappings must still point to a repository
+visible in the current PAT inventory. Record both the ADO project and repository,
+exact target branch casing, and Sonar project/analysis branch. Verify the analyzed
+commit against the target branch before enabling an unfamiliar mapping.
+
+```json
+{
+  "sources": {
+    "sonar-all": {
+      "domain": "work",
+      "projects_root": "/PATH/TO/fleet/clones",
+      "auto_onboard": true,
+      "per_cycle_cap": 2,
+      "retry_limit": 3,
+      "retry_backoff_s": 300,
+      "default_ticket_tier": 2,
+      "discovery": {"kind": "sonar_ado", "refresh_seconds": 900},
+      "member_roles": {
+        "PR-worker": "member",
+        "PR-reviewer": "reviewer",
+        "PR-coordinator": "member",
+        "PR-intake": "member"
+      },
+      "repositories": {
+        "example_backend": {
+          "repository_url": "https://dev.azure.com/example/Backend/_git/api",
+          "integration_ref": "dev"
+        }
+      }
+    }
+  }
+}
+```
+
+Use real verified principal IDs from `board_members`; agent names are not principal
+IDs. The Butler credential needs `board:read`, `board:write`, and
+`board:coordinate`, and must be allowed to bootstrap a new board. It joins initially
+with work/review capabilities disabled, provisions the configured members and tier,
+and publishes the fleet-owned clone in the project registry. Worker/reviewer token
+scopes remain necessary; membership does not grant token scopes. The coordinator
+intake principal additionally needs `board:intake`. No existing board admission is
+silently elevated. Bootstrap, clone or admission failures back off and leave the
+project unregistered for intake.
+
+Inventory refresh is bounded: at most 2,000 Sonar projects, 200 ADO projects, and
+5,000 repositories. Incomplete inventory does not publish a partial scope. Keep the
+Git credential helper's repository allowlist consistent with authorized discovered
+mappings; inventory access alone does not authorize a clone or push.
+
+## Group Sonar occurrences into repair tickets
+
+Add this fragment to a paged Sonar source in `butler-connectors.json`:
+
+```json
+{
+  "grouping": {
+    "kind": "sonar",
+    "canary_project": "example_backend",
+    "max_in_flight": 1,
+    "max_admitted_groups": 1
+  }
+}
+```
+
+`canary_project` limits the source snapshot and observation to one project during
+discovery. `max_admitted_groups` is a durable total admission cap for this source,
+including completed groups; one completed PR does not start a second canary.
+Raise or remove that cap deliberately after inspecting the first result. Remove
+`canary_project` to cover all resolved projects. `max_in_flight` defaults to 15 and
+is also bounded by the host seat ceiling and Butler's model-directed allowance.
+
+Butler reads the complete paged snapshot before planning (at most 2,000 issues).
+Rule, path and line metadata let its configured drafting model propose compatible
+repair groups, objectives and validation. These are planning suggestions: the worker
+must inspect actual code and preserve behavior, and the reviewer independently
+checks the repair. Code validates that every issue appears exactly once, splits
+oversized groups to at most 12 issues/3 files, and preserves all IDs in ticket text.
+Severity is not the grouping key; related rules may share one repair, while unrelated
+changes within a file may need separate tickets.
+
+Plans and their membership use private mode-0600 files next to
+`--source-intake-index-file`. Unchanged snapshots reuse the durable plan across
+restarts. Up to 12 omitted occurrences receive one bounded model repair request; the final
+partition must still cover all occurrences exactly once. A failed plan backs off
+for 15 minutes. Intake uses a durable prepared
+reservation before the Central CAS write, so an interrupted write can recover the
+same ask without losing or duplicating members. New analysis does not expand an
+already admitted ticket. Capacity counts groups, not raw Sonar occurrences.
+
+Groups sharing a file are serialized. An approved/open PR retains its file hold;
+this release does not automatically infer merge/landing or clear that hold. Keep
+the index when deploying or restarting. Do not delete it to rerun a canary: that
+would remove deduplication and delivery guards. Operator reconciliation of completed
+PRs and their landing remains required before releasing overlapping work.
+
+Add `{issue_ids}` to the configured writeback description to include every member
+ID in the single approved PR. Existing remote repository/branch/SHA preflight and
+once-only delivery protection still apply. Review approval and PR creation do not
+prove Sonar closure; confirm a subsequent Sonar analysis after integration.

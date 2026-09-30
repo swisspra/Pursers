@@ -697,3 +697,11 @@ def test_preflight_rejects_same_named_repository_in_another_organization(tmp_pat
         assert not [name for name,_ in calls if name=='pr_create']
         assert result['findings']
     asyncio.run(scenario())
+
+
+def test_repository_identity_accepts_ado_organization_username_only():
+    expected='https://dev.azure.com/example-org/example%20project/_git/repo'
+    observed='https://example-org@dev.azure.com/example-org/example%20project/_git/repo'
+    assert butler._repository_identity(expected)==butler._repository_identity(observed)
+    with pytest.raises(butler.ConnectorDenied):
+        butler._repository_identity('https://user:password@dev.azure.com/example-org/project/_git/repo')

@@ -49,7 +49,7 @@ from contextlib import (
     contextmanager,
     suppress,
 )
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -126,6 +126,7 @@ SOURCE_WRITEBACK_PLACEHOLDERS = frozenset(
     {
         "source_id",
         "external_id",
+        "issue_ids",
         "revision",
         "link",
         "ticket_id",
@@ -3581,6 +3582,7 @@ class SourceDeclaration:
     page_arg: str | None = None
     max_pages: int = 1
     observation: Any = None
+    grouping: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(
@@ -3605,6 +3607,7 @@ class SourceDeclaration:
             "page_arg",
             "max_pages",
             "observation",
+            "grouping",
         }
         _connector_keys(value, allowed, "source")
         if not required.issubset(value):
@@ -3659,6 +3662,16 @@ class SourceDeclaration:
                            if "observation" in value else None)
         except ValueError as exc:
             raise ConnectorConfigError(str(exc)) from None
+        grouping = value.get("grouping")
+        if grouping is not None:
+            if not isinstance(grouping, Mapping) or set(grouping) - {"kind", "canary_project", "max_in_flight", "max_admitted_groups"} or grouping.get("kind") != "sonar":
+                raise ConnectorConfigError("source.grouping is invalid")
+            if type(grouping.get("max_in_flight", 15)) is not int or not 1 <= grouping.get("max_in_flight", 15) <= 100:
+                raise ConnectorConfigError("source.grouping.max_in_flight is invalid")
+            if "max_admitted_groups" in grouping and (type(grouping["max_admitted_groups"]) is not int or not 1 <= grouping["max_admitted_groups"] <= 100):
+                raise ConnectorConfigError("source.grouping.max_admitted_groups is invalid")
+            if "canary_project" in grouping and (not isinstance(grouping["canary_project"], str) or not grouping["canary_project"]):
+                raise ConnectorConfigError("source.grouping.canary_project is invalid")
         return cls(
             source_id,
             connector_id,
@@ -3680,6 +3693,7 @@ class SourceDeclaration:
             page_arg,
             max_pages,
             observation,
+            copy.deepcopy(grouping),
         )
 
 
@@ -5812,6 +5826,14 @@ def _approved_submission(ticket: Mapping[str, Any]) -> tuple[str, str]:
     return match.group(1), match.group(2)
 
 
+def _repository_identity(url: str) -> tuple[str, str, str]:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.password or parsed.query or parsed.fragment:
+        raise ConnectorDenied("repository URL is not a credential-free HTTPS identity")
+    return (parsed.scheme, parsed.hostname.lower() + (f":{parsed.port}" if parsed.port else ""),
+            urllib.parse.unquote(parsed.path).rstrip("/"))
+
+
 def _repository_fields(project: Mapping[str, Any] | None) -> dict[str, str]:
     url = str((project or {}).get("repository_url") or "")
     fields = {
@@ -6021,6 +6043,9 @@ class SourceIntakePoller:
         ) = None,
     ) -> None:
         self.sources = tuple(source for source in sources if source.enabled)
+        self.group_choose = None
+        self.group_scope = None
+        self._group_retry_after: dict[str, datetime] = {}
         if not 1 <= per_source_cap <= SOURCE_INTAKE_MAX_ITEMS_PER_SOURCE:
             raise ConnectorConfigError("source per-cycle cap is invalid")
         if not per_source_cap <= cycle_cap <= SOURCE_INTAKE_MAX_ITEMS_PER_CYCLE:
@@ -6133,6 +6158,7 @@ class SourceIntakePoller:
         return {
             "source_id": source.source_id,
             "external_id": item["external_id"],
+            "issue_ids": ", ".join(json.loads(item["member_ids"]) if isinstance(item.get("member_ids"), str) else item.get("member_ids", [])),
             "revision": item["revision"],
             "link": item.get("link", ""),
             "ticket_id": ticket_id,
@@ -6163,7 +6189,7 @@ class SourceIntakePoller:
             raise ConnectorDenied("repository-details preflight requires repository_url_path")
         if repository_path is not None:
             observed_url = _source_value(document, repository_path)
-            if not isinstance(observed_url, str) or urllib.parse.unquote(observed_url).rstrip("/") != urllib.parse.unquote(fields["repository_url"]).rstrip("/"):
+            if not isinstance(observed_url, str) or _repository_identity(observed_url) != _repository_identity(fields["repository_url"]):
                 raise ConnectorDenied("remote repository identity does not match the registered project")
         rows = _source_value(document, policy["refs_path"])
         if not isinstance(rows, list):
@@ -6297,6 +6323,76 @@ class SourceIntakePoller:
                 writebacks += 1
         return writebacks
 
+    async def _grouped_items(self, source: SourceDeclaration, now: datetime) -> list[dict[str, Any]]:
+        if self.index.path is None or self.group_choose is None or self.group_scope is None:
+            raise ConnectorConfigError("grouped intake needs a durable index and configured planner")
+        if now < self._group_retry_after.get(source.source_id, now):
+            raise ConnectorResultError("group planner is waiting for retry backoff")
+        runtime = self.runtimes[source.connector_id]
+        rows = []
+        total = None
+        for page in range(1, source.max_pages + 1):
+            args = {**source.fixed_args, source.page_arg or "pageIndex": page}
+            if source.grouping.get("canary_project"):
+                args["projectKeys"] = [source.grouping["canary_project"]]
+            result = await runtime.call_tool("group-snapshot-" + hashlib.sha256(_canonical_json([source.source_id, now.isoformat(), page])).hexdigest()[:32], source.list_tool, args)
+            payload = _source_payload_document(result.payload)
+            items = _source_value(payload, source.items_path)
+            page_total = payload.get("paging", {}).get("total")
+            if total is not None and page_total != total:
+                raise ConnectorResultError("group snapshot changed during pagination")
+            total = page_total
+            if not isinstance(items, list) or type(total) is not int or total < 0 or total > 2000:
+                raise ConnectorResultError("group snapshot is incomplete or exceeds 2000 issues")
+            rows.extend(items)
+            if len(rows) == total:
+                break
+            if not items or len(rows) > total:
+                raise ConnectorResultError("group snapshot pagination is inconsistent")
+        if total != len(rows) or len({x.get("key") for x in rows}) != len(rows):
+            raise ConnectorResultError("group snapshot is incomplete or duplicated")
+        reserved = set()
+        prepared = []
+        busy_paths = set()
+        active_groups = 0
+        for entry in self.index.entries.values():
+            if entry.get("source_id") != source.source_id:
+                continue
+            reserved.update(json.loads(entry.get("member_ids", "[]")))
+            if not entry.get("group_item"):
+                reserved.add(entry.get("external_id"))
+            if entry.get("group_item") and entry.get("status") == "prepared":
+                prepared.append(json.loads(entry["group_item"]))
+            if entry.get("status") in {"asked", "delivering", "delivered"}:
+                # A PR still edits the branch until it is landed. Preserve the overlap hold.
+                busy_paths.update((entry.get("project_hint"), path) for path in json.loads(entry.get("paths", "[]")))
+                if entry.get("status") != "delivered":active_groups += 1
+        if active_groups >= source.grouping.get("max_in_flight", 15):
+            return prepared
+        api = runpy.run_path(str(Path(__file__).with_name("source_grouping.py")))
+        projects = sorted({r["project"] for r in rows})
+        grouped = []
+        for project in projects:
+            scope = await self.group_scope(source.source_id, project)
+            if scope is None:
+                raise ConnectorResultError("group project has no verified repository mapping")
+            cache = self.index.path.with_name("groups-" + hashlib.sha256(_canonical_json([source.source_id, project])).hexdigest()[:20] + ".json")
+            try:
+                groups = await api["plan_groups"]([r for r in rows if r["project"] == project], scope, self.group_choose, cache)
+            except Exception:
+                self._group_retry_after[source.source_id] = now + timedelta(minutes=15)
+                raise
+            for group in groups:
+                remaining = [i for i in group["member_ids"] if i not in reserved]
+                if not remaining:
+                    continue
+                if len(remaining) != len(group["member_ids"]):
+                    # Preserve already admitted membership when a new analysis regroups issues.
+                    group = api["render"](group, [r for r in rows if r["key"] in remaining], scope)
+                if any((project, path) in busy_paths for path in group["paths"]):continue
+                grouped.append(group)
+        return prepared + grouped
+
     async def _allowance(
         self, findings: list[dict[str, Any]], now: datetime
     ) -> tuple[int | None, tuple[str, ...], dict[str, Any]]:
@@ -6376,8 +6472,27 @@ class SourceIntakePoller:
             runtime = self.runtimes[source.connector_id]
             source_new = 0
             source_ok = True
-            for page in range(1, source.max_pages + 1):
-                if exhausted() or source_new >= self.per_source_cap:
+            groups = None
+            if source.grouping is not None:
+                try:
+                    groups = await self._grouped_items(source, now)
+                except Exception as exc:
+                    findings.append({"kind": "source-grouping-unavailable", "source_id": source.source_id, "error_class": type(exc).__name__, "message": "No grouped tickets were admitted; snapshot or plan was unavailable."})
+                    continue
+            group_capacity = self.per_source_cap
+            if groups is not None:
+                active_groups = sum(1 for entry in self.index.entries.values()
+                                    if entry.get("source_id") == source.source_id
+                                    and entry.get("status") in {"asked", "delivering"})
+                group_capacity = max(0, min(group_capacity, source.grouping.get("max_in_flight", 15) - active_groups))
+                if "max_admitted_groups" in source.grouping:
+                    admitted = sum(1 for entry in self.index.entries.values()
+                                   if entry.get("source_id") == source.source_id and entry.get("group_item")
+                                   and entry.get("status") != "prepared")
+                    group_capacity = max(0, min(group_capacity, source.grouping["max_admitted_groups"] - admitted))
+            admitted_paths: set[tuple[str, str]] = set()
+            for page in range(1, 2 if groups is not None else source.max_pages + 1):
+                if exhausted() or source_new >= group_capacity:
                     break
                 arguments = dict(source.fixed_args)
                 if source.page_arg is not None:
@@ -6386,17 +6501,20 @@ class SourceIntakePoller:
                     f"{source.source_id}\0{page}\0{now.isoformat()}".encode()
                 ).hexdigest()
                 try:
-                    result = await runtime.call_tool(
-                        "source-poll-" + operation_digest[:32],
-                        source.list_tool,
-                        arguments,
-                    )
-                    document = _source_payload_document(result.payload)
-                    raw_items = _source_value(document, source.items_path)
-                    if not isinstance(raw_items, list):
-                        raise ConnectorResultError(
-                            "source items_path did not resolve to a list"
+                    if groups is not None:
+                        raw_items = groups
+                    else:
+                        result = await runtime.call_tool(
+                            "source-poll-" + operation_digest[:32],
+                            source.list_tool,
+                            arguments,
                         )
+                        document = _source_payload_document(result.payload)
+                        raw_items = _source_value(document, source.items_path)
+                        if not isinstance(raw_items, list):
+                            raise ConnectorResultError(
+                                "source items_path did not resolve to a list"
+                            )
                 except ConnectorError as exc:
                     findings.append(
                         {
@@ -6413,10 +6531,10 @@ class SourceIntakePoller:
                 if not raw_items:
                     break
                 for offset, raw_item in enumerate(raw_items):
-                    if exhausted() or source_new >= self.per_source_cap:
+                    if exhausted() or source_new >= group_capacity:
                         break
                     try:
-                        item = self._normalize(source, raw_item)
+                        item = dict(raw_item) if groups is not None else self._normalize(source, raw_item)
                     except ConnectorResultError as exc:
                         findings.append(
                             {
@@ -6431,8 +6549,10 @@ class SourceIntakePoller:
                         )
                         continue
                     seen = self.index.get(source.source_id, item["external_id"])
-                    if seen is not None and seen.get("revision") == item["revision"]:
+                    if seen is not None and seen.get("revision") == item["revision"] and seen.get("status") != "prepared":
                         continue  # already taken: no Central call
+                    if groups is not None and any((item["project_hint"], path) in admitted_paths for path in item["paths"]):
+                        continue
                     processed += 1
                     board_id = self._route(source, item["project_hint"])
                     if board_id is None:
@@ -6457,13 +6577,17 @@ class SourceIntakePoller:
                         "project_hint": item["project_hint"],
                         "board_id": board_id,
                         "ticket_id": ticket_id,
-                        "status": (seen or {}).get("status", "asked"),
+                        "status": "asked" if (seen or {}).get("status") == "prepared" else (seen or {}).get("status", "asked"),
                     }
+                    if groups is not None:
+                        index_entry.update({"member_ids": json.dumps(item["member_ids"]), "paths": json.dumps(item["paths"]), "group_item": json.dumps(item)})
                     ticket = await self.ticket_reader(board_id, ticket_id)
                     revision_marker = _source_revision_marker(
                         source.source_id, item["revision"]
                     )
                     if ticket is not None:
+                        if groups is not None and (seen or {}).get("status") == "prepared":
+                            source_new += 1
                         if self.active and revision_marker not in _ticket_text(ticket):
                             await self.ticket_annotator(
                                 board_id,
@@ -6526,11 +6650,18 @@ class SourceIntakePoller:
                     if source_row is not None and source_row.get("source", {}).get(
                         "revision"
                     ) == item["revision"]:
+                        if groups is not None and (seen or {}).get("status") == "prepared":
+                            source_new += 1
                         if self.active:
                             self.index.put(source.source_id, item["external_id"], index_entry)
                         continue
                     new_asks += 1
                     source_new += 1
+                    if groups is not None:
+                        admitted_paths.update((item["project_hint"], path) for path in item["paths"])
+                        if self.active:
+                            self.index.put(source.source_id, item["external_id"], {**index_entry, "status": "prepared"})
+                            self.index.save()
                     if self.active:
                         if source_row is None:
                             rows.append(ask)
@@ -6569,7 +6700,10 @@ class SourceIntakePoller:
         except BaseException:
             # An ask that never reached Central must not be remembered as taken.
             attempts = {k: dict(v) for k, v in self.index.entries.items()
-                        if v.get("status") in {"delivering", "delivered"}}
+                        if v.get("status") in {"delivering", "delivered"} or v.get("group_item")}
+            for k, entry in attempts.items():
+                if entry.get("group_item") and entry.get("status") == "asked" and index_snapshot.get(k, {}).get("status") != "asked":
+                    entry["status"] = "prepared"
             self.index.entries = {**index_snapshot, **attempts}
             self.index.dirty = index_dirty or bool(attempts)
             self.index.save()
@@ -11376,7 +11510,7 @@ class CentralProjectRegistry:
     async def ensure_board(
         self, board_id: str, _domain: str, default_ticket_tier: int | None = None
     ) -> None:
-        async with self.backend._client_for_board(board_id) as client:
+        async with self.backend._client_for_board(board_id, onboarding=True) as client:
             await client.board_onboard(
                 role="coordinator",
                 capabilities=dict(BOARD_BUTLER_CAPABILITIES),
@@ -11407,6 +11541,17 @@ class CentralProjectRegistry:
                     "default_ticket_tier": default_ticket_tier,
                 },
             )
+
+    async def ensure_members(self, board_id: str, roles: Mapping[str, str]) -> None:
+        async with self.backend._client_for_board(board_id) as client:
+            current = await client._call("board_members", {})
+            members = {m.get("principal_id"): m.get("role") for m in current.get("members", [])}
+            for principal, role in roles.items():
+                if members.get(principal) == role:
+                    continue
+                if principal in members:
+                    raise RuntimeError("onboarding membership role conflicts with existing admission")
+                await client._call("board_member_add", {"agent_name": client.agent_name, "principal_id": principal, "role": role})
 
     async def add_project(
         self,
@@ -11710,6 +11855,9 @@ class CentralBackend:
         self._project_registry_adapter: CentralProjectRegistry | None = None
         self._project_onboarder: Any = None
         self._project_onboarding_retry_keys: set[tuple[str, str]] = set()
+        self._source_discovery_next: dict[str, datetime] = {}
+        self._source_discovery_results: dict[str, Any] = {}
+        self._source_discovery_base = dict(self._project_onboarding_policies)
         self.subscription_healthy = True
         self._subscription_failure_active = False
         self._source_registry_projects: dict[str, str] = {}
@@ -11738,6 +11886,9 @@ class CentralBackend:
             if connector_sources
             else None
         )
+        if self.source_intake_poller is not None:
+            self.source_intake_poller.group_choose = self._source_group_choose
+            self.source_intake_poller.group_scope = self._source_group_scope
         self._source_intake_task: asyncio.Task[dict[str, Any]] | None = None
         startup_findings = [
             dict(item)
@@ -11875,11 +12026,56 @@ class CentralBackend:
             return dict(self._source_intake_last)
         if self._source_intake_task is None:
             self._source_intake_task = asyncio.create_task(
-                self.source_intake_poller.run_cycle(now),
+                self._run_source_intake_cycle(now),
                 name="board-butler-source-intake",
             )
             return {"status": "scheduled", "previous": dict(self._source_intake_last)}
         return {"status": "running", "previous": dict(self._source_intake_last)}
+
+    async def _run_source_intake_cycle(self, now: datetime) -> dict[str, Any]:
+        assert self.source_intake_poller is not None
+        poller = self.source_intake_poller
+        findings = []
+        for source in poller.sources:
+            policy = self._source_discovery_base.get(source.source_id)
+            if policy is None or policy.discovery is None:
+                continue
+            api = runpy.run_path(str(Path(__file__).with_name("source_discovery.py")))
+            runtime = poller.runtimes[source.connector_id]
+            if any(not any(t.name == tool and t.effect == "read_only" for t in runtime.declaration.tools) for tool in api["READ_TOOLS"]):
+                raise ConnectorConfigError("discovery requires declared read-only inventory tools")
+            if now >= self._source_discovery_next.get(source.source_id, now):
+                self._source_discovery_next[source.source_id] = now + timedelta(seconds=policy.discovery["refresh_seconds"])
+                async def read(tool, arguments):
+                    op = hashlib.sha256(_canonical_json([source.source_id, now.isoformat(), tool, arguments])).hexdigest()
+                    result = await runtime.call_tool("discovery-" + op[:32], tool, arguments)
+                    return _source_payload_document(result.payload)
+                try:
+                    explicit = {key: {"repository_url": value.repository_url, "integration_ref": value.integration_ref} for key, value in policy.repositories.items()}
+                    result = await api["discover"](read, explicit)
+                    self._source_discovery_results[source.source_id] = result
+                except Exception:
+                    self._source_discovery_results.pop(source.source_id, None)
+                    raise
+            result = self._source_discovery_results.get(source.source_id)
+            if result is None:
+                return {"new_asks": 0, "findings": [{"kind": "source-discovery-unavailable", "source_id": source.source_id}], "decision": {"pull": 0, "model_called": False}}
+            for item in result.findings:
+                findings.append({"kind": "source-discovery-unresolved", "source_id": source.source_id, **item})
+            if not result.repositories:
+                return {"new_asks": 0, "findings": findings[:50], "decision": {"pull": 0, "model_called": False, "reason": "no_matched_projects"}}
+            api_onboard = _project_onboarding_api()
+            resolutions = {key: api_onboard["RepositoryResolution"](**value) for key, value in result.repositories.items()}
+            self._project_onboarding_policies[source.source_id] = replace(policy, repositories=resolutions)
+            if self._project_onboarder is not None:
+                self._project_onboarder.policies[source.source_id] = self._project_onboarding_policies[source.source_id]
+            keys = [source.grouping["canary_project"]] if source.grouping and source.grouping.get("canary_project") else sorted(resolutions)
+            observation = replace(source.observation, arguments={**source.observation.arguments, "projectKeys": keys}) if source.observation else None
+            updated = replace(source, fixed_args={**source.fixed_args, "projectKeys": keys}, observation=observation)
+            poller.sources = tuple(updated if x.source_id == source.source_id else x for x in poller.sources)
+        result = await poller.run_cycle(now)
+        result["discovery_findings"] = findings[:50]
+        return result
 
     def _managed_intake_options(self, args: argparse.Namespace) -> dict[str, Any]:
         """Butler-managed intake: a private index, a seat ceiling and an LLM decision."""
@@ -11903,6 +12099,31 @@ class CentralBackend:
         if type(cap) is not int or cap <= 0:
             return 0
         return cap - sum(in_flight.values())
+
+    async def _source_group_scope(self, source_id: str, project: str) -> Mapping[str, Any] | None:
+        policy = self._project_onboarding_policies.get(source_id)
+        resolution = policy.repositories.get(project) if policy else None
+        if resolution is None:return None
+        return {"project": project, "repository_url": resolution.repository_url, "branch": resolution.integration_ref}
+
+    async def _source_group_choose(self, context: Mapping[str, Any]) -> dict[str, Any]:
+        document = await self.coordinator_config()
+        config = resolve_config(document, self.args, {}, utc_now(), project_name=self.project_name)
+        runtime = resolve_provider_runtime(config, "drafting", getattr(self.args, "provider_secrets_dir", None))
+        if runtime is None or runtime.draft_protocol != "openai_chat_completions_v1":
+            raise ButlerConfigError("group planner needs a configured chat provider")
+        api = runpy.run_path(str(Path(__file__).with_name("source_grouping.py")))
+        prompt = json.dumps(context, separators=(",", ":"))
+        if len(prompt) > 32_000:raise ValueError("group planning context exceeded bound")
+        body = json.dumps({"model": runtime.model, "messages": [{"role": "system", "content": api["SYSTEM_PROMPT"]}, {"role": "user", "content": prompt}], "max_tokens": 9000, "response_format": {"type": "json_object"}}).encode()
+        response = await _post_provider_json(runtime, body, timeout_s=60, max_response_bytes=MAX_PROVIDER_RESPONSE_BYTES)
+        text = _openai_chat_draft_text(response)
+        if text is None:raise ValueError("group response is malformed")
+        document = json.loads(text)
+        if isinstance(document, dict):
+            document["evidence"] = {"provider_response_id": str(response.get("id", ""))[:200],
+                                    "model": runtime.model[:120], "issue_count": context.get("issue_count", 0)}
+        return document
 
     async def _source_intake_decide(
         self, context: Mapping[str, Any]
@@ -12198,7 +12419,7 @@ class CentralBackend:
         self._source_intake_findings_pending = False
 
     @asynccontextmanager
-    async def _client_for_board(self, board_id: str) -> AsyncIterator[Any]:
+    async def _client_for_board(self, board_id: str, *, onboarding: bool = False) -> AsyncIterator[Any]:
         """Yield a client whose immutable board context matches the operation."""
         if board_id == self.args.home_board:
             yield self.client
@@ -12210,7 +12431,9 @@ class CentralBackend:
             self.token,
             board_id,
             agent_name=self.args.agent_name,
-            role="coordinator",
+            # A fresh board requires creator admission before coordinator-only joins.
+            # Explicit false capabilities keep this provisioning identity out of work.
+            role="worker" if onboarding else "coordinator",
             capabilities=dict(BOARD_BUTLER_CAPABILITIES),
             allow_takeover=True,
         ) as client:

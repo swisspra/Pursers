@@ -8,7 +8,7 @@ import importlib.util
 import re
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -53,6 +53,8 @@ class IntakeSourcePolicy:
     retry_backoff_s: int
     repositories: Mapping[str, RepositoryResolution]
     default_ticket_tier: int | None = None
+    member_roles: Mapping[str, str] = field(default_factory=dict)
+    discovery: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,8 @@ class ProjectRegistry(Protocol):
     async def ensure_board(
         self, board_id: str, domain: str, default_ticket_tier: int | None = None
     ) -> None: ...
+
+    async def ensure_members(self, board_id: str, roles: Mapping[str, str]) -> None: ...
 
     async def add_project(
         self,
@@ -144,6 +148,8 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             "repositories",
             "repository_map",
             "default_ticket_tier",
+            "member_roles",
+            "discovery",
         }
         if (
             not isinstance(raw, Mapping)
@@ -200,6 +206,17 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
                 repository_url=str(inspected["repository_url"]),
                 integration_ref=str(inspected["integration_ref"]),
             )
+        member_roles = raw.get("member_roles", {})
+        if not isinstance(member_roles, Mapping) or len(member_roles) > 100 or any(
+            not isinstance(k, str) or not re.fullmatch(r"PR-[A-Za-z0-9-]{1,100}", k)
+            or v not in {"member", "reviewer"} for k, v in member_roles.items()
+        ):
+            raise ValueError(f"{path}.member_roles must contain bounded member/reviewer principals")
+        discovery = raw.get("discovery")
+        if discovery is not None:
+            if not isinstance(discovery, Mapping) or set(discovery) - {"kind", "refresh_seconds"} or discovery.get("kind") != "sonar_ado":
+                raise ValueError(f"{path}.discovery is invalid")
+            discovery = {"kind": "sonar_ado", "refresh_seconds": _bounded_int(discovery.get("refresh_seconds", 900), path, 300, 86400)}
         result[source] = IntakeSourcePolicy(
             source_id=source,
             domain=domain,
@@ -219,9 +236,11 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
                 86_400,
             ),
             repositories=repositories,
+            member_roles=dict(member_roles),
+            discovery=discovery,
             default_ticket_tier=(
                 _bounded_int(
-                    raw["default_ticket_tier"], f"{path}.default_ticket_tier", 1, 5
+                    raw["default_ticket_tier"], f"{path}.default_ticket_tier", 1, 3
                 )
                 if "default_ticket_tier" in raw
                 else None
@@ -479,12 +498,17 @@ class ProjectOnboarder:
                 await self.registry.ensure_board(
                     board_id, policy.domain, policy.default_ticket_tier
                 )
+                if policy.member_roles:
+                    await self.registry.ensure_members(board_id, policy.member_roles)
                 entry = dict(plan["proposed_entry"])
                 entry.update(
                     {
                         "status": "active",
                         "domain": policy.domain,
                         "integration_ref": resolution.integration_ref,
+                        "fleet": True,
+                        "fleet_clone_dir": str(work_dir),
+                        "work_dir_owner": "fleet",
                     }
                 )
                 await self.registry.add_project(
@@ -516,14 +540,16 @@ class ProjectOnboarder:
                     ),
                     now,
                 )
-            except Exception:
+            except Exception as exc:
+                attempts = (retry.attempts if retry is not None else 0) + 1
+                self.retry_state[retry_key] = RetryState(attempts, now + timedelta(seconds=policy.retry_backoff_s))
                 return await self._finish(
                     OnboardingResult(
                         item.item_id,
                         item.source_id,
                         item.project_hint,
                         "onboarding_failed",
-                        finding=f"project {item.project_hint} onboarding could not complete"[:MAX_FINDING_CHARS],
+                        finding=f"project {item.project_hint} onboarding could not complete ({type(exc).__name__})"[:MAX_FINDING_CHARS],
                     ),
                     now,
                 )
