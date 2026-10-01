@@ -395,7 +395,7 @@ Response fields: `ok, released, release_events, implicitly_renewed, post_submiss
 
 ### `ticket_submit`
 
-Submit only work claimed by this authenticated agent identity.
+Submit claimed work; put literal test evidence in test_output (max 5000 chars). Legacy notes labels remain supported. Required code-ticket evidence is checked before review dispatch; an error preserves the work claim.
 
 Required authorization: `board:write` and the current work lease.
 
@@ -407,6 +407,7 @@ Required authorization: `board:write` and the current work lease.
 | `summary` | `string | null` | optional | `null` |
 | `files_changed` | `array[string] | null` | optional | `null` |
 | `notes` | `string | null` | optional | `null` |
+| `test_output` | `string | null` | optional | `null` |
 | `stay_active` | `boolean` | optional | `true` |
 | `expected_generation` | `string | null` | optional | `null` |
 | `submission_preflight` | `object[string, string] | null` | optional | `null` |
