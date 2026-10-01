@@ -7,7 +7,11 @@ import hashlib
 import importlib.util
 import re
 import runpy
-from pursers_client.delivery_workflow import parse_delivery_workflow
+from pursers_client.delivery_workflow import (
+    delivery_group_name,
+    parse_delivery_policy,
+    parse_delivery_workflow,
+)
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -58,6 +62,8 @@ class IntakeSourcePolicy:
     member_roles: Mapping[str, str] = field(default_factory=dict)
     discovery: Mapping[str, Any] | None = None
     delivery_workflow: Mapping[str, Any] | None = None
+    delivery_policy: Mapping[str, Any] | None = None
+    delivery_policy_group: str | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +160,8 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             "member_roles",
             "discovery",
             "delivery_workflow",
+            "delivery_policy",
+            "delivery_policy_group",
         }
         if (
             not isinstance(raw, Mapping)
@@ -243,6 +251,11 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             member_roles=dict(member_roles),
             discovery=discovery,
             delivery_workflow=parse_delivery_workflow(raw.get("delivery_workflow")),
+            delivery_policy=parse_delivery_policy(raw.get("delivery_policy")),
+            delivery_policy_group=(
+                delivery_group_name(raw["delivery_policy_group"])
+                if "delivery_policy_group" in raw else None
+            ),
             default_ticket_tier=(
                 _bounded_int(
                     raw["default_ticket_tier"], f"{path}.default_ticket_tier", 1, 3
@@ -516,6 +529,10 @@ class ProjectOnboarder:
                         "work_dir_owner": "fleet",
                     }
                 )
+                if policy.delivery_policy is not None:
+                    entry["delivery_policy"] = dict(policy.delivery_policy)
+                if policy.delivery_policy_group is not None:
+                    entry["delivery_policy_group"] = policy.delivery_policy_group
                 configured_delivery = policy.delivery_workflow or registry.get("delivery_defaults")
                 if configured_delivery and configured_delivery.get("mode") == "integration":
                     # Each source mapping supplies its own base; a default never guesses dev/main.

@@ -133,3 +133,111 @@ def test_delivery_observation_uses_complete_nonterminal_scan_not_truncated_histo
     assert bool(result['pending_offers']) is (variant=='offer')
     client.board_snapshot.assert_not_called()
     client.ticket_list.assert_awaited_once_with(include_closed=False,limit=500,view='work')
+
+
+def test_new_batch_policy_is_saved_as_draft_and_activation_fails_closed():
+    request = {'action': 'delivery', 'scope': 'repository', 'name': 'sample',
+               'delivery_policy': {'mode': 'batch_pr', 'mapped_base': 'dev',
+                                   'integration_branch': 'pursers-integration',
+                                   'snapshot_branch_prefix': 'codex',
+                                   'final_pr_target': 'prd',
+                                   'release_trigger': {'kind': 'manual'},
+                                   'pr_update': 'rolling', 'auto_integrate': False,
+                                   'final_merge': 'manual',
+                                   'validation': {'test_commands': [], 'required_reviewers': 1,
+                                                  'independent_review': True,
+                                                  'require_upstream_policies': True},
+                                   'conflict_policy': 'pause', 'collection_paused': False}}
+    kwargs = dict(registry=registry(), registry_expected_sha256='a'*64, actor='operator',
+                  central='default', observation={'complete': True, 'active_tickets': [], 'pending_offers': []},
+                  refs={'dev': 'a'*40, 'prd': 'b'*40})
+    draft = m.build_delivery_plan(request=request, **kwargs)
+    assert not draft['blocked']
+    assert draft['proposed_registry']['projects']['sample']['integration_ref'] == 'dev'
+    assert draft['affected_projects'][0]['runtime']['ready'] is False
+    activated = m.build_delivery_plan(request={**request, 'activate': True}, **kwargs)
+    assert activated['blocked']
+    assert any('batch_pr runtime' in blocker for blocker in activated['blockers'])
+    assert activated['proposed_registry']['projects']['sample']['integration_ref'] == 'dev'
+
+
+def test_repository_reset_to_inherit_removes_only_repository_override():
+    original = registry()
+    original['delivery_policy_defaults'] = {'conflict_policy': 'pause'}
+    original['projects']['sample']['delivery_policy'] = {'mode': 'branch_only', 'final_pr_target': None}
+    plan = m.build_delivery_plan(
+        request={'action': 'delivery', 'scope': 'repository', 'name': 'sample', 'reset_to_inherit': True},
+        registry=original, registry_expected_sha256='a'*64, actor='operator', central='default',
+        observation={'complete': True, 'active_tickets': [], 'pending_offers': []}, refs={'dev': 'a'*40})
+    assert not plan['blocked']
+    assert 'delivery_policy' not in plan['proposed_registry']['projects']['sample']
+    assert plan['proposed_registry']['delivery_policy_defaults'] == {'conflict_policy': 'pause'}
+
+
+def test_group_policy_preview_lists_only_explicit_group_members():
+    original = registry()
+    original['projects']['other'] = {**original['projects']['sample'], 'board_id': 'other'}
+    original['projects']['sample']['delivery_policy_group'] = 'backend'
+    original['delivery_policy_groups'] = {'backend': {}}
+    plan = m.build_delivery_plan(
+        request={'action': 'delivery', 'scope': 'group', 'name': 'backend',
+                 'delivery_policy_group': 'backend',
+                 'delivery_policy': {'validation': {'test_commands': ['pytest -q']}}},
+        registry=original, registry_expected_sha256='a'*64, actor='operator', central='default',
+        observation={'complete': True, 'active_tickets': [], 'pending_offers': []}, refs={})
+    assert [item['project'] for item in plan['affected_projects']] == ['sample']
+    assert plan['affected_projects'][0]['after']['validation']['test_commands'] == ['pytest -q']
+
+
+@pytest.mark.parametrize('active', [False, True])
+def test_new_policy_apply_rechecks_active_work_before_runtime_activation(monkeypatch, active):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    import fleet_dashboard as dashboard
+    original = registry()
+    original['projects']['sample'].update(
+        integration_ref='pursers-integration',
+        delivery_workflow=m.parse_delivery_workflow({
+            'mode': 'integration', 'base_branch': 'dev',
+            'integration_branch': 'pursers-integration'}),
+    )
+    request = {'action': 'delivery', 'scope': 'repository', 'name': 'sample', 'activate': True,
+               'delivery_policy': {'mode': 'per_ticket_pr', 'mapped_base': 'dev',
+                                   'integration_branch': 'pursers-integration',
+                                   'snapshot_branch_prefix': 'codex', 'final_pr_target': 'dev',
+                                   'release_trigger': {'kind': 'ready'}, 'pr_update': 'rolling',
+                                   'auto_integrate': False, 'collection_paused': False,
+                                   'final_merge': 'manual',
+                                   'validation': {'test_commands': [], 'required_reviewers': 1,
+                                                  'independent_review': True,
+                                                  'require_upstream_policies': True},
+                                   'conflict_policy': 'pause'}}
+    plan = m.build_delivery_plan(
+        request=request, registry=original, registry_expected_sha256='a'*64,
+        actor='operator', central='default',
+        observation={'complete': True, 'active_tickets': [], 'pending_offers': []},
+        refs={'dev': 'a'*40, 'pursers-integration': 'b'*40})
+    assert not plan['blocked']
+    fetcher = object.__new__(dashboard.FleetFetcher)
+    fetcher.config = SimpleNamespace(home_board='home')
+    fetcher._require_board_admin = AsyncMock()
+    fetcher.fetch_project_registry = AsyncMock(return_value={'registry': original, 'expected_sha256': 'a'*64})
+    fetcher._delivery_observation = AsyncMock(return_value={
+        'complete': True, 'active_tickets': [{'ticket_id': 'TK-live'}] if active else [],
+        'pending_offers': []})
+    fetcher.save_project_registry = AsyncMock()
+    branch = Mock()
+    monkeypatch.setattr(dashboard, 'prepare_delivery_branch', branch)
+    if active:
+        with pytest.raises(dashboard.ProjectLifecycleConflictError, match='Active work'):
+            asyncio.run(fetcher.apply_project_lifecycle_plan(plan, None))
+        branch.assert_not_called()
+        fetcher.save_project_registry.assert_not_awaited()
+    else:
+        result = asyncio.run(fetcher.apply_project_lifecycle_plan(plan, None))
+        assert result['kind'] == 'project-delivery-policy'
+        branch.assert_called_once()
+        saved = fetcher.save_project_registry.await_args.args[0]
+        assert saved['projects']['sample']['integration_ref'] == 'dev'
+        assert saved['projects']['sample']['delivery_workflow']['mode'] == 'direct'

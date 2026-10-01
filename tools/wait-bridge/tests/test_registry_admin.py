@@ -723,3 +723,24 @@ def test_delivery_policy_survives_admin_and_doctor_roundtrip():
         assert parsed['projects']['alpha']['delivery_workflow']['base_branch']=='dev'
         assert parsed['delivery_defaults']['integration_branch']=='pursers-integration'
     assert raw['projects']['alpha']['integration_ref']=='dev'  # no caller mutation
+
+
+def test_configurable_delivery_policy_hierarchy_survives_admin_and_doctor_roundtrip():
+    import copy
+    import registry_doctor
+    from pursers_client.project_registry import parse_project_registry
+    raw = copy.deepcopy(INITIAL)
+    raw['delivery_policy_defaults'] = {'validation': {'required_reviewers': 2}}
+    raw['delivery_policy_groups'] = {'backend': {'conflict_policy': 'pause'}}
+    raw['projects']['alpha'].update(
+        delivery_policy_group='backend',
+        delivery_policy={'mode': 'branch_only', 'final_pr_target': None},
+    )
+    validated = registry_admin.validate_registry(raw)
+    parsed_client = parse_project_registry({'state': {'value': json.dumps(validated)}})
+    parsed_doctor = registry_doctor.parse_registry({'state': {'value': validated}})
+    for parsed in (validated, parsed_client, parsed_doctor):
+        assert parsed['delivery_policy_defaults']['validation']['required_reviewers'] == 2
+        assert parsed['delivery_policy_groups']['backend']['conflict_policy'] == 'pause'
+        assert parsed['projects']['alpha']['delivery_policy_group'] == 'backend'
+        assert parsed['projects']['alpha']['delivery_policy']['final_pr_target'] is None

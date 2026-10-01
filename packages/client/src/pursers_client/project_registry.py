@@ -13,7 +13,12 @@ from urllib.parse import urlsplit
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
-from .delivery_workflow import parse_delivery_workflow
+from .delivery_workflow import (
+    delivery_group_name,
+    parse_delivery_policy,
+    parse_delivery_workflow,
+    resolve_delivery_policy,
+)
 
 from .client import (
     GENERATION_META_KEY,
@@ -201,6 +206,10 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             normalized[name]["repository_url"] = repository_url
         if "delivery_workflow" in project:
             normalized[name]["delivery_workflow"] = parse_delivery_workflow(project["delivery_workflow"])
+        if "delivery_policy" in project:
+            normalized[name]["delivery_policy"] = parse_delivery_policy(project["delivery_policy"])
+        if "delivery_policy_group" in project:
+            normalized[name]["delivery_policy_group"] = delivery_group_name(project["delivery_policy_group"])
         if "integration_ref" in project:
             ref = project["integration_ref"]
             if (
@@ -218,6 +227,21 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
     result = {"schema_version": PROJECT_REGISTRY_SCHEMA_VERSION, "projects": normalized}
     if "delivery_defaults" in registry:
         result["delivery_defaults"] = parse_delivery_workflow(registry["delivery_defaults"])
+    if "delivery_policy_defaults" in registry:
+        result["delivery_policy_defaults"] = parse_delivery_policy(registry["delivery_policy_defaults"])
+    if "delivery_policy_groups" in registry:
+        groups = registry["delivery_policy_groups"]
+        if not isinstance(groups, dict) or len(groups) > 100:
+            raise ValueError("project_registry delivery_policy_groups must be a bounded object")
+        result["delivery_policy_groups"] = {
+            delivery_group_name(group, "delivery policy group name"): parse_delivery_policy(policy)
+            for group, policy in groups.items()
+        }
+    for name in normalized:
+        if ("delivery_policy" in normalized[name]
+                or "delivery_policy_group" in normalized[name]
+                or "delivery_policy_defaults" in result):
+            resolve_delivery_policy(result, name)
     return result
 
 

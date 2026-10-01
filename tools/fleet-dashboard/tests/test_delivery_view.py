@@ -21,4 +21,9 @@ console.log(JSON.stringify(html));
     assert 'name="production_branch"' not in html
     assert 'Your team owns the final merge' in html
     assert 'Preview delivery changes' in html
+    assert 'name="mode"' in html
+    assert 'value="batch_pr"' in html
+    assert 'name="release_trigger"' in html
+    assert 'Reset repository overrides to inherit' in html
+    assert 'Unsupported runtime choices remain drafts' in html
     assert 'password' not in html

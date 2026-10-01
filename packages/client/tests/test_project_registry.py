@@ -955,3 +955,27 @@ def test_registry_rejects_invalid_integration_branch(ref):
         parse_project_registry(state({'schema_version': 1, 'projects': {
             'alpha': {'board_id': 'alpha', 'work_dir': '/repo/alpha', 'status': 'active',
                       'integration_ref': ref}}}))
+
+
+def test_registry_round_trips_delivery_policy_hierarchy_without_inference():
+    parsed = parse_project_registry(state({
+        'schema_version': 1,
+        'delivery_policy_defaults': {'conflict_policy': 'pause'},
+        'delivery_policy_groups': {'backend': {'mode': 'branch_only', 'final_pr_target': None}},
+        'projects': {
+            'api': {'board_id': 'api', 'work_dir': '/repo/api', 'status': 'active',
+                    'integration_ref': 'Dev', 'delivery_policy_group': 'backend',
+                    'delivery_policy': {'integration_branch': 'Pursers-Integration'}},
+            'web': {'board_id': 'web', 'work_dir': '/repo/web', 'status': 'active'},
+        },
+    }))
+    assert parsed['projects']['api']['delivery_policy_group'] == 'backend'
+    assert parsed['projects']['api']['delivery_policy']['integration_branch'] == 'Pursers-Integration'
+    assert 'delivery_policy_group' not in parsed['projects']['web']
+
+
+def test_registry_rejects_unknown_delivery_policy_group():
+    with pytest.raises(ValueError, match='is not defined'):
+        parse_project_registry(state({'schema_version': 1, 'projects': {
+            'api': {'board_id': 'api', 'work_dir': '/repo/api', 'status': 'active',
+                    'delivery_policy_group': 'missing'}}}))
