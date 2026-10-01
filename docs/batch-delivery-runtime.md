@@ -23,17 +23,20 @@ delivery modes fail closed; they are not treated as batch delivery.
 - `per_ticket_pr` remains the legacy path. The batch runtime does not adopt or
   rewrite its records.
 
-The policy fields consumed by `parse_batch_policy` are `mode`, `repository`,
-`base_branch`, `integration_branch`, `snapshot_prefix`, `target_branch`, `trigger`,
-`snapshot_strategy`, `timezone`, `schedule`, `policy_revision`, and
-`conflict_runner`. A missing `policy_revision` is deterministically derived from the
-effective policy. The resulting revision is frozen in each active batch. Later
-global, project, or repository edits affect only a subsequent batch.
+The resident Butler resolves the shared `delivery_policy` with
+`resolve_delivery_policy`, then `runtime_policy_from_resolved` compiles that exact
+effective policy into the runtime contract. Repository identity and the fleet-owned
+clone come from the same registry project. A missing resolver, unsupported schedule,
+unconfigured repair runner, mismatched clone origin, or operator-owned checkout fails
+closed before any delivery mutation. The effective policy digest is frozen in each
+active batch. Later global, group, or repository edits affect only a subsequent batch.
 
 The supported triggers are:
 
-- `ready`: release after an approved member has been integrated and the cumulative
-  validation succeeds.
+- `ready`: collect all reviewed members seen in one deterministic Butler writeback
+  cycle, then release only with an explicit cohort ID and the exact member set. A
+  first completed ticket therefore cannot freeze the snapshot while later members in
+  the selected cohort are still integrating.
 - `manual`: require an authorized, non-empty request ID. Request IDs are durably
   bound to one batch and cannot be reused for another batch.
 - `scheduled`: require an `HH:MM` wall-clock value and an IANA timezone. A release is
@@ -59,7 +62,9 @@ blocked until it has a new independent approval.
 
 ## Branch and pull request invariants
 
-The mapped base, owned integration branch, and customer target must be distinct.
+The mapped base, owned integration branch, and customer target must be distinct for
+`batch_pr`. `branch_only` uses the mapped base as its route identity but never writes
+it; its owned integration branch remains distinct.
 The runtime reads the ticket source ref and requires it to equal the independently
 approved full commit SHA. It also requires the owned integration ref to equal the
 ledger head before every integration. Adapter mutations receive an expected old
@@ -134,6 +139,15 @@ confirm_customer_merge
 request_conflict_repair  # only when a repair runner is configured
 ```
 
-An adapter that cannot provide one of the required checks must return an unavailable
-or unknown result. The runtime will expose a blocked state instead of fabricating a
+`VerifiedGitConnectorAdapter` is the resident production implementation. It verifies
+the fleet clone's origin against the registry mapping, uses isolated temporary Git
+worktrees, normal non-force pushes, exact remote-ref readback, configured validation
+commands without a shell, and the resident policy-gated ADO connector for customer PR
+operations. `branch_only` never invokes that connector. Every PR create/update is
+correlated in the body and read back by exact PR ID, source branch, source SHA, target
+branch, and batch key. Unknown rolling updates keep their reservation until that full
+identity is confirmed.
+
+An adapter that cannot provide one of the required checks returns an unavailable or
+unknown result. The runtime exposes a blocked state instead of fabricating a
 successful check or activating a partial mode.

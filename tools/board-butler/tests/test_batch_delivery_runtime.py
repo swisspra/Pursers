@@ -34,14 +34,19 @@ def member(ticket='TK-one', sha=A):
     }
 
 
+def cohort(*ticket_ids, cohort_id='ready-1'):
+    return {'cohort_id': cohort_id, 'members': list(ticket_ids)}
+
+
 class FakeAdapter:
     def __init__(self):
         self.refs = {'main': B, 'pursers/integration': B, 'pursers/TK-one': A,
-                     'pursers/TK-two': C, 'customer/review': B}
+                     'pursers/TK-two': C, 'pursers/TK-three': D, 'customer/review': B}
         self.prs = []
         self.calls = []
         self.merge_results = []
         self.create_error = None
+        self.update_error = None
         self.validation_passed = True
         self.validation_error = None
         self.target_after_validation = None
@@ -98,6 +103,8 @@ class FakeAdapter:
 
     async def update_customer_pr(self, repository, payload, body, operation_id):
         self.calls.append(('update_pr', repository, payload, body, operation_id))
+        if self.update_error:
+            raise self.update_error
         pr = next(p for p in self.prs if p['id'] == payload['pr_id'])
         pr['source_sha'] = payload['source_sha']
         return {'status': 'confirmed', 'source_sha': payload['source_sha']}
@@ -116,10 +123,15 @@ class FakeAdapter:
                   'source_sha': payload['snapshot_sha'], 'source_branch': payload['source_branch'],
                   'target_branch': payload['target_branch'], 'correlation': payload['correlation']}
             return {'status': 'confirmed', 'pr': pr}
+        if reservation['kind'] == 'update_customer_pr':
+            payload = reservation['payload']
+            pr = next(p for p in self.prs if p['id'] == payload['pr_id'])
+            pr['source_sha'] = payload['source_sha']
+            return {'status': 'confirmed', 'pr': dict(pr)}
         return {'status': 'confirmed'}
 
     async def get_customer_pr(self, repository, pr_id):
-        return next(p for p in self.prs if p['id'] == pr_id)
+        return next((p for p in self.prs if p['id'] == pr_id), self.prs[0])
 
     async def confirm_customer_merge(self, repository, target_branch, snapshot_sha, pr):
         return {'confirmed': True, 'target_sha': self.refs[target_branch]}
@@ -152,28 +164,35 @@ def test_policy_modes_fail_closed_and_keep_legacy_unchanged(tmp_path):
 def test_multi_ticket_one_customer_pr_and_frozen_batch_starts_next(tmp_path):
     rt, adapter = runtime(tmp_path)
     first = run(rt.collect(policy(), member()))
-    assert first['state'] == 'in_delivery' and first['pr_id'] == 1
     second = run(rt.collect(policy(), member('TK-two', C)))
-    assert second['state'] == 'integration_pending' and second['reason'] == 'customer_pr_slot_busy'
+    assert first['state'] == 'integrated' and second['state'] == 'integrated'
+    opened = run(rt.release(policy(), second['batch_key'], request=cohort('TK-one', 'TK-two')))
+    assert opened['state'] == 'in_delivery' and opened['pr_id'] == 1
+    third = run(rt.collect(policy(), member('TK-three', D)))
+    assert third['state'] == 'integrated'
+    waiting = run(rt.release(policy(), third['batch_key'], request=cohort('TK-three', cohort_id='ready-2')))
+    assert waiting['state'] == 'integration_pending' and waiting['reason'] == 'customer_pr_slot_busy'
     # The first immutable customer snapshot remains untouched; the next batch waits
     # because one customer PR is already active.
     assert len(adapter.prs) == 1
     batches = list(rt.ledger.document['batches'].values())
     assert len(batches) == 2
-    assert batches[0]['members']['TK-one']['status'] == 'in_delivery'
-    assert batches[1]['members']['TK-two']['status'] == 'integrated'
+    assert set(batches[0]['members']) == {'TK-one', 'TK-two'}
+    assert all(row['status'] == 'in_delivery' for row in batches[0]['members'].values())
+    assert set(batches[1]['members']) == {'TK-three'}
+    assert batches[1]['members']['TK-three']['status'] == 'integrated'
 
 
 def test_branch_only_never_calls_pr_connector(tmp_path):
     rt, adapter = runtime(tmp_path)
-    result = run(rt.collect(policy(mode='branch_only'), member()))
+    result = run(rt.collect(policy(mode='branch_only'), member(), release=cohort('TK-one')))
     assert result['state'] == 'in_delivery' and 'pr_id' not in result
     assert not any(call[0] in {'list_prs', 'create_pr', 'update_pr'} for call in adapter.calls)
 
 
 def test_duplicate_member_is_idempotent_across_restart_and_modes(tmp_path):
     rt, adapter = runtime(tmp_path)
-    result = run(rt.collect(policy(mode='branch_only'), member()))
+    result = run(rt.collect(policy(mode='branch_only'), member(), release=cohort('TK-one')))
     rt2 = m.BatchDeliveryRuntime(m.BatchLedger(tmp_path / 'ledger.json'), adapter)
     duplicate = run(rt2.collect(policy(mode='batch_pr'), member()))
     assert duplicate['deduplicated'] is True
@@ -187,14 +206,14 @@ def test_source_change_and_exact_validation_fail_closed(tmp_path):
     assert run(rt.collect(policy(), member()))['reason'] == 'source_ref_changed_fresh_independent_review_required'
     adapter.refs['pursers/TK-one'] = A
     adapter.validation_passed = False
-    assert run(rt.collect(policy(), member()))['reason'] == 'exact_cumulative_validation_required'
+    assert run(rt.collect(policy(), member(), release=cohort('TK-one')))['reason'] == 'exact_cumulative_validation_required'
     assert not adapter.prs
 
 
 def test_unavailable_external_checks_are_explicit_and_never_fabricated(tmp_path):
     rt, adapter = runtime(tmp_path)
     adapter.validation_error = RuntimeError('upstream checks route unavailable')
-    result = run(rt.collect(policy(), member()))
+    result = run(rt.collect(policy(), member(), release=cohort('TK-one')))
     assert result['reason'] == 'exact_validation_capability_unavailable'
     batch = next(iter(rt.ledger.document['batches'].values()))
     assert batch['state'] == 'blocked_validation'
@@ -205,7 +224,7 @@ def test_unavailable_external_checks_are_explicit_and_never_fabricated(tmp_path)
 def test_target_change_after_validation_blocks_pr_creation(tmp_path):
     rt, adapter = runtime(tmp_path)
     adapter.target_after_validation = C
-    result = run(rt.collect(policy(), member()))
+    result = run(rt.collect(policy(), member(), release=cohort('TK-one')))
     assert result['reason'] == 'customer_target_changed_revalidation_required'
     assert not adapter.prs
 
@@ -235,7 +254,7 @@ def test_conflict_requires_configured_runner_and_fresh_independent_review(tmp_pa
 def test_unknown_merge_is_reserved_before_mutation_and_reconciled_after_restart(tmp_path):
     rt, adapter = runtime(tmp_path)
     adapter.merge_results = [{'status': 'unknown'}]
-    result = run(rt.collect(policy(mode='branch_only'), member()))
+    result = run(rt.collect(policy(mode='branch_only'), member(), release=cohort('TK-one')))
     assert result['reason'] == 'integration_outcome_unknown_reconcile_before_retry'
     disk = m.BatchLedger(tmp_path / 'ledger.json')
     batch = next(iter(disk.document['batches'].values()))
@@ -248,7 +267,7 @@ def test_unknown_merge_is_reserved_before_mutation_and_reconciled_after_restart(
 def test_unknown_pr_create_does_not_duplicate_after_restart(tmp_path):
     rt, adapter = runtime(tmp_path)
     adapter.create_error = TimeoutError()
-    result = run(rt.collect(policy(), member()))
+    result = run(rt.collect(policy(), member(), release=cohort('TK-one')))
     assert result['reason'] == 'customer_pr_create_outcome_unknown'
     batch = next(iter(rt.ledger.document['batches'].values()))
     assert next(r for r in batch['reservations'].values() if r['kind'] == 'create_customer_pr')['status'] == 'unknown'
@@ -295,7 +314,7 @@ def test_duplicate_existing_pr_and_external_correlation_block(tmp_path):
     adapter.prs.append({'id': 99, 'status': 'active', 'mutable': False, 'source_sha': C,
                         'source_branch': 'foreign', 'target_branch': 'customer/review',
                         'correlation': 'foreign'})
-    result = run(rt.collect(policy(), member()))
+    result = run(rt.collect(policy(), member(), release=cohort('TK-one')))
     assert result['reason'] == 'one_active_customer_pr_limit'
     assert sum(call[0] == 'create_pr' for call in adapter.calls) == 0
 
@@ -303,9 +322,10 @@ def test_duplicate_existing_pr_and_external_correlation_block(tmp_path):
 def test_rolling_pr_updates_only_authorized_snapshot_and_invalidates_validation(tmp_path):
     rt, adapter = runtime(tmp_path)
     rolling = policy(snapshot_strategy='rolling')
-    first = run(rt.collect(rolling, member()))
+    first = run(rt.collect(rolling, member(), release=cohort('TK-one')))
     assert first['state'] == 'in_delivery'
-    second = run(rt.collect(rolling, member('TK-two', C)))
+    second = run(rt.collect(rolling, member('TK-two', C),
+                            release=cohort('TK-one', 'TK-two', cohort_id='ready-2')))
     assert second['state'] == 'in_delivery'
     batch = rt.ledger.document['batches'][first['batch_key']]
     assert batch['validation_state'] == 'stale'
@@ -313,11 +333,30 @@ def test_rolling_pr_updates_only_authorized_snapshot_and_invalidates_validation(
     assert sum(call[0] == 'update_pr' for call in adapter.calls) == 1
 
 
+def test_rolling_update_timeout_stays_reserved_until_exact_pr_readback(tmp_path):
+    rt, adapter = runtime(tmp_path)
+    rolling = policy(snapshot_strategy='rolling')
+    opened = run(rt.collect(rolling, member(), release=cohort('TK-one')))
+    adapter.update_error = TimeoutError()
+    result = run(rt.collect(rolling, member('TK-two', C),
+                            release=cohort('TK-one', 'TK-two', cohort_id='ready-2')))
+    assert result['reason'] == 'rolling_customer_pr_update_outcome_unknown'
+    batch = rt.ledger.document['batches'][opened['batch_key']]
+    reserved = next(row for row in batch['reservations'].values()
+                    if row['kind'] == 'update_customer_pr')
+    assert reserved['status'] == 'unknown'
+    reconciled = run(rt.reconcile_unknown(opened['batch_key']))
+    assert reconciled['state'] == 'delivery_open'
+    assert reserved['status'] == 'confirmed'
+    assert batch['customer_pr']['source_sha'] == E
+    assert all(row['status'] == 'in_delivery' for row in batch['members'].values())
+
+
 def test_customer_pr_body_reports_blockers_and_baseline_without_sonar_claim(tmp_path):
     rt, adapter = runtime(tmp_path)
     work = member()
     work.update(blockers='waiting on customer window', baseline_failures='one known flaky check')
-    run(rt.collect(policy(), work))
+    run(rt.collect(policy(), work, release=cohort('TK-one')))
     body = next(call[3] for call in adapter.calls if call[0] == 'create_pr')
     assert 'Blockers: waiting on customer window' in body
     assert 'Baseline failures: one known flaky check' in body
@@ -326,7 +365,7 @@ def test_customer_pr_body_reports_blockers_and_baseline_without_sonar_claim(tmp_
 
 def test_customer_squash_completion_is_reconciled_without_downstream_pr(tmp_path):
     rt, adapter = runtime(tmp_path)
-    opened = run(rt.collect(policy(), member()))
+    opened = run(rt.collect(policy(), member(), release=cohort('TK-one')))
     pr = adapter.prs[0]
     pr.update(status='completed', merge_sha=C)
     adapter.refs['customer/review'] = E  # target may advance beyond a squash merge SHA
@@ -336,6 +375,19 @@ def test_customer_squash_completion_is_reconciled_without_downstream_pr(tmp_path
     assert batch['mapped_target_sha'] == E
     assert all(v['status'] == 'customer_merged' for v in batch['members'].values())
     assert sum(call[0] == 'create_pr' for call in adapter.calls) == 1
+
+
+@pytest.mark.parametrize('field,value', [
+    ('id', 99), ('source_branch', 'externally/edited'),
+    ('target_branch', 'wrong/target'), ('correlation', 'wrong-batch'),
+])
+def test_customer_completion_requires_exact_immutable_pr_identity(tmp_path, field, value):
+    rt, adapter = runtime(tmp_path)
+    opened = run(rt.collect(policy(), member(), release=cohort('TK-one')))
+    adapter.prs[0].update(status='completed', merge_sha=C)
+    adapter.prs[0][field] = value
+    result = run(rt.observe_customer_completion(opened['batch_key']))
+    assert result['reason'] == 'customer_pr_correlation_mismatch'
 
 
 def test_blocked_member_does_not_block_independent_repository(tmp_path):
@@ -350,7 +402,7 @@ def test_blocked_member_does_not_block_independent_repository(tmp_path):
         adapter.refs['pursers/free'] = B
         task = asyncio.create_task(rt.collect(blocked_policy, member()))
         await asyncio.sleep(0)
-        result = await rt.collect(independent, member('TK-two', C))
+        result = await rt.collect(independent, member('TK-two', C), release=cohort('TK-two'))
         assert result['state'] == 'in_delivery'
         blocked_gate.set()
         await task
@@ -394,6 +446,46 @@ def test_real_git_fixture_can_form_cumulative_reviewed_history(tmp_path):
     cumulative = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip()
     assert len({base, reviewed, cumulative}) == 3
     assert subprocess.run(['git', '-C', repo, 'merge-base', '--is-ancestor', reviewed, cumulative]).returncode == 0
+
+
+def test_verified_git_adapter_drives_branch_only_without_pr_calls(tmp_path):
+    origin = tmp_path / 'origin.git'
+    repo = tmp_path / 'fleet-clone'
+    subprocess.run(['git', 'init', '--bare', origin], check=True, capture_output=True)
+    subprocess.run(['git', 'clone', origin, repo], check=True, capture_output=True)
+    subprocess.run(['git', '-C', repo, 'config', 'user.email', 'test@example.invalid'], check=True)
+    subprocess.run(['git', '-C', repo, 'config', 'user.name', 'Batch Test'], check=True)
+    (repo / 'base').write_text('base\n')
+    subprocess.run(['git', '-C', repo, 'add', 'base'], check=True)
+    subprocess.run(['git', '-C', repo, 'commit', '-m', 'base'], check=True, capture_output=True)
+    base = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip()
+    subprocess.run(['git', '-C', repo, 'branch', '-M', 'main'], check=True)
+    subprocess.run(['git', '-C', repo, 'push', 'origin', 'main'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', repo, 'switch', '-c', 'ticket-one'], check=True, capture_output=True)
+    (repo / 'reviewed').write_text('reviewed\n')
+    subprocess.run(['git', '-C', repo, 'add', 'reviewed'], check=True)
+    subprocess.run(['git', '-C', repo, 'commit', '-m', 'reviewed'], check=True, capture_output=True)
+    reviewed = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip()
+    subprocess.run(['git', '-C', repo, 'push', 'origin', 'ticket-one'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', repo, 'push', 'origin', f'{base}:refs/heads/pursers-integration'],
+                   check=True, capture_output=True)
+
+    class NoPrConnector:
+        def __getattr__(self, name):
+            raise AssertionError(f'branch_only called connector method {name}')
+
+    adapter = m.VerifiedGitConnectorAdapter(
+        repo, str(origin), NoPrConnector(),
+        validation_commands=['python3 -c "from pathlib import Path; assert Path(\'reviewed\').is_file()"'])
+    rt = m.BatchDeliveryRuntime(m.BatchLedger(tmp_path / 'ledger.json'), adapter)
+    actual_policy = policy(mode='branch_only', repository=str(origin), base_branch='main',
+                           integration_branch='pursers-integration', target_branch='main')
+    actual_member = member(sha=reviewed)
+    actual_member['source_ref'] = 'ticket-one'
+    result = run(rt.collect(actual_policy, actual_member, release=cohort('TK-one')))
+    assert result['state'] == 'in_delivery'
+    snapshot = next(iter(rt.ledger.document['batches'].values()))['snapshot_branch']
+    assert run(adapter.read_ref(str(origin), snapshot)) is not None
 
 
 @pytest.mark.parametrize('bad', [

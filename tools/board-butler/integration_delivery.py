@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import subprocess
 import tempfile
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -131,8 +133,10 @@ def parse_batch_policy(value: Any) -> dict[str, Any] | None:
         raise ValueError('delivery_workflow.trigger is unsupported')
     if result['snapshot_strategy'] not in BATCH_SNAPSHOTS:
         raise ValueError('delivery_workflow.snapshot_strategy is unsupported')
-    if len({result['base_branch'].casefold(), result['integration_branch'].casefold(),
-            result['target_branch'].casefold()}) != 3:
+    folded = [result['base_branch'].casefold(), result['integration_branch'].casefold(),
+              result['target_branch'].casefold()]
+    if (folded[0] == folded[1] or folded[1] == folded[2]
+            or (mode != 'branch_only' and folded[0] == folded[2])):
         raise ValueError('base, integration and customer target branches must be distinct')
     if mode == 'branch_only' and result['snapshot_strategy'] == 'rolling':
         raise ValueError('branch_only uses immutable delivery snapshots')
@@ -158,6 +162,45 @@ def parse_batch_policy(value: Any) -> dict[str, Any] | None:
     elif 'schedule' in value or 'timezone' in value:
         raise ValueError('schedule and timezone require the scheduled trigger')
     return result
+
+
+def runtime_policy_from_resolved(resolved: Mapping[str, Any], project: Mapping[str, Any]) -> dict[str, Any]:
+    """Compile the shared resolved-policy shape into the installed runtime contract."""
+    policy = resolved.get('policy') if isinstance(resolved, Mapping) else None
+    if not isinstance(policy, Mapping):
+        raise ValueError('resolved delivery policy is unavailable')
+    repository = project.get('repository_url')
+    if not isinstance(repository, str) or not repository:
+        raise ValueError('mapped repository identity is unavailable')
+    mode = policy.get('mode')
+    if mode == 'per_ticket_pr':
+        return {'mode': 'per_ticket_pr'}
+    trigger = policy.get('release_trigger')
+    if not isinstance(trigger, Mapping):
+        raise ValueError('resolved release trigger is unavailable')
+    trigger_kind = trigger.get('kind')
+    result = {
+        'mode': mode, 'repository': repository,
+        'base_branch': policy.get('mapped_base'),
+        'integration_branch': policy.get('integration_branch'),
+        'snapshot_prefix': policy.get('snapshot_branch_prefix'),
+        'target_branch': policy.get('final_pr_target') or policy.get('mapped_base'),
+        'trigger': trigger_kind,
+        'snapshot_strategy': 'rolling' if policy.get('pr_update') == 'rolling' else 'frozen',
+        'policy_revision': _digest(policy)[:40],
+    }
+    if trigger_kind == 'scheduled':
+        fields = str(trigger.get('schedule', '')).split()
+        if (len(fields) != 5 or not fields[0].isdigit() or not fields[1].isdigit()
+                or fields[2:] != ['*', '*', '*']):
+            raise ValueError('installed scheduler requires one exact daily minute')
+        minute, hour = int(fields[0]), int(fields[1])
+        if not 0 <= minute <= 59 or not 0 <= hour <= 23:
+            raise ValueError('scheduled release time is invalid')
+        result.update(schedule=f'{hour:02d}:{minute:02d}', timezone=trigger.get('timezone'))
+    if policy.get('conflict_policy') == 'repair_then_review':
+        raise ValueError('conflict repair runner is not configured')
+    return parse_batch_policy(result) or {}
 
 
 class BatchLedger:
@@ -201,6 +244,158 @@ class BatchLedger:
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
+
+
+class VerifiedGitConnectorAdapter:
+    """Production adapter: verified fleet clone for Git, injected connector for PRs."""
+
+    def __init__(self, repo_path: Path, repository_url: str, connector: Any,
+                 *, validation_commands: list[str] | None = None) -> None:
+        self.repo_path = Path(repo_path).resolve()
+        self.repository_url = repository_url.rstrip('/').removesuffix('.git').casefold()
+        self.connector = connector
+        self.validation_commands = list(validation_commands or [])
+        if not (self.repo_path / '.git').exists():
+            raise ValueError('batch delivery requires a verified fleet Git clone')
+        observed = self._git('config', '--get', 'remote.origin.url').strip()
+        if observed.rstrip('/').removesuffix('.git').casefold() != self.repository_url:
+            raise ValueError('fleet clone origin does not match mapped repository')
+
+    def _git(self, *args: str, cwd: Path | None = None, check: bool = True) -> str:
+        env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0',
+               'GIT_AUTHOR_NAME': 'Pursers Batch Delivery',
+               'GIT_AUTHOR_EMAIL': 'batch-delivery@pursers.invalid',
+               'GIT_COMMITTER_NAME': 'Pursers Batch Delivery',
+               'GIT_COMMITTER_EMAIL': 'batch-delivery@pursers.invalid'}
+        result = subprocess.run(['git', *args], cwd=cwd or self.repo_path, env=env,
+                                text=True, capture_output=True, check=False)
+        if check and result.returncode:
+            raise RuntimeError('verified Git operation failed')
+        return result.stdout.strip()
+
+    async def read_ref(self, repository, branch):
+        if repository.rstrip('/').removesuffix('.git').casefold() != self.repository_url:
+            raise ValueError('repository identity changed')
+        output = await asyncio.to_thread(
+            self._git, 'ls-remote', '--heads', 'origin', f'refs/heads/{_branch(branch, "branch")}')
+        rows = [line.split() for line in output.splitlines() if line.strip()]
+        if not rows:
+            return None
+        if len(rows) != 1 or len(rows[0]) != 2 or not SHA.fullmatch(rows[0][0]):
+            raise RuntimeError('remote ref response is ambiguous')
+        await asyncio.to_thread(
+            self._git, 'fetch', '--no-tags', 'origin', f'refs/heads/{branch}')
+        return rows[0][0]
+
+    async def ensure_branch(self, repository, branch, sha, expected, operation_id):
+        del operation_id
+        observed = await self.read_ref(repository, branch)
+        if observed != expected:
+            return {'status': 'conflict', 'head_sha': observed}
+        _sha(sha, 'sha')
+        if expected is not None:
+            base = await asyncio.to_thread(self._git, 'merge-base', expected, sha)
+            if base != expected:
+                return {'status': 'conflict', 'head_sha': observed}
+        try:
+            await asyncio.to_thread(self._git, 'push', 'origin', f'{sha}:refs/heads/{branch}')
+        except RuntimeError:
+            return {'status': 'unknown'}
+        confirmed = await self.read_ref(repository, branch)
+        return {'status': 'confirmed' if confirmed == sha else 'unknown', 'head_sha': confirmed}
+
+    async def integrate_reviewed(self, repository, source_sha, branch, expected, operation_id):
+        del operation_id
+        if await self.read_ref(repository, branch) != expected:
+            return {'status': 'conflict', 'head_sha': await self.read_ref(repository, branch)}
+        _sha(source_sha, 'source_sha'); _sha(expected, 'expected_head')
+        with tempfile.TemporaryDirectory(prefix='pursers-batch-worktree-') as raw:
+            worktree = Path(raw)
+            await asyncio.to_thread(self._git, 'worktree', 'add', '--detach', str(worktree), expected)
+            try:
+                merged = subprocess.run(
+                    ['git', 'merge', '--no-ff', '--no-edit', source_sha], cwd=worktree,
+                    env={**os.environ, 'GIT_AUTHOR_NAME': 'Pursers Batch Delivery',
+                         'GIT_AUTHOR_EMAIL': 'batch-delivery@pursers.invalid',
+                         'GIT_COMMITTER_NAME': 'Pursers Batch Delivery',
+                         'GIT_COMMITTER_EMAIL': 'batch-delivery@pursers.invalid'},
+                    text=True, capture_output=True, check=False)
+                if merged.returncode:
+                    return {'status': 'conflict', 'source_sha': source_sha}
+                head = await asyncio.to_thread(self._git, 'rev-parse', '--verify', 'HEAD^{commit}', cwd=worktree)
+                try:
+                    await asyncio.to_thread(self._git, 'push', 'origin', f'{head}:refs/heads/{branch}', cwd=worktree)
+                except RuntimeError:
+                    return {'status': 'unknown'}
+            finally:
+                await asyncio.to_thread(self._git, 'worktree', 'remove', '--force', str(worktree))
+        confirmed = await self.read_ref(repository, branch)
+        return {'status': 'confirmed' if confirmed == head else 'unknown', 'head_sha': confirmed}
+
+    async def validate_cumulative(self, repository, base_branch, source_sha, members):
+        target_sha = await self.read_ref(repository, base_branch)
+        _sha(target_sha, 'target_sha'); _sha(source_sha, 'source_sha')
+        for member in members:
+            source = _sha(member.get('source_sha'), 'member.source_sha')
+            base = await asyncio.to_thread(self._git, 'merge-base', source, source_sha)
+            if base != source:
+                return {'passed': False, 'source_sha': source_sha, 'target_sha': target_sha}
+        with tempfile.TemporaryDirectory(prefix='pursers-batch-validation-') as raw:
+            worktree = Path(raw)
+            await asyncio.to_thread(self._git, 'worktree', 'add', '--detach', str(worktree), source_sha)
+            try:
+                for command in self.validation_commands:
+                    args = shlex.split(command)
+                    if not args:
+                        raise ValueError('validation command is empty')
+                    result = await asyncio.to_thread(
+                        subprocess.run, args, cwd=worktree, text=True,
+                        capture_output=True, check=False)
+                    if result.returncode:
+                        return {'passed': False, 'source_sha': source_sha,
+                                'target_sha': target_sha, 'failed_command': command}
+            finally:
+                await asyncio.to_thread(self._git, 'worktree', 'remove', '--force', str(worktree))
+        return {'passed': True, 'source_sha': source_sha, 'target_sha': target_sha,
+                'commands': list(self.validation_commands)}
+
+    async def list_customer_prs(self, repository, target_branch, status):
+        return await self.connector.list_customer_prs(repository, target_branch, status)
+
+    async def create_customer_pr(self, repository, payload, body, operation_id):
+        return await self.connector.create_customer_pr(repository, payload, body, operation_id)
+
+    async def update_customer_pr(self, repository, payload, body, operation_id):
+        return await self.connector.update_customer_pr(repository, payload, body, operation_id)
+
+    async def get_customer_pr(self, repository, pr_id):
+        return await self.connector.get_customer_pr(repository, pr_id)
+
+    async def confirm_customer_merge(self, repository, target_branch, snapshot_sha, pr):
+        del snapshot_sha
+        target_sha = await self.read_ref(repository, target_branch)
+        return {'confirmed': pr.get('status') == 'completed' and target_sha is not None,
+                'target_sha': target_sha}
+
+    async def request_conflict_repair(self, repository, runner, ticket_id, source_sha, working_head):
+        if not hasattr(self.connector, 'request_conflict_repair'):
+            return {'status': 'unavailable'}
+        return await self.connector.request_conflict_repair(
+            repository, runner, ticket_id, source_sha, working_head)
+
+    async def reconcile_operation(self, repository, reservation):
+        payload = reservation.get('payload', {})
+        kind = reservation.get('kind')
+        if kind in {'create_integration_branch', 'snapshot_ref'}:
+            head = await self.read_ref(repository, payload['branch'])
+            return {'status': 'confirmed' if head == payload['sha'] else 'unknown', 'head_sha': head}
+        if kind in {'integrate_member', 'integrate_repaired_member'}:
+            head = await self.read_ref(repository, payload['integration_branch'])
+            source = payload['source_sha']
+            if head and await asyncio.to_thread(self._git, 'merge-base', source, head) == source:
+                return {'status': 'confirmed', 'head_sha': head}
+            return {'status': 'unknown'}
+        return await self.connector.reconcile_operation(repository, reservation)
 
 
 class BatchDeliveryRuntime:
@@ -247,9 +442,10 @@ class BatchDeliveryRuntime:
         candidates = [b for b in self.ledger.document['batches'].values()
                       if b.get('route_key') == route
                       and b.get('effective_policy_revision') == policy['policy_revision']
-                      and (b.get('state') in {'collecting', 'waiting_customer_slot'}
+                      and (b.get('state') == 'collecting'
                            or (b.get('state') == 'delivery_open'
-                               and policy['snapshot_strategy'] == 'rolling'))]
+                               and policy['snapshot_strategy'] == 'rolling'
+                               and b.get('snapshot_frozen') is not True))]
         if candidates:
             return max(candidates, key=lambda b: int(b['ordinal']))
         return self._new_batch(policy, working_head)
@@ -368,10 +564,6 @@ class BatchDeliveryRuntime:
             batch['working_head'] = result['head_sha']
             batch['state'] = 'collecting' if batch['state'] != 'delivery_open' else batch['state']
             self.ledger.save()
-            if batch['state'] == 'delivery_open' and policy['snapshot_strategy'] == 'rolling':
-                rolled = await self._roll_snapshot(policy, batch)
-                if rolled['state'] == 'integration_blocked':
-                    return rolled
             released = await self.release(policy, batch['batch_key'], request=release)
             return released if released.get('released') or released.get('state') in {
                 'integration_blocked', 'integration_pending'} else {
@@ -422,6 +614,20 @@ class BatchDeliveryRuntime:
             return False, 'no_integrated_members'
         trigger = policy['trigger']
         if trigger == 'ready':
+            if (not isinstance(request, Mapping)
+                    or not isinstance(request.get('cohort_id'), str)
+                    or not request['cohort_id']
+                    or sorted(request.get('members', [])) != sorted(batch['members'])):
+                return False, 'explicit_ready_cohort_required'
+            prior = batch.get('ready_cohort_id')
+            if (prior is not None and prior != request['cohort_id']
+                    and policy['snapshot_strategy'] == 'frozen'):
+                return False, 'ready_cohort_already_frozen'
+            batch['ready_cohort_id'] = request['cohort_id']
+            history = batch.setdefault('ready_cohort_ids', [])
+            if request['cohort_id'] not in history:
+                history.append(request['cohort_id'])
+            self.ledger.save()
             return True, None
         if trigger == 'manual':
             if (not isinstance(request, Mapping) or request.get('authorized') is not True
@@ -472,6 +678,8 @@ class BatchDeliveryRuntime:
             batch['state'] = 'blocked_validation'; self.ledger.save()
             return blocked('exact_cumulative_validation_required')
         batch['validation'] = dict(validation)
+        if batch['state'] == 'delivery_open' and policy['snapshot_strategy'] == 'rolling':
+            return await self._roll_snapshot(policy, batch)
         snapshot = await self._snapshot(policy, batch)
         if snapshot.get('state') == 'integration_blocked':
             return snapshot
@@ -486,9 +694,14 @@ class BatchDeliveryRuntime:
 
     async def _snapshot(self, policy, batch):
         observed = await self.adapter.read_ref(policy['repository'], batch['snapshot_branch'])
-        if batch.get('snapshot_frozen') and observed != batch.get('snapshot_sha'):
-            batch['state'] = 'blocked_external_edit'; self.ledger.save()
-            return blocked('frozen_snapshot_changed_externally')
+        if batch.get('snapshot_frozen'):
+            if observed != batch.get('snapshot_sha'):
+                batch['state'] = 'blocked_external_edit'; self.ledger.save()
+                return blocked('frozen_snapshot_changed_externally')
+            if batch['working_head'] != batch.get('snapshot_sha'):
+                batch['state'] = 'blocked_external_edit'; self.ledger.save()
+                return blocked('frozen_snapshot_is_immutable')
+            return {'state': 'snapshot_ready'}
         if observed == batch['working_head']:
             batch['snapshot_sha'] = observed; batch['snapshot_frozen'] = policy['snapshot_strategy'] == 'frozen'
             self.ledger.save(); return {'state': 'snapshot_ready'}
@@ -515,6 +728,7 @@ class BatchDeliveryRuntime:
             return blocked('customer_pr_inventory_unavailable')
         exact = [p for p in active if p.get('correlation') == batch['batch_key']
                  and p.get('source_branch') == batch['snapshot_branch']
+                 and p.get('source_sha') == batch['snapshot_sha']
                  and p.get('target_branch') == policy['target_branch']]
         if len(active) > 1 or (active and not exact):
             known = all(any(other.get('batch_key') == row.get('correlation')
@@ -530,7 +744,8 @@ class BatchDeliveryRuntime:
             pr = exact[0]
         else:
             payload = {'source_branch': batch['snapshot_branch'], 'target_branch': policy['target_branch'],
-                       'snapshot_sha': batch['snapshot_sha'], 'correlation': batch['batch_key']}
+                       'snapshot_sha': batch['snapshot_sha'], 'correlation': batch['batch_key'],
+                       'mutable': policy['snapshot_strategy'] == 'rolling'}
             reservation = self._reserve(batch, 'create_customer_pr', payload)
             body = self._pr_body(batch)
             try:
@@ -548,7 +763,8 @@ class BatchDeliveryRuntime:
         if (not isinstance(pr, Mapping) or not isinstance(pr.get('id'), (str, int))
                 or pr.get('source_sha') != batch['snapshot_sha']
                 or pr.get('source_branch') != batch['snapshot_branch']
-                or pr.get('target_branch') != policy['target_branch']):
+                or pr.get('target_branch') != policy['target_branch']
+                or pr.get('correlation') != batch['batch_key']):
             batch['state'] = 'blocked_existing_pr'; self.ledger.save()
             return blocked('customer_pr_correlation_mismatch')
         batch['customer_pr'] = dict(pr); batch['state'] = 'delivery_open'
@@ -571,8 +787,14 @@ class BatchDeliveryRuntime:
         payload = {'pr_id': pr['id'], 'source_sha': batch['snapshot_sha'],
                    'correlation': batch['batch_key']}
         reservation = self._reserve(batch, 'update_customer_pr', payload)
-        result = await self.adapter.update_customer_pr(policy['repository'], payload,
-                                                       self._pr_body(batch), reservation['operation_id'])
+        try:
+            result = await self.adapter.update_customer_pr(
+                policy['repository'], payload, self._pr_body(batch), reservation['operation_id'])
+        except Exception:
+            reservation['status'] = 'unknown'
+            batch['state'] = 'blocked_unknown'
+            self.ledger.save()
+            return blocked('rolling_customer_pr_update_outcome_unknown')
         self._finish(reservation, result)
         if result.get('status') != 'confirmed' or result.get('source_sha') != batch['snapshot_sha']:
             batch['state'] = 'blocked_unknown'; self.ledger.save()
@@ -586,7 +808,9 @@ class BatchDeliveryRuntime:
     @staticmethod
     def _pr_body(batch):
         members = sorted(batch['members'].values(), key=lambda m: m['ticket_id'])
-        lines = [f"Batch: {batch['batch_key']}", '', 'Reviewed members:']
+        lines = [f"Pursers-Batch-Correlation: {batch['batch_key']}",
+                 f"Pursers-Snapshot-Mutable: {str(batch['snapshot_strategy'] == 'rolling').lower()}",
+                 '', 'Reviewed members:']
         for member in members:
             issues = ', '.join(member['issue_ids']) or 'none'
             lines.extend([f"- {member['ticket_id']} ({member['source_sha']}), issues: {issues}",
@@ -625,9 +849,28 @@ class BatchDeliveryRuntime:
             elif reservation['kind'] == 'create_customer_pr':
                 pr = result.get('pr')
                 if (not isinstance(pr, Mapping) or pr.get('correlation') != batch['batch_key']
-                        or pr.get('source_sha') != batch.get('snapshot_sha')):
+                        or pr.get('source_sha') != batch.get('snapshot_sha')
+                        or pr.get('source_branch') != batch['snapshot_branch']
+                        or pr.get('target_branch') != batch['target_branch']):
                     return blocked('reconciled_customer_pr_mismatch')
                 batch['customer_pr'] = dict(pr); batch['state'] = 'delivery_open'
+                for member in batch['members'].values():
+                    if member['status'] == 'integrated':
+                        member['status'] = 'in_delivery'
+            elif reservation['kind'] == 'update_customer_pr':
+                pr = result.get('pr')
+                recorded = batch.get('customer_pr', {})
+                if (not isinstance(pr, Mapping)
+                        or pr.get('id') != payload.get('pr_id')
+                        or pr.get('id') != recorded.get('id')
+                        or pr.get('correlation') != batch['batch_key']
+                        or pr.get('source_branch') != batch['snapshot_branch']
+                        or pr.get('source_sha') != payload.get('source_sha')
+                        or pr.get('target_branch') != batch['target_branch']):
+                    return blocked('reconciled_customer_pr_update_mismatch')
+                batch['customer_pr'] = dict(pr)
+                batch['state'] = 'delivery_open'
+                batch['validation_state'] = 'stale'
                 for member in batch['members'].values():
                     if member['status'] == 'integrated':
                         member['status'] = 'in_delivery'
@@ -642,13 +885,20 @@ class BatchDeliveryRuntime:
         pr = await self.adapter.get_customer_pr(batch['repository'], batch['customer_pr']['id'])
         if not isinstance(pr, Mapping) or pr.get('status') not in {'active', 'completed', 'abandoned'}:
             return blocked('customer_pr_state_unavailable')
+        recorded = batch['customer_pr']
+        if (pr.get('id') != recorded.get('id')
+                or pr.get('correlation') != batch['batch_key']
+                or pr.get('source_branch') != batch['snapshot_branch']
+                or pr.get('target_branch') != batch['target_branch']
+                or pr.get('source_sha') != batch.get('snapshot_sha')):
+            batch['state'] = 'blocked_external_edit'; self.ledger.save()
+            return blocked('customer_pr_correlation_mismatch')
         if pr.get('status') == 'active':
             return {'state': 'in_delivery', 'batch_key': batch_key}
         if pr.get('status') == 'abandoned':
             batch['state'] = 'abandoned'; self.ledger.save()
             return {'state': 'abandoned', 'batch_key': batch_key}
-        if (pr.get('source_sha') != batch.get('snapshot_sha')
-                or not SHA.fullmatch(str(pr.get('merge_sha', '')))):
+        if not SHA.fullmatch(str(pr.get('merge_sha', ''))):
             batch['state'] = 'blocked_external_edit'; self.ledger.save()
             return blocked('customer_merge_correlation_mismatch')
         confirmed = await self.adapter.confirm_customer_merge(

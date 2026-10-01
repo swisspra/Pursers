@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import subprocess
 from pathlib import Path
 import pytest
 
@@ -163,3 +164,75 @@ def test_legacy_deliveries_are_not_adopted_by_a_later_policy(tmp_path):
     asyncio.run(poller._integration_pass([]))
     poller._delivery_tool.assert_not_called()
     assert 'delivery_state' not in poller.index.entries['old']
+
+
+def test_resident_branch_only_uses_resolved_policy_and_makes_zero_pr_calls(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from test_source_intake import butler
+
+    origin = tmp_path / 'origin.git'
+    repo = tmp_path / 'fleet-clone'
+    subprocess.run(['git', 'init', '--bare', origin], check=True, capture_output=True)
+    subprocess.run(['git', 'clone', origin, repo], check=True, capture_output=True)
+    subprocess.run(['git', '-C', repo, 'config', 'user.email', 'test@example.invalid'], check=True)
+    subprocess.run(['git', '-C', repo, 'config', 'user.name', 'Batch Test'], check=True)
+    (repo / 'base').write_text('base\n')
+    subprocess.run(['git', '-C', repo, 'add', 'base'], check=True)
+    subprocess.run(['git', '-C', repo, 'commit', '-m', 'base'], check=True, capture_output=True)
+    base = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip()
+    subprocess.run(['git', '-C', repo, 'branch', '-M', 'main'], check=True)
+    subprocess.run(['git', '-C', repo, 'push', 'origin', 'main'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', repo, 'switch', '-c', 'ticket-one'], check=True, capture_output=True)
+    (repo / 'reviewed').write_text('reviewed\n')
+    subprocess.run(['git', '-C', repo, 'add', 'reviewed'], check=True)
+    subprocess.run(['git', '-C', repo, 'commit', '-m', 'reviewed'], check=True, capture_output=True)
+    reviewed = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip()
+    subprocess.run(['git', '-C', repo, 'push', 'origin', 'ticket-one'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', repo, 'push', 'origin', f'{base}:refs/heads/pursers-integration'],
+                   check=True, capture_output=True)
+
+    effective = {
+        'mode': 'branch_only', 'mapped_base': 'main',
+        'integration_branch': 'pursers-integration',
+        'snapshot_branch_prefix': 'pursers/delivery', 'final_pr_target': None,
+        'release_trigger': {'kind': 'ready'}, 'pr_update': 'freeze_on_ready',
+        'auto_integrate': False, 'final_merge': 'manual',
+        'validation': {'test_commands': [], 'required_reviewers': 1,
+                       'independent_review': True, 'require_upstream_policies': True},
+        'conflict_policy': 'pause', 'collection_paused': False,
+    }
+    monkeypatch.setattr(butler._delivery_policy_api, 'resolve_delivery_policy',
+                        lambda registry, project_name: {'policy': effective}, raising=False)
+    project = {'repository_url': str(origin), 'fleet_clone_dir': str(repo),
+               'work_dir_owner': 'fleet', '__registry__': {'projects': {'P': {}}},
+               '__project_name__': 'P'}
+    ticket = {'status': 'closed', 'latest_verdict': {'verdict': 'approve'},
+              'title': 'Reviewed work',
+              'latest_submission': {'branch': 'ticket-one', 'commit_hash': reviewed,
+                                    'notes': 'tests passed'}}
+    poller = object.__new__(butler.SourceIntakePoller)
+    poller.index = butler.SourceIntakeIndex(tmp_path / 'index.json')
+    entry_key = poller.index.key('s', 'ISSUE-1')
+    poller.index.entries = {entry_key: {'status': 'asked', 'source_id': 's', 'external_id': 'ISSUE-1',
+                                        'board_id': 'b', 'ticket_id': 'TK-one'}}
+    poller._writeback_offset = 0
+    poller._batch_delivery_runtimes = {}
+    poller.sources = [SimpleNamespace(source_id='s', connector_id='c',
+                                      writeback=SimpleNamespace(tool='ado_pull_request_create'))]
+    poller.runtimes = {'c': SimpleNamespace()}
+    poller.project_reader = AsyncMock(return_value=project)
+    poller.ticket_reader = AsyncMock(return_value=ticket)
+    poller._writeback_fields = AsyncMock(return_value={
+        'repository_project': 'sample', 'repository_name': 'repo',
+        'repository_url': str(origin), 'source_branch': 'ticket-one',
+        'approved_sha': reviewed, 'target_branch': 'main',
+    })
+    poller._maybe_writeback = AsyncMock(side_effect=AssertionError('legacy PR path called'))
+    poller._delivery_tool = AsyncMock(side_effect=AssertionError('PR connector called'))
+    findings = []
+    written = asyncio.run(poller._writeback_pass(findings))
+    assert written == 1, findings[0].get('error_class') if findings else findings
+    assert poller.index.entries[entry_key]['status'] == 'delivered'
+    poller._maybe_writeback.assert_not_called()
+    poller._delivery_tool.assert_not_called()
