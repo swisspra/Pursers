@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import importlib.util
 import re
+import runpy
+from pursers_client.delivery_workflow import parse_delivery_workflow
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -55,6 +57,7 @@ class IntakeSourcePolicy:
     default_ticket_tier: int | None = None
     member_roles: Mapping[str, str] = field(default_factory=dict)
     discovery: Mapping[str, Any] | None = None
+    delivery_workflow: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +153,7 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             "default_ticket_tier",
             "member_roles",
             "discovery",
+            "delivery_workflow",
         }
         if (
             not isinstance(raw, Mapping)
@@ -238,6 +242,7 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             repositories=repositories,
             member_roles=dict(member_roles),
             discovery=discovery,
+            delivery_workflow=parse_delivery_workflow(raw.get("delivery_workflow")),
             default_ticket_tier=(
                 _bounded_int(
                     raw["default_ticket_tier"], f"{path}.default_ticket_tier", 1, 3
@@ -511,6 +516,23 @@ class ProjectOnboarder:
                         "work_dir_owner": "fleet",
                     }
                 )
+                configured_delivery = policy.delivery_workflow or registry.get("delivery_defaults")
+                if configured_delivery and configured_delivery.get("mode") == "integration":
+                    # Each source mapping supplies its own base; a default never guesses dev/main.
+                    configured_delivery = {**configured_delivery, "base_branch": resolution.integration_ref}
+                delivery = parse_delivery_workflow(configured_delivery)
+                if delivery and delivery["mode"] == "integration":
+                    settings = runpy.run_path(str(Path(__file__).resolve().parents[1] / "fleet-dashboard" / "delivery_settings.py"))
+                    refs = await asyncio.to_thread(settings["remote_branches"], entry)
+                    delivery_plan = settings["build_delivery_plan"](
+                        request={"action": "delivery", "name": item.project_hint, "delivery_workflow": delivery},
+                        registry={"projects": {item.project_hint: entry}}, registry_expected_sha256=digest,
+                        actor="board-butler", central="registry",
+                        observation={"complete": True, "active_tickets": [], "pending_offers": []}, refs=refs)
+                    if delivery_plan["blocked"]:
+                        raise ValueError("Delivery branches need project configuration before onboarding")
+                    await asyncio.to_thread(settings["prepare_delivery_branch"], delivery_plan)
+                    entry = delivery_plan["proposed_entry"]
                 await self.registry.add_project(
                     item.project_hint, entry, expected_sha256=digest
                 )

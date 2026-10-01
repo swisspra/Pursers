@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
+from .delivery_workflow import parse_delivery_workflow
+
 from .client import (
     GENERATION_META_KEY,
     BoardClient,
@@ -197,6 +199,8 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             normalized[name]["fleet"] = project["fleet"]
         if repository_url is not None:
             normalized[name]["repository_url"] = repository_url
+        if "delivery_workflow" in project:
+            normalized[name]["delivery_workflow"] = parse_delivery_workflow(project["delivery_workflow"])
         if "integration_ref" in project:
             ref = project["integration_ref"]
             if (
@@ -208,7 +212,13 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
                     "a non-empty, trimmed ref"
                 )
             normalized[name]["integration_ref"] = ref
-    return {"schema_version": PROJECT_REGISTRY_SCHEMA_VERSION, "projects": normalized}
+        policy = normalized[name].get("delivery_workflow")
+        if policy and policy["mode"] == "integration":
+            normalized[name]["integration_ref"] = policy["integration_branch"]
+    result = {"schema_version": PROJECT_REGISTRY_SCHEMA_VERSION, "projects": normalized}
+    if "delivery_defaults" in registry:
+        result["delivery_defaults"] = parse_delivery_workflow(registry["delivery_defaults"])
+    return result
 
 
 def resolve_registry_target(

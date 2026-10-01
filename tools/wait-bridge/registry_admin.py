@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from pursers_client import BoardClient, BoardClientError
+from pursers_client.delivery_workflow import parse_delivery_workflow
 
 
 CENTRAL_URL_DEFAULT = "http://127.0.0.1:8766/mcp"
@@ -83,15 +84,22 @@ def validate_registry(document: Any) -> dict[str, Any]:
     """Return a deep copy of a registry that exactly matches schema v1."""
     if not isinstance(document, dict):
         raise RegistryError("project_registry must be a JSON object")
-    if set(document) != {"schema_version", "projects"}:
+    if not {"schema_version", "projects"} <= set(document) or set(document) - {"schema_version", "projects", "delivery_defaults"}:
         raise RegistryError(
-            "project_registry must contain exactly schema_version and projects"
+            "project_registry must contain schema_version and projects, with optional delivery_defaults"
         )
     if type(document["schema_version"]) is not int or document["schema_version"] != 1:
         raise RegistryError("project_registry schema_version must be 1")
     projects = document["projects"]
     if not isinstance(projects, dict):
         raise RegistryError("project_registry projects must be an object")
+    document = copy.deepcopy(document)
+    projects = document["projects"]
+    if "delivery_defaults" in document:
+        try:
+            document["delivery_defaults"] = parse_delivery_workflow(document["delivery_defaults"])
+        except ValueError as exc:
+            raise RegistryError(str(exc)) from exc
 
     for name, entry in projects.items():
         _require_clean_string(name, "project name")
@@ -104,6 +112,7 @@ def validate_registry(document: Any) -> dict[str, Any]:
             "integration_ref",
             "domain",
             "public",
+            "delivery_workflow",
         }
         if (
             not isinstance(entry, dict)
@@ -156,6 +165,14 @@ def validate_registry(document: Any) -> dict[str, Any]:
             _require_repository_url(
                 entry["repository_url"], f"project {name!r} repository_url"
             )
+        if "delivery_workflow" in entry:
+            try:
+                policy = parse_delivery_workflow(entry["delivery_workflow"])
+            except ValueError as exc:
+                raise RegistryError(str(exc)) from exc
+            entry["delivery_workflow"] = policy
+            if policy and policy["mode"] == "integration":
+                entry["integration_ref"] = policy["integration_branch"]
 
     routes: dict[tuple[str, str], str] = {}
     for name, entry in projects.items():

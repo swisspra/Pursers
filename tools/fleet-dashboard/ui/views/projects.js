@@ -58,6 +58,7 @@
     const review = sumStates(counts, REVIEW_STATES);
     const open = numberCount(counts.open);
     const health = projectHealth(board);
+    const ready = (board.tickets || []).filter(ticket => ticket.delivery?.state === 'integration_merged').length;
     const truncation = board.snapshot_truncation;
     const limited = truncation && truncation.total > truncation.returned;
     const scope = limited
@@ -81,6 +82,7 @@
         <div><dt>In progress</dt><dd>${esc(active)}</dd></div>
         <div><dt>Review ready</dt><dd>${esc(review)}</dd></div>
       </dl>
+      ${ready ? `<p><b>${esc(ready)}</b> visible ticket${ready === 1 ? '' : 's'} ready for your team on the delivery branch.</p>` : ''}
       <div class="projects-board-detail">
         <div>
           <p class="projects-detail-label">All reported states</p>
@@ -165,8 +167,10 @@
     const warnings = (lifecyclePlan.warnings || []).map(item => `<li>${esc(item)}</li>`).join('');
     const preserved = (lifecyclePlan.preserved || []).map(item => `<li>${esc(item)}</li>`).join('');
     return `<section class="card projects-lifecycle-preview" aria-live="polite">
-      <div class="projects-lifecycle-head"><div><p class="projects-detail-label">Impact preview</p><h2>${lifecyclePlan.kind === 'project-remove' ? 'Remove from Fleet' : 'Add project'} · ${esc(lifecyclePlan.project)}</h2></div><span class="status ${lifecyclePlan.blocked ? 'danger' : 'ready'}">${lifecyclePlan.blocked ? 'Blocked' : 'Ready to confirm'}</span></div>
+      <div class="projects-lifecycle-head"><div><p class="projects-detail-label">Impact preview</p><h2>${lifecyclePlan.kind === 'project-remove' ? 'Remove from Fleet' : lifecyclePlan.kind === 'project-delivery' ? 'Configure delivery' : 'Add project'} · ${esc(lifecyclePlan.project)}</h2></div><span class="status ${lifecyclePlan.blocked ? 'danger' : 'ready'}">${lifecyclePlan.blocked ? 'Blocked' : 'Ready to confirm'}</span></div>
       <p class="meta">Plan expires ${esc(lifecyclePlan.expires_at)} · ${esc(lifecyclePlan.central)}</p>
+      ${lifecyclePlan.delivery_workflow ? `<p class="delivery-route">Read-only base <b>${esc(lifecyclePlan.delivery_workflow.base_branch)}</b> → ticket branches → <b>${esc(lifecyclePlan.delivery_workflow.integration_branch)}</b> → your team handles the final merge</p><p>Automatic integration: <b>${lifecyclePlan.delivery_workflow.auto_integrate ? 'enabled, subject to validation' : 'disabled'}</b>. Collection: <b>${lifecyclePlan.delivery_workflow.collection_paused ? 'paused' : 'open'}</b>.</p>` : ''}
+      ${lifecyclePlan.use_as_default ? '<p><b>This also sets the workflow default for newly onboarded repositories.</b></p>' : ''}
       <h3>Effects</h3><ol class="projects-operation-list">${operationList(lifecyclePlan)}</ol>
       ${blockers ? `<div class="error"><b>Resolve before apply</b><ul>${blockers}</ul></div>` : ''}
       ${warnings ? `<div class="warning"><b>Guardrails</b><ul>${warnings}</ul></div>` : ''}
@@ -187,6 +191,101 @@
       <p class="${lifecycleError ? 'error' : 'status ready'}">${esc(lifecycleError || `${lifecycleResult.kind} completed for ${lifecycleResult.project}.`)}</p>
       ${lifecycleResult?.preserved ? `<p class="muted">Preserved: ${esc(lifecycleResult.preserved.join('; '))}</p>` : ''}
     </section>`;
+  }
+
+  const deliveryRows = new Map();
+  const deliveryDrafts = new Map();
+  let deliveryCentral = '';
+  let deliveryProject = '';
+  let deliveryLoadError = '';
+  const deliveryLoading = new Set();
+
+  function deliveryEditor() {
+    const central = deliveryCentral || centralLabels[0];
+    const rows = deliveryRows.get(central) || [];
+    const selected = rows.find(row => row.name === deliveryProject) || rows[0];
+    const draft = deliveryDrafts.get(JSON.stringify([central, selected?.name]));
+    const policy = draft || selected?.delivery_workflow || {};
+    const integration = policy.integration_branch ?? 'pursers-integration';
+    const base = policy.base_branch ?? selected?.integration_ref ?? '';
+    return `<section class="card projects-delivery" id="project-delivery" aria-labelledby="delivery-title">
+      <div class="projects-lifecycle-head"><div><h2 id="delivery-title">Delivery workflow</h2><p>Start from the branch in your source mapping. Collect reviewed fixes on a separate delivery branch for your team.</p></div><span class="status">Your team owns the final merge</span></div>
+      ${deliveryLoadError ? `<p role="alert" class="error">${esc(deliveryLoadError)}</p>` : ''}
+      <form id="project-delivery-form" class="projects-lifecycle-form">
+        <label>Coordinator<select name="central">${centralLabels.map(label => `<option value="${esc(label)}" ${label === central ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+        <label>Repository project<select name="name" required>${rows.map(row => `<option value="${esc(row.name)}" ${row === selected ? 'selected' : ''}>${esc(row.name)}</option>`).join('') || '<option value="">Load registered repositories</option>'}</select></label>
+        <div class="projects-wide delivery-route" role="status" aria-live="polite">Mapped base <b data-route-base>${esc(base)}</b> → ticket branches → <b data-route-integration>${esc(integration)}</b> → hand off to your team</div>
+        <label>Delivery branch<input name="integration_branch" value="${esc(integration)}" maxlength="200" required><small>Pursers collects reviewed work here.</small></label>
+        <label>Mapped base branch<input name="base_branch" value="${esc(base)}" maxlength="200" required><small>Read only: Pursers never merges back into this branch.</small></label>
+        <label class="projects-check"><input name="auto_integrate" type="checkbox" ${policy.auto_integrate ? 'checked' : ''}> Automatically integrate approved ticket PRs after required validation passes</label>
+        <label class="projects-check"><input name="collection_paused" type="checkbox" ${policy.collection_paused ? 'checked' : ''}> Pause new integrations while your team checks the delivery branch</label>
+        <label class="projects-check"><input name="use_as_default" type="checkbox" ${draft?.use_as_default ? 'checked' : ''}> Use this workflow as the default for newly onboarded repositories</label>
+        <p class="projects-wide muted">If missing, the integration branch will be created from the verified mapped base commit. Existing PRs keep their targets. Source analysis and credentials stay configured separately.</p>
+        <details class="projects-wide"><summary>Readiness and access</summary><p>Connect the repository and source first. The dashboard host needs repository access to inspect and create the integration branch. Butler needs PR read/write tools and reliable validation checks. Unavailable or failed checks block automatic integration; the mapped base and environment branches are never merge targets.</p><p>After creating a project, configure its delivery here. Pause integration when handing off a stable branch to your team. Your team creates and completes its final merge.</p></details>
+        <div class="projects-wide card-actions"><button class="primary-action" type="submit" ${!selected?.repository_configured ? 'disabled' : ''}>Preview delivery changes</button><button class="button" type="button" data-delivery-refresh>Reload repositories</button></div>
+      </form>
+    </section>`;
+  }
+
+  async function loadDelivery(central, force = false) {
+    if (deliveryLoading.has(central) || (!force && deliveryRows.has(central))) return;
+    deliveryLoading.add(central);
+    try {
+      const response = await fetch(`/api/projects/delivery?central=${encodeURIComponent(central)}`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      deliveryRows.set(central, payload.projects || []);
+      deliveryLoadError = '';
+    } catch (error) {
+      deliveryRows.set(central, []);
+      deliveryLoadError = `Could not load delivery settings: ${error.message}. Use Reload repositories to retry.`;
+    } finally { deliveryLoading.delete(central); }
+    rerender();
+  }
+
+  function bindDelivery(root) {
+    const form = root.querySelector('#project-delivery-form');
+    if (!form) return;
+    const central = form.elements.central.value;
+    const draftKey = JSON.stringify([central, form.elements.name.value || undefined]);
+    const saveDraft = () => {
+      const fields = form.elements;
+      deliveryDrafts.set(draftKey, {
+        integration_branch: fields.integration_branch.value, base_branch: fields.base_branch.value,
+        auto_integrate: fields.auto_integrate.checked, collection_paused: fields.collection_paused.checked,
+        use_as_default: fields.use_as_default.checked,
+      });
+    };
+    for (const name of ['integration_branch', 'base_branch', 'auto_integrate', 'collection_paused', 'use_as_default']) {
+      form.elements[name].addEventListener('input', saveDraft);
+      form.elements[name].addEventListener('change', saveDraft);
+    }
+    loadDelivery(central);
+    form.elements.central.addEventListener('change', () => {
+      deliveryCentral = form.elements.central.value; deliveryProject = ''; rerender();
+    });
+    form.elements.name.addEventListener('change', () => { deliveryProject = form.elements.name.value; rerender(); });
+    for (const stage of ['integration', 'base']) {
+      form.elements[`${stage}_branch`].addEventListener('input', () => {
+        form.querySelector(`[data-route-${stage}]`).textContent = form.elements[`${stage}_branch`].value;
+      });
+    }
+    form.querySelector('[data-delivery-refresh]').addEventListener('click', () => loadDelivery(central, true));
+    form.addEventListener('submit', event => {
+      event.preventDefault();
+      const fields = form.elements;
+      const branches = ['integration_branch','base_branch'].map(key => fields[key].value.trim());
+      if (new Set(branches.map(branch => branch.toLowerCase())).size !== 2) {
+        fields.integration_branch.setCustomValidity('Delivery and mapped base must be different branches.');
+        fields.integration_branch.reportValidity();
+        fields.integration_branch.setCustomValidity('');
+        return;
+      }
+      requestPlan({action: 'delivery', name: fields.name.value, use_as_default: fields.use_as_default.checked, delivery_workflow: {
+        mode: 'integration', integration_branch: branches[0], base_branch: branches[1],
+        auto_integrate: fields.auto_integrate.checked, collection_paused: fields.collection_paused.checked,
+      }}, central);
+    });
   }
 
   function renderWarmProjects() {
@@ -214,7 +313,7 @@
       ? [...groups.entries()].map(([central, boards]) => centralGroup(central, boards)).join('')
       : emptyProjects();
 
-    return `${pageHead('Projects', 'Your project map', 'See which coordinator owns each board, where work is moving, and what needs attention.', action)}${warmTruthStrip()}${lifecycleOutcome()}${lifecyclePreview()}${addProjectForm()}${summary}<div class="projects-map">${content}</div>`;
+    return `${pageHead('Projects', 'Your project map', 'See which coordinator owns each board, where work is moving, and what needs attention.', action)}${warmTruthStrip()}${lifecycleOutcome()}${lifecyclePreview()}${deliveryEditor()}${addProjectForm()}${summary}<div class="projects-map">${content}</div>`;
   }
 
   async function postLifecycle(path, central, payload) {
@@ -259,6 +358,7 @@
   }
 
   function bindProjects(_context, root) {
+    bindDelivery(root);
     const addForm = root.querySelector('#project-lifecycle-form');
     if (addForm) {
       syncGitMode(addForm);
@@ -294,6 +394,8 @@
           plan_digest: plan.plan_digest,
           confirmation: event.currentTarget.elements.confirmation.value,
         });
+        deliveryRows.delete(plan.central);
+        deliveryDrafts.delete(JSON.stringify([plan.central, plan.project]));
         lifecyclePlan = null;
         lifecycleError = '';
         if (typeof refreshCentral === 'function') await refreshCentral(plan.central);

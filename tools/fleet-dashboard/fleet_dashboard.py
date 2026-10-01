@@ -79,6 +79,11 @@ from release_ops import ReleaseOpsManager
 import runtime_environment
 from warm_home import apply_warm_guided_home
 from result_visibility import project_ticket_result, project_delivery
+from delivery_settings import (
+    public_delivery_settings, build_delivery_plan, remote_branches,
+    prepare_delivery_branch, delivery_route_changed,
+)
+from pursers_client.delivery_workflow import delivery_stage
 from case_study import aggregate_case_studies
 from evidence_trace import CORRELATION_HEADERS, EvidenceTrace, EvidenceTraceConfigError
 from butler_settings import (
@@ -2679,7 +2684,7 @@ def _ticket_status_label(ticket: dict[str, Any], now: datetime) -> str:
     if delivery:
         labels = {"delivery_recorded": "Approved · delivery recorded", "pr_pending": "Approved · PR pending", "pr_created": "Approved · PR created",
                   "pr_blocked": "Approved · PR blocked", "pr_uncertain": "Approved · PR outcome unconfirmed"}
-        return labels[delivery["state"]]
+        return labels.get(delivery["state"], delivery_stage(delivery["state"]))
     lease = ticket.get("review_lease")
     expires = _parse_time(lease.get("expires_at")) if isinstance(lease, dict) else None
     if status in SUBMITTED_STATES and expires is not None and expires > now:
@@ -6990,18 +6995,56 @@ class FleetFetcher:
             else None,
         }
 
+    async def _delivery_observation(self, board_id: str) -> dict[str, Any]:
+        """Prove route quiescence from all non-terminal tickets, not history size."""
+        try:
+            async with self._client(board_id) as client:
+                page = await client.ticket_list(include_closed=False, limit=500, view="work")
+        except Exception:
+            return {"complete": False, "active_tickets": [], "pending_offers": []}
+        rows = page.get("tickets") if isinstance(page, dict) else None
+        total = page.get("total_matching") if isinstance(page, dict) else None
+        complete = (isinstance(rows, list) and type(total) is int
+                    and total == len(rows) and page.get("count") == total
+                    and not page.get("truncated")
+                    and all(isinstance(row, dict) and isinstance(row.get("ticket_id"), str)
+                            and isinstance(row.get("status"), str) for row in rows))
+        rows = rows if isinstance(rows, list) else []
+        active_states = {"claimed", "in_progress", "creating_report", "submitted", "reviewing", "in_review"}
+        active = [{"ticket_id": row["ticket_id"], "status": row["status"]}
+                  for row in rows if isinstance(row, dict) and row.get("status") in active_states
+                  and isinstance(row.get("ticket_id"), str)]
+        offers = [{"ticket_id": row.get("ticket_id"), "status": row.get("status")}
+                  for row in rows if isinstance(row, dict) and isinstance(row.get("dispatch_state"), dict)
+                  and row["dispatch_state"].get("state") == "offered"]
+        return {"complete": complete, "active_tickets": active[:50], "pending_offers": offers[:50],
+                "ticket_count": len(rows)}
+
     async def build_project_lifecycle_plan(
         self, request: Mapping[str, Any]
     ) -> dict[str, Any]:
         """Build a read-only, permission-checked add or remove preview."""
         action = request.get("action")
-        if action not in {"add", "remove"}:
-            raise ProjectLifecycleError("action must be add or remove")
+        if action not in {"add", "remove", "delivery"}:
+            raise ProjectLifecycleError("action must be add, remove or delivery")
         await self._require_board_admin(self.config.home_board)
         registry_payload = await self.fetch_project_registry()
         registry = registry_payload["registry"]
         central = str(getattr(self.config, "label", "default"))
         actor = self.config.agent_name
+
+        if action == "delivery":
+            entry = registry.get("projects", {}).get(request.get("name"))
+            if not isinstance(entry, dict):
+                raise ProjectLifecycleError("project is not registered")
+            await self._require_board_admin(entry["board_id"])
+            observation = await self._delivery_observation(entry["board_id"])
+            refs = await asyncio.to_thread(remote_branches, entry)
+            return build_delivery_plan(
+                request=request, registry=registry,
+                registry_expected_sha256=registry_payload["expected_sha256"],
+                actor=actor, central=central, observation=observation, refs=refs,
+            )
 
         if action == "add":
             allowed = {
@@ -7071,6 +7114,21 @@ class FleetFetcher:
             raise ProjectLifecycleConflictError(
                 "project registry changed after preview; create a new plan"
             )
+
+        if plan.get("kind") == "project-delivery":
+            await self._require_board_admin(str(plan["board_id"]))
+            observed = await self._delivery_observation(str(plan["board_id"]))
+            if not observed.get("complete") or (delivery_route_changed(plan["existing_entry"], plan["proposed_entry"])
+                    and (observed.get("active_tickets") or observed.get("pending_offers"))):
+                raise ProjectLifecycleConflictError("Active work changed; refresh the delivery plan")
+            await asyncio.to_thread(prepare_delivery_branch, plan)
+            registry = copy.deepcopy(registry_payload["registry"])
+            registry["projects"][plan["project"]] = copy.deepcopy(plan["proposed_entry"])
+            if plan.get("use_as_default"):
+                registry["delivery_defaults"] = copy.deepcopy(plan["delivery_workflow"])
+            await self.save_project_registry(registry, registry_payload["expected_sha256"])
+            return {"ok": True, "kind": "project-delivery", "project": plan["project"],
+                    "preserved": plan["preserved"]}
 
         if plan.get("kind") == "project-add":
             source = plan.get("source")
@@ -9188,6 +9246,11 @@ class DashboardCache:
         stored = self.project_lifecycle.add(plan)
         return self._labeled(public_project_lifecycle_plan(stored), label)
 
+    def get_project_delivery_settings(self, central: str | None = None) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        payload = self._async_runner.run(self.fetchers[label].fetch_project_registry())
+        return self._labeled({"projects": public_delivery_settings(payload["registry"])}, label)
+
     def get_project_lifecycle_plan(
         self, plan_id: str, central: str | None = None
     ) -> dict[str, Any]:
@@ -9742,6 +9805,14 @@ def make_handler(
                         _api_exception_payload(route, label, central_url, exc)
                     )
                     self._send(503, "application/json; charset=utf-8", body)
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
+            if route == "/api/projects/delivery":
+                try:
+                    body = _json_bytes(cache_call("get_project_delivery_settings", central=central))
+                except Exception as exc:
+                    self._send(503, "application/json; charset=utf-8", _json_bytes({"error": type(exc).__name__}))
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return

@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Guided per-repository delivery settings in Projects, linked from Settings. Create
+  a dedicated delivery branch from the exact mapped base, preserve source mappings,
+  and configure defaults for future onboarding with guarded preview and CAS apply.
+- Deterministic, exact-SHA integration of approved ticket PRs into the configured
+  delivery branch, with durable completion attempts and truthful Work/ticket status.
+  The mapped base and environment branches remain human-owned; unavailable connector
+  validation blocks integration. See [delivery setup](docs/integration-delivery.md).
+
 ### Fixed
 
 - Add explicit `test_output` to Central and client submission tools and

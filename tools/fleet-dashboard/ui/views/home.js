@@ -97,6 +97,7 @@
     const blocked = tickets.filter(item => item.ticket.status === 'needs_human' || item.ticket.parked === true).length;
     const submitted = tickets.filter(item => item.ticket.status === 'submitted').length;
     const open = tickets.filter(item => item.ticket.status === 'open').length;
+    const readyForTeam = tickets.filter(item => item.ticket.delivery?.state === 'integration_merged').length;
     const attention = humanPending + operationalAttention.length;
     const pressure = attention || blocked ? 'high' : 'calm';
 
@@ -111,6 +112,7 @@
         <dl class="home-stats"><div><dt>In progress</dt><dd>${esc(working)}</dd></div><div class="${blocked ? 'is-alert' : ''}"><dt>Blocked</dt><dd>${esc(blocked)}</dd></div><div><dt>Review ready</dt><dd>${esc(submitted)}</dd></div><div><dt>Open queue</dt><dd>${esc(open)}</dd></div></dl>
         <div class="home-health-list" aria-label="Central health">${centralLabels.map(renderHealthRow).join('')}</div>
       </aside></section>
+      ${readyForTeam ? `<section class="home-human-queue"><h3>Ready for your team</h3><p>${esc(readyForTeam)} visible ticket${readyForTeam === 1 ? '' : 's'} confirmed on the delivery branch. Your team handles the final merge.</p><a href="#/work">Inspect delivered work</a></section>` : ''}
       ${renderOperationalAttention(operationalAttention)}
       ${humanPending ? `<section class="home-human-queue" aria-label="Human decision queue">${renderWaitingForYou()}</section>` : ''}`;
   }
