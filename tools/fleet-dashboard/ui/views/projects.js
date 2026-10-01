@@ -213,10 +213,12 @@
     const trigger = policy.release_trigger || {kind: 'ready'};
     const validation = policy.validation || {};
     const runtime = selected?.delivery_runtime || {ready: true, blockers: []};
+    const active = selected?.delivery_policy_active === true;
+    const runtimeLabel = !runtime.ready ? 'Draft only' : active ? 'Active' : 'Ready to activate';
     const provenance = selected?.delivery_policy_provenance || {};
     const group = draft?.delivery_policy_group ?? selected?.delivery_policy_group ?? '';
     return `<section class="card projects-delivery" id="project-delivery" aria-labelledby="delivery-title">
-      <div class="projects-lifecycle-head"><div><h2 id="delivery-title">Delivery policy</h2><p>Choose how reviewed work is handed off. Your team owns the final merge. Unsupported runtime choices remain drafts and never fall back silently.</p></div><span class="status ${runtime.ready ? 'ready' : 'warning'}">${runtime.ready ? 'Runtime ready' : 'Draft only'}</span></div>
+      <div class="projects-lifecycle-head"><div><h2 id="delivery-title">Delivery policy</h2><p>Choose how reviewed work is handed off. Your team owns the final merge. Unsupported runtime choices remain drafts and never fall back silently.</p></div><span class="status ${runtime.ready ? 'ready' : 'warning'}">${runtimeLabel}</span></div>
       ${deliveryLoadError ? `<p role="alert" class="error">${esc(deliveryLoadError)}</p>` : ''}
       <form id="project-delivery-form" class="projects-lifecycle-form">
         <label>Coordinator<select name="central">${centralLabels.map(label => `<option value="${esc(label)}" ${label === central ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label>

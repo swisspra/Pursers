@@ -42,6 +42,42 @@ def test_registry_parser_active_boards_and_work_dirs() -> None:
     assert registry_work_dirs(parsed)["fullplatts"] == "/repo/other"
 
 
+def test_registry_parser_preserves_valid_delivery_activation() -> None:
+    activation = {
+        "schema_version": 1,
+        "state": "active",
+        "policy_revision": "a" * 40,
+        "activation_id": "policy:" + "a" * 40,
+    }
+    parsed = parse_project_registry(state({
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "alpha",
+                "work_dir": "/repo/alpha",
+                "status": "active",
+                "delivery_policy_activation": activation,
+            },
+        },
+    }))
+    assert parsed["projects"]["alpha"]["delivery_policy_activation"] == activation
+
+
+def test_registry_parser_rejects_malformed_delivery_activation() -> None:
+    with pytest.raises(ValueError, match="delivery_policy_activation"):
+        parse_project_registry(state({
+            "schema_version": 1,
+            "projects": {
+                "alpha": {
+                    "board_id": "alpha",
+                    "work_dir": "/repo/alpha",
+                    "status": "active",
+                    "delivery_policy_activation": {"state": "active"},
+                },
+            },
+        }))
+
+
 def test_registry_routes_seats_to_fleet_clone_and_retains_operator_checkout() -> None:
     parsed = parse_project_registry(state({
         "schema_version": 1,

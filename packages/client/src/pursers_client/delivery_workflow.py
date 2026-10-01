@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+import hashlib
+import json
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -30,6 +32,8 @@ DELIVERY_POLICY_PRESETS: dict[str, dict[str, Any]] = {
 }
 _CRON_FIELD_RE = re.compile(r'[0-9*/?,\-]+')
 _GROUP_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}')
+_POLICY_REVISION_RE = re.compile(r'[0-9a-f]{40}')
+_ACTIVATION_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}')
 
 
 def branch_name(value: Any, field: str = 'branch') -> str:
@@ -234,28 +238,87 @@ def _validate_effective_policy(policy: Mapping[str, Any]) -> None:
         raise ValueError('per_ticket_pr final_pr_target must equal mapped_base')
 
 
-def delivery_runtime_readiness(policy: Mapping[str, Any]) -> dict[str, Any]:
+def delivery_policy_revision(policy: Mapping[str, Any]) -> str:
+    """Return the resident runtime's stable revision for one effective policy."""
+    parsed = parse_delivery_policy(policy, partial=False)
+    assert parsed is not None
+    payload = json.dumps(
+        parsed, sort_keys=True, separators=(',', ':'), ensure_ascii=False
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()[:40]
+
+
+def parse_delivery_policy_activation(value: Any) -> dict[str, Any] | None:
+    """Validate an explicit activation record without requiring it to be current."""
+    if value is None:
+        return None
+    required = {'schema_version', 'state', 'policy_revision', 'activation_id'}
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise ValueError('delivery_policy_activation contains unsupported or missing fields')
+    if value.get('schema_version') != 1 or value.get('state') != 'active':
+        raise ValueError('delivery_policy_activation must be an active schema_version 1 record')
+    revision = value.get('policy_revision')
+    if not isinstance(revision, str) or _POLICY_REVISION_RE.fullmatch(revision) is None:
+        raise ValueError('delivery_policy_activation.policy_revision must be 40 lowercase hex characters')
+    activation_id = value.get('activation_id')
+    if not isinstance(activation_id, str) or _ACTIVATION_ID_RE.fullmatch(activation_id) is None:
+        raise ValueError('delivery_policy_activation.activation_id is invalid')
+    return {
+        'schema_version': 1,
+        'state': 'active',
+        'policy_revision': revision,
+        'activation_id': activation_id,
+    }
+
+
+def activate_delivery_policy(policy: Mapping[str, Any]) -> dict[str, Any]:
+    """Create the deterministic record used by preview/apply and resident readers."""
+    revision = delivery_policy_revision(policy)
+    return {
+        'schema_version': 1,
+        'state': 'active',
+        'policy_revision': revision,
+        'activation_id': f'policy:{revision}',
+    }
+
+
+def delivery_runtime_readiness(
+    policy: Mapping[str, Any], project: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """Describe exact deployed support. Unsupported settings remain configuration drafts."""
     blockers: list[str] = []
-    if policy['mode'] == 'batch_pr':
-        blockers.append('batch_pr runtime is not installed')
-    if policy['mode'] == 'branch_only':
-        blockers.append('branch_only runtime is not installed; legacy integration still creates per-ticket PRs')
-    if policy['release_trigger']['kind'] != 'ready':
-        blockers.append(f'{policy["release_trigger"]["kind"]} release trigger is not installed')
-    if policy['pr_update'] != 'rolling':
-        blockers.append('freeze_on_ready PR updates are not installed')
-    if policy['snapshot_branch_prefix'] != 'codex':
-        blockers.append('custom snapshot branch prefixes are not installed')
+    mode = policy['mode']
+    if mode in {'batch_pr', 'branch_only'}:
+        if project is not None:
+            clone = project.get('fleet_clone_dir')
+            if clone is None and project.get('work_dir_owner') == 'fleet':
+                clone = project.get('work_dir')
+            if not isinstance(project.get('repository_url'), str):
+                blockers.append(f'{mode} requires a mapped repository')
+            if not isinstance(clone, str):
+                blockers.append(f'{mode} requires a fleet-owned clone')
+        if policy['release_trigger']['kind'] != 'ready':
+            blockers.append(
+                f'{policy["release_trigger"]["kind"]} resident release path is not installed'
+            )
+        if mode == 'branch_only' and policy['pr_update'] != 'freeze_on_ready':
+            blockers.append('branch_only requires freeze_on_ready snapshots')
+    else:
+        if policy['release_trigger']['kind'] != 'ready':
+            blockers.append(f'{policy["release_trigger"]["kind"]} release trigger is not installed')
+        if policy['pr_update'] != 'rolling':
+            blockers.append('freeze_on_ready PR updates are not installed')
+        if policy['snapshot_branch_prefix'] != 'codex':
+            blockers.append('custom snapshot branch prefixes are not installed')
     validation = policy['validation']
-    if validation['test_commands']:
+    if mode == 'per_ticket_pr' and validation['test_commands']:
         blockers.append('custom validation test commands are not installed')
     if validation['required_reviewers'] != 1:
         blockers.append('multiple required reviewers are not installed')
     if policy['conflict_policy'] != 'pause':
         blockers.append('automatic conflict repair is not installed')
     return {'ready': not blockers, 'blockers': blockers,
-            'supported_modes': ['per_ticket_pr'],
+            'supported_modes': ['per_ticket_pr', 'batch_pr', 'branch_only'],
             'supported_release_triggers': ['ready']}
 
 
@@ -283,7 +346,7 @@ def resolve_delivery_policy(registry: Mapping[str, Any], project_name: str) -> d
     effective = parse_delivery_policy(effective, partial=False) or {}
     return {'policy': effective, 'provenance': provenance, 'group': group,
             'overrides': parse_delivery_policy(project.get('delivery_policy'), partial=True) or {},
-            'runtime': delivery_runtime_readiness(effective)}
+            'runtime': delivery_runtime_readiness(effective, project)}
 
 
 def compile_delivery_workflow(policy: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
@@ -292,6 +355,8 @@ def compile_delivery_workflow(policy: Mapping[str, Any]) -> tuple[dict[str, Any]
     readiness = delivery_runtime_readiness(parsed)
     if not readiness['ready']:
         raise ValueError('delivery policy is configuration-only: ' + '; '.join(readiness['blockers']))
+    if parsed['mode'] != 'per_ticket_pr':
+        raise ValueError('batch delivery activates through delivery_policy_activation')
     return {'mode': 'direct'}, parsed['mapped_base']
 
 

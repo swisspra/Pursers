@@ -38,7 +38,13 @@ compiled `policy_revision`. No activation record preserves the legacy delivery p
 a stale or malformed activation fails closed. Deploying new runtime capability alone
 therefore never changes routing or PR behavior for an existing saved draft.
 
-The supported triggers are:
+The dashboard creates that record deterministically from the canonical effective
+policy during an authorized repository-level apply. Project-registry client parsing,
+admin validation, doctor inspection and the resident nested Central-state reader all
+preserve the same record. Shared-default edits retain the old record rather than
+silently authorizing a new route; its revision mismatch blocks resident collection.
+
+The batch core implements these triggers:
 
 - `ready`: collect all reviewed members seen in one deterministic Butler writeback
   cycle, then release only with an explicit cohort ID and the exact member set. A
@@ -51,6 +57,10 @@ The supported triggers are:
   which prevents restart catch-up storms.
 
 There is no issue-count trigger.
+
+The current resident Butler advertises and activates only `ready`. Manual and
+scheduled policies remain drafts until an authorized lifecycle request and resident
+scheduler call the core with their required idempotency evidence.
 
 ## Durable state and recovery
 

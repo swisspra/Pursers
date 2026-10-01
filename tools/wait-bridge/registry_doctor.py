@@ -21,6 +21,7 @@ from pursers_client import BoardClient
 from pursers_client.delivery_workflow import (
     delivery_group_name,
     delivery_target,
+    parse_delivery_policy_activation,
     parse_delivery_policy,
     parse_delivery_workflow,
     resolve_delivery_policy,
@@ -266,6 +267,7 @@ def parse_registry(result: Any) -> dict[str, Any]:
         "delivery_workflow",
         "delivery_policy",
         "delivery_policy_group",
+        "delivery_policy_activation",
         "domain",
     }
     for name, raw in projects.items():
@@ -345,6 +347,13 @@ def parse_registry(result: Any) -> dict[str, Any]:
         if "delivery_policy_group" in raw:
             try:
                 normalized["projects"][name]["delivery_policy_group"] = delivery_group_name(raw["delivery_policy_group"])
+            except ValueError as exc:
+                raise DoctorError(str(exc)) from exc
+        if "delivery_policy_activation" in raw:
+            try:
+                normalized["projects"][name]["delivery_policy_activation"] = parse_delivery_policy_activation(
+                    raw["delivery_policy_activation"]
+                )
             except ValueError as exc:
                 raise DoctorError(str(exc)) from exc
     for name, entry in normalized["projects"].items():

@@ -1,10 +1,13 @@
 import pytest
 from pursers_client.delivery_workflow import (
+    activate_delivery_policy,
     compile_delivery_workflow,
+    delivery_policy_revision,
     delivery_runtime_readiness,
     delivery_target,
     delivery_stage,
     parse_delivery_policy,
+    parse_delivery_policy_activation,
     parse_delivery_workflow,
     resolve_delivery_policy,
 )
@@ -105,16 +108,29 @@ def test_runtime_gating_compiles_only_deployed_modes_without_fallback():
     batch = {**per_ticket, 'mode': 'batch_pr', 'release_trigger': {'kind': 'manual'}}
     readiness = delivery_runtime_readiness(batch)
     assert not readiness['ready']
-    assert any('batch_pr' in item for item in readiness['blockers'])
+    assert any('manual resident release path' in item for item in readiness['blockers'])
     with pytest.raises(ValueError, match='configuration-only'):
         compile_delivery_workflow(batch)
-    branch_only = {**per_ticket, 'mode': 'branch_only', 'final_pr_target': None}
+    branch_only = {**per_ticket, 'mode': 'branch_only', 'final_pr_target': None,
+                   'pr_update': 'freeze_on_ready'}
     readiness = delivery_runtime_readiness(branch_only)
-    assert not readiness['ready']
-    assert any('legacy integration still creates per-ticket PRs' in item
-               for item in readiness['blockers'])
-    with pytest.raises(ValueError, match='configuration-only'):
+    assert readiness['ready']
+    with pytest.raises(ValueError, match='delivery_policy_activation'):
         compile_delivery_workflow(branch_only)
+
+
+def test_delivery_policy_activation_is_deterministic_bounded_and_explicit():
+    policy = resolve_delivery_policy(
+        {'projects': {'api': {'integration_ref': 'main'}}}, 'api'
+    )['policy']
+    record = activate_delivery_policy(policy)
+    assert record == parse_delivery_policy_activation(record)
+    assert record['policy_revision'] == delivery_policy_revision(policy)
+    assert activate_delivery_policy(policy) == record
+    with pytest.raises(ValueError, match='policy_revision'):
+        parse_delivery_policy_activation({**record, 'policy_revision': 'ABC'})
+    with pytest.raises(ValueError, match='unsupported or missing'):
+        parse_delivery_policy_activation({**record, 'extra': True})
 
 
 def test_existing_integration_workflow_projects_as_branch_only_until_migrated():

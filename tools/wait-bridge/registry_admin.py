@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from pursers_client import BoardClient, BoardClientError
 from pursers_client.delivery_workflow import (
     delivery_group_name,
+    parse_delivery_policy_activation,
     parse_delivery_policy,
     parse_delivery_workflow,
     resolve_delivery_policy,
@@ -137,6 +138,7 @@ def validate_registry(document: Any) -> dict[str, Any]:
             "delivery_workflow",
             "delivery_policy",
             "delivery_policy_group",
+            "delivery_policy_activation",
         }
         if (
             not isinstance(entry, dict)
@@ -205,6 +207,13 @@ def validate_registry(document: Any) -> dict[str, Any]:
         if "delivery_policy_group" in entry:
             try:
                 entry["delivery_policy_group"] = delivery_group_name(entry["delivery_policy_group"])
+            except ValueError as exc:
+                raise RegistryError(str(exc)) from exc
+        if "delivery_policy_activation" in entry:
+            try:
+                entry["delivery_policy_activation"] = parse_delivery_policy_activation(
+                    entry["delivery_policy_activation"]
+                )
             except ValueError as exc:
                 raise RegistryError(str(exc)) from exc
 

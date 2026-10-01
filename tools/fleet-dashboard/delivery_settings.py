@@ -6,8 +6,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 from pursers_client.delivery_workflow import (
+    activate_delivery_policy,
     compile_delivery_workflow,
+    delivery_policy_revision,
     delivery_group_name,
+    parse_delivery_policy_activation,
     parse_delivery_policy,
     parse_delivery_workflow,
     resolve_delivery_policy,
@@ -26,22 +29,36 @@ def public_delivery_settings(registry: Mapping[str, Any]) -> list[dict[str, Any]
     groups = sorted((registry.get('delivery_policy_groups') or {}).keys())
     for name, row in sorted(registry['projects'].items()):
         resolved = resolve_delivery_policy(registry, name)
+        activation = parse_delivery_policy_activation(row.get('delivery_policy_activation'))
+        policy = resolved['policy']
+        legacy = parse_delivery_workflow(row.get('delivery_workflow'))
+        active = (
+            policy['mode'] == 'per_ticket_pr'
+            and (legacy is None or legacy['mode'] == 'direct')
+            and row.get('integration_ref', 'main') == policy['mapped_base']
+        ) or bool(
+            activation
+            and activation['policy_revision'] == delivery_policy_revision(policy)
+        )
         rows.append({'name': name, 'board_id': row['board_id'], 'status': row['status'],
                      'integration_ref': row.get('integration_ref', 'main'),
                      'repository_configured': bool(row.get('repository_url')),
                      'delivery_workflow': parse_delivery_workflow(row.get('delivery_workflow')) or {'mode': 'direct'},
-                     'delivery_policy': resolved['policy'],
+                     'delivery_policy': policy,
                      'delivery_policy_overrides': resolved['overrides'],
                      'delivery_policy_group': resolved['group'],
                      'delivery_policy_provenance': resolved['provenance'],
                      'delivery_runtime': resolved['runtime'],
+                     'delivery_policy_activation': activation,
+                     'delivery_policy_active': active,
                      'delivery_policy_groups': groups})
     return rows
 
 
 def remote_branches(entry: Mapping[str, Any], runner=subprocess.run) -> dict[str, str]:
     repo = entry.get('fleet_clone_dir') or entry['work_dir']
-    result = runner(['git', '-C', repo, 'remote', 'get-url', 'origin'], capture_output=True, text=True, timeout=30)
+    # Read the configured identity, not Git's insteadOf-expanded transport URL.
+    result = runner(['git', '-C', repo, 'config', '--get', 'remote.origin.url'], capture_output=True, text=True, timeout=30)
     if result.returncode or result.stdout.strip() != entry.get('repository_url'):
         raise ValueError('Repository checkout origin does not match the registered repository')
     result = runner(['git', '-C', repo, 'ls-remote', '--heads', 'origin'], capture_output=True, text=True, timeout=30)
@@ -109,10 +126,14 @@ def _policy_branch_plan(policy, existing, refs):
         selected = policy.get(field)
         if selected is not None and selected not in refs:
             blockers.append(f'{field.replace("_", " ").title()} was not found on the registered remote')
-    if policy['mode'] == 'branch_only':
+    if policy['mode'] in {'batch_pr', 'branch_only'}:
         branch = policy['integration_branch']
-        previous = (existing.get('delivery_workflow') or {}).get('integration_branch')
-        if branch in refs and previous != branch:
+        activation = parse_delivery_policy_activation(existing.get('delivery_policy_activation'))
+        branch_is_owned = bool(
+            activation
+            and activation['policy_revision'] == delivery_policy_revision(policy)
+        )
+        if branch in refs and not branch_is_owned:
             blockers.append('Delivery branch already exists outside this project policy; choose a new branch name')
         folded = branch.casefold()
         if any(name != branch and (name.casefold() == folded
@@ -191,12 +212,20 @@ def _build_policy_plan(*, request, registry, registry_expected_sha256, actor, ce
         runtime = effects[0]['runtime']
         blockers.extend(runtime['blockers'])
         if runtime['ready']:
-            workflow, integration_ref = compile_delivery_workflow(policy)
             proposed = copy.deepcopy(dict(existing))
-            proposed['delivery_workflow'] = workflow
-            proposed['integration_ref'] = integration_ref
+            if policy['mode'] == 'per_ticket_pr':
+                workflow, integration_ref = compile_delivery_workflow(policy)
+                proposed['delivery_workflow'] = workflow
+                proposed['integration_ref'] = integration_ref
+                proposed.pop('delivery_policy_activation', None)
+            else:
+                proposed['delivery_policy_activation'] = activate_delivery_policy(policy)
             registry_after['projects'][str(name)] = proposed
-            routing_changed = delivery_route_changed(registry['projects'][str(name)], proposed)
+            routing_changed = (
+                delivery_route_changed(registry['projects'][str(name)], proposed)
+                or registry['projects'][str(name)].get('delivery_policy_activation')
+                != proposed.get('delivery_policy_activation')
+            )
             branch_blockers, create = _policy_branch_plan(policy, registry['projects'][str(name)], refs)
             blockers.extend(branch_blockers)
     if scope == 'repository':
@@ -210,6 +239,7 @@ def _build_policy_plan(*, request, registry, registry_expected_sha256, actor, ce
             'expires_at': (now + timedelta(minutes=10)).isoformat(), 'actor': actor,
             'central': central, 'project': label, 'board_id': existing.get('board_id') if isinstance(existing, Mapping) else None,
             'scope': scope, 'activate': activate, 'registry_expected_sha256': registry_expected_sha256,
+            'routing_changed': routing_changed,
             'existing_entry': copy.deepcopy(dict(registry['projects'][str(name)])) if scope == 'repository' else None,
             'proposed_entry': proposed, 'proposed_registry': registry_after,
             'delivery_policy': policy, 'affected_projects': effects, 'create_branch': create,

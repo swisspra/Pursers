@@ -15,6 +15,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from .delivery_workflow import (
     delivery_group_name,
+    parse_delivery_policy_activation,
     parse_delivery_policy,
     parse_delivery_workflow,
     resolve_delivery_policy,
@@ -210,6 +211,10 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             normalized[name]["delivery_policy"] = parse_delivery_policy(project["delivery_policy"])
         if "delivery_policy_group" in project:
             normalized[name]["delivery_policy_group"] = delivery_group_name(project["delivery_policy_group"])
+        if "delivery_policy_activation" in project:
+            normalized[name]["delivery_policy_activation"] = parse_delivery_policy_activation(
+                project["delivery_policy_activation"]
+            )
         if "integration_ref" in project:
             ref = project["integration_ref"]
             if (

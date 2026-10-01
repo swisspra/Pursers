@@ -157,8 +157,92 @@ def test_new_batch_policy_is_saved_as_draft_and_activation_fails_closed():
     assert draft['affected_projects'][0]['runtime']['ready'] is False
     activated = m.build_delivery_plan(request={**request, 'activate': True}, **kwargs)
     assert activated['blocked']
-    assert any('batch_pr runtime' in blocker for blocker in activated['blockers'])
+    assert any('manual resident release path' in blocker for blocker in activated['blockers'])
     assert activated['proposed_registry']['projects']['sample']['integration_ref'] == 'dev'
+
+
+def test_ready_batch_activation_writes_revision_bound_record_and_owned_branch():
+    original = registry()
+    original['projects']['sample'].update(
+        work_dir_owner='fleet', fleet_clone_dir='/PATH/TO/fleet-clone'
+    )
+    policy = {
+        'mode': 'batch_pr', 'mapped_base': 'dev',
+        'integration_branch': 'pursers-integration',
+        'snapshot_branch_prefix': 'pursers/delivery', 'final_pr_target': 'prd',
+        'release_trigger': {'kind': 'ready'}, 'pr_update': 'freeze_on_ready',
+        'auto_integrate': False, 'final_merge': 'manual',
+        'validation': {'test_commands': ['pytest -q'], 'required_reviewers': 1,
+                       'independent_review': True, 'require_upstream_policies': True},
+        'conflict_policy': 'pause', 'collection_paused': False,
+    }
+    plan = m.build_delivery_plan(
+        request={'action': 'delivery', 'scope': 'repository', 'name': 'sample',
+                 'delivery_policy': policy, 'activate': True},
+        registry=original, registry_expected_sha256='a' * 64, actor='operator',
+        central='default',
+        observation={'complete': True, 'active_tickets': [], 'pending_offers': []},
+        refs={'dev': 'a' * 40, 'prd': 'b' * 40},
+    )
+    assert not plan['blocked']
+    assert plan['create_branch'] == {
+        'name': 'pursers-integration', 'base_sha': 'a' * 40
+    }
+    activation = plan['proposed_registry']['projects']['sample'][
+        'delivery_policy_activation'
+    ]
+    assert activation == m.activate_delivery_policy(plan['delivery_policy'])
+    assert plan['proposed_registry']['projects']['sample']['integration_ref'] == 'dev'
+    assert plan['proposed_registry']['projects']['sample'].get('delivery_workflow') is None
+
+
+def test_draft_and_shared_changes_do_not_refresh_existing_activation():
+    original = registry()
+    original['projects']['sample'].update(
+        work_dir_owner='fleet', fleet_clone_dir='/PATH/TO/fleet-clone'
+    )
+    effective = m.resolve_delivery_policy(original, 'sample')['policy']
+    activation = m.activate_delivery_policy(effective)
+    original['projects']['sample']['delivery_policy_activation'] = activation
+    plan = m.build_delivery_plan(
+        request={'action': 'delivery', 'scope': 'global',
+                 'delivery_policy': {'validation': {'test_commands': ['pytest -q']}}},
+        registry=original, registry_expected_sha256='a' * 64, actor='operator',
+        central='default', observation={}, refs={},
+    )
+    assert not plan['blocked']
+    assert plan['proposed_registry']['projects']['sample'][
+        'delivery_policy_activation'
+    ] == activation
+    changed = plan['affected_projects'][0]['after']
+    assert m.delivery_policy_revision(changed) != activation['policy_revision']
+
+
+def test_public_settings_distinguish_active_stale_and_ready_drafts():
+    original = registry()
+    original['projects']['sample'].update(
+        work_dir_owner='fleet', fleet_clone_dir='/PATH/TO/fleet-clone',
+        delivery_policy={
+            'mode': 'batch_pr', 'mapped_base': 'dev',
+            'integration_branch': 'pursers-integration',
+            'snapshot_branch_prefix': 'pursers/delivery',
+            'final_pr_target': 'prd', 'release_trigger': {'kind': 'ready'},
+            'pr_update': 'freeze_on_ready', 'auto_integrate': False,
+            'final_merge': 'manual',
+            'validation': {'test_commands': [], 'required_reviewers': 1,
+                           'independent_review': True, 'require_upstream_policies': True},
+            'conflict_policy': 'pause', 'collection_paused': False,
+        },
+    )
+    row = m.public_delivery_settings(original)[0]
+    assert row['delivery_runtime']['ready'] is True
+    assert row['delivery_policy_active'] is False
+    original['projects']['sample']['delivery_policy_activation'] = m.activate_delivery_policy(
+        row['delivery_policy']
+    )
+    assert m.public_delivery_settings(original)[0]['delivery_policy_active'] is True
+    original['delivery_policy_defaults'] = {'validation': {'test_commands': ['pytest -q']}}
+    assert m.public_delivery_settings(original)[0]['delivery_policy_active'] is False
 
 
 def test_repository_reset_to_inherit_removes_only_repository_override():

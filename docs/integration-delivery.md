@@ -124,20 +124,32 @@ Projects without a policy retain direct-delivery behavior until explicitly migra
 
 ### Runtime capability gate
 
-The schema intentionally describes more policy than the current runtime executes.
-Today only `per_ticket_pr` with the `ready` trigger, rolling updates, the `codex`
-snapshot prefix, one independent reviewer, no custom test-command list, and `pause`
-conflict handling can be activated. `branch_only`, `batch_pr`, manual/scheduled release,
-`freeze_on_ready`, custom snapshot prefixes, custom test commands, multiple required
-reviewers, and `repair_then_review` remain visible configuration drafts until their
-runtime follow-up lands. The dashboard labels those combinations **Draft only** and
-activation fails closed; it never substitutes per-ticket PR behavior.
+The schema intentionally describes more policy than the resident path executes.
+`per_ticket_pr` remains the legacy route. `batch_pr` and `branch_only` can be
+activated with the `ready` trigger when the project has an exact repository mapping,
+a fleet-owned clone, one independent reviewer, and `pause` conflict handling.
+`batch_pr` supports rolling or frozen snapshots and configured validation commands;
+`branch_only` requires `freeze_on_ready` and makes no pull-request connector calls.
+The final customer merge always remains manual.
 
-`branch_only` does not compile to the legacy integration workflow: that runtime still
-creates one upstream PR per ticket, so treating it as branch-only would be a silent
-fallback. Activation compiles only a supported policy into the existing
-`delivery_workflow` so current Butler and worker behavior stays explicit. Saving a draft does not modify
-`integration_ref`, create a branch, or claim that batching/scheduling is operational.
+Manual and scheduled release logic exists in the private batch runtime, but there is
+not yet a resident authorized request/scheduler path. Multiple required reviewers and
+`repair_then_review` also require additional resident capabilities. Those combinations
+remain **Draft only** in the dashboard and activation fails closed with the exact
+reason; it never substitutes per-ticket behavior.
+
+Saving any policy is inert. Activating a supported batch or branch-only policy writes
+an explicit `delivery_policy_activation` record whose revision is bound to the exact
+effective policy. The dashboard creates the owned integration branch from the observed
+mapped-base SHA under the same guarded preview/apply flow. Registry CAS, board-admin
+authorization, remote-ref readback, and a second active-work check run before saving.
+A global, group, or repository draft edit never refreshes an activation record. If an
+inherited effective policy changes, the old record becomes stale and resident delivery
+fails closed until the repository is explicitly reviewed and activated again.
+
+`branch_only` never compiles to the legacy integration workflow: that path still
+creates one upstream PR per ticket. Saving a draft does not modify `integration_ref`,
+create a branch, or claim that batching or scheduling is operational.
 
 ## Integration and validation
 

@@ -7144,7 +7144,10 @@ class FleetFetcher:
                 if plan.get("scope") == "repository" and plan.get("activate"):
                     await self._require_board_admin(str(plan["board_id"]))
                     observed = await self._delivery_observation(str(plan["board_id"]))
-                    if not observed.get("complete") or (delivery_route_changed(plan["existing_entry"], plan["proposed_entry"])
+                    if not observed.get("complete") or (plan.get(
+                            "routing_changed",
+                            delivery_route_changed(plan["existing_entry"], plan["proposed_entry"]),
+                        )
                             and (observed.get("active_tickets") or observed.get("pending_offers"))):
                         raise ProjectLifecycleConflictError("Active work changed; refresh the delivery plan")
                     await asyncio.to_thread(prepare_delivery_branch, plan)
