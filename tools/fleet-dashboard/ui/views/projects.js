@@ -167,9 +167,11 @@
     const warnings = (lifecyclePlan.warnings || []).map(item => `<li>${esc(item)}</li>`).join('');
     const preserved = (lifecyclePlan.preserved || []).map(item => `<li>${esc(item)}</li>`).join('');
     return `<section class="card projects-lifecycle-preview" aria-live="polite">
-      <div class="projects-lifecycle-head"><div><p class="projects-detail-label">Impact preview</p><h2>${lifecyclePlan.kind === 'project-remove' ? 'Remove from Fleet' : lifecyclePlan.kind === 'project-delivery' ? 'Configure delivery' : 'Add project'} · ${esc(lifecyclePlan.project)}</h2></div><span class="status ${lifecyclePlan.blocked ? 'danger' : 'ready'}">${lifecyclePlan.blocked ? 'Blocked' : 'Ready to confirm'}</span></div>
+      <div class="projects-lifecycle-head"><div><p class="projects-detail-label">Impact preview</p><h2>${lifecyclePlan.kind === 'project-remove' ? 'Remove from Fleet' : lifecyclePlan.kind === 'project-delivery' || lifecyclePlan.kind === 'project-delivery-policy' ? 'Configure delivery' : 'Add project'} · ${esc(lifecyclePlan.project)}</h2></div><span class="status ${lifecyclePlan.blocked ? 'danger' : 'ready'}">${lifecyclePlan.blocked ? 'Blocked' : 'Ready to confirm'}</span></div>
       <p class="meta">Plan expires ${esc(lifecyclePlan.expires_at)} · ${esc(lifecyclePlan.central)}</p>
       ${lifecyclePlan.delivery_workflow ? `<p class="delivery-route">Read-only base <b>${esc(lifecyclePlan.delivery_workflow.base_branch)}</b> → ticket branches → <b>${esc(lifecyclePlan.delivery_workflow.integration_branch)}</b> → your team handles the final merge</p><p>Automatic integration: <b>${lifecyclePlan.delivery_workflow.auto_integrate ? 'enabled, subject to validation' : 'disabled'}</b>. Collection: <b>${lifecyclePlan.delivery_workflow.collection_paused ? 'paused' : 'open'}</b>.</p>` : ''}
+      ${lifecyclePlan.delivery_policy ? `<p class="delivery-route">Effective policy: <b>${esc(lifecyclePlan.delivery_policy.mode)}</b> · mapped base <b>${esc(lifecyclePlan.delivery_policy.mapped_base)}</b> · release <b>${esc(lifecyclePlan.delivery_policy.release_trigger?.kind)}</b> · final merge <b>manual</b></p>` : ''}
+      ${lifecyclePlan.affected_projects?.length ? `<p>Affected repositories: ${esc(lifecyclePlan.affected_projects.map(item => item.project).join(', '))}</p>` : ''}
       ${lifecyclePlan.use_as_default ? '<p><b>This also sets the workflow default for newly onboarded repositories.</b></p>' : ''}
       <h3>Effects</h3><ol class="projects-operation-list">${operationList(lifecyclePlan)}</ol>
       ${blockers ? `<div class="error"><b>Resolve before apply</b><ul>${blockers}</ul></div>` : ''}
@@ -205,24 +207,45 @@
     const rows = deliveryRows.get(central) || [];
     const selected = rows.find(row => row.name === deliveryProject) || rows[0];
     const draft = deliveryDrafts.get(JSON.stringify([central, selected?.name]));
-    const policy = draft || selected?.delivery_workflow || {};
+    const policy = draft || selected?.delivery_policy || {};
     const integration = policy.integration_branch ?? 'pursers-integration';
-    const base = policy.base_branch ?? selected?.integration_ref ?? '';
+    const base = policy.mapped_base ?? selected?.integration_ref ?? '';
+    const trigger = policy.release_trigger || {kind: 'ready'};
+    const validation = policy.validation || {};
+    const runtime = selected?.delivery_runtime || {ready: true, blockers: []};
+    const provenance = selected?.delivery_policy_provenance || {};
+    const group = draft?.delivery_policy_group ?? selected?.delivery_policy_group ?? '';
     return `<section class="card projects-delivery" id="project-delivery" aria-labelledby="delivery-title">
-      <div class="projects-lifecycle-head"><div><h2 id="delivery-title">Delivery workflow</h2><p>Start from the branch in your source mapping. Collect reviewed fixes on a separate delivery branch for your team.</p></div><span class="status">Your team owns the final merge</span></div>
+      <div class="projects-lifecycle-head"><div><h2 id="delivery-title">Delivery policy</h2><p>Choose how reviewed work is handed off. Your team owns the final merge. Unsupported runtime choices remain drafts and never fall back silently.</p></div><span class="status ${runtime.ready ? 'ready' : 'warning'}">${runtime.ready ? 'Runtime ready' : 'Draft only'}</span></div>
       ${deliveryLoadError ? `<p role="alert" class="error">${esc(deliveryLoadError)}</p>` : ''}
       <form id="project-delivery-form" class="projects-lifecycle-form">
         <label>Coordinator<select name="central">${centralLabels.map(label => `<option value="${esc(label)}" ${label === central ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
         <label>Repository project<select name="name" required>${rows.map(row => `<option value="${esc(row.name)}" ${row === selected ? 'selected' : ''}>${esc(row.name)}</option>`).join('') || '<option value="">Load registered repositories</option>'}</select></label>
-        <div class="projects-wide delivery-route" role="status" aria-live="polite">Mapped base <b data-route-base>${esc(base)}</b> → ticket branches → <b data-route-integration>${esc(integration)}</b> → hand off to your team</div>
+        <label>Control level<select name="scope"><option value="repository">Repository override</option><option value="group">Named group default</option><option value="global">Global default</option></select></label>
+        <label>Preset<select name="preset"><option value="custom">Custom</option><option value="review-each-ticket">Review each ticket</option><option value="receive-batches">Receive batches</option><option value="branch-only">Branch only</option></select></label>
+        <label>Named group<input name="delivery_policy_group" value="${esc(group)}" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" placeholder="backend-services"><small>Explicit reference only; repository names are never inferred as groups.</small></label>
+        <label>Mode<select name="mode"><option value="per_ticket_pr" ${policy.mode === 'per_ticket_pr' ? 'selected' : ''}>Per-ticket PR</option><option value="batch_pr" ${policy.mode === 'batch_pr' ? 'selected' : ''}>Batched delivery PR</option><option value="branch_only" ${policy.mode === 'branch_only' ? 'selected' : ''}>Branch only</option></select></label>
+        <div class="projects-wide delivery-route" role="status" aria-live="polite">Mapped base <b data-route-base>${esc(base)}</b> → snapshot prefix <b>${esc(policy.snapshot_branch_prefix || 'codex')}</b> → <b data-route-integration>${esc(integration)}</b> → final target <b>${esc(policy.final_pr_target || 'none')}</b></div>
         <label>Delivery branch<input name="integration_branch" value="${esc(integration)}" maxlength="200" required><small>Pursers collects reviewed work here.</small></label>
         <label>Mapped base branch<input name="base_branch" value="${esc(base)}" maxlength="200" required><small>Read only: Pursers never merges back into this branch.</small></label>
+        <label>Snapshot branch prefix<input name="snapshot_branch_prefix" value="${esc(policy.snapshot_branch_prefix || 'codex')}" maxlength="200" required></label>
+        <label>Final PR target<input name="final_pr_target" value="${esc(policy.final_pr_target || '')}" maxlength="200"><small>Leave empty for branch-only delivery.</small></label>
+        <label>Release trigger<select name="release_trigger"><option value="ready" ${trigger.kind === 'ready' ? 'selected' : ''}>Ready</option><option value="manual" ${trigger.kind === 'manual' ? 'selected' : ''}>Manual</option><option value="scheduled" ${trigger.kind === 'scheduled' ? 'selected' : ''}>Scheduled</option></select></label>
+        <label>PR updates<select name="pr_update"><option value="rolling" ${policy.pr_update === 'rolling' ? 'selected' : ''}>Rolling</option><option value="freeze_on_ready" ${policy.pr_update === 'freeze_on_ready' ? 'selected' : ''}>Freeze when ready</option></select></label>
+        <label>Timezone<input name="timezone" value="${esc(trigger.timezone || '')}" placeholder="Asia/Bangkok"></label>
+        <label>Schedule<input name="schedule" value="${esc(trigger.schedule || '')}" placeholder="0 9 * * 1-5"></label>
         <label class="projects-check"><input name="auto_integrate" type="checkbox" ${policy.auto_integrate ? 'checked' : ''}> Automatically integrate approved ticket PRs after required validation passes</label>
         <label class="projects-check"><input name="collection_paused" type="checkbox" ${policy.collection_paused ? 'checked' : ''}> Pause new integrations while your team checks the delivery branch</label>
-        <label class="projects-check"><input name="use_as_default" type="checkbox" ${draft?.use_as_default ? 'checked' : ''}> Use this workflow as the default for newly onboarded repositories</label>
-        <p class="projects-wide muted">If missing, the integration branch will be created from the verified mapped base commit. Existing PRs keep their targets. Source analysis and credentials stay configured separately.</p>
-        <details class="projects-wide"><summary>Readiness and access</summary><p>Connect the repository and source first. The dashboard host needs repository access to inspect and create the integration branch. Butler needs PR read/write tools and reliable validation checks. Unavailable or failed checks block automatic integration; the mapped base and environment branches are never merge targets.</p><p>After creating a project, configure its delivery here. Pause integration when handing off a stable branch to your team. Your team creates and completes its final merge.</p></details>
-        <div class="projects-wide card-actions"><button class="primary-action" type="submit" ${!selected?.repository_configured ? 'disabled' : ''}>Preview delivery changes</button><button class="button" type="button" data-delivery-refresh>Reload repositories</button></div>
+        <label class="projects-check"><input name="activate" type="checkbox"> Activate only if every selected capability is installed</label>
+        <details class="projects-wide"><summary>Advanced settings</summary>
+          <label>Validation commands<textarea name="test_commands" rows="3" placeholder="pytest -q tests/unit">${esc((validation.test_commands || []).join('\n'))}</textarea></label>
+          <label>Required reviewers<input name="required_reviewers" type="number" min="1" max="10" value="${esc(validation.required_reviewers || 1)}"></label>
+          <label>Conflict policy<select name="conflict_policy"><option value="pause" ${policy.conflict_policy === 'pause' ? 'selected' : ''}>Pause</option><option value="repair_then_review" ${policy.conflict_policy === 'repair_then_review' ? 'selected' : ''}>Repair, then review again</option></select></label>
+          <p>Final merge: <b>manual</b>. Independent review and required upstream policies cannot be disabled.</p>
+        </details>
+        <div class="projects-wide"><p><b>Inheritance:</b> global → ${esc(group || 'no group')} → repository. <code>${esc(JSON.stringify(provenance))}</code></p>${runtime.blockers?.length ? `<p class="warning">Not ready: ${esc(runtime.blockers.join('; '))}</p>` : ''}</div>
+        <p class="projects-wide muted">Shared default edits preview every affected repository but stay configuration-only. Existing PRs and in-flight batches keep their targets.</p>
+        <div class="projects-wide card-actions"><button class="primary-action" type="submit" ${!selected?.repository_configured ? 'disabled' : ''}>Preview delivery changes</button><button class="button" type="button" data-delivery-reset>Reset repository overrides to inherit</button><button class="button" type="button" data-delivery-refresh>Reload repositories</button></div>
       </form>
     </section>`;
   }
@@ -251,12 +274,17 @@
     const saveDraft = () => {
       const fields = form.elements;
       deliveryDrafts.set(draftKey, {
-        integration_branch: fields.integration_branch.value, base_branch: fields.base_branch.value,
+        mode: fields.mode.value, integration_branch: fields.integration_branch.value,
+        mapped_base: fields.base_branch.value, snapshot_branch_prefix: fields.snapshot_branch_prefix.value,
+        final_pr_target: fields.final_pr_target.value, pr_update: fields.pr_update.value,
+        release_trigger: {kind: fields.release_trigger.value, timezone: fields.timezone.value, schedule: fields.schedule.value},
         auto_integrate: fields.auto_integrate.checked, collection_paused: fields.collection_paused.checked,
-        use_as_default: fields.use_as_default.checked,
+        delivery_policy_group: fields.delivery_policy_group.value,
+        validation: {test_commands: fields.test_commands.value.split('\n').filter(Boolean), required_reviewers: Number(fields.required_reviewers.value)},
+        conflict_policy: fields.conflict_policy.value,
       });
     };
-    for (const name of ['integration_branch', 'base_branch', 'auto_integrate', 'collection_paused', 'use_as_default']) {
+    for (const name of ['scope','preset','delivery_policy_group','mode','integration_branch','base_branch','snapshot_branch_prefix','final_pr_target','release_trigger','pr_update','timezone','schedule','auto_integrate','collection_paused','activate','test_commands','required_reviewers','conflict_policy']) {
       form.elements[name].addEventListener('input', saveDraft);
       form.elements[name].addEventListener('change', saveDraft);
     }
@@ -270,7 +298,15 @@
         form.querySelector(`[data-route-${stage}]`).textContent = form.elements[`${stage}_branch`].value;
       });
     }
+    form.elements.preset.addEventListener('change', () => {
+      const preset = form.elements.preset.value;
+      if (preset === 'review-each-ticket') { form.elements.mode.value = 'per_ticket_pr'; form.elements.release_trigger.value = 'ready'; form.elements.final_pr_target.value = form.elements.base_branch.value; }
+      if (preset === 'receive-batches') { form.elements.mode.value = 'batch_pr'; form.elements.release_trigger.value = 'manual'; form.elements.final_pr_target.value = form.elements.base_branch.value; }
+      if (preset === 'branch-only') { form.elements.mode.value = 'branch_only'; form.elements.release_trigger.value = 'ready'; form.elements.final_pr_target.value = ''; }
+      saveDraft();
+    });
     form.querySelector('[data-delivery-refresh]').addEventListener('click', () => loadDelivery(central, true));
+    form.querySelector('[data-delivery-reset]').addEventListener('click', () => requestPlan({action: 'delivery', scope: 'repository', name: form.elements.name.value, reset_to_inherit: true}, central));
     form.addEventListener('submit', event => {
       event.preventDefault();
       const fields = form.elements;
@@ -281,10 +317,17 @@
         fields.integration_branch.setCustomValidity('');
         return;
       }
-      requestPlan({action: 'delivery', name: fields.name.value, use_as_default: fields.use_as_default.checked, delivery_workflow: {
-        mode: 'integration', integration_branch: branches[0], base_branch: branches[1],
-        auto_integrate: fields.auto_integrate.checked, collection_paused: fields.collection_paused.checked,
-      }}, central);
+      const trigger = {kind: fields.release_trigger.value};
+      if (trigger.kind === 'scheduled') { trigger.timezone = fields.timezone.value.trim(); trigger.schedule = fields.schedule.value.trim(); }
+      requestPlan({action: 'delivery', scope: fields.scope.value, name: fields.name.value,
+        delivery_policy_group: fields.delivery_policy_group.value || null, activate: fields.activate.checked,
+        delivery_policy: {mode: fields.mode.value, integration_branch: branches[0], mapped_base: branches[1],
+          snapshot_branch_prefix: fields.snapshot_branch_prefix.value.trim(), final_pr_target: fields.final_pr_target.value.trim() || null,
+          release_trigger: trigger, pr_update: fields.pr_update.value, auto_integrate: fields.auto_integrate.checked,
+          collection_paused: fields.collection_paused.checked, final_merge: 'manual',
+          validation: {test_commands: fields.test_commands.value.split('\n').map(x => x.trim()).filter(Boolean),
+            required_reviewers: Number(fields.required_reviewers.value), independent_review: true, require_upstream_policies: true},
+          conflict_policy: fields.conflict_policy.value}}, central);
     });
   }
 

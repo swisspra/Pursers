@@ -7034,12 +7034,32 @@ class FleetFetcher:
         actor = self.config.agent_name
 
         if action == "delivery":
+            scope = request.get("scope", "repository")
             entry = registry.get("projects", {}).get(request.get("name"))
-            if not isinstance(entry, dict):
-                raise ProjectLifecycleError("project is not registered")
-            await self._require_board_admin(entry["board_id"])
-            observation = await self._delivery_observation(entry["board_id"])
-            refs = await asyncio.to_thread(remote_branches, entry)
+            if scope == "repository":
+                if not isinstance(entry, dict):
+                    raise ProjectLifecycleError("project is not registered")
+                await self._require_board_admin(entry["board_id"])
+                draft_only = (
+                    "delivery_policy" in request or request.get("reset_to_inherit")
+                ) and not request.get("activate", False)
+                if draft_only:
+                    observation = {"complete": True, "active_tickets": [], "pending_offers": []}
+                    refs = {}
+                else:
+                    observation = await self._delivery_observation(entry["board_id"])
+                    refs = await asyncio.to_thread(remote_branches, entry)
+            else:
+                if scope not in {"global", "group"}:
+                    raise ProjectLifecycleError("delivery policy scope must be repository, group or global")
+                affected = registry.get("projects", {}).values()
+                if scope == "group":
+                    affected = [row for row in affected
+                                if row.get("delivery_policy_group") == request.get("delivery_policy_group")]
+                for board_id in sorted({row["board_id"] for row in affected if isinstance(row, dict)}):
+                    await self._require_board_admin(board_id)
+                observation = {"complete": True, "active_tickets": [], "pending_offers": []}
+                refs = {}
             return build_delivery_plan(
                 request=request, registry=registry,
                 registry_expected_sha256=registry_payload["expected_sha256"],
@@ -7115,19 +7135,33 @@ class FleetFetcher:
                 "project registry changed after preview; create a new plan"
             )
 
-        if plan.get("kind") == "project-delivery":
-            await self._require_board_admin(str(plan["board_id"]))
-            observed = await self._delivery_observation(str(plan["board_id"]))
-            if not observed.get("complete") or (delivery_route_changed(plan["existing_entry"], plan["proposed_entry"])
-                    and (observed.get("active_tickets") or observed.get("pending_offers"))):
-                raise ProjectLifecycleConflictError("Active work changed; refresh the delivery plan")
-            await asyncio.to_thread(prepare_delivery_branch, plan)
-            registry = copy.deepcopy(registry_payload["registry"])
-            registry["projects"][plan["project"]] = copy.deepcopy(plan["proposed_entry"])
-            if plan.get("use_as_default"):
-                registry["delivery_defaults"] = copy.deepcopy(plan["delivery_workflow"])
+        if plan.get("kind") in {"project-delivery", "project-delivery-policy"}:
+            if plan.get("kind") == "project-delivery-policy":
+                for effect in plan.get("affected_projects", []):
+                    row = registry_payload["registry"].get("projects", {}).get(effect.get("project"))
+                    if isinstance(row, dict):
+                        await self._require_board_admin(str(row["board_id"]))
+                if plan.get("scope") == "repository" and plan.get("activate"):
+                    await self._require_board_admin(str(plan["board_id"]))
+                    observed = await self._delivery_observation(str(plan["board_id"]))
+                    if not observed.get("complete") or (delivery_route_changed(plan["existing_entry"], plan["proposed_entry"])
+                            and (observed.get("active_tickets") or observed.get("pending_offers"))):
+                        raise ProjectLifecycleConflictError("Active work changed; refresh the delivery plan")
+                    await asyncio.to_thread(prepare_delivery_branch, plan)
+                registry = copy.deepcopy(plan["proposed_registry"])
+            else:
+                await self._require_board_admin(str(plan["board_id"]))
+                observed = await self._delivery_observation(str(plan["board_id"]))
+                if not observed.get("complete") or (delivery_route_changed(plan["existing_entry"], plan["proposed_entry"])
+                        and (observed.get("active_tickets") or observed.get("pending_offers"))):
+                    raise ProjectLifecycleConflictError("Active work changed; refresh the delivery plan")
+                await asyncio.to_thread(prepare_delivery_branch, plan)
+                registry = copy.deepcopy(registry_payload["registry"])
+                registry["projects"][plan["project"]] = copy.deepcopy(plan["proposed_entry"])
+                if plan.get("use_as_default"):
+                    registry["delivery_defaults"] = copy.deepcopy(plan["delivery_workflow"])
             await self.save_project_registry(registry, registry_payload["expected_sha256"])
-            return {"ok": True, "kind": "project-delivery", "project": plan["project"],
+            return {"ok": True, "kind": plan["kind"], "project": plan["project"],
                     "preserved": plan["preserved"]}
 
         if plan.get("kind") == "project-add":

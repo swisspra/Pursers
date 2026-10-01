@@ -302,6 +302,22 @@ def test_config_requires_absolute_root_and_rejects_credentials(tmp_path: Path) -
     with pytest.raises(ValueError, match="credentials"):
         onboarding.parse_source_policies(credential)
 
+    configured = copy.deepcopy(base)
+    configured["sources"]["sonarqube"].update(
+        delivery_policy_group="backend",
+        delivery_policy={"mode": "batch_pr", "release_trigger": {"kind": "manual"}},
+    )
+    configured_policy = onboarding.parse_source_policies(configured)["sonarqube"]
+    assert configured_policy.delivery_policy_group == "backend"
+    assert configured_policy.delivery_policy["mode"] == "batch_pr"
+
+    weakening = copy.deepcopy(base)
+    weakening["sources"]["sonarqube"]["delivery_policy"] = {
+        "validation": {"require_upstream_policies": False}
+    }
+    with pytest.raises(ValueError, match="cannot weaken"):
+        onboarding.parse_source_policies(weakening)
+
 
 def test_delivery_default_uses_each_mapping_base_without_pushing_to_it(tmp_path):
     remote = make_remote(tmp_path, 'delivery')
