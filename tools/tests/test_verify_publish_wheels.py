@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
 import zipfile
 from pathlib import Path
 
@@ -170,16 +175,100 @@ def test_publish_workflow_serializes_new_version_check_and_upload() -> None:
     assert workflow.index(concurrency) < workflow.index("jobs:")
 
 
-def test_publish_workflow_is_bound_to_exact_stable_tag() -> None:
+def _publish_tag_validators(workflow: str) -> list[str]:
+    return [
+        textwrap.dedent(match)
+        for match in re.findall(
+            r'python - "\$TAG" <<\'PY\'\n(.*?)\n\s+PY', workflow, re.DOTALL
+        )
+    ]
+
+
+def test_publish_workflow_is_bound_to_manifest_matched_stable_tag() -> None:
     workflow = (
         Path(__file__).resolve().parents[2] / ".github/workflows/publish-pypi.yml"
     ).read_text(encoding="utf-8")
 
     assert "release_tag:" in workflow
     assert "required: true" in workflow
+    assert "Existing manifest-matched stable tag to publish" in workflow
     assert workflow.count("ref: refs/tags/${{ inputs.release_tag }}") == 2
-    assert workflow.count('test "$TAG" = "v5.0.8"') == 2
+    assert "v5.0.8" not in workflow
+    validators = _publish_tag_validators(workflow)
+    assert len(validators) == 2
+    assert validators[0] == validators[1]
     assert workflow.count('python tools/release_publish.py "$TAG" verify-checkout') == 2
+
+
+def test_publish_workflow_tag_validator_accepts_stable_and_rejects_mismatch(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github/workflows/publish-pypi.yml").read_text(
+        encoding="utf-8"
+    )
+    validator = _publish_tag_validators(workflow)[0]
+
+    manifest = (root / "tools/release_versions.toml").read_text(encoding="utf-8")
+    stable_root = tmp_path / "stable"
+    stable_tools = stable_root / "tools"
+    stable_tools.mkdir(parents=True)
+    shutil.copy(root / "tools/release_versions.py", stable_tools)
+    (stable_tools / "release_versions.toml").write_text(
+        re.sub(
+            r'^product = ".*"$',
+            'product = "9.9.9"',
+            manifest,
+            count=1,
+            flags=re.M,
+        ),
+        encoding="utf-8",
+    )
+    accepted = subprocess.run(
+        [sys.executable, "-", "v9.9.9"],
+        cwd=stable_root,
+        input=validator,
+        capture_output=True,
+        text=True,
+    )
+    assert accepted.returncode == 0
+    assert accepted.stdout.strip() == "stable_release_tag=v9.9.9"
+
+    mismatched = subprocess.run(
+        [sys.executable, "-", "v9.9.10"],
+        cwd=stable_root,
+        input=validator,
+        capture_output=True,
+        text=True,
+    )
+    assert mismatched.returncode != 0
+    assert "does not match manifest product 9.9.9" in mismatched.stderr
+
+    prerelease_root = tmp_path / "prerelease"
+    prerelease_tools = prerelease_root / "tools"
+    prerelease_tools.mkdir(parents=True)
+    shutil.copy(root / "tools/release_versions.py", prerelease_tools)
+    (prerelease_tools / "release_versions.toml").write_text(
+        re.sub(
+            r'^product = ".*"$',
+            'product = "9.9.9rc1"',
+            manifest,
+            count=1,
+            flags=re.M,
+        ),
+        encoding="utf-8",
+    )
+    prerelease = subprocess.run(
+        [sys.executable, "-", "v9.9.9rc1"],
+        cwd=prerelease_root,
+        input=validator,
+        capture_output=True,
+        text=True,
+    )
+    assert prerelease.returncode != 0
+    assert "PyPI publishing requires a stable release tag: v9.9.9rc1" in (
+        prerelease.stderr
+    )
 
 
 def test_serialized_later_run_rejects_artifact_published_by_first_run(

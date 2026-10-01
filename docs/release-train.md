@@ -59,6 +59,27 @@ the affected distribution must receive a new version. One workflow-level
 concurrency group serializes every manual publish run, so a later dispatch
 cannot perform this check until the earlier run has finished uploading.
 
+### Publish an existing stable tag to PyPI
+
+Dispatch the current workflow definition from `main` and pass the existing tag
+as an input. Do not use the release tag as `--ref`: that would select the old
+workflow definition stored at the tag instead of the reviewed publisher on
+`main`.
+
+```sh
+TAG=v5.0.9
+gh workflow run publish-pypi.yml --repo swisspra/Pursers \
+  --ref main -f release_tag="$TAG"
+```
+
+Each publish job checks out `refs/tags/$TAG`, requires `HEAD` to equal that
+tag's commit, requires the tag to use canonical PEP 440 spelling, requires it
+to match the checked-out `tools/release_versions.toml` product version, and
+rejects prereleases. A mismatch stops before wheel construction or OIDC
+publication. The component lock, pinned build toolchain, immutable same-version
+PyPI wheel comparison, and per-environment Trusted Publishing boundaries remain
+required.
+
 ## Home runtime wheelhouse lock
 
 `tools/home_runtime_wheelhouse.lock` pins every third-party wheel by exact

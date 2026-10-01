@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing stable tag to publish (must be v5.0.8)
+        description: Existing manifest-matched stable tag to publish
         required: true
         type: string
 
@@ -47,7 +47,17 @@ jobs:
           TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          test "$TAG" = "v5.0.8"
+          python - "$TAG" <<'PY'
+          import sys
+
+          from tools.release_versions import release_version_from_tag
+
+          tag = sys.argv[1]
+          version = release_version_from_tag(tag)
+          if version.is_prerelease:
+              raise SystemExit(f"PyPI publishing requires a stable release tag: {tag}")
+          print(f"stable_release_tag={tag}")
+          PY
           python tools/release_publish.py "$TAG" verify-checkout
 
       - uses: actions/setup-python@v7
@@ -141,7 +151,17 @@ jobs:
           TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          test "$TAG" = "v5.0.8"
+          python - "$TAG" <<'PY'
+          import sys
+
+          from tools.release_versions import release_version_from_tag
+
+          tag = sys.argv[1]
+          version = release_version_from_tag(tag)
+          if version.is_prerelease:
+              raise SystemExit(f"PyPI publishing requires a stable release tag: {tag}")
+          print(f"stable_release_tag={tag}")
+          PY
           python tools/release_publish.py "$TAG" verify-checkout
 
       - uses: actions/setup-python@v7
