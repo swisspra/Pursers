@@ -12778,9 +12778,11 @@ class CentralBackend:
             raw = await client.board_state_get("project_registry")
         registry = parse_project_registry(raw)
         raw_registry = {}
-        if isinstance(raw, Mapping) and isinstance(raw.get('value'), str):
+        state = raw.get('state') if isinstance(raw, Mapping) else None
+        raw_value = state.get('value') if isinstance(state, Mapping) else None
+        if isinstance(raw_value, str):
             try:
-                raw_registry = json.loads(raw['value'])
+                raw_registry = json.loads(raw_value)
             except json.JSONDecodeError:
                 raw_registry = {}
         for name, row in (registry.get("projects") or {}).items():

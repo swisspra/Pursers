@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -206,9 +207,30 @@ def test_resident_branch_only_uses_resolved_policy_and_makes_zero_pr_calls(tmp_p
     }
     monkeypatch.setattr(butler._delivery_policy_api, 'resolve_delivery_policy',
                         lambda registry, project_name: {'policy': effective}, raising=False)
-    project = {'repository_url': str(origin), 'fleet_clone_dir': str(repo),
-               'work_dir_owner': 'fleet', '__registry__': {'projects': {'P': {}}},
-               '__project_name__': 'P'}
+    registry_project = {
+        'board_id': 'b', 'work_dir': str(repo), 'status': 'active',
+        'repository_url': 'https://example.invalid/team/repo',
+        'fleet_clone_dir': str(repo),
+        'work_dir_owner': 'fleet',
+    }
+    registry = {'schema_version': 1, 'projects': {'P': registry_project}}
+
+    class Client:
+        async def board_state_get(self, key):
+            assert key == 'project_registry'
+            return {'state': {'value': json.dumps(registry)}}
+
+    @contextlib.asynccontextmanager
+    async def client_for_board(board_id):
+        assert board_id == 'home'
+        yield Client()
+
+    backend = object.__new__(butler.CentralBackend)
+    backend.args = SimpleNamespace(home_board='home')
+    backend._client_for_board = client_for_board
+
+    project = asyncio.run(backend._source_project_reader('b'))
+    assert 'delivery_policy_activation' not in project
     ticket = {'status': 'closed', 'latest_verdict': {'verdict': 'approve'},
               'title': 'Reviewed work',
               'latest_submission': {'branch': 'ticket-one', 'commit_hash': reviewed,
@@ -234,12 +256,29 @@ def test_resident_branch_only_uses_resolved_policy_and_makes_zero_pr_calls(tmp_p
     poller._delivery_tool = AsyncMock(side_effect=AssertionError('PR connector called'))
     draft_policy, _ = poller._resolved_batch_policy(project)
     assert draft_policy == {'mode': 'per_ticket_pr'}
-    project['delivery_policy_activation'] = {
+
+    activation = {
         'schema_version': 1, 'state': 'active', 'activation_id': 'apply-1',
         'policy_revision': hashlib.sha256(json.dumps(
             effective, sort_keys=True, separators=(',', ':'),
             ensure_ascii=False).encode()).hexdigest()[:40],
     }
+    registry_project['delivery_policy_activation'] = {
+        **activation, 'policy_revision': 'f' * 40,
+    }
+    mismatched = asyncio.run(backend._source_project_reader('b'))
+    with pytest.raises(butler.ConnectorDenied, match='activation does not match'):
+        poller._resolved_batch_policy(mismatched)
+
+    registry_project['delivery_policy_activation'] = activation
+    project = asyncio.run(backend._source_project_reader('b'))
+    assert project['delivery_policy_activation'] == activation
+    active_policy, _ = poller._resolved_batch_policy(project)
+    assert active_policy['mode'] == 'branch_only'
+    # The product-shaped registry requires HTTPS; use the temporary Git remote
+    # only after proving the resident reader carried activation through.
+    project = {**project, 'repository_url': str(origin)}
+    poller.project_reader = AsyncMock(return_value=project)
     findings = []
     written = asyncio.run(poller._writeback_pass(findings))
     assert written == 1, findings[0].get('error_class') if findings else findings
