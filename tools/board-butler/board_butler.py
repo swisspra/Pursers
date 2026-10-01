@@ -6696,6 +6696,18 @@ class SourceIntakePoller:
         resolved = resolver(registry, project_name)
         api = runpy.run_path(str(Path(__file__).with_name('integration_delivery.py')))
         policy = api['runtime_policy_from_resolved'](resolved, project)
+        if policy.get('mode') in {'batch_pr', 'branch_only'}:
+            activation = project.get('delivery_policy_activation')
+            if activation is None:
+                return {'mode': 'per_ticket_pr'}, resolved
+            if (not isinstance(activation, Mapping)
+                    or set(activation) != {'schema_version', 'state', 'policy_revision', 'activation_id'}
+                    or activation.get('schema_version') != 1
+                    or activation.get('state') != 'active'
+                    or activation.get('policy_revision') != policy.get('policy_revision')
+                    or not isinstance(activation.get('activation_id'), str)
+                    or not activation['activation_id']):
+                raise ConnectorDenied('delivery policy activation does not match the effective policy')
         return policy, resolved
 
     async def _collect_batch_member(self, source, runtime, board_id, ticket_id, ticket, entry,
@@ -12765,9 +12777,18 @@ class CentralBackend:
         async with self._client_for_board(self.args.home_board) as client:
             raw = await client.board_state_get("project_registry")
         registry = parse_project_registry(raw)
+        raw_registry = {}
+        if isinstance(raw, Mapping) and isinstance(raw.get('value'), str):
+            try:
+                raw_registry = json.loads(raw['value'])
+            except json.JSONDecodeError:
+                raw_registry = {}
         for name, row in (registry.get("projects") or {}).items():
             if isinstance(row, Mapping) and row.get("board_id") == board_id:
-                return {**row, "__registry__": registry, "__project_name__": name}
+                original = raw_registry.get('projects', {}).get(name, {}) if isinstance(raw_registry, Mapping) else {}
+                activation = original.get('delivery_policy_activation') if isinstance(original, Mapping) else None
+                return {**row, **({'delivery_policy_activation': activation} if activation is not None else {}),
+                        "__registry__": registry, "__project_name__": name}
         return None
 
     async def _source_state_reader(self, board_id: str) -> Mapping[str, Any] | None:

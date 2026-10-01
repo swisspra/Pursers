@@ -31,6 +31,13 @@ unconfigured repair runner, mismatched clone origin, or operator-owned checkout 
 closed before any delivery mutation. The effective policy digest is frozen in each
 active batch. Later global, group, or repository edits affect only a subsequent batch.
 
+A saved `batch_pr` or `branch_only` policy remains a draft. The resident path activates
+it only when the project also contains a versioned `delivery_policy_activation` record
+with `schema_version: 1`, `state: active`, a non-empty `activation_id`, and the exact
+compiled `policy_revision`. No activation record preserves the legacy delivery path;
+a stale or malformed activation fails closed. Deploying new runtime capability alone
+therefore never changes routing or PR behavior for an existing saved draft.
+
 The supported triggers are:
 
 - `ready`: collect all reviewed members seen in one deterministic Butler writeback

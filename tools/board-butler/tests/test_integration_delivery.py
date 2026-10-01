@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
 import pytest
@@ -230,6 +232,14 @@ def test_resident_branch_only_uses_resolved_policy_and_makes_zero_pr_calls(tmp_p
     })
     poller._maybe_writeback = AsyncMock(side_effect=AssertionError('legacy PR path called'))
     poller._delivery_tool = AsyncMock(side_effect=AssertionError('PR connector called'))
+    draft_policy, _ = poller._resolved_batch_policy(project)
+    assert draft_policy == {'mode': 'per_ticket_pr'}
+    project['delivery_policy_activation'] = {
+        'schema_version': 1, 'state': 'active', 'activation_id': 'apply-1',
+        'policy_revision': hashlib.sha256(json.dumps(
+            effective, sort_keys=True, separators=(',', ':'),
+            ensure_ascii=False).encode()).hexdigest()[:40],
+    }
     findings = []
     written = asyncio.run(poller._writeback_pass(findings))
     assert written == 1, findings[0].get('error_class') if findings else findings
