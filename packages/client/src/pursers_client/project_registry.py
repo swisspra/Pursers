@@ -212,6 +212,9 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
                     "a non-empty, trimmed ref"
                 )
             normalized[name]["integration_ref"] = ref
+        policy = normalized[name].get("delivery_workflow")
+        if policy and policy["mode"] == "integration":
+            normalized[name]["integration_ref"] = policy["integration_branch"]
     result = {"schema_version": PROJECT_REGISTRY_SCHEMA_VERSION, "projects": normalized}
     if "delivery_defaults" in registry:
         result["delivery_defaults"] = parse_delivery_workflow(registry["delivery_defaults"])

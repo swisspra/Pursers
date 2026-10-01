@@ -706,3 +706,20 @@ class RegistryAdminRealCentralTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_delivery_policy_survives_admin_and_doctor_roundtrip():
+    import copy
+    import registry_doctor
+    from pursers_client.project_registry import parse_project_registry
+    raw=copy.deepcopy(INITIAL)
+    policy={'mode':'integration','base_branch':'dev'}
+    raw['delivery_defaults']=policy
+    raw['projects']['alpha'].update(delivery_workflow=policy,integration_ref='dev',domain='work')
+    validated=registry_admin.validate_registry(raw)
+    assert validated['projects']['alpha']['integration_ref']=='pursers-integration'
+    for parsed in (parse_project_registry({'state':{'value':json.dumps(raw)}}),registry_doctor.parse_registry({'state':{'value':validated}})):
+        assert parsed['projects']['alpha']['integration_ref']=='pursers-integration'
+        assert parsed['projects']['alpha']['delivery_workflow']['base_branch']=='dev'
+        assert parsed['delivery_defaults']['integration_branch']=='pursers-integration'
+    assert raw['projects']['alpha']['integration_ref']=='dev'  # no caller mutation

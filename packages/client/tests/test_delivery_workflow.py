@@ -31,3 +31,9 @@ def test_delivery_stage_requires_explicit_evidence():
     assert delivery_stage('pr_created') == 'PR opened'
     assert delivery_stage('integration_merged') == 'Ready for your team'
     assert delivery_stage('unknown') == 'Delivery unconfirmed'
+
+
+@pytest.mark.parametrize('value', [42, None, '', ' dev '])
+def test_invalid_legacy_ref_is_not_coerced_to_a_delivery_branch(value):
+    with pytest.raises(ValueError):
+        delivery_target({'integration_ref':value})

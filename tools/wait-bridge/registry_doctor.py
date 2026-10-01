@@ -18,6 +18,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from pursers_client import BoardClient
+from pursers_client.delivery_workflow import parse_delivery_workflow, delivery_target
 
 from registry_admin import CENTRAL_URL_DEFAULT, HOME_BOARD_ID
 
@@ -226,6 +227,11 @@ def parse_registry(result: Any) -> dict[str, Any]:
     if not isinstance(projects, dict):
         raise DoctorError("project_registry projects must be an object")
     normalized: dict[str, Any] = {"schema_version": 1, "projects": {}}
+    if "delivery_defaults" in document:
+        try:
+            normalized["delivery_defaults"] = parse_delivery_workflow(document["delivery_defaults"])
+        except ValueError as exc:
+            raise DoctorError(str(exc)) from exc
     required = {"board_id", "work_dir", "status"}
     optional = {
         "integration_ref",
@@ -235,6 +241,8 @@ def parse_registry(result: Any) -> dict[str, Any]:
         "fleet_clone_dir",
         "fleet",
         "repository_url",
+        "delivery_workflow",
+        "domain",
     }
     for name, raw in projects.items():
         if not isinstance(name, str) or not name.strip() or name != name.strip():
@@ -246,7 +254,13 @@ def parse_registry(result: Any) -> dict[str, Any]:
         board_id = raw.get("board_id")
         work_dir = raw.get("work_dir")
         status = raw.get("status")
-        integration_ref = raw.get("integration_ref", "main")
+        try:
+            integration_ref = delivery_target(raw)
+            policy = parse_delivery_workflow(raw.get("delivery_workflow"))
+        except ValueError as exc:
+            raise DoctorError(str(exc)) from exc
+        if "domain" in raw and raw["domain"] not in {"personal", "work"}:
+            raise DoctorError(f"project {name!r} domain must be personal or work")
         if not all(
             isinstance(item, str) and item.strip() and item == item.strip()
             for item in (board_id, work_dir, integration_ref)
@@ -297,6 +311,8 @@ def parse_registry(result: Any) -> dict[str, Any]:
                 )
         normalized["projects"][name] = dict(raw)
         normalized["projects"][name]["integration_ref"] = integration_ref
+        if "delivery_workflow" in raw:
+            normalized["projects"][name]["delivery_workflow"] = policy
     return normalized
 
 

@@ -57,7 +57,10 @@ def delivery_target(project: Mapping[str, Any] | None) -> str:
     policy = parse_delivery_workflow(project.get('delivery_workflow'))
     if policy and policy['mode'] == 'integration':
         return policy['integration_branch']
-    return str(project.get('integration_ref') or 'main')
+    ref = project.get('integration_ref', 'main')
+    if not isinstance(ref, str) or not ref or ref != ref.strip():
+        raise ValueError('integration_ref must be a non-empty, trimmed ref')
+    return ref
 
 
 def integration_policy(project: Mapping[str, Any] | None) -> dict[str, Any] | None:
