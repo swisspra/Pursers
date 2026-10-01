@@ -3043,6 +3043,17 @@ def test_generated_submit_preflights_exact_remote_tip_before_board_mutation(
         submissions[0]["notes"]
     )
 
+    evidence_file = tmp_path / "test-results.txt"
+    evidence_file.write_text("Tests: 12 passed\nTime: 3.89 s", encoding="utf-8")
+    explicit = generated._parser().parse_args([
+        "submit", "TK-submit", "ready",
+        f"branch_and_commit: {branch}@{current_sha}", "change.txt",
+        "--test-output-file", str(evidence_file),
+    ])
+    asyncio.run(generated._execute(explicit))
+    assert submissions.pop()["test_output"] == evidence_file.read_text()
+    capsys.readouterr()
+
     long_notes = (
         "test-command: PYTHONPATH=. pytest -q .\n"
         + "test_output: " + "x" * 5_500

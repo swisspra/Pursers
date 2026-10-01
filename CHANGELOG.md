@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Add explicit `test_output` to Central and client submission tools and
+  `--test-output` / `--test-output-file` to generated worker helpers. Preserve
+  bounded, scrubbed evidence in submission history; accept legacy
+  `Required test_output:` notes. Missing required evidence on verified code
+  submissions now preserves the claim and returns a corrective error before
+  review dispatch, preventing avoidable rejection loops.
+
 ## [5.0.9] - 2026-10-01
 
 This release includes `pursers-central==0.1.6`,

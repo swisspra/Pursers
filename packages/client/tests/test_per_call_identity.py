@@ -1697,3 +1697,15 @@ async def test_ticket_list_include_archived_passthrough(monkeypatch) -> None:
     assert [name for name, _ in calls] == ["ticket_list", "ticket_list"]
     assert calls[0][1]["include_archived"] is True
     assert calls[1][1]["include_archived"] is False
+
+
+@pytest.mark.anyio
+async def test_ticket_submit_forwards_explicit_test_output(monkeypatch) -> None:
+    board = client()
+    captured = {}
+    async def call(name, arguments):
+        captured.update(arguments)
+        return {"ok": True}
+    monkeypatch.setattr(board, "_call", call)
+    await board.ticket_submit("TK-evidence", summary="ready", test_output="Tests: 12 passed")
+    assert captured["test_output"] == "Tests: 12 passed"

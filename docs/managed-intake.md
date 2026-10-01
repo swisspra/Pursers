@@ -158,9 +158,29 @@ The worker helper writes `branch_and_commit: pursers/<ticket_id>@<full-40-hex-sh
 Whitespace around `@` is accepted when reading older submissions. Conflicting or
 malformed identities fail validation. Central verifies the provided remote-tip
 proof and persists `branch`, `commit_hash`, `test_output` and `submission_preflight`
-with the submission, including legacy `commit_hash` tickets. Both labeled
-`test_output: ...` and inline `test_output=...` evidence are extracted; quoted
-test summaries retain their semicolons. Reviewers still check
+with the submission, including legacy `commit_hash` tickets. Supply literal test
+results in the `ticket_submit(test_output=...)` MCP/BoardClient argument. The seat
+helper accepts `--test-output-file results.txt` or `--test-output "Tests: 12 passed"`.
+The field has its own 5000-character limit and the same credential/privacy scrub
+policy as notes. Use a truthful bounded result tail, retaining failures; do not
+replace results with an invented pass summary. Explicit evidence takes precedence
+over notes and is stored with the exact submission, including submission history.
+
+For older callers, labeled `test_output: ...`, `Required test_output: ...`, and
+inline `test_output=...` evidence are extracted; quoted test summaries retain their
+semicolons. Verified code submissions requiring `test_output` are refused when it
+is missing or blank, before review dispatch or claim release. Correct the evidence
+and resubmit the same candidate; no new code commit is needed just to supply logs.
+This is an evidence-presence check, not an assessment that tests pass. Non-code
+legacy submissions retain their existing acceptance/review policy.
+
+Upgrade Central and clients together and regenerate managed seat helpers with
+`seat_new.py --upgrade`; existing model processes must reload their MCP tool schema
+at their next safe restart. For a ticket already paused due to missing evidence,
+resolve only that platform blocker through `ticket_human_resolve` after deployment,
+then let the worker resubmit and an independent reviewer verify it. Do not mutate
+stored ticket evidence, approve the ticket manually, or resolve unrelated baseline
+acceptance requests. Reviewers still check
 the exact code and test evidence; spacing alone is not a rejection criterion.
 
 Two consecutive retryable rejections of the same SHA with the same feedback
