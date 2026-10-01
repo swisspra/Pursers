@@ -1783,3 +1783,30 @@ def test_recovery_prefers_last_successful_seat_over_probe_latency(warm_health, e
         'last_attempt_at': (NOW-timedelta(hours=1)).isoformat()}}}
     plan = reconciler({'pursers': policy}).plan(current, prior)
     assert [(o.action, o.seat_id) for o in plan.operations] == [('start', expected)]
+
+
+def test_registry_fleet_demand_includes_projects_without_double_counting():
+    snapshots = {
+        'home': {'agents': [], 'tickets': [{'ticket_id': 'TK-home', 'status': 'open', 'tier': 1}]},
+        'project': {'agents': [], 'truncated': True, 'coordination_tickets_complete': True,
+                    'coordination_tickets': [{'ticket_id': 'TK-project', 'status': 'submitted'}]},
+        'separate': {'agents': [], 'tickets': [{'ticket_id': 'TK-separate', 'status': 'open', 'tier': 2}]},
+    }
+    selected = butler.registry_fleet_snapshots(snapshots, ['home', 'separate'], 'home')
+    assert [t['ticket_id'] for t in selected['home']['coordination_tickets']] == ['TK-home', 'TK-project']
+    assert selected['home']['coordination_tickets_complete'] is True
+    assert selected['separate'] == snapshots['separate']
+    assert 'coordination_tickets' not in snapshots['home']
+    snapshots['project']['coordination_tickets_complete'] = False
+    with pytest.raises(ValueError, match='incomplete'):
+        butler.registry_fleet_snapshots(snapshots, ['home', 'separate'], 'home')
+
+
+@pytest.mark.parametrize('available', [700, 50])
+def test_linux_headroom_uses_available_memory_not_only_unused_pages(monkeypatch, available):
+    monkeypatch.setattr(butler.sys, 'platform', 'linux')
+    monkeypatch.setattr(butler.Path, 'read_text', lambda *_args, **_kwargs:
+        f'MemTotal: 1000 kB\nMemFree: 10 kB\nMemAvailable: {available} kB\n')
+    monkeypatch.setattr(butler.os, 'sysconf', lambda name:
+        {'SC_PAGE_SIZE': 1024, 'SC_AVPHYS_PAGES': 10, 'SC_PHYS_PAGES': 1000}[name])
+    assert butler._memory_headroom_bytes() == (available * 1024, 1000 * 1024)

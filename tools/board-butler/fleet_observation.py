@@ -31,6 +31,28 @@ def publish(path, document):
             os.unlink(temporary)
 
 
+def ticket_holds_seat(ticket, agent):
+    """Protect the exact holder; unknown active ownership protects every seat."""
+    holders = []
+    if ticket.get('status') in {'claimed', 'in_progress', 'reviewing'}:
+        holders.append((ticket, ('claimed_by_agent_id', 'claimed_by', 'claimed_by_principal_id')))
+    review = ticket.get('review_lease')
+    if isinstance(review, Mapping) and review:
+        holders.append((review, ('reviewer_agent_id', 'reviewer_agent_name', 'reviewer_principal_id')))
+    for record, keys in holders:
+        identified = False
+        for key, identity in zip(keys, ('agent_id', 'agent_name', 'principal_id')):
+            value = record.get(key)
+            if isinstance(value, str) and value:
+                identified = True
+                if value == agent.get(identity):
+                    return True
+                break
+        if not identified:
+            return True
+    return False
+
+
 class LocalFleetObserver:
     def __init__(self, templates, services, stored, bindings):
         self.templates, self.services, self.stored, self.bindings = templates, services, stored, bindings
@@ -55,7 +77,8 @@ class LocalFleetObserver:
                 agents, tickets = snapshot.get('agents'), snapshot.get('coordination_tickets', snapshot.get('tickets'))
                 members = membership.get('members')
                 if (not isinstance(agents, list) or not isinstance(tickets, list) or not isinstance(members, list)
-                        or snapshot.get('truncated') or membership.get('truncated') or membership.get('next_cursor')):
+                        or (snapshot.get('truncated') and snapshot.get('coordination_tickets_complete') is not True)
+                        or membership.get('truncated') or membership.get('next_cursor')):
                     known = False
                     continue
                 matches = [a for a in agents if isinstance(a, Mapping)
@@ -92,7 +115,7 @@ class LocalFleetObserver:
                     if not isinstance(ticket, Mapping):
                         known = False
                         continue
-                    if ticket.get('status') in {'claimed', 'in_progress', 'reviewing'}:
+                    if ticket_holds_seat(ticket, agent):
                         busy = True
             if known:
                 for board in active_boards:

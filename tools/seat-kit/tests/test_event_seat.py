@@ -77,7 +77,7 @@ def test_bootstrap_reads_authoritative_watermarks_only_for_new_boards(tmp_path,m
         async def __aexit__(self,*args):pass
         async def board_state_get(self,key):
             return {'state':{'value':json.dumps({'schema_version':1,'projects':{'Example':{
-                'board_id':'project','work_dir':str(tmp_path),'status':'active','domain':'work'}}})}}
+                'board_id':'project','work_dir':str(tmp_path/'clones'/'project'),'status':'active','domain':'work'}}})}}
         async def board_snapshot(self,**kwargs):snapshots.append(self.board);return {'latest_seq':97}
     monkeypatch.setattr(pursers_client,'BoardClient',Client)
     runner=api()['EventSeatRunner'](cfg)
@@ -189,3 +189,18 @@ def test_explicit_hourly_limit_waits_and_resumes_pending_without_replay(tmp_path
 def test_invalid_hourly_limit_rejected(tmp_path,limit):
     cfg=config(tmp_path);cfg['max_runs_per_hour']=limit
     with pytest.raises(ValueError):api()['validate_config'](cfg)
+
+
+def test_registry_root_guard_rejects_wrong_boundary_and_symlink_escape(tmp_path):
+    module = api()
+    root = tmp_path/'clones'; root.mkdir()
+    project = root/'project'; project.mkdir()
+    registry = {'projects': {'p': {'status': 'active', 'board_id': 'project', 'work_dir': str(project)}}}
+    module['validate_registry_roots'](registry, str(root))
+    with pytest.raises(ValueError, match='repository_root'):
+        module['validate_registry_roots'](registry, str(root/'seat-only'))
+    outside = tmp_path/'outside'; outside.mkdir()
+    link = root/'escape'; link.symlink_to(outside, target_is_directory=True)
+    registry['projects']['p']['work_dir'] = str(link)
+    with pytest.raises(ValueError, match='repository_root'):
+        module['validate_registry_roots'](registry, str(root))

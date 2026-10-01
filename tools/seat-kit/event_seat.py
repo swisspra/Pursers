@@ -37,6 +37,17 @@ def validate_config(config):
     return config
 
 
+def validate_registry_roots(registry, repository_root):
+    """Reject an unusable relay boundary before invoking any model."""
+    root = Path(repository_root).resolve()
+    for project in registry['projects'].values():
+        if project['status'] != 'active' or not project.get('fleet', True):
+            continue
+        work = Path(project.get('fleet_clone_dir') or project['work_dir']).resolve()
+        if not work.is_relative_to(root):
+            raise ValueError('repository_root excludes an active registry project clone')
+
+
 def transient_wait_failure(exc):
     """Only retry transport failures; never repeat a model execution here."""
     if isinstance(exc, (ConnectionError, TimeoutError, subprocess.TimeoutExpired)):
@@ -145,6 +156,7 @@ class EventSeatRunner:
                                capabilities=caps,allow_takeover=True)
         async with client(c['home_board']) as home:
             registry=parse_project_registry(await home.board_state_get('project_registry'))
+        validate_registry_roots(registry,c['repository_root'])
         boards=active_registry_boards(registry,c['home_board'])
         self.active_boards=boards
         if any(type(v) is not int or v<1 for v in self.state['cursor'].values()):
