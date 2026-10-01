@@ -4599,3 +4599,34 @@ def test_parse_args_none_tracks_explicit_process_argv(
     assert resolved.sources["thresholds.stale_seconds"] == "flag"
     assert resolved.sources["intake.enabled"] == "flag"
     assert resolved.sources["intake.rate_per_hour"] == "flag"
+
+
+def test_server_intake_rate_limit_waits_and_recovers_without_breaker():
+    rows=[_intake_row(f'ask-rate-{i}',f'Update docs page {i}') for i in range(4)]
+    snapshot={'board-a':{'tickets':[],'coordinator_intake_state':_intake_state(rows)}}
+    runtime=coordinator.RuntimeState.for_mode('active');calls=[]
+    async def create(_board,draft):
+        calls.append(draft.ticket_id)
+        if len(calls)==1:raise PermissionError('board:intake hourly ticket creation limit reached')
+        return draft.ticket_id
+    def cycle(at):
+        return asyncio.run(coordinator.process_intakes([_intake_project()],snapshot,at,runtime,
+            enabled=True,dry_run=False,create_ticket=create))
+    first=cycle(NOW)
+    assert len(calls)==1 and not runtime.intake_breakers
+    assert first[0][0]['matrix_rule']=='server-hourly-auto-create-limit'
+    cycle(NOW+timedelta(seconds=30));assert len(calls)==1
+    last=cycle(NOW+timedelta(seconds=61))
+    assert last[1]=={'board-a':frozenset(r['id'] for r in rows)}
+    assert not runtime.intake_breakers
+
+
+def test_intake_hourly_limit_can_be_explicitly_disabled():
+    args=coordinator.parse_args(['--token-path','/tmp/test-token.jwt','--intake-rate-per-hour','none'])
+    assert coordinator.resolve_coordinator_config(None,args).rate_per_hour is None
+    snapshot={'board-a':{'tickets':[{'tags':['coordinator-intake'],'created_at':ago(1)}]*30,
+                        'coordinator_intake_state':_intake_state([_intake_row('unlimited','Update the README documentation')])}}
+    async def create(_board,draft):return draft.ticket_id
+    _,updates=asyncio.run(coordinator.process_intakes([_intake_project()],snapshot,NOW,
+        coordinator.RuntimeState.for_mode('active'),enabled=True,dry_run=False,create_ticket=create,rate_per_hour=None))
+    assert updates=={'board-a':frozenset({'unlimited'})}

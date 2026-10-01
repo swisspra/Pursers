@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Retry Central intake quota refusals after backoff instead of tripping the permanent
+  creation breaker. Allow explicit null/none hourly creation limits independently
+  of concurrent seat caps, preserving existing defaults and authorization.
+
 - Release grouped-intake file holds after confirmed PR delivery while retaining
   issue deduplication and active/uncertain-delivery holds. Let Butler plan a ready
   queue from fresh fleet capacity, including busy workers, without fixed pull quotas.

@@ -543,3 +543,23 @@ when capacity is needed again. A subsequent observation can start it afresh.
 Live leases and busy work prevent this stop. This avoids treating a draining
 process as a ready replacement forever. No model requests are needed for this
 reconciliation, and no seat or hourly execution limit changes are required.
+
+### Optional hourly intake limits and quota recovery
+
+Seat ceilings bound simultaneous work. Two independent settings bound ticket
+creation over a rolling hour: coordinator `intake.rate_per_hour` (CLI
+`--intake-rate-per-hour`) and each Central board's `config.intake_rate_limit_per_hour`.
+Defaults remain unchanged. To run without hourly creation throttling, explicitly
+set the coordinator value to JSON `null` or CLI `none`, and the Central board value
+to `null`. The Central setting is persisted board configuration, not a coordinator
+state key; a host administrator must update it with the supported Central runtime
+and a database backup. Deploy the nullable-limit runtime before setting it. Other
+boards retain their own limits. Do not change tokens or add `board:write` to the
+intake principal to bypass a limit.
+
+A Central hourly-limit refusal leaves the ask queued, defers that board for at
+least 60 seconds and retries on a subsequent coordinator cycle. It does not count
+as a failed creation or trip the permanent creation breaker. Other creation errors
+retain their existing breaker. A coordinator process that already tripped the old
+breaker needs a controlled restart after deployment; its durable ask IDs preserve
+idempotency. This changes neither worker model-run throttles nor host seat caps.

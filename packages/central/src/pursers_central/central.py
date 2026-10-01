@@ -1834,7 +1834,7 @@ class CentralBoard:
         intake_rate_limit = config.setdefault(
             "intake_rate_limit_per_hour", DEFAULT_INTAKE_RATE_LIMIT_PER_HOUR
         )
-        if (
+        if intake_rate_limit is not None and (
             isinstance(intake_rate_limit, bool)
             or not isinstance(intake_rate_limit, int)
             or not 1 <= intake_rate_limit <= MAX_INTAKE_RATE_LIMIT_PER_HOUR
@@ -9375,10 +9375,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                             created_epoch = now
                     if float(created_epoch) >= cutoff:
                         recent += 1
-                rate_limit = int(
-                    document["config"]["intake_rate_limit_per_hour"]
-                )
-                if recent >= rate_limit:
+                rate_limit = document["config"]["intake_rate_limit_per_hour"]
+                if rate_limit is not None and recent >= rate_limit:
                     raise PermissionError(
                         "board:intake hourly ticket creation limit reached"
                     )

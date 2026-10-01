@@ -1228,6 +1228,18 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
                 expected_absent=True,
             )
 
+    async def test_intake_scope_hourly_limit_can_be_disabled(self) -> None:
+        self.service.mutate("pursers", lambda document: document["config"].update(
+            {"intake_rate_limit_per_hour": None}))
+        self.principal = self.intake
+        for index in range(central.DEFAULT_INTAKE_RATE_LIMIT_PER_HOUR + 1):
+            created = await self.call("ticket_create", agent_name="intake-coordinator",
+                ticket_id=f"TK-unlimited-{index}", title=f"Intake {index}",
+                description="Explicit unlimited intake.", target_url="pursers/tests",
+                scope="interactive-no-send", required_fields=["test_output"],
+                unassigned=True, coordinator_op_key=f"coord-unlimited-{index}")
+            self.assertFalse(created.is_error)
+
     async def test_intake_scope_server_rate_limit(self) -> None:
         self.service.mutate(
             "pursers",
