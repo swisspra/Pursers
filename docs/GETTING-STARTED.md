@@ -148,6 +148,11 @@ integration:
   [AionUi extension guide](../tools/aionui-extension/README.md).
 - The Fleet dashboard is a repo-owned, loopback-only operator surface. Follow
   its [launcher and upgrade guide](../tools/fleet-dashboard/README.md).
+- The optional portable Agent Skills bundle provides narrow onboarding, work,
+  review, and operator workflows for Zed, Codex, and goose. Preview a
+  project-scoped install and verify host support with the
+  [portable skills guide](guides/portable-skills.md). Installing a skill does
+  not configure MCP, create credentials, or grant board authority.
 
 From a source checkout, the documented loopback Central default is explicit:
 

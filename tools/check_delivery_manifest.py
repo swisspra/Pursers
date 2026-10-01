@@ -213,6 +213,16 @@ def discover_artifacts(root: Path) -> dict[str, Artifact]:
         if isinstance(extension_id, str) and extension_id:
             add(f"zed-extension:{extension_id}", "zed-extension", path)
 
+    skill_manifest = root / "integrations/skills/manifest.json"
+    if skill_manifest.is_file() and not _ignored(skill_manifest, root):
+        try:
+            document = json.loads(skill_manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"cannot inspect {skill_manifest}: {exc}") from exc
+        bundle_name = document.get("bundle_name")
+        if isinstance(bundle_name, str) and bundle_name:
+            add(f"skill-bundle:{bundle_name}", "skill-bundle", skill_manifest)
+
     for path in sorted(root.rglob("*.html")):
         relative_parts = path.relative_to(root).parts
         if (

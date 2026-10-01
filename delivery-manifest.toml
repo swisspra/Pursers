@@ -181,6 +181,24 @@ evidence = ["integrations/zed/pursers-mcp/README.md"]
 evidence_contains = ["cargo test --locked", "wasm32-wasip2", "zed: install dev extension"]
 
 [[artifacts]]
+id = "skill-bundle:pursers"
+kind = "skill-bundle"
+source = "integrations/skills/manifest.json"
+state = "delivered"
+channel = "documented project or user Agent Skills install for one selected host"
+evidence = ["docs/guides/portable-skills.md", "integrations/skills/manifest.json"]
+evidence_contains = ["integrations/skills/manage.py plan", "pursers-start", "pursers-work", "pursers-review", "pursers-operate"]
+
+[[artifacts]]
+id = "operator-tool:integrations/skills/manage.py"
+kind = "operator-tool"
+source = "integrations/skills/manage.py"
+state = "delivered"
+channel = "documented source command for previewed skill installation, checks, and removal"
+evidence = ["docs/guides/portable-skills.md"]
+evidence_contains = ["integrations/skills/manage.py plan", "integrations/skills/manage.py install", "integrations/skills/manage.py check", "integrations/skills/manage.py remove"]
+
+[[artifacts]]
 id = "web-surface:packages/personal/src/pursers_personal/resources/dashboard.html"
 kind = "web-surface"
 source = "packages/personal/src/pursers_personal/resources/dashboard.html"
