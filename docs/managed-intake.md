@@ -593,3 +593,17 @@ After provisioning, verify eligible stopped inventory, autonomous start receipts
 registry memberships and real work/review claims. Service status alone does not prove
 that a runner can accept work. Keep a private configuration backup and document the
 actual running count separately from the host ceiling.
+
+The event runner's `repository_root` is the relay's authorized boundary. It must
+contain the canonical active project clone paths from the registry, including
+`fleet_clone_dir` overrides. A per-seat checkout directory is insufficient when
+registry work is routed to a shared projects directory. Use the explicitly approved
+host projects root and retain isolated ticket worktrees within it. Bootstrap checks
+resolved paths, including symlinks, and rejects a mismatched boundary before a model
+is called. It does not expand permissions automatically. Change private deployment
+configuration through the operator, then roll idle runners without interrupting live
+work/review leases; preserve their cursor files.
+
+Local fleet observation attributes active work and review leases to their holder.
+An unidentified active holder remains protected conservatively. Other ready seats
+can drain and stop when demand drops after the existing grace/cooldown period.

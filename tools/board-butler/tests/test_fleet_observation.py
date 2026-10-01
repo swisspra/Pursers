@@ -150,3 +150,20 @@ def test_complete_coordination_scan_allows_truncated_ticket_payloads():
     observation, _, leases = observer.collect(['a', 'b'], boards, members, NOW, {}, {})
     assert observation['executor_seats'][0]['lifecycle'] == 'busy'
     assert all(leases['boards'][b]['seats']['seat']['work'] for b in ('a', 'b'))
+
+
+@pytest.mark.parametrize('review', [False, True])
+@pytest.mark.parametrize('holder,want', [('agent', 'busy'), ('other-agent', 'ready'), (None, 'busy')])
+def test_ticket_lease_protects_only_its_holder_or_unknown(review, holder, want):
+    template, boards, members, services = fixture()
+    ticket = {'status': 'submitted' if review else 'claimed'}
+    if review:
+        ticket['review_lease'] = {'expires_at': (NOW+timedelta(minutes=5)).isoformat()}
+        if holder: ticket['review_lease']['reviewer_agent_id'] = holder
+    elif holder: ticket['claimed_by_agent_id'] = holder
+    boards['b']['tickets'] = [ticket]
+    observer = observer_api()['LocalFleetObserver']({'t': template}, services, {},
+        {'t': {'board_id': 'a', 'provider': 'worker'}})
+    observation, _, leases = observer.collect(['a', 'b'], boards, members, NOW, {}, {})
+    assert observation['executor_seats'][0]['lifecycle'] == want
+    assert leases['boards']['a']['seats']['seat']['work'] == (want == 'busy')
