@@ -6746,7 +6746,11 @@ class SourceIntakePoller:
         if policy.get('mode') in {'batch_pr', 'branch_only'}:
             activation = project.get('delivery_policy_activation')
             if activation is None:
-                return {'mode': 'per_ticket_pr'}, resolved
+                return {
+                    'mode': 'inactive',
+                    'configured_mode': policy['mode'],
+                    'reason_code': 'delivery_policy_not_activated',
+                }, resolved
             if (not isinstance(activation, Mapping)
                     or set(activation) != {'schema_version', 'state', 'policy_revision', 'activation_id'}
                     or activation.get('schema_version') != 1
@@ -6851,6 +6855,21 @@ class SourceIntakePoller:
             try:
                 project = await self.project_reader(board_id) if self.project_reader is not None else None
                 resolved_batch = self._resolved_batch_policy(project)
+                if resolved_batch is not None and resolved_batch[0].get('mode') == 'inactive':
+                    policy, _resolved = resolved_batch
+                    findings.append({
+                        'kind': 'source-intake-delivery-inactive',
+                        'level': 'warn',
+                        'status': 'inactive',
+                        'source_id': source.source_id,
+                        'ticket_id': ticket_id,
+                        'configured_mode': policy['configured_mode'],
+                        'reason_code': policy['reason_code'],
+                        'message': (
+                            'Configured delivery policy is a saved draft and has not been activated.'
+                        ),
+                    })
+                    continue
                 if resolved_batch is not None and resolved_batch[0].get('mode') != 'per_ticket_pr':
                     policy, resolved = resolved_batch
                     batch_runtime, result = await self._collect_batch_member(
