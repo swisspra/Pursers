@@ -11,6 +11,23 @@ def registry():
     return {'schema_version': 1, 'projects': {'sample': {'board_id': 'sample', 'work_dir': '/PATH/TO/repo', 'repository_url': 'https://example.invalid/repo.git', 'integration_ref': 'dev', 'status': 'active', 'private_extra': 'preserve'}}}
 
 
+def test_public_delivery_settings_exposes_exact_editable_layers_not_only_effective_policy():
+    original = registry()
+    original['delivery_policy_defaults'] = {'snapshot_branch_prefix': 'global-snap'}
+    original['delivery_policy_groups'] = {'backend': {'conflict_policy': 'repair_then_review'}}
+    original['projects']['sample'].update(
+        delivery_policy_group='backend',
+        delivery_policy={'mode': 'branch_only', 'final_pr_target': None},
+    )
+    row = m.public_delivery_settings(original)[0]
+    assert row['delivery_policy']['mode'] == 'branch_only'
+    assert row['delivery_policy_layers'] == {
+        'global': {'snapshot_branch_prefix': 'global-snap'},
+        'groups': {'backend': {'conflict_policy': 'repair_then_review'}},
+        'repository': {'mode': 'branch_only', 'final_pr_target': None},
+    }
+
+
 def test_delivery_plan_preserves_unrelated_registry_and_requires_human_promotion():
     plan = m.build_delivery_plan(request={'action': 'delivery', 'name': 'sample', 'delivery_workflow': {'mode': 'integration', 'base_branch': 'dev'}}, registry=registry(), registry_expected_sha256='a'*64, actor='operator', central='default', observation={'complete': True, 'active_tickets': [], 'pending_offers': []}, refs={'dev': 'a'*40, 'prd': 'b'*40})
     assert not plan['blocked']

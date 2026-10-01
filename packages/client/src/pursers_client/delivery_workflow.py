@@ -36,6 +36,32 @@ _POLICY_REVISION_RE = re.compile(r'[0-9a-f]{40}')
 _ACTIVATION_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}')
 
 
+def _cron_field(value: str, minimum: int, maximum: int) -> bool:
+    """Validate one numeric cron field, including lists, ranges and steps."""
+    if _CRON_FIELD_RE.fullmatch(value) is None or '?' in value:
+        return False
+    for item in value.split(','):
+        if not item:
+            return False
+        base, separator, step_text = item.partition('/')
+        if separator:
+            if not step_text.isdigit() or not 1 <= int(step_text) <= maximum - minimum + 1:
+                return False
+        if base == '*':
+            continue
+        if '-' in base:
+            start_text, dash, end_text = base.partition('-')
+            if not dash or '-' in end_text or not start_text.isdigit() or not end_text.isdigit():
+                return False
+            start, end = int(start_text), int(end_text)
+            if not minimum <= start <= end <= maximum:
+                return False
+            continue
+        if not base.isdigit() or not minimum <= int(base) <= maximum:
+            return False
+    return True
+
+
 def branch_name(value: Any, field: str = 'branch') -> str:
     """Validate a short branch name without shell execution or ref ambiguity."""
     if (not isinstance(value, str) or not 1 <= len(value) <= 200
@@ -83,9 +109,11 @@ def _release_trigger(value: Any) -> dict[str, Any]:
         ZoneInfo(timezone_name)
     except (ZoneInfoNotFoundError, ValueError) as exc:
         raise ValueError('scheduled release trigger timezone is not recognized') from exc
+    fields = schedule.split() if isinstance(schedule, str) else []
+    limits = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
     if (not isinstance(schedule, str) or schedule != schedule.strip()
-            or len(schedule.split()) != 5
-            or any(_CRON_FIELD_RE.fullmatch(field) is None for field in schedule.split())):
+            or len(fields) != 5
+            or any(not _cron_field(field, *limit) for field, limit in zip(fields, limits))):
         raise ValueError('scheduled release trigger requires a five-field numeric cron schedule')
     return {'kind': kind, 'timezone': timezone_name, 'schedule': schedule}
 
