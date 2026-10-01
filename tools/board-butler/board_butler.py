@@ -1526,6 +1526,14 @@ def _fleet_state_time(state: Mapping[str, Any], key: str) -> datetime | None:
     return parse_time(value) if isinstance(value, str) else None
 
 
+def _fleet_role_idle_time(state: Mapping[str, Any], role: str) -> datetime | None:
+    timers = state.get("role_idle_since")
+    if isinstance(timers, Mapping):
+        return _fleet_state_time(timers, role)
+    # Older state only tracked fully idle boards. Preserve that elapsed grace.
+    return _fleet_state_time(state, "idle_since")
+
+
 def fleet_policies_from_config(
     configs: Mapping[str, Mapping[str, Any]],
     provider_maximums: Mapping[str, Mapping[str, int]],
@@ -2098,13 +2106,13 @@ class FleetReconciler:
                 if isinstance(board_prior, Mapping)
                 else {}
             )
-            idle_since = _fleet_state_time(board_prior, "idle_since")
             last_up = _fleet_state_time(board_prior, "last_scale_up_at")
             last_down = _fleet_state_time(board_prior, "last_scale_down_at")
             seats = [seat for seat in snapshot.seats if seat.board_id == board_id]
             counts: dict[str, int] = {}
             for role in FLEET_ROLES:
                 role_policy = policy.roles[role]
+                idle_since = _fleet_role_idle_time(board_prior, role)
                 live = sum(
                     1
                     for seat in seats
@@ -2533,6 +2541,13 @@ class FleetReconciler:
             boards[board_id] = {
                 "desired": dict(desired),
                 "provider_desired": dict(plan.provider_desired[board_id]),
+                "role_idle_since": {
+                    role: (
+                        (_fleet_role_idle_time(previous, role) or now).isoformat()
+                        if _role_pressure(demand, role) == 0 else None
+                    )
+                    for role in FLEET_ROLES
+                },
                 "idle_since": (
                     previous.get("idle_since")
                     if not demand.has_work and previous.get("idle_since")

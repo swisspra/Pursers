@@ -538,6 +538,12 @@ provider probe prevents new starts on that provider; it does not turn a known
 running seat into zero capacity or drain the configured minimum by itself.
 Independent human maxima and approved-template checks still apply.
 
+Idle grace is tracked independently for workers, reviewers and ACP workers using
+the existing `scale_down_s` setting. For example, a review queue does not reset
+the idle worker timer. Timers persist across Butler restarts and reset when that
+role has demand again. Older board-wide idle timestamps remain compatible;
+live lease holders and busy seats remain protected during drain selection.
+
 An idle `draining` seat finishes its stop after the configured grace period, even
 when capacity is needed again. A subsequent observation can start it afresh.
 Live leases and busy work prevent this stop. This avoids treating a draining
