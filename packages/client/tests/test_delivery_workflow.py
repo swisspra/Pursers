@@ -113,7 +113,8 @@ def test_runtime_gating_compiles_only_deployed_modes_without_fallback():
     per_ticket = resolve_delivery_policy({'projects': {'api': {'integration_ref': 'main'}}}, 'api')['policy']
     assert delivery_runtime_readiness(per_ticket)['ready']
     assert compile_delivery_workflow(per_ticket) == ({'mode': 'direct'}, 'main')
-    batch = {**per_ticket, 'mode': 'batch_pr', 'release_trigger': {'kind': 'manual'}}
+    batch = {**per_ticket, 'mode': 'batch_pr', 'final_pr_target': 'customer-review',
+             'release_trigger': {'kind': 'manual'}}
     readiness = delivery_runtime_readiness(batch)
     assert not readiness['ready']
     assert any('manual resident release path' in item for item in readiness['blockers'])
@@ -139,6 +140,15 @@ def test_delivery_policy_activation_is_deterministic_bounded_and_explicit():
         parse_delivery_policy_activation({**record, 'policy_revision': 'ABC'})
     with pytest.raises(ValueError, match='unsupported or missing'):
         parse_delivery_policy_activation({**record, 'extra': True})
+
+
+def test_batch_policy_requires_a_distinct_customer_pr_target():
+    registry = {'projects': {'api': {
+        'integration_ref': 'main',
+        'delivery_policy': {'mode': 'batch_pr', 'final_pr_target': 'main'},
+    }}}
+    with pytest.raises(ValueError, match='distinct from mapped and integration'):
+        resolve_delivery_policy(registry, 'api')
 
 
 def test_existing_integration_workflow_projects_as_branch_only_until_migrated():

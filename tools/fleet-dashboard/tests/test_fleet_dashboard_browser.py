@@ -366,7 +366,8 @@ console.log(JSON.stringify({{globalBefore, globalAfter, groupLayer, repositoryAf
          "delivery_policy_group": "backend", "activate": True,
          "delivery_policy": {
              "mode": "batch_pr", "integration_branch": "alpha-delivery",
-             "snapshot_branch_prefix": "repo-draft", "release_trigger": {"kind": "manual"},
+             "snapshot_branch_prefix": "repo-draft", "release_trigger": {"kind": "ready"},
+             "pr_update": "freeze_on_ready",
              "validation": {"test_commands": ["pytest -q edited"]},
          }},
     ]

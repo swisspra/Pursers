@@ -391,8 +391,8 @@
     form.elements.preset.addEventListener('change', () => {
       const preset = form.elements.preset.value;
       if (preset === 'review-each-ticket') { form.elements.mode.value = 'per_ticket_pr'; form.elements.release_trigger.value = 'ready'; form.elements.final_pr_target_mode.value = 'branch'; form.elements.final_pr_target.value = form.elements.base_branch.value; }
-      if (preset === 'receive-batches') { form.elements.mode.value = 'batch_pr'; form.elements.release_trigger.value = 'manual'; form.elements.final_pr_target_mode.value = 'branch'; form.elements.final_pr_target.value = form.elements.base_branch.value; }
-      if (preset === 'branch-only') { form.elements.mode.value = 'branch_only'; form.elements.release_trigger.value = 'ready'; form.elements.final_pr_target_mode.value = 'none'; form.elements.final_pr_target.value = ''; }
+      if (preset === 'receive-batches') { form.elements.mode.value = 'batch_pr'; form.elements.release_trigger.value = 'ready'; form.elements.pr_update.value = 'freeze_on_ready'; form.elements.final_pr_target_mode.value = 'branch'; form.elements.final_pr_target.value = ''; }
+      if (preset === 'branch-only') { form.elements.mode.value = 'branch_only'; form.elements.release_trigger.value = 'ready'; form.elements.pr_update.value = 'freeze_on_ready'; form.elements.final_pr_target_mode.value = 'none'; form.elements.final_pr_target.value = ''; }
       saveDraft();
     });
     form.querySelector('[data-delivery-refresh]').addEventListener('click', () => loadDelivery(central, true));

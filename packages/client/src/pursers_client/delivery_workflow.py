@@ -26,9 +26,10 @@ DELIVERY_POLICY_FIELDS = frozenset({
 })
 DELIVERY_POLICY_PRESETS: dict[str, dict[str, Any]] = {
     'review-each-ticket': {'mode': 'per_ticket_pr', 'release_trigger': {'kind': 'ready'}},
-    'receive-batches': {'mode': 'batch_pr', 'release_trigger': {'kind': 'manual'}},
+    'receive-batches': {'mode': 'batch_pr', 'release_trigger': {'kind': 'ready'},
+                        'pr_update': 'freeze_on_ready'},
     'branch-only': {'mode': 'branch_only', 'final_pr_target': None,
-                    'release_trigger': {'kind': 'ready'}},
+                    'release_trigger': {'kind': 'ready'}, 'pr_update': 'freeze_on_ready'},
 }
 _CRON_FIELD_RE = re.compile(r'[0-9*/?,\-]+')
 _GROUP_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}')
@@ -257,6 +258,10 @@ def _validate_effective_policy(policy: Mapping[str, Any]) -> None:
         raise ValueError('snapshot branch prefix conflicts with a configured branch namespace')
     if policy['mode'] == 'branch_only' and policy['final_pr_target'] is not None:
         raise ValueError('branch_only delivery requires final_pr_target null')
+    if (policy['mode'] == 'batch_pr'
+            and policy['final_pr_target'].casefold()
+            in {policy['mapped_base'].casefold(), policy['integration_branch'].casefold()}):
+        raise ValueError('batch_pr final_pr_target must be distinct from mapped and integration branches')
     if policy['mode'] in {'per_ticket_pr', 'batch_pr'} and policy['final_pr_target'] is None:
         raise ValueError(f'{policy["mode"]} delivery requires final_pr_target')
     if policy['mode'] == 'per_ticket_pr' and policy['auto_integrate']:
