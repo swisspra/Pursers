@@ -17,7 +17,13 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from pursers_client import BoardClient, BoardClientError
-from pursers_client.delivery_workflow import parse_delivery_workflow
+from pursers_client.delivery_workflow import (
+    delivery_group_name,
+    parse_delivery_policy_activation,
+    parse_delivery_policy,
+    parse_delivery_workflow,
+    resolve_delivery_policy,
+)
 
 
 CENTRAL_URL_DEFAULT = "http://127.0.0.1:8766/mcp"
@@ -84,9 +90,10 @@ def validate_registry(document: Any) -> dict[str, Any]:
     """Return a deep copy of a registry that exactly matches schema v1."""
     if not isinstance(document, dict):
         raise RegistryError("project_registry must be a JSON object")
-    if not {"schema_version", "projects"} <= set(document) or set(document) - {"schema_version", "projects", "delivery_defaults"}:
+    root_optional = {"delivery_defaults", "delivery_policy_defaults", "delivery_policy_groups"}
+    if not {"schema_version", "projects"} <= set(document) or set(document) - {"schema_version", "projects"} - root_optional:
         raise RegistryError(
-            "project_registry must contain schema_version and projects, with optional delivery_defaults"
+            "project_registry contains unsupported root fields"
         )
     if type(document["schema_version"]) is not int or document["schema_version"] != 1:
         raise RegistryError("project_registry schema_version must be 1")
@@ -98,6 +105,22 @@ def validate_registry(document: Any) -> dict[str, Any]:
     if "delivery_defaults" in document:
         try:
             document["delivery_defaults"] = parse_delivery_workflow(document["delivery_defaults"])
+        except ValueError as exc:
+            raise RegistryError(str(exc)) from exc
+    if "delivery_policy_defaults" in document:
+        try:
+            document["delivery_policy_defaults"] = parse_delivery_policy(document["delivery_policy_defaults"])
+        except ValueError as exc:
+            raise RegistryError(str(exc)) from exc
+    if "delivery_policy_groups" in document:
+        groups = document["delivery_policy_groups"]
+        if not isinstance(groups, dict) or len(groups) > 100:
+            raise RegistryError("delivery_policy_groups must be a bounded object")
+        try:
+            document["delivery_policy_groups"] = {
+                delivery_group_name(name, "delivery policy group name"): parse_delivery_policy(policy)
+                for name, policy in groups.items()
+            }
         except ValueError as exc:
             raise RegistryError(str(exc)) from exc
 
@@ -113,6 +136,9 @@ def validate_registry(document: Any) -> dict[str, Any]:
             "domain",
             "public",
             "delivery_workflow",
+            "delivery_policy",
+            "delivery_policy_group",
+            "delivery_policy_activation",
         }
         if (
             not isinstance(entry, dict)
@@ -173,6 +199,23 @@ def validate_registry(document: Any) -> dict[str, Any]:
             entry["delivery_workflow"] = policy
             if policy and policy["mode"] == "integration":
                 entry["integration_ref"] = policy["integration_branch"]
+        if "delivery_policy" in entry:
+            try:
+                entry["delivery_policy"] = parse_delivery_policy(entry["delivery_policy"])
+            except ValueError as exc:
+                raise RegistryError(str(exc)) from exc
+        if "delivery_policy_group" in entry:
+            try:
+                entry["delivery_policy_group"] = delivery_group_name(entry["delivery_policy_group"])
+            except ValueError as exc:
+                raise RegistryError(str(exc)) from exc
+        if "delivery_policy_activation" in entry:
+            try:
+                entry["delivery_policy_activation"] = parse_delivery_policy_activation(
+                    entry["delivery_policy_activation"]
+                )
+            except ValueError as exc:
+                raise RegistryError(str(exc)) from exc
 
     routes: dict[tuple[str, str], str] = {}
     for name, entry in projects.items():
@@ -186,6 +229,14 @@ def validate_registry(document: Any) -> dict[str, Any]:
                 "repository_url on one board"
             )
         routes[route] = name
+
+    for name, entry in projects.items():
+        if ("delivery_policy" in entry or "delivery_policy_group" in entry
+                or "delivery_policy_defaults" in document):
+            try:
+                resolve_delivery_policy(document, name)
+            except ValueError as exc:
+                raise RegistryError(str(exc)) from exc
 
     return copy.deepcopy(document)
 

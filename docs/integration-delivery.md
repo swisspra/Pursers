@@ -42,6 +42,70 @@ Repository credentials remain in the existing protected configuration.
 
 ## Configuration contract
 
+The original `delivery_workflow` remains the active runtime contract for existing
+repositories. It is not rewritten merely because a configurable policy is saved.
+The configurable policy is resolved in this order:
+
+1. Built-in safe defaults, using the repository's mapped `integration_ref`.
+2. Root `delivery_policy_defaults`.
+3. The explicitly named `delivery_policy_group`, if any.
+4. Repository `delivery_policy` overrides.
+
+No group is inferred from repository, board, directory or company names. The
+dashboard shows the source of each effective field. Resetting a repository removes
+only its overrides, so it inherits the current group and global values again.
+
+Missing keys inherit. `false` remains an explicit boolean. An empty
+`validation.test_commands` list adds no repository-specific commands but cannot
+remove commands required by a higher layer. `final_pr_target: null` is meaningful
+only for branch-only delivery; empty branch strings are invalid. Required upstream
+policies and independent review cannot be set to false.
+
+A registry can define reusable policy without changing the flat repository map:
+
+```json
+{
+  "delivery_policy_defaults": {
+    "validation": {"required_reviewers": 1, "require_upstream_policies": true}
+  },
+  "delivery_policy_groups": {
+    "backend": {"conflict_policy": "pause"}
+  },
+  "projects": {
+    "orders-api": {
+      "delivery_policy_group": "backend",
+      "delivery_policy": {"mode": "branch_only", "final_pr_target": null}
+    }
+  }
+}
+```
+
+The effective policy fields are:
+
+- `mode`: `per_ticket_pr`, `batch_pr`, or `branch_only`.
+- `mapped_base`, `integration_branch`, `snapshot_branch_prefix`, and optional
+  `final_pr_target`, all validated as case-preserving Git ref names. Base, delivery,
+  final target and prefix namespaces are checked for collisions.
+- `release_trigger`: `ready`, `manual`, or `scheduled`. Scheduled triggers require
+  a recognized IANA timezone and a five-field numeric cron expression.
+- `pr_update`: `rolling` or `freeze_on_ready`.
+- `auto_integrate`, `collection_paused`, and the fixed `final_merge: "manual"`.
+- `validation.test_commands`, `validation.required_reviewers`, mandatory
+  `validation.independent_review`, and mandatory
+  `validation.require_upstream_policies`.
+- `conflict_policy`: `pause` or `repair_then_review`.
+
+Shared global or group edits preview every explicitly affected repository and save
+configuration only. Activate repositories separately after reviewing remote refs
+and active work. Existing PRs and in-flight batches are never silently rerouted.
+
+Auto-onboarding has the same explicit boundary. A source configuration may set
+`activate_delivery_policy: true` to validate the effective policy, create its owned
+integration branch, and persist a revision-bound activation for each new repository.
+If a new repository would inherit `batch_pr` or `branch_only` without that explicit
+intent, onboarding stops with `delivery_setup_required`; it never falls back to a
+per-ticket PR. Existing repositories and saved drafts remain inert until activated.
+
 A project registry entry can contain:
 
 ```json
@@ -64,6 +128,35 @@ A root registry `delivery_defaults` object supplies the same template for future
 auto-onboarding. Its `base_branch` is replaced by each source mapping's branch.
 An onboarding source can also declare `delivery_workflow` to override the template.
 Projects without a policy retain direct-delivery behavior until explicitly migrated.
+
+### Runtime capability gate
+
+The schema intentionally describes more policy than the resident path executes.
+`per_ticket_pr` remains the legacy route. `batch_pr` and `branch_only` can be
+activated with the `ready` trigger when the project has an exact repository mapping,
+a fleet-owned clone, one independent reviewer, and `pause` conflict handling.
+`batch_pr` supports rolling or frozen snapshots and configured validation commands;
+`branch_only` requires `freeze_on_ready` and makes no pull-request connector calls.
+The final customer merge always remains manual.
+
+Manual and scheduled release logic exists in the private batch runtime, but there is
+not yet a resident authorized request/scheduler path. Multiple required reviewers and
+`repair_then_review` also require additional resident capabilities. Those combinations
+remain **Draft only** in the dashboard and activation fails closed with the exact
+reason; it never substitutes per-ticket behavior.
+
+Saving any policy is inert. Activating a supported batch or branch-only policy writes
+an explicit `delivery_policy_activation` record whose revision is bound to the exact
+effective policy. The dashboard creates the owned integration branch from the observed
+mapped-base SHA under the same guarded preview/apply flow. Registry CAS, board-admin
+authorization, remote-ref readback, and a second active-work check run before saving.
+A global, group, or repository draft edit never refreshes an activation record. If an
+inherited effective policy changes, the old record becomes stale and resident delivery
+fails closed until the repository is explicitly reviewed and activated again.
+
+`branch_only` never compiles to the legacy integration workflow: that path still
+creates one upstream PR per ticket. Saving a draft does not modify `integration_ref`,
+create a branch, or claim that batching or scheduling is operational.
 
 ## Integration and validation
 

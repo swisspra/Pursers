@@ -18,7 +18,14 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from pursers_client import BoardClient
-from pursers_client.delivery_workflow import parse_delivery_workflow, delivery_target
+from pursers_client.delivery_workflow import (
+    delivery_group_name,
+    delivery_target,
+    parse_delivery_policy_activation,
+    parse_delivery_policy,
+    parse_delivery_workflow,
+    resolve_delivery_policy,
+)
 
 from registry_admin import CENTRAL_URL_DEFAULT, HOME_BOARD_ID
 
@@ -232,6 +239,22 @@ def parse_registry(result: Any) -> dict[str, Any]:
             normalized["delivery_defaults"] = parse_delivery_workflow(document["delivery_defaults"])
         except ValueError as exc:
             raise DoctorError(str(exc)) from exc
+    if "delivery_policy_defaults" in document:
+        try:
+            normalized["delivery_policy_defaults"] = parse_delivery_policy(document["delivery_policy_defaults"])
+        except ValueError as exc:
+            raise DoctorError(str(exc)) from exc
+    if "delivery_policy_groups" in document:
+        groups = document["delivery_policy_groups"]
+        if not isinstance(groups, dict) or len(groups) > 100:
+            raise DoctorError("delivery_policy_groups must be a bounded object")
+        try:
+            normalized["delivery_policy_groups"] = {
+                delivery_group_name(name, "delivery policy group name"): parse_delivery_policy(policy)
+                for name, policy in groups.items()
+            }
+        except ValueError as exc:
+            raise DoctorError(str(exc)) from exc
     required = {"board_id", "work_dir", "status"}
     optional = {
         "integration_ref",
@@ -242,6 +265,9 @@ def parse_registry(result: Any) -> dict[str, Any]:
         "fleet",
         "repository_url",
         "delivery_workflow",
+        "delivery_policy",
+        "delivery_policy_group",
+        "delivery_policy_activation",
         "domain",
     }
     for name, raw in projects.items():
@@ -313,6 +339,30 @@ def parse_registry(result: Any) -> dict[str, Any]:
         normalized["projects"][name]["integration_ref"] = integration_ref
         if "delivery_workflow" in raw:
             normalized["projects"][name]["delivery_workflow"] = policy
+        if "delivery_policy" in raw:
+            try:
+                normalized["projects"][name]["delivery_policy"] = parse_delivery_policy(raw["delivery_policy"])
+            except ValueError as exc:
+                raise DoctorError(str(exc)) from exc
+        if "delivery_policy_group" in raw:
+            try:
+                normalized["projects"][name]["delivery_policy_group"] = delivery_group_name(raw["delivery_policy_group"])
+            except ValueError as exc:
+                raise DoctorError(str(exc)) from exc
+        if "delivery_policy_activation" in raw:
+            try:
+                normalized["projects"][name]["delivery_policy_activation"] = parse_delivery_policy_activation(
+                    raw["delivery_policy_activation"]
+                )
+            except ValueError as exc:
+                raise DoctorError(str(exc)) from exc
+    for name, entry in normalized["projects"].items():
+        if ("delivery_policy" in entry or "delivery_policy_group" in entry
+                or "delivery_policy_defaults" in normalized):
+            try:
+                resolve_delivery_policy(normalized, name)
+            except ValueError as exc:
+                raise DoctorError(str(exc)) from exc
     return normalized
 
 

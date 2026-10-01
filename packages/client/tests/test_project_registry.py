@@ -42,6 +42,42 @@ def test_registry_parser_active_boards_and_work_dirs() -> None:
     assert registry_work_dirs(parsed)["fullplatts"] == "/repo/other"
 
 
+def test_registry_parser_preserves_valid_delivery_activation() -> None:
+    activation = {
+        "schema_version": 1,
+        "state": "active",
+        "policy_revision": "a" * 40,
+        "activation_id": "policy:" + "a" * 40,
+    }
+    parsed = parse_project_registry(state({
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "alpha",
+                "work_dir": "/repo/alpha",
+                "status": "active",
+                "delivery_policy_activation": activation,
+            },
+        },
+    }))
+    assert parsed["projects"]["alpha"]["delivery_policy_activation"] == activation
+
+
+def test_registry_parser_rejects_malformed_delivery_activation() -> None:
+    with pytest.raises(ValueError, match="delivery_policy_activation"):
+        parse_project_registry(state({
+            "schema_version": 1,
+            "projects": {
+                "alpha": {
+                    "board_id": "alpha",
+                    "work_dir": "/repo/alpha",
+                    "status": "active",
+                    "delivery_policy_activation": {"state": "active"},
+                },
+            },
+        }))
+
+
 def test_registry_routes_seats_to_fleet_clone_and_retains_operator_checkout() -> None:
     parsed = parse_project_registry(state({
         "schema_version": 1,
@@ -955,3 +991,27 @@ def test_registry_rejects_invalid_integration_branch(ref):
         parse_project_registry(state({'schema_version': 1, 'projects': {
             'alpha': {'board_id': 'alpha', 'work_dir': '/repo/alpha', 'status': 'active',
                       'integration_ref': ref}}}))
+
+
+def test_registry_round_trips_delivery_policy_hierarchy_without_inference():
+    parsed = parse_project_registry(state({
+        'schema_version': 1,
+        'delivery_policy_defaults': {'conflict_policy': 'pause'},
+        'delivery_policy_groups': {'backend': {'mode': 'branch_only', 'final_pr_target': None}},
+        'projects': {
+            'api': {'board_id': 'api', 'work_dir': '/repo/api', 'status': 'active',
+                    'integration_ref': 'Dev', 'delivery_policy_group': 'backend',
+                    'delivery_policy': {'integration_branch': 'Pursers-Integration'}},
+            'web': {'board_id': 'web', 'work_dir': '/repo/web', 'status': 'active'},
+        },
+    }))
+    assert parsed['projects']['api']['delivery_policy_group'] == 'backend'
+    assert parsed['projects']['api']['delivery_policy']['integration_branch'] == 'Pursers-Integration'
+    assert 'delivery_policy_group' not in parsed['projects']['web']
+
+
+def test_registry_rejects_unknown_delivery_policy_group():
+    with pytest.raises(ValueError, match='is not defined'):
+        parse_project_registry(state({'schema_version': 1, 'projects': {
+            'api': {'board_id': 'api', 'work_dir': '/repo/api', 'status': 'active',
+                    'delivery_policy_group': 'missing'}}}))

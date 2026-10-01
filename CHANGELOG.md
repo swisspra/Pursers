@@ -9,6 +9,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Configurable delivery policy inheritance across global defaults, explicit named
+  groups, and repository overrides, with field provenance, presets, reset-to-inherit,
+  guarded activation and draft-only visibility for runtime capabilities that are not
+  installed yet. Existing delivery routes and in-flight PRs remain unchanged until
+  an operator activates a supported repository policy.
+- Explicit revision-bound activation for resident `batch_pr` and `branch_only`
+  delivery, preserved across registry reload/admin/doctor paths. Ready cohorts can
+  collect independently reviewed commits into one frozen or rolling customer handoff;
+  stale drafts and unsupported resident triggers remain inert and fail closed.
+
 - Guided per-repository delivery settings in Projects, linked from Settings. Create
   a dedicated delivery branch from the exact mapped base, preserve source mappings,
   and configure defaults for future onboarding with guarded preview and CAS apply.

@@ -15,8 +15,11 @@ that cannot work.
 
 from __future__ import annotations
 
-from pursers_client.delivery_workflow import delivery_target, integration_policy
+from pursers_client import delivery_workflow as _delivery_policy_api
 from pursers_client.submission_evidence import submission_identity
+
+delivery_target = _delivery_policy_api.delivery_target
+integration_policy = _delivery_policy_api.integration_policy
 
 import argparse
 import asyncio
@@ -6138,6 +6141,129 @@ class IntakeDecisionCache:
             return copy.deepcopy(self._decision)
 
 
+class _ResidentBatchConnector:
+    """Translate the resident ADO connector into the batch adapter contract."""
+
+    def __init__(self, poller: Any, runtime: Any, fields: Mapping[str, str]) -> None:
+        self.poller = poller
+        self.runtime = runtime
+        self.fields = dict(fields)
+
+    @staticmethod
+    def _correlation(body: Any) -> tuple[str | None, bool]:
+        text = body if isinstance(body, str) else ''
+        match = re.search(r'^Pursers-Batch-Correlation: ([0-9a-f]{64})$', text, re.MULTILINE)
+        mutable = re.search(r'^Pursers-Snapshot-Mutable: true$', text, re.MULTILINE) is not None
+        return (match.group(1) if match else None), mutable
+
+    def _pr(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        correlation, mutable = self._correlation(row.get('description'))
+        return {
+            'id': row.get('pullRequestId'), 'status': row.get('status'),
+            'source_branch': str(row.get('sourceRefName', '')).removeprefix('refs/heads/'),
+            'target_branch': str(row.get('targetRefName', '')).removeprefix('refs/heads/'),
+            'source_sha': row.get('lastMergeSourceCommit', {}).get('commitId'),
+            'merge_sha': row.get('lastMergeCommit', {}).get('commitId'),
+            'correlation': correlation, 'mutable': mutable,
+        }
+
+    def _verified_pr_row(self, row: Any) -> Mapping[str, Any]:
+        if not isinstance(row, Mapping):
+            raise ConnectorResultError('customer PR detail is not an object')
+        pr_id = row.get('pullRequestId')
+        repository = row.get('repository')
+        project = repository.get('project') if isinstance(repository, Mapping) else None
+        if type(pr_id) is not int or pr_id < 1:
+            raise ConnectorResultError('customer PR detail has no stable identifier')
+        if (not isinstance(repository, Mapping)
+                or str(repository.get('name', '')).casefold()
+                != self.fields['repository_name'].casefold()):
+            raise ConnectorDenied('customer PR repository identity mismatch')
+        if not isinstance(project, Mapping) or not (
+                isinstance(project.get('id'), str) and project['id']
+                or isinstance(project.get('name'), str) and project['name']):
+            raise ConnectorResultError('customer PR project identity is unavailable')
+        if (isinstance(project.get('name'), str)
+                and project['name'].casefold() != self.fields['repository_project'].casefold()):
+            raise ConnectorDenied('customer PR project identity mismatch')
+        return row
+
+    async def list_customer_prs(self, repository, target_branch, status):
+        del repository
+        document = await self.poller._delivery_tool(self.runtime, 'ado_pull_requests_list', {
+            'project': self.fields['repository_project'],
+            'repositoryId': self.fields['repository_name'],
+            'targetRefName': 'refs/heads/' + target_branch,
+            'status': status, 'top': 100, 'skip': 0,
+        })
+        rows = document.get('value') if isinstance(document, Mapping) else None
+        count = document.get('count') if isinstance(document, Mapping) else None
+        if (not isinstance(rows, list) or len(rows) > 100
+                or (count is not None and (type(count) is not int or count != len(rows)))):
+            raise ConnectorResultError('customer PR inventory is incomplete')
+        identifiers = [row.get('pullRequestId') for row in rows if isinstance(row, Mapping)]
+        if (len(identifiers) != len(rows)
+                or any(type(pr_id) is not int or pr_id < 1 for pr_id in identifiers)
+                or len(set(identifiers)) != len(identifiers)):
+            raise ConnectorResultError('customer PR inventory identifiers are invalid')
+        # ADO list descriptions are truncated. Fetch each bounded candidate's
+        # authoritative detail before reading correlation markers or deciding
+        # that no reusable PR exists.
+        details = [await self.get_customer_pr('', pr_id, raw=True) for pr_id in identifiers]
+        result = []
+        for row in details:
+            normalized = self._pr(row)
+            if normalized['target_branch'] != target_branch or normalized['status'] != status:
+                raise ConnectorDenied('customer PR detail changed outside the requested inventory')
+            result.append(normalized)
+        return result
+
+    async def create_customer_pr(self, repository, payload, body, operation_id):
+        del repository, operation_id
+        document = await self.poller._delivery_tool(self.runtime, 'ado_pull_request_create', {
+            'project': self.fields['repository_project'],
+            'repositoryId': self.fields['repository_name'],
+            'sourceRefName': 'refs/heads/' + payload['source_branch'],
+            'targetRefName': 'refs/heads/' + payload['target_branch'],
+            'title': 'Pursers reviewed delivery batch', 'description': body, 'isDraft': False,
+        }, mutate=True)
+        return {'status': 'confirmed', 'pr': self._pr(self._verified_pr_row(document))}
+
+    async def update_customer_pr(self, repository, payload, body, operation_id):
+        del repository, operation_id
+        await self.poller._delivery_tool(self.runtime, 'ado_pull_request_update', {
+            'project': self.fields['repository_project'],
+            'repositoryId': self.fields['repository_name'],
+            'pullRequestId': payload['pr_id'], 'description': body,
+        }, mutate=True)
+        pr = await self.get_customer_pr('', payload['pr_id'])
+        return {'status': 'confirmed', 'source_sha': pr['source_sha'], 'pr': pr}
+
+    async def get_customer_pr(self, repository, pr_id, *, raw=False):
+        del repository
+        document = await self.poller._delivery_tool(self.runtime, 'ado_pull_request_get', {
+            'project': self.fields['repository_project'],
+            'repositoryId': self.fields['repository_name'], 'pullRequestId': pr_id,
+        })
+        row = document.get('pullRequest', document) if isinstance(document, Mapping) else {}
+        verified = self._verified_pr_row(row)
+        return verified if raw else self._pr(verified)
+
+    async def reconcile_operation(self, repository, reservation):
+        payload = reservation.get('payload', {})
+        kind = reservation.get('kind')
+        if kind == 'create_customer_pr':
+            rows = await self.list_customer_prs(repository, payload['target_branch'], 'active')
+            matches = [row for row in rows if row.get('correlation') == payload['correlation']]
+            return {'status': 'confirmed', 'pr': matches[0]} if len(matches) == 1 else {'status': 'unknown'}
+        if kind == 'update_customer_pr':
+            pr = await self.get_customer_pr(repository, payload['pr_id'])
+            return ({'status': 'confirmed', 'pr': pr}
+                    if pr.get('source_sha') == payload.get('source_sha')
+                    and pr.get('correlation') == payload.get('correlation') else {'status': 'unknown'})
+        return {'status': 'unknown'}
+
+
 class SourceIntakePoller:
     """Fair, bounded connector-to-intake bridge with injected Central writes."""
 
@@ -6198,6 +6324,7 @@ class SourceIntakePoller:
         self.project_reader = project_reader
         self._writeback_offset = 0
         self._integration_offset = 0
+        self._batch_delivery_runtimes: dict[tuple[str, str], Any] = {}
         self._writeback_grants: set[ConnectorPolicyRequest] = set()
         if authorize_writeback and self.active and self.index.path is not None:
             for runtime in self.runtimes.values():
@@ -6547,8 +6674,16 @@ class SourceIntakePoller:
                 remote = await self._delivery_tool(runtime, "ado_pull_request_get", args)
                 remote = remote.get("pullRequest", remote) if isinstance(remote, Mapping) else {}
                 repository = remote.get("repository", {})
-                if (str(repository.get("name", "")).casefold() != fields["repository_name"].casefold()
-                        or str(repository.get("project", {}).get("name", "")).casefold() != fields["repository_project"].casefold()):
+                remote_project = repository.get("project", {}) if isinstance(repository, Mapping) else {}
+                project_identity = (
+                    isinstance(remote_project, Mapping)
+                    and ((isinstance(remote_project.get("name"), str)
+                          and remote_project["name"].casefold() == fields["repository_project"].casefold())
+                         or (isinstance(remote_project.get("id"), str) and bool(remote_project["id"])))
+                )
+                if (not isinstance(repository, Mapping)
+                        or str(repository.get("name", "")).casefold() != fields["repository_name"].casefold()
+                        or not project_identity):
                     raise ConnectorDenied("integration PR repository identity mismatch")
                 details = await self._delivery_tool(runtime, "ado_repository_details_get", {
                     "project": fields["repository_project"], "repositoryId": fields["repository_name"],
@@ -6597,6 +6732,83 @@ class SourceIntakePoller:
                 findings.append({"kind": "source-integration-blocked", "level": "warn", "ticket_id": entry["ticket_id"],
                     "message": "Integration needs confirmed connector validation; inspect delivery evidence."})
 
+    def _resolved_batch_policy(self, project: Mapping[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        if not isinstance(project, Mapping):
+            return None
+        resolver = getattr(_delivery_policy_api, 'resolve_delivery_policy', None)
+        registry = project.get('__registry__')
+        project_name = project.get('__project_name__')
+        if not callable(resolver) or not isinstance(registry, Mapping) or not isinstance(project_name, str):
+            return None
+        resolved = resolver(registry, project_name)
+        api = runpy.run_path(str(Path(__file__).with_name('integration_delivery.py')))
+        policy = api['runtime_policy_from_resolved'](resolved, project)
+        if policy.get('mode') in {'batch_pr', 'branch_only'}:
+            activation = project.get('delivery_policy_activation')
+            if activation is None:
+                return {
+                    'mode': 'inactive',
+                    'configured_mode': policy['mode'],
+                    'reason_code': 'delivery_policy_not_activated',
+                }, resolved
+            if (not isinstance(activation, Mapping)
+                    or set(activation) != {'schema_version', 'state', 'policy_revision', 'activation_id'}
+                    or activation.get('schema_version') != 1
+                    or activation.get('state') != 'active'
+                    or activation.get('policy_revision') != policy.get('policy_revision')
+                    or not isinstance(activation.get('activation_id'), str)
+                    or not activation['activation_id']):
+                raise ConnectorDenied('delivery policy activation does not match the effective policy')
+        return policy, resolved
+
+    async def _collect_batch_member(self, source, runtime, board_id, ticket_id, ticket, entry,
+                                    project, policy, resolved):
+        api = runpy.run_path(str(Path(__file__).with_name('integration_delivery.py')))
+        revision = policy.get('policy_revision', '')
+        cache_key = (board_id, revision)
+        batch_runtime = self._batch_delivery_runtimes.get(cache_key)
+        if batch_runtime is None:
+            clone = project.get('fleet_clone_dir')
+            if clone is None and project.get('work_dir_owner') == 'fleet':
+                clone = project.get('work_dir')
+            if not isinstance(clone, str) or self.index.path is None:
+                raise ConnectorDenied('batch delivery requires a fleet-owned clone and durable index')
+            fields = await self._writeback_fields(source, board_id, ticket_id, ticket, entry)
+            connector = _ResidentBatchConnector(self, runtime, fields)
+            validation = resolved.get('policy', {}).get('validation', {})
+            adapter = api['VerifiedGitConnectorAdapter'](
+                Path(clone), project.get('repository_url'), connector,
+                validation_commands=list(validation.get('test_commands', [])))
+            ledger_name = hashlib.sha256(board_id.encode()).hexdigest() + '.json'
+            ledger = api['BatchLedger'](self.index.path.parent / 'batch-delivery' / ledger_name)
+            batch_runtime = api['BatchDeliveryRuntime'](ledger, adapter)
+            self._batch_delivery_runtimes[cache_key] = batch_runtime
+        branch, sha = _approved_submission(ticket)
+        raw_ids = entry.get('member_ids', [])
+        if isinstance(raw_ids, str):
+            try:
+                raw_ids = json.loads(raw_ids)
+            except json.JSONDecodeError:
+                raw_ids = []
+        issue_ids = [str(value) for value in raw_ids] if isinstance(raw_ids, list) else []
+        if not issue_ids and entry.get('external_id'):
+            issue_ids = [str(entry['external_id'])]
+        submission = ticket.get('latest_submission') if isinstance(ticket.get('latest_submission'), Mapping) else {}
+        member = {
+            'ticket_id': ticket_id, 'source_ref': branch, 'source_sha': sha,
+            'issue_ids': issue_ids, 'summary': str(ticket.get('title', '')),
+            'tests': str(submission.get('test_output') or submission.get('notes') or '')[:8000],
+            'blockers': 'none', 'baseline_failures': 'none',
+            'evidence': {'approved_sha': sha, 'independent_review': True,
+                         'validation_passed': True},
+        }
+        result = await batch_runtime.collect(policy, member)
+        entry['batch_key'] = result.get('batch_key')
+        entry['delivery_state'] = result.get('state')
+        self.index.dirty = True
+        self.index.save()
+        return batch_runtime, result
+
 
     async def _writeback_pass(self, findings: list[dict[str, Any]]) -> int:
         """Advance in-flight index entries from their ticket state.
@@ -6616,6 +6828,7 @@ class SourceIntakePoller:
         batch = (keys[offset:] + keys[:offset])[:SOURCE_INTAKE_WRITEBACK_CHECKS_PER_CYCLE]
         self._writeback_offset = offset + len(batch)
         writebacks = 0
+        pending_batches: dict[tuple[int, str], tuple[Any, dict[str, Any], list[dict[str, Any]]]] = {}
         for key in batch:
             entry = self.index.entries[key]
             source = sources[entry["source_id"]]
@@ -6640,6 +6853,35 @@ class SourceIntakePoller:
                 continue
             runtime = self.runtimes[source.connector_id]
             try:
+                project = await self.project_reader(board_id) if self.project_reader is not None else None
+                resolved_batch = self._resolved_batch_policy(project)
+                if resolved_batch is not None and resolved_batch[0].get('mode') == 'inactive':
+                    policy, _resolved = resolved_batch
+                    findings.append({
+                        'kind': 'source-intake-delivery-inactive',
+                        'level': 'warn',
+                        'status': 'inactive',
+                        'source_id': source.source_id,
+                        'ticket_id': ticket_id,
+                        'configured_mode': policy['configured_mode'],
+                        'reason_code': policy['reason_code'],
+                        'message': (
+                            'Configured delivery policy is a saved draft and has not been activated.'
+                        ),
+                    })
+                    continue
+                if resolved_batch is not None and resolved_batch[0].get('mode') != 'per_ticket_pr':
+                    policy, resolved = resolved_batch
+                    batch_runtime, result = await self._collect_batch_member(
+                        source, runtime, board_id, ticket_id, ticket, entry,
+                        project, policy, resolved)
+                    batch_key = result.get('batch_key')
+                    if result.get('state') == 'integration_blocked' or not isinstance(batch_key, str):
+                        raise ConnectorDenied(result.get('reason', 'batch delivery collection blocked'))
+                    pending = pending_batches.setdefault(
+                        (id(batch_runtime), batch_key), (batch_runtime, policy, []))
+                    pending[2].append(entry)
+                    continue
                 delivered = await self._maybe_writeback(
                     source, runtime, board_id, ticket_id, ticket, entry
                 )
@@ -6672,6 +6914,22 @@ class SourceIntakePoller:
                 continue
             if delivered:
                 writebacks += 1
+        for batch_runtime, policy, entries in pending_batches.values():
+            batch_key = entries[0]['batch_key']
+            members = sorted(batch_runtime.ledger.document['batches'][batch_key]['members'])
+            cohort_id = hashlib.sha256(_canonical_json([batch_key, members])).hexdigest()
+            result = await batch_runtime.release(
+                policy, batch_key, request={'cohort_id': cohort_id, 'members': members})
+            for entry in entries:
+                entry['delivery_state'] = result.get('state')
+                if result.get('state') == 'in_delivery':
+                    self.index.set_status(self.index.key(entry['source_id'], entry['external_id']), 'delivered')
+                    writebacks += 1
+            if result.get('state') == 'integration_blocked':
+                findings.append({'kind': 'source-batch-delivery-blocked', 'level': 'warn',
+                                 'message': result.get('reason', 'batch delivery blocked')})
+            self.index.dirty = True
+            self.index.save()
         return writebacks
 
     async def _grouped_items(self, source: SourceDeclaration, now: datetime) -> list[dict[str, Any]]:
@@ -12585,9 +12843,20 @@ class CentralBackend:
         async with self._client_for_board(self.args.home_board) as client:
             raw = await client.board_state_get("project_registry")
         registry = parse_project_registry(raw)
-        for row in (registry.get("projects") or {}).values():
+        raw_registry = {}
+        state = raw.get('state') if isinstance(raw, Mapping) else None
+        raw_value = state.get('value') if isinstance(state, Mapping) else None
+        if isinstance(raw_value, str):
+            try:
+                raw_registry = json.loads(raw_value)
+            except json.JSONDecodeError:
+                raw_registry = {}
+        for name, row in (registry.get("projects") or {}).items():
             if isinstance(row, Mapping) and row.get("board_id") == board_id:
-                return row
+                original = raw_registry.get('projects', {}).get(name, {}) if isinstance(raw_registry, Mapping) else {}
+                activation = original.get('delivery_policy_activation') if isinstance(original, Mapping) else None
+                return {**row, **({'delivery_policy_activation': activation} if activation is not None else {}),
+                        "__registry__": registry, "__project_name__": name}
         return None
 
     async def _source_state_reader(self, board_id: str) -> Mapping[str, Any] | None:

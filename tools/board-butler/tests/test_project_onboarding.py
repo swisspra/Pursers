@@ -302,6 +302,29 @@ def test_config_requires_absolute_root_and_rejects_credentials(tmp_path: Path) -
     with pytest.raises(ValueError, match="credentials"):
         onboarding.parse_source_policies(credential)
 
+    configured = copy.deepcopy(base)
+    configured["sources"]["sonarqube"].update(
+        delivery_policy_group="backend",
+        delivery_policy={"mode": "batch_pr", "release_trigger": {"kind": "manual"}},
+        activate_delivery_policy=True,
+    )
+    configured_policy = onboarding.parse_source_policies(configured)["sonarqube"]
+    assert configured_policy.delivery_policy_group == "backend"
+    assert configured_policy.delivery_policy["mode"] == "batch_pr"
+    assert configured_policy.activate_delivery_policy is True
+
+    invalid_activation = copy.deepcopy(base)
+    invalid_activation["sources"]["sonarqube"]["activate_delivery_policy"] = "yes"
+    with pytest.raises(ValueError, match="activate_delivery_policy must be boolean"):
+        onboarding.parse_source_policies(invalid_activation)
+
+    weakening = copy.deepcopy(base)
+    weakening["sources"]["sonarqube"]["delivery_policy"] = {
+        "validation": {"require_upstream_policies": False}
+    }
+    with pytest.raises(ValueError, match="cannot weaken"):
+        onboarding.parse_source_policies(weakening)
+
 
 def test_delivery_default_uses_each_mapping_base_without_pushing_to_it(tmp_path):
     remote = make_remote(tmp_path, 'delivery')
@@ -316,3 +339,56 @@ def test_delivery_default_uses_each_mapping_base_without_pushing_to_it(tmp_path)
     assert entry['integration_ref'] == 'pursers-integration'
     assert subprocess.check_output(['git','--git-dir',str(remote),'rev-parse','refs/heads/main'],text=True).strip() == before
     assert subprocess.check_output(['git','--git-dir',str(remote),'rev-parse','refs/heads/pursers-integration'],text=True).strip() == before
+
+
+def test_new_batch_repository_requires_explicit_activation_before_side_effects(tmp_path):
+    remote = make_remote(tmp_path, 'batch-draft')
+    registry = FakeRegistry()
+    registry.document['delivery_policy_defaults'] = {
+        'mode': 'batch_pr', 'final_pr_target': 'customer-review',
+        'release_trigger': {'kind': 'ready'}, 'pr_update': 'freeze_on_ready',
+    }
+    selected = policy(
+        tmp_path, {'batch-draft': onboarding.RepositoryResolution(str(remote), 'main')}
+    )
+    result = asyncio.run(onboarding.ProjectOnboarder(
+        registry, {'sonarqube': selected}, clock=lambda: NOW
+    ).run_cycle([item('batch-draft')]))[0]
+    assert result.status == 'delivery_setup_required'
+    assert 'batch_pr' in result.finding
+    assert 'batch-draft' not in registry.document['projects']
+    assert not (selected.projects_root / onboarding.safe_project_name('batch-draft')).exists()
+
+
+def test_explicit_batch_template_activates_new_repository(tmp_path):
+    from dataclasses import replace
+
+    remote = make_remote(tmp_path, 'batch-active')
+    base = subprocess.check_output(
+        ['git', '--git-dir', str(remote), 'rev-parse', 'refs/heads/main'], text=True
+    ).strip()
+    subprocess.run(
+        ['git', '--git-dir', str(remote), 'update-ref', 'refs/heads/customer-review', base],
+        check=True,
+    )
+    registry = FakeRegistry()
+    selected = replace(
+        policy(tmp_path, {'batch-active': onboarding.RepositoryResolution(str(remote), 'main')}),
+        delivery_policy={
+            'mode': 'batch_pr', 'integration_branch': 'pursers-integration',
+            'final_pr_target': 'customer-review', 'release_trigger': {'kind': 'ready'},
+            'pr_update': 'freeze_on_ready',
+        },
+        activate_delivery_policy=True,
+    )
+    result = asyncio.run(onboarding.ProjectOnboarder(
+        registry, {'sonarqube': selected}, clock=lambda: NOW
+    ).run_cycle([item('batch-active')]))[0]
+    assert result.status == 'onboarded'
+    entry = registry.document['projects']['batch-active']
+    assert entry['delivery_policy']['mode'] == 'batch_pr'
+    assert entry['delivery_policy_activation']['state'] == 'active'
+    assert subprocess.check_output(
+        ['git', '--git-dir', str(remote), 'rev-parse', 'refs/heads/pursers-integration'],
+        text=True,
+    ).strip() == base

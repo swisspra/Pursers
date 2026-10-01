@@ -29,7 +29,10 @@ GIT_TIMEOUT_SECONDS = 30
 PROJECT_NAME_RE = re.compile(r"^[^\x00-\x1f/\\]{1,120}$")
 BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 GIT_MODES = frozenset({"none", "existing", "clone"})
-PUBLIC_REGISTRY_FIELDS = frozenset({"board_id", "integration_ref", "status", "delivery_workflow"})
+PUBLIC_REGISTRY_FIELDS = frozenset({
+    "board_id", "integration_ref", "status", "delivery_workflow",
+    "delivery_policy", "delivery_policy_group",
+})
 PUBLIC_REGISTRY_MARKERS = {
     "work_dir": "[local folder configured]",
     "repository_url": "[Git source configured]",
@@ -229,6 +232,9 @@ def _public_registry_entry(entry: Any) -> dict[str, Any] | None:
         if key == "delivery_workflow" and isinstance(value, Mapping):
             from pursers_client.delivery_workflow import parse_delivery_workflow
             visible[key] = parse_delivery_workflow(value)
+        elif key == "delivery_policy" and isinstance(value, Mapping):
+            from pursers_client.delivery_workflow import parse_delivery_policy
+            visible[key] = parse_delivery_policy(value)
             continue
         if isinstance(value, (str, int, float, bool)) or value is None:
             if key in entry:
@@ -309,6 +315,10 @@ def public_project_lifecycle_plan(plan: Mapping[str, Any]) -> dict[str, Any]:
             "state",
             "failure",
             "delivery_workflow",
+            "delivery_policy",
+            "scope",
+            "activate",
+            "affected_projects",
             "create_branch",
             "use_as_default",
         )

@@ -1,5 +1,9 @@
 import asyncio
+import contextlib
+import hashlib
 import importlib.util
+import json
+import subprocess
 from pathlib import Path
 import pytest
 
@@ -163,3 +167,167 @@ def test_legacy_deliveries_are_not_adopted_by_a_later_policy(tmp_path):
     asyncio.run(poller._integration_pass([]))
     poller._delivery_tool.assert_not_called()
     assert 'delivery_state' not in poller.index.entries['old']
+
+
+def test_resident_branch_only_uses_resolved_policy_and_makes_zero_pr_calls(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from test_source_intake import butler
+
+    origin = tmp_path / 'origin.git'
+    repo = tmp_path / 'fleet-clone'
+    subprocess.run(['git', 'init', '--bare', origin], check=True, capture_output=True)
+    subprocess.run(['git', 'clone', origin, repo], check=True, capture_output=True)
+    subprocess.run(['git', '-C', repo, 'config', 'user.email', 'test@example.invalid'], check=True)
+    subprocess.run(['git', '-C', repo, 'config', 'user.name', 'Batch Test'], check=True)
+    (repo / 'base').write_text('base\n')
+    subprocess.run(['git', '-C', repo, 'add', 'base'], check=True)
+    subprocess.run(['git', '-C', repo, 'commit', '-m', 'base'], check=True, capture_output=True)
+    base = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip()
+    subprocess.run(['git', '-C', repo, 'branch', '-M', 'main'], check=True)
+    subprocess.run(['git', '-C', repo, 'push', 'origin', 'main'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', repo, 'switch', '-c', 'ticket-one'], check=True, capture_output=True)
+    (repo / 'reviewed').write_text('reviewed\n')
+    subprocess.run(['git', '-C', repo, 'add', 'reviewed'], check=True)
+    subprocess.run(['git', '-C', repo, 'commit', '-m', 'reviewed'], check=True, capture_output=True)
+    reviewed = subprocess.check_output(['git', '-C', repo, 'rev-parse', 'HEAD'], text=True).strip()
+    subprocess.run(['git', '-C', repo, 'push', 'origin', 'ticket-one'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', repo, 'push', 'origin', f'{base}:refs/heads/pursers-integration'],
+                   check=True, capture_output=True)
+
+    effective = {
+        'mode': 'branch_only', 'mapped_base': 'main',
+        'integration_branch': 'pursers-integration',
+        'snapshot_branch_prefix': 'pursers/delivery', 'final_pr_target': None,
+        'release_trigger': {'kind': 'ready'}, 'pr_update': 'freeze_on_ready',
+        'auto_integrate': False, 'final_merge': 'manual',
+        'validation': {'test_commands': [], 'required_reviewers': 1,
+                       'independent_review': True, 'require_upstream_policies': True},
+        'conflict_policy': 'pause', 'collection_paused': False,
+    }
+    monkeypatch.setattr(butler._delivery_policy_api, 'resolve_delivery_policy',
+                        lambda registry, project_name: {'policy': effective}, raising=False)
+    registry_project = {
+        'board_id': 'b', 'work_dir': str(repo), 'status': 'active',
+        'repository_url': 'https://example.invalid/team/repo',
+        'fleet_clone_dir': str(repo),
+        'work_dir_owner': 'fleet',
+    }
+    registry = {'schema_version': 1, 'projects': {'P': registry_project}}
+
+    class Client:
+        async def board_state_get(self, key):
+            assert key == 'project_registry'
+            return {'state': {'value': json.dumps(registry)}}
+
+    @contextlib.asynccontextmanager
+    async def client_for_board(board_id):
+        assert board_id == 'home'
+        yield Client()
+
+    backend = object.__new__(butler.CentralBackend)
+    backend.args = SimpleNamespace(home_board='home')
+    backend._client_for_board = client_for_board
+
+    project = asyncio.run(backend._source_project_reader('b'))
+    assert 'delivery_policy_activation' not in project
+    ticket = {'status': 'closed', 'latest_verdict': {'verdict': 'approve'},
+              'title': 'Reviewed work',
+              'latest_submission': {'branch': 'ticket-one', 'commit_hash': reviewed,
+                                    'notes': 'tests passed'}}
+    poller = object.__new__(butler.SourceIntakePoller)
+    poller.index = butler.SourceIntakeIndex(tmp_path / 'index.json')
+    entry_key = poller.index.key('s', 'ISSUE-1')
+    poller.index.entries = {entry_key: {'status': 'asked', 'source_id': 's', 'external_id': 'ISSUE-1',
+                                        'board_id': 'b', 'ticket_id': 'TK-one'}}
+    poller._writeback_offset = 0
+    poller._batch_delivery_runtimes = {}
+    poller.sources = [SimpleNamespace(source_id='s', connector_id='c',
+                                      writeback=SimpleNamespace(tool='ado_pull_request_create'))]
+    poller.runtimes = {'c': SimpleNamespace()}
+    poller.project_reader = AsyncMock(return_value=project)
+    poller.ticket_reader = AsyncMock(return_value=ticket)
+    poller._writeback_fields = AsyncMock(return_value={
+        'repository_project': 'sample', 'repository_name': 'repo',
+        'repository_url': str(origin), 'source_branch': 'ticket-one',
+        'approved_sha': reviewed, 'target_branch': 'main',
+    })
+    poller._maybe_writeback = AsyncMock(side_effect=AssertionError('legacy PR path called'))
+    poller._delivery_tool = AsyncMock(side_effect=AssertionError('PR connector called'))
+    draft_policy, _ = poller._resolved_batch_policy(project)
+    assert draft_policy == {
+        'mode': 'inactive',
+        'configured_mode': 'branch_only',
+        'reason_code': 'delivery_policy_not_activated',
+    }
+    draft_entry = dict(poller.index.entries[entry_key])
+    findings = []
+    written = asyncio.run(poller._writeback_pass(findings))
+    assert written == 0
+    assert poller.index.entries[entry_key] == draft_entry
+    assert poller.index.dirty is False
+    assert not poller.index.path.exists()
+    assert poller._batch_delivery_runtimes == {}
+    poller._writeback_fields.assert_not_called()
+    poller._maybe_writeback.assert_not_called()
+    poller._delivery_tool.assert_not_called()
+    assert findings == [{
+        'kind': 'source-intake-delivery-inactive',
+        'level': 'warn',
+        'status': 'inactive',
+        'source_id': 's',
+        'ticket_id': 'TK-one',
+        'configured_mode': 'branch_only',
+        'reason_code': 'delivery_policy_not_activated',
+        'message': 'Configured delivery policy is a saved draft and has not been activated.',
+    }]
+
+    monkeypatch.setattr(
+        butler._delivery_policy_api, 'resolve_delivery_policy',
+        lambda registry, project_name: {'policy': {'mode': 'per_ticket_pr'}},
+        raising=False,
+    )
+    legacy_policy, _ = poller._resolved_batch_policy(project)
+    assert legacy_policy == {'mode': 'per_ticket_pr'}
+    poller._maybe_writeback = AsyncMock(return_value=True)
+    findings = []
+    written = asyncio.run(poller._writeback_pass(findings))
+    assert written == 1
+    assert findings == []
+    poller._maybe_writeback.assert_awaited_once()
+    poller._delivery_tool.assert_not_called()
+    monkeypatch.setattr(
+        butler._delivery_policy_api, 'resolve_delivery_policy',
+        lambda registry, project_name: {'policy': effective},
+        raising=False,
+    )
+    poller._maybe_writeback = AsyncMock(side_effect=AssertionError('legacy PR path called'))
+
+    activation = {
+        'schema_version': 1, 'state': 'active', 'activation_id': 'apply-1',
+        'policy_revision': hashlib.sha256(json.dumps(
+            effective, sort_keys=True, separators=(',', ':'),
+            ensure_ascii=False).encode()).hexdigest()[:40],
+    }
+    registry_project['delivery_policy_activation'] = {
+        **activation, 'policy_revision': 'f' * 40,
+    }
+    mismatched = asyncio.run(backend._source_project_reader('b'))
+    with pytest.raises(butler.ConnectorDenied, match='activation does not match'):
+        poller._resolved_batch_policy(mismatched)
+
+    registry_project['delivery_policy_activation'] = activation
+    project = asyncio.run(backend._source_project_reader('b'))
+    assert project['delivery_policy_activation'] == activation
+    active_policy, _ = poller._resolved_batch_policy(project)
+    assert active_policy['mode'] == 'branch_only'
+    # The product-shaped registry requires HTTPS; use the temporary Git remote
+    # only after proving the resident reader carried activation through.
+    project = {**project, 'repository_url': str(origin)}
+    poller.project_reader = AsyncMock(return_value=project)
+    findings = []
+    written = asyncio.run(poller._writeback_pass(findings))
+    assert written == 1, findings[0].get('error_class') if findings else findings
+    assert poller.index.entries[entry_key]['status'] == 'delivered'
+    poller._maybe_writeback.assert_not_called()
+    poller._delivery_tool.assert_not_called()
