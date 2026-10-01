@@ -34,6 +34,9 @@ def validate_config(config):
         if type(value) is not int or not 1 <= value <= ceiling: raise ValueError('invalid turn limit')
     tier = config.get('tier_max',2)
     if type(tier) is not int or tier not in (1,2,3): raise ValueError('invalid seat tier')
+    recoveries = config.get('max_owned_recoveries', 1)
+    if type(recoveries) is not int or not 0 <= recoveries <= 10:
+        raise ValueError('invalid owned recovery limit')
     return config
 
 
@@ -70,7 +73,7 @@ class EventSeatRunner:
     def __init__(self, config):
         self.config=validate_config(config)
         self.path=Path(config['state_file'])
-        self.state={'cursor':{},'seen':[],'runs':[],'pending':[]}
+        self.state={'cursor':{},'seen':[],'runs':[],'pending':[], 'owned_recoveries':{}}
         if self.path.exists(): self.state.update(json.loads(HELPERS['private_read'](self.path,1048576)))
         self.run_command=self._run
 
@@ -129,6 +132,9 @@ class EventSeatRunner:
                 return max(0,self.state['rate_limited_until']-now)
             self.state.pop('rate_limited_until',None)
             event=pending.pop(0)
+            if event.get('recovery_key'):
+                key = event['recovery_key']
+                self.state['owned_recoveries'][key] = self.state['owned_recoveries'].get(key, 0) + 1
             self.state['runs']=(runs+[now])[-200:]
             self.state['seen']=(self.state['seen']+[event['marker']])[-200:]
             PUBLISH(self.path,self.state)  # reserve before a potentially uncertain model execution
@@ -138,23 +144,91 @@ class EventSeatRunner:
             prompt=('$token-thrift. Process exactly one authorized Pursers event, then exit. '
                     f"Seat {c['seat_id']}; role {role}; board_id {event['board']}; ticket_id {event['ticket']}. "
                     'Read AGENTS.md and .goosehints. Use this exact board for every operation. '
-                    'Claim or review-claim this ticket, follow its scope, perform work or independent verification, '
-                    'record required evidence and submit or review. Do not poll. Stop on authentication failure.')
-            self.run_command([c['goose'],'run','--no-session','--no-profile','--with-builtin','developer',
-                '--with-extension',extension,'--provider',c['provider'],'--model',c['model'],
-                '--max-turns',str(c.get('max_turns',30)),'--text',prompt])
+                    'GET the ticket first and verify exact current ownership. If already held by this seat, resume it; '
+                    'otherwise claim or review-claim only an authorized offer. Preserve existing worktrees, changes, '
+                    'commits and evidence. Follow its scope, perform work or independent verification, '
+                    'record required evidence and submit or review on the exact board_id above. '
+                    'Confirm the resulting Central ticket state before exiting. If blocked, request human input '
+                    'on that ticket instead of returning silently with a held lease. '
+                    'Do not poll. Stop on authentication failure.')
+            self.state['last_turn'] = {'board':event['board'], 'ticket':event['ticket'],
+                'started_at':now, 'outcome':'started'}
+            PUBLISH(self.path,self.state)
+            try:
+                self.run_command([c['goose'],'run','--no-session','--no-profile','--with-builtin','developer',
+                    '--with-extension',extension,'--provider',c['provider'],'--model',c['model'],
+                    '--max-turns',str(c.get('max_turns',30)),'--text',prompt])
+            except BaseException as exc:
+                self.state['last_turn'].update(outcome='interrupted', error_class=type(exc).__name__)
+                raise
+            else:
+                self.state['last_turn']['outcome'] = 'exited_pending_verification'
+            finally:
+                self.state['last_turn']['finished_at'] = time.time()
+                PUBLISH(self.path,self.state)
+
+    def client(self, board):
+        from pursers_client import BoardClient
+        c = self.config
+        token = HELPERS['private_read'](Path(c['token_file']),16384).strip()
+        return BoardClient(c['central_url'],token,board,agent_name=c['seat_id'],role=c['role'],
+            capabilities={'can_work':c['role']=='worker','can_review':c['role']=='reviewer',
+                          'tier_max':c.get('tier_max',2),'max_parallel':1},
+            allow_takeover=True, renewal_source='keepalive')
+
+    def owned_key(self, board, ticket, identity, now):
+        if self.config['role'] == 'reviewer':
+            lease = ticket.get('review_lease') or {}
+            owned = (ticket.get('status') == 'submitted'
+                     and lease.get('reviewer_agent_id') == identity.agent_id
+                     and lease.get('reviewer_principal_id') == identity.principal_id
+                     and lease.get('expires_at_epoch',0) > now)
+            epoch = lease.get('claimed_at')
+        else:
+            owned = (ticket.get('status') in {'claimed','in_progress','creating_report'}
+                     and ticket.get('claimed_by_agent_id') == identity.agent_id
+                     and ticket.get('claimed_by_principal_id') == identity.principal_id
+                     and ticket.get('lease_expires_at_epoch',0) > now)
+            epoch = ticket.get('claimed_at')
+        if not owned: return None
+        tid = ticket.get('ticket_id')
+        if not isinstance(tid,str) or not re.fullmatch(r'TK-[A-Za-z0-9-]+',tid) or not isinstance(epoch,str):
+            raise ValueError('owned lease lacks stable ticket or claim identity')
+        return json.dumps([board,tid,self.config['role'],epoch],separators=(',',':'))
+
+    async def reconcile_owned(self):
+        """Recover unfinished owned turns once, then visibly pause; never infer progress from exit 0."""
+        pending = [p for p in self.state['pending'] if not p.get('recovery_key')]
+        live = set()
+        for board in self.active_boards:
+            async with self.client(board) as client:
+                joined = await client.board_join(allow_takeover=True)
+                if not isinstance(joined.get('renewed_leases'),list):
+                    raise ValueError('Central did not report owned leases')
+                for row in joined['renewed_leases']:
+                    ticket = (await client.ticket_get(row['ticket_id'],view='full'))['ticket']
+                    key = self.owned_key(board,ticket,client.identity,time.time())
+                    if key is None: continue
+                    live.add(key)
+                    tid = ticket['ticket_id']
+                    pending = [p for p in pending if (p['board'],p['ticket']) != (board,tid)]
+                    attempts = self.state['owned_recoveries'].get(key,0)
+                    if attempts >= self.config.get('max_owned_recoveries',1):
+                        await client.ticket_request_human(tid,
+                            'The event runner exited without completing this owned ticket. '
+                            'Its bounded automatic continuation is exhausted. Partial work and evidence '
+                            'are preserved; inspect the blocker before authorizing another attempt.', 'decision')
+                    else:
+                        pending.insert(0,{'board':board,'ticket':tid,'recovery_key':key,
+                            'marker':[board,tid,f'{key}:{attempts+1}','owned_recovery']})
+        self.state['pending'] = pending
+        self.state['owned_recoveries'] = {k:v for k,v in self.state['owned_recoveries'].items() if k in live}
+        PUBLISH(self.path,self.state)
 
     async def bootstrap(self):
-        from pursers_client import BoardClient
         from pursers_client.project_registry import parse_project_registry,active_registry_boards
         c=self.config
-        token=HELPERS['private_read'](Path(c['token_file']),16384).strip()
-        caps={'can_work':c['role']=='worker','can_review':c['role']=='reviewer',
-              'tier_max':c.get('tier_max',2),'max_parallel':1}
-        def client(board):
-            return BoardClient(c['central_url'],token,board,agent_name=c['seat_id'],role=c['role'],
-                               capabilities=caps,allow_takeover=True)
-        async with client(c['home_board']) as home:
+        async with self.client(c['home_board']) as home:
             registry=parse_project_registry(await home.board_state_get('project_registry'))
         validate_registry_roots(registry,c['repository_root'])
         boards=active_registry_boards(registry,c['home_board'])
@@ -163,7 +237,7 @@ class EventSeatRunner:
             raise ValueError('invalid saved positive cursor')
         for board in boards:
             if board in self.state['cursor']: continue
-            async with client(board) as joined:
+            async with self.client(board) as joined:
                 snapshot=await joined.board_snapshot(limit=1,max_bytes=100000)
             seq=snapshot.get('latest_seq')
             if type(seq) is not int or seq<1: raise ValueError('authoritative positive cursor unavailable')
@@ -175,6 +249,7 @@ class EventSeatRunner:
         while True:
             try:
                 asyncio.run(self.bootstrap())
+                asyncio.run(self.reconcile_owned())
             except Exception as exc:
                 if not transient_wait_failure(exc): raise
                 failures+=1
@@ -186,7 +261,7 @@ class EventSeatRunner:
                 delay=self.process({'new_seq':self.state['cursor'],'events':[]},time.time())
                 if delay is not None and delay>0:
                     time.sleep(min(60,delay))
-                    continue
+                continue
             command=[self.config['board_script'],'wait','--since',json.dumps(self.state['cursor']),
                      '--timeout','270','--boards',','.join(self.active_boards)]
             if self.config['role']=='reviewer':command.insert(2,'--submitted')

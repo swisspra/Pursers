@@ -484,6 +484,7 @@ async def wait_for_boards(
             join_arguments: dict[str, Any] = {
                 "board_id": board_id,
                 "agent_name": client.agent_name,
+                "renewal_source": "keepalive",
             }
             if capabilities is not None:
                 join_arguments["capabilities"] = capabilities

@@ -653,7 +653,7 @@ def test_registry_wait_preserves_collision_refusal_without_takeover() -> None:
     }
     assert calls == [(
         "board_join",
-        {"board_id": "fullplatts", "agent_name": "worker-agent"},
+        {"board_id": "fullplatts", "agent_name": "worker-agent", "renewal_source": "keepalive"},
     )]
 
 
@@ -701,6 +701,7 @@ def test_registry_wait_forwards_takeover_and_reuses_join() -> None:
             "agent_name": "worker-agent",
             "capabilities": {"tier_max": 2},
             "allow_takeover": True,
+            "renewal_source": "keepalive",
         },
     )]
 

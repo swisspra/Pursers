@@ -10626,7 +10626,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
         principal = current_principal()
-        require_board_write_or_coordinate(principal)
+        if "board:review" not in principal.scopes:
+            require_board_write_or_coordinate(principal)
         coordinate_authorized = COORDINATOR_SCOPE in principal.scopes
         if kind not in HUMAN_REQUEST_KINDS:
             raise ValueError("kind must be decision, deliverable, approval, or information")
@@ -10661,9 +10662,19 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 and ticket.get("claimed_by_principal_id") == principal.principal_id
             )
             is_admin = membership.get("role") == "admin"
-            if not (is_holder or is_admin or coordinate_authorized):
+            review_lease = ticket.get("review_lease")
+            is_review_holder = (
+                "board:review" in principal.scopes
+                and ticket.get("status") == "submitted"
+                and review_lease_is_live(ticket, now)
+                and isinstance(review_lease, Mapping)
+                and review_lease.get("reviewer_agent_id") == actor["agent_id"]
+                and review_lease.get("reviewer_principal_id") == principal.principal_id
+            )
+            if not (((is_holder or is_admin) and "board:write" in principal.scopes)
+                    or is_review_holder or coordinate_authorized):
                 raise PermissionError(
-                    "human request requires the work lease, board admin, or board:coordinate"
+                    "human request requires the work or review lease, board admin, or board:coordinate"
                 )
             if ticket.get("status") in TERMINAL_TICKET_STATES:
                 raise ValueError(f"ticket is already {ticket['status']}")
@@ -10675,6 +10686,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ):
                 raise ValueError("ticket already has a pending human request")
             old_status = str(ticket["status"])
+            released_review = ticket.pop("review_lease", None)
             if ticket.get("status") in PRE_SUBMISSION_STATES:
                 progress_reset = reset_ticket_progress(
                     document, ticket, now, "unclaimed"
@@ -10726,6 +10738,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "released": released,
                 "renewed": [item for item in renewed if item != ticket_id],
                 "scrub_audit": scrub_audit,
+                "released_review": released_review,
             }
 
         changed = service.mutate(board_id, request)
@@ -10733,6 +10746,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             board_id, changed["released"], principal, ctx
         )
         uri = resource_uri(board_id, "ticket", ticket_id)
+        if isinstance(changed["released_review"], Mapping):
+            lease = changed["released_review"]
+            release_events.append(await append_and_publish(
+                board_id, changed["actor"], REVIEW_LEASE_RELEASED, uri,
+                changed["recipients"], ctx, ticket_id=ticket_id,
+                status_from=changed["old_status"], status_to="needs_human",
+                reviewer_agent_id=lease.get("reviewer_agent_id"),
+                reviewer_agent_name=lease.get("reviewer_agent_name"),
+                reviewer_principal_id=lease.get("reviewer_principal_id"),
+                release_reason="human_input_requested",
+            ))
         event = await append_and_publish(
             board_id, changed["actor"], HUMAN_INPUT_REQUESTED, uri,
             changed["recipients"], ctx, ticket_id=ticket_id,

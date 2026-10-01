@@ -601,6 +601,7 @@ class BoardClient:
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         http_client: httpx2.AsyncClient | None = None,
         expected_instance_id: str | None = None,
+        renewal_source: str | None = None,
     ):
         self.url = url
         self.token = token
@@ -615,6 +616,9 @@ class BoardClient:
         self.role = role
         self.reconnect_delay_s = reconnect_delay_s
         self.claim_ttl_s = claim_ttl_s
+        if renewal_source not in (None, "model", "keepalive"):
+            raise ValueError("renewal_source must be model or keepalive")
+        self.renewal_source = renewal_source
         self.capabilities = capabilities
         self.readiness = readiness
         self.allow_takeover = allow_takeover
@@ -864,9 +868,15 @@ class BoardClient:
         readiness: dict[str, Any] | None = None,
         allow_takeover: bool = False,
         allow_matching_takeover: bool = False,
+        renewal_source: str | None = None,
     ) -> dict[str, Any]:
         selected_name = self.agent_name if agent_name is None else agent_name
         arguments: dict[str, Any] = {"agent_name": selected_name}
+        source = self.renewal_source if renewal_source is None else renewal_source
+        if source is not None:
+            if source not in ("model", "keepalive"):
+                raise ValueError("renewal_source must be model or keepalive")
+            arguments["renewal_source"] = source
         selected_role = self.role if role is None else role
         if selected_role is not None:
             arguments["role"] = selected_role

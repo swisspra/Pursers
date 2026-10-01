@@ -5,6 +5,10 @@ from pathlib import Path
 import pytest
 
 
+async def no_owned_tickets():
+    pass
+
+
 def api():
     path=Path(__file__).resolve().parents[1]/'event_seat.py'
     assert path.exists(), 'native event seat is missing'
@@ -102,6 +106,7 @@ def test_transport_reconnect_preserves_cursor_and_only_runs_after_an_offer(tmp_p
     calls=[];delays=[];waits=[]
     async def bootstrap(): runner.active_boards=['home']
     runner.bootstrap=bootstrap
+    runner.reconcile_owned=no_owned_tickets
     runner.run_command=lambda *args,**kwargs:calls.append(args)
     def wait(command,**kwargs):
         waits.append(json.loads(command[command.index('--since')+1]))
@@ -126,6 +131,7 @@ def test_wait_authentication_failure_stops_without_retry(tmp_path, monkeypatch):
     runner.state['cursor']={'home':42}
     async def bootstrap(): runner.active_boards=['home']
     runner.bootstrap=bootstrap
+    runner.reconcile_owned=no_owned_tickets
     def wait(*args,**kwargs):
         raise subprocess.CalledProcessError(1,['wait'],stderr='HTTP 401 Unauthorized')
     monkeypatch.setattr(module['subprocess'],'run',wait)
@@ -170,6 +176,7 @@ def test_explicit_hourly_limit_waits_and_resumes_pending_without_replay(tmp_path
     resumed=module['EventSeatRunner'](cfg)
     async def bootstrap():resumed.active_boards=['home']
     resumed.bootstrap=bootstrap
+    resumed.reconcile_owned=no_owned_tickets
     resumed.run_command=lambda *args,**kwargs:pytest.fail('must wait for budget')
     monkeypatch.setattr(module['time'],'time',lambda:101)
     def sleep(seconds):
