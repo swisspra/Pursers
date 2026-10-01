@@ -563,3 +563,33 @@ as a failed creation or trip the permanent creation breaker. Other creation erro
 retain their existing breaker. A coordinator process that already tripped the old
 breaker needs a controlled restart after deployment; its durable ask IDs preserve
 idempotency. This changes neither worker model-run throttles nor host seat caps.
+
+### Provisioning shared fleet capacity
+
+`host_seat_cap` limits concurrent agent processes; it does not create runners.
+To make a larger fleet available, provision an independent identity, role-scoped
+credential, seat directory, event configuration and cursor file for each runner.
+Generate its instructions with `tools/seat-kit/seat_new.py --event-config`, admit
+its principal to every active registry board, and bootstrap a positive cursor
+before making it eligible for starts. Reviewers require independent principals.
+Keep worktrees separate; existing lease holders and their cursor files must survive
+capacity changes.
+
+Add each runner to the executor templates and local fleet bindings. Use a shared
+provider binding for runners on the same endpoint/model so a capacity increase does
+not multiply provider discovery requests. Update the authorized template list and
+role maxima, desired role minimum/target/maximum, board/host concurrency and executor
+policy together. Recompute the envelope fingerprint and use a fresh, authorized
+config revision. For example, a host cap of 20 can bound 16 workers and 4 reviewers;
+it does not require all 20 to run when there is no demand or host headroom.
+
+In local observation mode the shared home fleet includes demand from active registry
+projects without their own fleet policy. Projects with their own policy remain
+separate and are counted once. An incomplete project scan prevents scaling decisions.
+A truncated ticket payload is acceptable only when the complete coordination scan
+is available; missing membership or identity evidence still prevents starts.
+
+After provisioning, verify eligible stopped inventory, autonomous start receipts,
+registry memberships and real work/review claims. Service status alone does not prove
+that a runner can accept work. Keep a private configuration backup and document the
+actual running count separately from the host ceiling.

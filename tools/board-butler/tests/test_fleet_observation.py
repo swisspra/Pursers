@@ -139,3 +139,14 @@ def test_stopped_seat_missing_registry_membership_is_not_a_start_candidate():
         {'worker': {'status': 'healthy', 'latency_ms': 1}}, {})
     assert observation['executor_seats'][0]['lifecycle'] == 'unhealthy'
     assert all('seat' not in leases['boards'][b]['seats'] for b in ('a', 'b'))
+
+
+def test_complete_coordination_scan_allows_truncated_ticket_payloads():
+    template, boards, members, services = fixture()
+    boards['b'].update(truncated=True, coordination_tickets_complete=True,
+        coordination_tickets=[{'status': 'claimed'}])
+    observer = observer_api()['LocalFleetObserver']({'t': template}, services, {},
+        {'t': {'board_id': 'a', 'provider': 'worker'}})
+    observation, _, leases = observer.collect(['a', 'b'], boards, members, NOW, {}, {})
+    assert observation['executor_seats'][0]['lifecycle'] == 'busy'
+    assert all(leases['boards'][b]['seats']['seat']['work'] for b in ('a', 'b'))

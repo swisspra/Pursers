@@ -55,7 +55,8 @@ class LocalFleetObserver:
                 agents, tickets = snapshot.get('agents'), snapshot.get('coordination_tickets', snapshot.get('tickets'))
                 members = membership.get('members')
                 if (not isinstance(agents, list) or not isinstance(tickets, list) or not isinstance(members, list)
-                        or snapshot.get('truncated') or membership.get('truncated') or membership.get('next_cursor')):
+                        or (snapshot.get('truncated') and snapshot.get('coordination_tickets_complete') is not True)
+                        or membership.get('truncated') or membership.get('next_cursor')):
                     known = False
                     continue
                 matches = [a for a in agents if isinstance(a, Mapping)

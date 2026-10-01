@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Scale the shared local fleet from active registry project demand, counting separately
+  managed projects once. Accept complete coordination scans when ticket payloads
+  are truncated, so larger boards do not incorrectly disable eligible fleet seats.
+
 - Retry Central intake quota refusals after backoff instead of tripping the permanent
   creation breaker. Allow explicit null/none hourly creation limits independently
   of concurrent seat caps, preserving existing defaults and authorization.

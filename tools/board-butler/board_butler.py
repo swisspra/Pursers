@@ -1666,6 +1666,25 @@ def fleet_policies_from_config(
     return host_policy, policies
 
 
+def registry_fleet_snapshots(board_snapshots, configured_boards, home_board):
+    """Include registry project demand in the shared home fleet exactly once."""
+    selected = {board: board_snapshots[board] for board in configured_boards}
+    if home_board not in selected:
+        return selected
+    pooled = [home_board] + sorted(set(board_snapshots) - set(configured_boards))
+    tickets = []
+    for board in pooled:
+        snapshot = board_snapshots[board]
+        rows = snapshot.get("coordination_tickets", snapshot.get("tickets"))
+        if (not isinstance(rows, list) or not isinstance(snapshot.get("agents"), list)
+                or (snapshot.get("truncated") and snapshot.get("coordination_tickets_complete") is not True)):
+            raise ValueError(f"{board}: registry fleet demand is incomplete")
+        tickets.extend(rows)
+    selected[home_board] = {**selected[home_board], "coordination_tickets": tickets,
+                            "coordination_tickets_complete": True}
+    return selected
+
+
 def fleet_snapshot_from_products(
     board_snapshots: Mapping[str, Mapping[str, Any]],
     executor_seats: Sequence[Mapping[str, Any]],
@@ -13128,6 +13147,11 @@ class CentralBackend:
         selected_snapshots = {
             board_id: board_snapshots[board_id] for board_id in configs
         }
+        if getattr(self.args, "fleet_observation_mode", "file") == "local":
+            selected_snapshots = registry_fleet_snapshots(
+                {board: board_snapshots[board] for board in active_boards},
+                configs, self.args.home_board,
+            )
         snapshot = fleet_snapshot_from_products(
             selected_snapshots,
             observation["executor_seats"],

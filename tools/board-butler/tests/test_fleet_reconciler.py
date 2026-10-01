@@ -1783,3 +1783,20 @@ def test_recovery_prefers_last_successful_seat_over_probe_latency(warm_health, e
         'last_attempt_at': (NOW-timedelta(hours=1)).isoformat()}}}
     plan = reconciler({'pursers': policy}).plan(current, prior)
     assert [(o.action, o.seat_id) for o in plan.operations] == [('start', expected)]
+
+
+def test_registry_fleet_demand_includes_projects_without_double_counting():
+    snapshots = {
+        'home': {'agents': [], 'tickets': [{'ticket_id': 'TK-home', 'status': 'open', 'tier': 1}]},
+        'project': {'agents': [], 'truncated': True, 'coordination_tickets_complete': True,
+                    'coordination_tickets': [{'ticket_id': 'TK-project', 'status': 'submitted'}]},
+        'separate': {'agents': [], 'tickets': [{'ticket_id': 'TK-separate', 'status': 'open', 'tier': 2}]},
+    }
+    selected = butler.registry_fleet_snapshots(snapshots, ['home', 'separate'], 'home')
+    assert [t['ticket_id'] for t in selected['home']['coordination_tickets']] == ['TK-home', 'TK-project']
+    assert selected['home']['coordination_tickets_complete'] is True
+    assert selected['separate'] == snapshots['separate']
+    assert 'coordination_tickets' not in snapshots['home']
+    snapshots['project']['coordination_tickets_complete'] = False
+    with pytest.raises(ValueError, match='incomplete'):
+        butler.registry_fleet_snapshots(snapshots, ['home', 'separate'], 'home')
