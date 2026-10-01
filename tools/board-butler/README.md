@@ -223,6 +223,14 @@ is isolated as a bounded `unavailable` or `invalid` finding so the resident can
 continue refreshing. `--connector-probe` remains strict and exits non-zero for
 the same configuration or connection failure.
 
+Operator-owned auto-onboarding policy can include `delivery_policy`,
+`delivery_policy_group`, and an explicit `activate_delivery_policy: true`. The
+activation option validates the effective policy and remote refs, creates only an
+absent owned integration branch, and records the exact policy revision. A new
+repository that resolves to batch or branch-only delivery without this flag stays
+unregistered with `delivery_setup_required`; it cannot silently use legacy
+per-ticket PR delivery.
+
 With `--source-intake-index-file /PATH/TO/private/source-intake-index.json`
 the resident runs Butler-managed intake. The configured Butler model (the
 `drafting` provider) decides when inputs change whether to pull, how many items, and

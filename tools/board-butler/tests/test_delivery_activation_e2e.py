@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -23,6 +24,7 @@ import fleet_dashboard as dashboard
 import registry_admin
 import registry_doctor
 from pursers_client.project_registry import parse_project_registry
+from pursers_client.delivery_workflow import activate_delivery_policy
 
 
 RUNTIME_SPEC = importlib.util.spec_from_file_location(
@@ -84,6 +86,49 @@ class FakePrTransport:
     async def update_customer_pr(self, repository, payload, body, operation_id):
         self.update_calls += 1
         raise AssertionError("frozen delivery must not update a customer PR")
+
+
+def test_resident_connector_reads_full_ado_detail_before_matching_correlation():
+    marker = "f" * 64
+    full_description = "x" * 450 + f"\nPursers-Batch-Correlation: {marker}\n"
+    raw = {
+        "pullRequestId": 17,
+        "status": "active",
+        "description": full_description,
+        "sourceRefName": "refs/heads/pursers/delivery/one",
+        "targetRefName": "refs/heads/customer-review",
+        "lastMergeSourceCommit": {"commitId": "a" * 40},
+        "lastMergeTargetCommit": {"commitId": "b" * 40},
+        "lastMergeCommit": {"commitId": "c" * 40},
+        "isDraft": False,
+        "mergeStatus": "succeeded",
+        "reviewers": [],
+        "repository": {
+            "id": "repo-id", "name": "repo", "project": {"id": "project-id"},
+        },
+    }
+    calls: list[str] = []
+
+    async def delivery_tool(_runtime, name, _args, **_kwargs):
+        calls.append(name)
+        if name == "ado_pull_requests_list":
+            return {"value": [{**raw, "description": full_description[:400]}], "count": 1}
+        if name == "ado_pull_request_get":
+            return raw
+        raise AssertionError(name)
+
+    poller = SimpleNamespace(_delivery_tool=delivery_tool)
+    connector = board_butler._ResidentBatchConnector(
+        poller, object(), {"repository_project": "sample", "repository_name": "repo"}
+    )
+    rows = asyncio.run(connector.list_customer_prs("ignored", "customer-review", "active"))
+    assert calls == ["ado_pull_requests_list", "ado_pull_request_get"]
+    assert rows[0]["correlation"] == marker
+    reconciled = asyncio.run(connector.reconcile_operation("ignored", {
+        "kind": "create_customer_pr",
+        "payload": {"target_branch": "customer-review", "correlation": marker},
+    }))
+    assert reconciled["status"] == "confirmed"
 
 
 def reviewed_member(ticket_id: str, branch: str, sha: str) -> dict[str, object]:
@@ -270,3 +315,117 @@ def test_dashboard_activation_roundtrip_drives_one_frozen_customer_pr(tmp_path):
     assert transport.create_calls == 1 and transport.update_calls == 0
     assert transport.prs[0] == frozen
     assert git(clone, "ls-remote", "--heads", "origin", "refs/heads/main").split()[0] == base
+
+
+def test_real_poller_releases_same_file_fence_after_integration_while_pr_is_open(tmp_path):
+    from test_grouped_intake import Board, NOW, grouped_poller, issue
+
+    origin = tmp_path / "origin.git"
+    clone = tmp_path / "fleet-clone"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(origin), str(clone)], check=True, capture_output=True)
+    git(clone, "config", "user.email", "test@example.invalid")
+    git(clone, "config", "user.name", "Delivery Poller E2E")
+    (clone / "base.txt").write_text("base\n", encoding="utf-8")
+    git(clone, "add", "base.txt")
+    git(clone, "commit", "-m", "base")
+    base = git(clone, "rev-parse", "--verify", "HEAD^{commit}")
+    git(clone, "branch", "-M", "main")
+    git(clone, "push", "origin", "main")
+    git(clone, "push", "origin", f"{base}:refs/heads/customer-review")
+    git(clone, "push", "origin", f"{base}:refs/heads/pursers-integration")
+    repository_url = "https://dev.azure.com/acme/sample/_git/repo"
+    git(clone, "remote", "set-url", "origin", repository_url)
+    git(clone, "config", f"url.file://{origin}.insteadOf", repository_url)
+    git(clone, "switch", "-C", "reviewed/one", base)
+    changed = clone / "src" / "module" / "file.ts"
+    changed.parent.mkdir(parents=True)
+    changed.write_text("reviewed\n", encoding="utf-8")
+    git(clone, "add", "src/module/file.ts")
+    git(clone, "commit", "-m", "reviewed one")
+    reviewed = git(clone, "rev-parse", "--verify", "HEAD^{commit}")
+    git(clone, "push", "origin", f"{reviewed}:refs/heads/reviewed/one")
+
+    effective = {
+        "mode": "batch_pr", "mapped_base": "main",
+        "integration_branch": "pursers-integration",
+        "snapshot_branch_prefix": "pursers/delivery",
+        "final_pr_target": "customer-review",
+        "release_trigger": {"kind": "ready"}, "pr_update": "freeze_on_ready",
+        "auto_integrate": False, "final_merge": "manual",
+        "validation": {"test_commands": [], "required_reviewers": 1,
+                       "independent_review": True, "require_upstream_policies": True},
+        "conflict_policy": "pause", "collection_paused": False,
+    }
+    project_row = {
+        "board_id": "board-a", "integration_ref": "main", "status": "active",
+        "domain": "work", "repository_url": repository_url,
+        "fleet": True, "fleet_clone_dir": str(clone), "work_dir_owner": "fleet",
+        "delivery_policy": effective,
+        "delivery_policy_activation": activate_delivery_policy(effective),
+    }
+    registry = {"schema_version": 1, "projects": {"Alpha": project_row}}
+    project = {
+        **project_row, "__registry__": registry, "__project_name__": "Alpha",
+    }
+
+    board = Board()
+    rows = [
+        issue(0, project="alpha", component="alpha:src/module/file.ts"),
+        issue(1, project="alpha", component="alpha:src/module/file.ts"),
+    ]
+    poller, _calls = grouped_poller(tmp_path, board, rows, [[0], [1]])
+    poller.sources = (
+        replace(poller.sources[0], writeback=SimpleNamespace(tool="ado_pull_request_create")),
+    )
+    first = asyncio.run(poller.run_cycle(NOW))
+    assert first["new_asks"] == 1
+    entry_key, entry = next(iter(poller.index.entries.items()))
+    board.tickets[entry["ticket_id"]] = {
+        "status": "closed", "latest_verdict": {"verdict": "approve"},
+        "title": "Reviewed same-file repair",
+        "latest_submission": {
+            "branch": "reviewed/one", "commit_hash": reviewed,
+            "test_output": "plain pytest passed",
+        },
+    }
+    poller.project_reader = AsyncMock(return_value=project)
+    prs: list[dict[str, object]] = []
+    delivery_calls: list[str] = []
+
+    async def delivery_tool(_runtime, name, args, **_kwargs):
+        delivery_calls.append(name)
+        if name == "ado_pull_requests_list":
+            return {"value": [], "count": 0}
+        if name == "ado_pull_request_create":
+            snapshot = git(clone, "ls-remote", "--heads", "origin", args["sourceRefName"]).split()[0]
+            row = {
+                "pullRequestId": 41, "status": "active", "description": args["description"],
+                "sourceRefName": args["sourceRefName"], "targetRefName": args["targetRefName"],
+                "lastMergeSourceCommit": {"commitId": snapshot},
+                "lastMergeTargetCommit": {"commitId": base}, "lastMergeCommit": {},
+                "isDraft": False, "mergeStatus": "succeeded", "reviewers": [],
+                "repository": {"id": "repo-id", "name": "repo",
+                               "project": {"id": "project-id"}},
+            }
+            prs.append(row)
+            return row
+        if name == "ado_pull_request_get":
+            return prs[0]
+        raise AssertionError(name)
+
+    poller._delivery_tool = delivery_tool
+    second = asyncio.run(poller.run_cycle(NOW.replace(minute=NOW.minute + 1)))
+    assert second["writebacks"] == 1
+    assert second["new_asks"] == 1
+    assert poller.index.entries[entry_key]["status"] == "delivered"
+    assert poller.index.entries[entry_key]["delivery_state"] == "in_delivery"
+    assert len(board.asks()) == 2
+    assert len(prs) == 1 and prs[0]["status"] == "active"
+    integration = git(
+        clone, "ls-remote", "--heads", "origin", "refs/heads/pursers-integration"
+    ).split()[0]
+    assert integration != base
+    assert git(clone, "merge-base", "--is-ancestor", reviewed, integration) == ""
+    assert git(clone, "ls-remote", "--heads", "origin", "refs/heads/main").split()[0] == base
+    assert "ado_pull_request_create" in delivery_calls

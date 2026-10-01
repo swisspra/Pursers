@@ -11,6 +11,7 @@ from pursers_client.delivery_workflow import (
     delivery_group_name,
     parse_delivery_policy,
     parse_delivery_workflow,
+    resolve_delivery_policy,
 )
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -64,6 +65,7 @@ class IntakeSourcePolicy:
     delivery_workflow: Mapping[str, Any] | None = None
     delivery_policy: Mapping[str, Any] | None = None
     delivery_policy_group: str | None = None
+    activate_delivery_policy: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,7 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             "delivery_workflow",
             "delivery_policy",
             "delivery_policy_group",
+            "activate_delivery_policy",
         }
         if (
             not isinstance(raw, Mapping)
@@ -188,6 +191,12 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             raise ValueError(f"{path}.projects_root must be absolute")
         if type(raw.get("auto_onboard")) is not bool:
             raise ValueError(f"{path}.auto_onboard must be boolean")
+        if type(raw.get("activate_delivery_policy", False)) is not bool:
+            raise ValueError(f"{path}.activate_delivery_policy must be boolean")
+        if raw.get("activate_delivery_policy", False) and "delivery_workflow" in raw:
+            raise ValueError(
+                f"{path} cannot activate delivery_policy and delivery_workflow together"
+            )
         repositories_raw = raw.get("repositories", raw.get("repository_map"))
         if not isinstance(repositories_raw, Mapping) or len(repositories_raw) > MAX_SOURCE_PROJECTS:
             raise ValueError(f"{path}.repositories must be a bounded object")
@@ -256,6 +265,7 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
                 delivery_group_name(raw["delivery_policy_group"])
                 if "delivery_policy_group" in raw else None
             ),
+            activate_delivery_policy=raw.get("activate_delivery_policy", False),
             default_ticket_tier=(
                 _bounded_int(
                     raw["default_ticket_tier"], f"{path}.default_ticket_tier", 1, 3
@@ -511,13 +521,6 @@ class ProjectOnboarder:
                         ),
                         now,
                     )
-                if git_mode == "clone":
-                    await asyncio.to_thread(lifecycle.clone_project_source, plan)
-                await self.registry.ensure_board(
-                    board_id, policy.domain, policy.default_ticket_tier
-                )
-                if policy.member_roles:
-                    await self.registry.ensure_members(board_id, policy.member_roles)
                 entry = dict(plan["proposed_entry"])
                 entry.update(
                     {
@@ -533,6 +536,34 @@ class ProjectOnboarder:
                     entry["delivery_policy"] = dict(policy.delivery_policy)
                 if policy.delivery_policy_group is not None:
                     entry["delivery_policy_group"] = policy.delivery_policy_group
+                candidate_registry = dict(registry)
+                candidate_registry["projects"] = {
+                    **dict(projects or {}), item.project_hint: entry,
+                }
+                resolved_policy = resolve_delivery_policy(candidate_registry, item.project_hint)
+                if (resolved_policy["policy"]["mode"] in {"batch_pr", "branch_only"}
+                        and not policy.activate_delivery_policy):
+                    return await self._finish(
+                        OnboardingResult(
+                            item.item_id,
+                            item.source_id,
+                            item.project_hint,
+                            "delivery_setup_required",
+                            finding=(
+                                f"project {item.project_hint} selects "
+                                f"{resolved_policy['policy']['mode']} delivery; set "
+                                "activate_delivery_policy true or choose per_ticket_pr"
+                            )[:MAX_FINDING_CHARS],
+                        ),
+                        now,
+                    )
+                if git_mode == "clone":
+                    await asyncio.to_thread(lifecycle.clone_project_source, plan)
+                await self.registry.ensure_board(
+                    board_id, policy.domain, policy.default_ticket_tier
+                )
+                if policy.member_roles:
+                    await self.registry.ensure_members(board_id, policy.member_roles)
                 configured_delivery = policy.delivery_workflow or registry.get("delivery_defaults")
                 if configured_delivery and configured_delivery.get("mode") == "integration":
                     # Each source mapping supplies its own base; a default never guesses dev/main.
@@ -548,6 +579,35 @@ class ProjectOnboarder:
                         observation={"complete": True, "active_tickets": [], "pending_offers": []}, refs=refs)
                     if delivery_plan["blocked"]:
                         raise ValueError("Delivery branches need project configuration before onboarding")
+                    await asyncio.to_thread(settings["prepare_delivery_branch"], delivery_plan)
+                    entry = delivery_plan["proposed_entry"]
+                if policy.activate_delivery_policy:
+                    settings = runpy.run_path(str(Path(__file__).resolve().parents[1] / "fleet-dashboard" / "delivery_settings.py"))
+                    candidate_registry = dict(registry)
+                    candidate_registry["projects"] = {
+                        **dict(projects or {}), item.project_hint: entry,
+                    }
+                    refs = await asyncio.to_thread(settings["remote_branches"], entry)
+                    policy_request = {
+                        "action": "delivery",
+                        "scope": "repository",
+                        "name": item.project_hint,
+                        "delivery_policy": dict(policy.delivery_policy or {}),
+                        "activate": True,
+                    }
+                    if policy.delivery_policy_group is not None:
+                        policy_request["delivery_policy_group"] = policy.delivery_policy_group
+                    delivery_plan = settings["build_delivery_plan"](
+                        request=policy_request,
+                        registry=candidate_registry,
+                        registry_expected_sha256=digest,
+                        actor="board-butler",
+                        central="registry",
+                        observation={"complete": True, "active_tickets": [], "pending_offers": []},
+                        refs=refs,
+                    )
+                    if delivery_plan["blocked"]:
+                        raise ValueError("Delivery policy is not ready for onboarding activation")
                     await asyncio.to_thread(settings["prepare_delivery_branch"], delivery_plan)
                     entry = delivery_plan["proposed_entry"]
                 await self.registry.add_project(

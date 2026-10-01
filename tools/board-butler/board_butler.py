@@ -6167,6 +6167,27 @@ class _ResidentBatchConnector:
             'correlation': correlation, 'mutable': mutable,
         }
 
+    def _verified_pr_row(self, row: Any) -> Mapping[str, Any]:
+        if not isinstance(row, Mapping):
+            raise ConnectorResultError('customer PR detail is not an object')
+        pr_id = row.get('pullRequestId')
+        repository = row.get('repository')
+        project = repository.get('project') if isinstance(repository, Mapping) else None
+        if type(pr_id) is not int or pr_id < 1:
+            raise ConnectorResultError('customer PR detail has no stable identifier')
+        if (not isinstance(repository, Mapping)
+                or str(repository.get('name', '')).casefold()
+                != self.fields['repository_name'].casefold()):
+            raise ConnectorDenied('customer PR repository identity mismatch')
+        if not isinstance(project, Mapping) or not (
+                isinstance(project.get('id'), str) and project['id']
+                or isinstance(project.get('name'), str) and project['name']):
+            raise ConnectorResultError('customer PR project identity is unavailable')
+        if (isinstance(project.get('name'), str)
+                and project['name'].casefold() != self.fields['repository_project'].casefold()):
+            raise ConnectorDenied('customer PR project identity mismatch')
+        return row
+
     async def list_customer_prs(self, repository, target_branch, status):
         del repository
         document = await self.poller._delivery_tool(self.runtime, 'ado_pull_requests_list', {
@@ -6176,9 +6197,26 @@ class _ResidentBatchConnector:
             'status': status, 'top': 100, 'skip': 0,
         })
         rows = document.get('value') if isinstance(document, Mapping) else None
-        if not isinstance(rows, list) or len(rows) > 100:
+        count = document.get('count') if isinstance(document, Mapping) else None
+        if (not isinstance(rows, list) or len(rows) > 100
+                or (count is not None and (type(count) is not int or count != len(rows)))):
             raise ConnectorResultError('customer PR inventory is incomplete')
-        return [self._pr(row) for row in rows if isinstance(row, Mapping)]
+        identifiers = [row.get('pullRequestId') for row in rows if isinstance(row, Mapping)]
+        if (len(identifiers) != len(rows)
+                or any(type(pr_id) is not int or pr_id < 1 for pr_id in identifiers)
+                or len(set(identifiers)) != len(identifiers)):
+            raise ConnectorResultError('customer PR inventory identifiers are invalid')
+        # ADO list descriptions are truncated. Fetch each bounded candidate's
+        # authoritative detail before reading correlation markers or deciding
+        # that no reusable PR exists.
+        details = [await self.get_customer_pr('', pr_id, raw=True) for pr_id in identifiers]
+        result = []
+        for row in details:
+            normalized = self._pr(row)
+            if normalized['target_branch'] != target_branch or normalized['status'] != status:
+                raise ConnectorDenied('customer PR detail changed outside the requested inventory')
+            result.append(normalized)
+        return result
 
     async def create_customer_pr(self, repository, payload, body, operation_id):
         del repository, operation_id
@@ -6189,7 +6227,7 @@ class _ResidentBatchConnector:
             'targetRefName': 'refs/heads/' + payload['target_branch'],
             'title': 'Pursers reviewed delivery batch', 'description': body, 'isDraft': False,
         }, mutate=True)
-        return {'status': 'confirmed', 'pr': self._pr(document)}
+        return {'status': 'confirmed', 'pr': self._pr(self._verified_pr_row(document))}
 
     async def update_customer_pr(self, repository, payload, body, operation_id):
         del repository, operation_id
@@ -6201,14 +6239,15 @@ class _ResidentBatchConnector:
         pr = await self.get_customer_pr('', payload['pr_id'])
         return {'status': 'confirmed', 'source_sha': pr['source_sha'], 'pr': pr}
 
-    async def get_customer_pr(self, repository, pr_id):
+    async def get_customer_pr(self, repository, pr_id, *, raw=False):
         del repository
         document = await self.poller._delivery_tool(self.runtime, 'ado_pull_request_get', {
             'project': self.fields['repository_project'],
             'repositoryId': self.fields['repository_name'], 'pullRequestId': pr_id,
         })
         row = document.get('pullRequest', document) if isinstance(document, Mapping) else {}
-        return self._pr(row)
+        verified = self._verified_pr_row(row)
+        return verified if raw else self._pr(verified)
 
     async def reconcile_operation(self, repository, reservation):
         payload = reservation.get('payload', {})
@@ -6635,8 +6674,16 @@ class SourceIntakePoller:
                 remote = await self._delivery_tool(runtime, "ado_pull_request_get", args)
                 remote = remote.get("pullRequest", remote) if isinstance(remote, Mapping) else {}
                 repository = remote.get("repository", {})
-                if (str(repository.get("name", "")).casefold() != fields["repository_name"].casefold()
-                        or str(repository.get("project", {}).get("name", "")).casefold() != fields["repository_project"].casefold()):
+                remote_project = repository.get("project", {}) if isinstance(repository, Mapping) else {}
+                project_identity = (
+                    isinstance(remote_project, Mapping)
+                    and ((isinstance(remote_project.get("name"), str)
+                          and remote_project["name"].casefold() == fields["repository_project"].casefold())
+                         or (isinstance(remote_project.get("id"), str) and bool(remote_project["id"])))
+                )
+                if (not isinstance(repository, Mapping)
+                        or str(repository.get("name", "")).casefold() != fields["repository_name"].casefold()
+                        or not project_identity):
                     raise ConnectorDenied("integration PR repository identity mismatch")
                 details = await self._delivery_tool(runtime, "ado_repository_details_get", {
                     "project": fields["repository_project"], "repositoryId": fields["repository_name"],

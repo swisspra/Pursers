@@ -99,6 +99,13 @@ Shared global or group edits preview every explicitly affected repository and sa
 configuration only. Activate repositories separately after reviewing remote refs
 and active work. Existing PRs and in-flight batches are never silently rerouted.
 
+Auto-onboarding has the same explicit boundary. A source configuration may set
+`activate_delivery_policy: true` to validate the effective policy, create its owned
+integration branch, and persist a revision-bound activation for each new repository.
+If a new repository would inherit `batch_pr` or `branch_only` without that explicit
+intent, onboarding stops with `delivery_setup_required`; it never falls back to a
+per-ticket PR. Existing repositories and saved drafts remain inert until activated.
+
 A project registry entry can contain:
 
 ```json
