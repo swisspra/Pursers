@@ -174,3 +174,37 @@ def test_transport_only_changes_do_not_replan(tmp_path):
     asyncio.run(m.plan_groups([issue(0,impacts={'value':1})],{'project':'org_api','analysis_sha':'a'*40},choose,tmp_path/'cache'))
     asyncio.run(m.plan_groups([issue(0,impacts={'value':1.0})],{'project':'org_api','analysis_sha':'b'*40},choose,tmp_path/'cache'))
     assert calls==[1]
+
+
+def test_delivered_group_releases_file_for_distinct_issues_after_restart(tmp_path):
+    board=Board();planner=[]
+    rows=[issue(i,project='alpha') for i in range(3)]
+    poller,_=grouped_poller(tmp_path,board,rows,[[0],[1],[2]],planner_calls=planner)
+    assert asyncio.run(poller.run_cycle(NOW))['new_asks']==1
+    first=next(iter(poller.index.entries))
+    poller.index.set_status(first,'delivering');poller.index.save()
+    assert asyncio.run(poller.run_cycle(NOW+timedelta(minutes=1)))['new_asks']==0
+    poller.index.set_status(first,'delivered');poller.index.save()
+    restarted,_=grouped_poller(tmp_path,board,rows,[[0],[1],[2]],planner_calls=planner)
+    assert asyncio.run(restarted.run_cycle(NOW+timedelta(minutes=2)))['new_asks']==1
+    assert asyncio.run(restarted.run_cycle(NOW+timedelta(minutes=3)))['new_asks']==0
+    import json
+    admitted=[m for e in restarted.index.entries.values() for m in json.loads(e['member_ids'])]
+    assert sorted(admitted)==['I-0','I-1']
+    assert len(planner)==1
+
+
+def test_group_policy_upgrade_replans_once_then_reuses_validated_plan(tmp_path):
+    import json
+    m=module();calls=[];path=tmp_path/'groups.json'
+    async def choose(_):
+        calls.append(1)
+        return {'groups':[{'title':'Cleanup imports','objective':'Remove unused imports',
+                           'validation':'Typecheck','issues':[0,1]}]}
+    rows=[issue(0),issue(1)];scope={'project':'org_api','branch':'dev'}
+    asyncio.run(m.plan_groups(rows,scope,choose,path))
+    saved=json.loads(path.read_text());saved.pop('planner_version',None)
+    m.save_private(path,saved)
+    asyncio.run(m.plan_groups(rows,scope,choose,path))
+    asyncio.run(m.plan_groups(rows,scope,choose,path))
+    assert len(calls)==2

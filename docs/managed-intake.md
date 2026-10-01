@@ -427,6 +427,15 @@ oversized groups to at most 12 issues/3 files, and preserves all IDs in ticket t
 Severity is not the grouping key; related rules may share one repair, while unrelated
 changes within a file may need separate tickets.
 
+The planner first considers compatible small repairs within each file, including
+different rules that share an objective and validation. Repeated edits across
+functions need not become separate tickets. Behavioral, async/API, security,
+exception-handling and mutation changes require their own compatibility assessment;
+file identity alone does not justify combining them. Planner policy version 2
+refreshes older cached plans once, then reuses the validated plan for unchanged
+inputs. Already admitted issue membership and existing tickets/PRs are preserved;
+only remaining occurrences can be admitted under the new plan.
+
 Plans and their membership use private mode-0600 files next to
 `--source-intake-index-file`. Unchanged snapshots reuse the durable plan across
 restarts. Up to 12 omitted occurrences receive one bounded model repair request; the final
@@ -436,12 +445,15 @@ reservation before the Central CAS write, so an interrupted write can recover th
 same ask without losing or duplicating members. New analysis does not expand an
 already admitted ticket. Capacity counts groups, not raw Sonar occurrences.
 
-Groups sharing a repository, target branch and file are serialized, including
-different Sonar keys mapped to the same repository. An approved/open PR retains its file hold;
-this release does not automatically infer merge/landing or clear that hold. Keep
-the index when deploying or restarting. Do not delete it to rerun a canary: that
-would remove deduplication and delivery guards. Operator reconciliation of completed
-PRs and their landing remains required before releasing overlapping work.
+Groups sharing a repository, target branch and file are serialized while work or
+PR delivery is active, including different Sonar keys mapped to the same repository.
+Confirmed PR delivery releases the file hold so distinct issues in that file can
+proceed on another branch without waiting for a human merge. Uncertain delivery
+retains the hold. Delivered issue IDs remain reserved and cannot be admitted again.
+Separate PRs touching the same file can require conflict resolution when merged;
+delivery does not imply merge or Sonar resolution. Keep the index when deploying
+or restarting: deleting it removes deduplication and delivery guards. Existing
+delivered records release their holds automatically with this runtime update.
 
 Add `{issue_ids}` to the configured writeback description to include every member
 ID in the single approved PR. Existing remote repository/branch/SHA preflight and
@@ -467,7 +479,15 @@ Intake decisions reserve up to 1,600 completion tokens, shared by model reasonin
 
 When the provider reports token usage, intake audit metadata includes `provider_usage` with prompt, completion, total, and reasoning token counts. Successful cached decisions do not emit new usage. Failure metadata is retained during backoff: count usage only when `model_called` is true, using `provider_response_id` to deduplicate. Missing usage means unreported, not zero.
 
-The intake model receives `fleet_load` with unique idle worker/reviewer counts across registry boards. Per-board membership counts can overlap and must not be added together. A seat busy on any observed board is unavailable to admit more work. Routing-state events are visible through catchup to principals with `board:coordinate`; workers retain their existing event visibility.
+The intake model receives `fleet_load` with unique fresh `workers`/`reviewers` and
+`idle_workers`/`idle_reviewers` across registry boards. Per-board memberships must
+not be added together. A busy seat is excluded from idle counts but remains fleet
+capacity for planning the next task. Butler chooses a small ready queue using open
+work, in-flight work and review backlog; busy workers alone are not a reason to
+leave the next-work queue empty. Pull counts remain model decisions within existing
+seat and group ceilings. Empty-source skipping, decision caching and failure backoff
+remain in effect. Routing-state events are visible through catchup to principals
+with `board:coordinate`; workers retain their existing event visibility.
 
 ### Review evidence across repair commits
 
@@ -523,3 +543,23 @@ when capacity is needed again. A subsequent observation can start it afresh.
 Live leases and busy work prevent this stop. This avoids treating a draining
 process as a ready replacement forever. No model requests are needed for this
 reconciliation, and no seat or hourly execution limit changes are required.
+
+### Optional hourly intake limits and quota recovery
+
+Seat ceilings bound simultaneous work. Two independent settings bound ticket
+creation over a rolling hour: coordinator `intake.rate_per_hour` (CLI
+`--intake-rate-per-hour`) and each Central board's `config.intake_rate_limit_per_hour`.
+Defaults remain unchanged. To run without hourly creation throttling, explicitly
+set the coordinator value to JSON `null` or CLI `none`, and the Central board value
+to `null`. The Central setting is persisted board configuration, not a coordinator
+state key; a host administrator must update it with the supported Central runtime
+and a database backup. Deploy the nullable-limit runtime before setting it. Other
+boards retain their own limits. Do not change tokens or add `board:write` to the
+intake principal to bypass a limit.
+
+A Central hourly-limit refusal leaves the ask queued, defers that board for at
+least 60 seconds and retries on a subsequent coordinator cycle. It does not count
+as a failed creation or trip the permanent creation breaker. Other creation errors
+retain their existing breaker. A coordinator process that already tripped the old
+breaker needs a controlled restart after deployment; its durable ask IDs preserve
+idempotency. This changes neither worker model-run throttles nor host seat caps.

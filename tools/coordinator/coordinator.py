@@ -104,7 +104,7 @@ class CoordinatorConfig:
     auto_categories: tuple[str, ...]
     always_ask_categories: tuple[str, ...]
     work_domain_always_ask: bool
-    rate_per_hour: int
+    rate_per_hour: int | None
     effective: dict[str, Any]
     sources: dict[str, str]
     invalid_fields: tuple[str, ...]
@@ -141,6 +141,7 @@ class RuntimeState:
     consecutive_failures: int = 0
     intake_failures: dict[str, int] | None = None
     intake_breakers: set[str] | None = None
+    intake_retry_after: dict[str, datetime] | None = None
 
     @classmethod
     def for_mode(cls, mode: str) -> "RuntimeState":
@@ -374,7 +375,7 @@ def resolve_coordinator_config(
             "flag" if "intake_token_path" in explicit else "default"
         )
     work_ask = choose("intake.work_domain_always_ask", intake_doc.get("work_domain_always_ask"), lambda value: type(value) is bool, "work_domain_always_ask", True, present="work_domain_always_ask" in intake_doc)
-    rate = choose("intake.rate_per_hour", intake_doc.get("rate_per_hour"), lambda value: type(value) is int and 1 <= value <= 20, "intake_rate_per_hour", INTAKE_RATE_LIMIT, present="rate_per_hour" in intake_doc)
+    rate = choose("intake.rate_per_hour", intake_doc.get("rate_per_hour"), lambda value: value is None or (type(value) is int and 1 <= value <= 20), "intake_rate_per_hour", INTAKE_RATE_LIMIT, present="rate_per_hour" in intake_doc)
     threshold_values = Thresholds(**fields)
     effective = {
         "schema_version": 1,
@@ -3383,7 +3384,7 @@ async def process_intakes(
     auto_categories: Sequence[str] = DEFAULT_AUTO_CATEGORIES,
     always_ask_categories: Sequence[str] = DEFAULT_ALWAYS_ASK_CATEGORIES,
     work_domain_always_ask: bool = True,
-    rate_per_hour: int = INTAKE_RATE_LIMIT,
+    rate_per_hour: int | None = INTAKE_RATE_LIMIT,
 ) -> tuple[list[dict[str, Any]], dict[str, frozenset[str]]]:
     """Classify, validate and consume queues; mutations remain injected/testable."""
     if not enabled:
@@ -3392,6 +3393,8 @@ async def process_intakes(
     breakers = runtime.intake_breakers if runtime.intake_breakers is not None else set()
     runtime.intake_failures = failures
     runtime.intake_breakers = breakers
+    retry_after = runtime.intake_retry_after if runtime.intake_retry_after is not None else {}
+    runtime.intake_retry_after = retry_after
     findings: list[dict[str, Any]] = []
     updates: dict[str, frozenset[str]] = {}
     by_board: dict[str, list[Project]] = {}
@@ -3471,10 +3474,13 @@ async def process_intakes(
                 )
             if decision == "auto" and board_id in breakers and not ask.approved:
                 decision, rule = "ask", "create-breaker-draft-only"
-            if decision == "auto" and recent_creates is None:
+            if decision == "auto" and rate_per_hour is not None and recent_creates is None:
                 decision, rule = "ask", "incomplete-rate-history-draft-only"
+            if decision == "auto" and now < retry_after.get(board_id, now):
+                decision, rule = "ask", "server-hourly-auto-create-limit"
             if (
                 decision == "auto"
+                and rate_per_hour is not None
                 and recent_creates is not None
                 and recent_creates >= rate_per_hour
             ):
@@ -3513,6 +3519,15 @@ async def process_intakes(
             try:
                 ticket_id = await create_ticket(board_id, draft)
             except Exception as exc:
+                if "board:intake hourly ticket creation limit reached" in str(exc):
+                    retry_after[board_id] = now + timedelta(seconds=60)
+                    findings.append(intake_finding(
+                        "intake-pending", "info", ask, draft, "ask",
+                        "server-hourly-auto-create-limit",
+                    ))
+                    # A temporary quota refusal is not a failed creation. Leave
+                    # this board's remaining asks queued and retry on a later event.
+                    break
                 failures[board_id] = failures.get(board_id, 0) + 1
                 findings.append(
                     _finding(
@@ -3542,6 +3557,7 @@ async def process_intakes(
                 continue
             failures.pop(board_id, None)
             breakers.discard(board_id)
+            retry_after.pop(board_id, None)
             if recent_creates is not None:
                 recent_creates += 1
             findings.append(
@@ -3975,7 +3991,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     work_policy.add_argument("--work-domain-always-ask", dest="work_domain_always_ask", action="store_true")
     work_policy.add_argument("--allow-work-domain-auto", dest="work_domain_always_ask", action="store_false")
     parser.set_defaults(work_domain_always_ask=True)
-    parser.add_argument("--intake-rate-per-hour", type=int, default=INTAKE_RATE_LIMIT)
+    parser.add_argument("--intake-rate-per-hour", type=lambda value: None if value.casefold() == "none" else int(value),
+                        default=INTAKE_RATE_LIMIT, help="Optional hourly ticket creation limit; none disables it")
     parser.add_argument(
         "--integration-watch-since",
         help="Ignore closed-ticket integration checks before this ISO-8601 timestamp",
@@ -4032,8 +4049,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("intake category policy must cover every known category")
     if set(_csv_categories(args.intake_auto_categories) or ()) & set(_csv_categories(args.intake_always_ask_categories) or ()):
         parser.error("intake auto and always-ask categories must be disjoint")
-    if not 1 <= args.intake_rate_per_hour <= 20:
-        parser.error("--intake-rate-per-hour must be between 1 and 20")
+    if args.intake_rate_per_hour is not None and not 1 <= args.intake_rate_per_hour <= 20:
+        parser.error("--intake-rate-per-hour must be between 1 and 20, or none")
     return args
 
 
