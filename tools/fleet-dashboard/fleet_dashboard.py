@@ -79,6 +79,7 @@ from release_ops import ReleaseOpsManager
 import runtime_environment
 from warm_home import apply_warm_guided_home
 from result_visibility import project_ticket_result, project_delivery
+from activity_visibility import project_activity
 from delivery_settings import (
     public_delivery_settings, build_delivery_plan, remote_branches,
     prepare_delivery_branch, delivery_route_changed,
@@ -3240,6 +3241,7 @@ def _detail_ticket(
             if ticket.get("progress_freshness") in {"fresh", "stale", "unknown"}
             else "unknown"
         ),
+        "activity": project_activity(ticket.get("activity")),
         "rejection_count": _nonnegative_int(ticket.get("rejection_count")),
         "review_wait_started_at": (
             _clip(
@@ -4223,9 +4225,10 @@ def aggregate_fleet(
 
             claimed_id = ticket.get("claimed_by_agent_id")
             if (
-                status == "open"
+                status in {"open", "needs_human"}
                 or status in ACTIVE_CLAIM_STATES
                 or status in SUBMITTED_STATES
+                or _closed_today(ticket, now)
             ):
                 claimed_by = ticket.get("claimed_by")
                 if not claimed_by and isinstance(claimed_id, str):
@@ -4268,6 +4271,7 @@ def aggregate_fleet(
                             in {"fresh", "stale", "unknown"}
                             else "unknown"
                         ),
+                        "activity": project_activity(ticket.get("activity")),
                         "updated_at": _clip(ticket.get("updated_at"), 40) or None,
                         "abandoned_count": max(
                             0, int(ticket.get("abandoned_count", 0) or 0)

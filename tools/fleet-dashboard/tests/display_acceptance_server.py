@@ -51,6 +51,37 @@ def ticket(
     }
 
 
+def activity(
+    ticket_id: str,
+    stage: str,
+    state: str,
+    *,
+    attempt: int | None,
+    actor: str | None,
+    next_action: str,
+    freshness: str = "fresh",
+    boundary: str = "unknown",
+    blocker: str | None = None,
+) -> dict:
+    value = {
+        "schema_version": 1,
+        "stage": stage,
+        "state": state,
+        "attempt_id": attempt,
+        "actor_id": actor,
+        "updated_at": "2030-01-02T11:58:00Z",
+        "freshness": freshness,
+        "evidence_refs": [
+            f"board://fixture-board/ticket/{ticket_id}#acceptance-evidence"
+        ],
+        "next_action": next_action,
+        "completion_boundary": boundary,
+    }
+    if blocker is not None:
+        value["blocking_reason"] = blocker
+    return value
+
+
 class AcceptanceCache:
     def __init__(self, dashboard, mode: str = "populated") -> None:
         self.dashboard = dashboard
@@ -69,13 +100,46 @@ class AcceptanceCache:
 
     @staticmethod
     def _tickets() -> list[dict]:
-        return [
+        rows = [
             ticket("TK-human", "Choose the safe rollout window", "needs_human"),
             ticket("TK-review", "Verify the submitted display evidence", "submitted", owner="reviewer-01"),
             ticket("TK-working", "Prepare the Fleet acceptance gallery", "claimed", owner="worker-01"),
+            ticket("TK-stale", "Reconcile the expired work evidence", "claimed", owner="worker-03"),
             ticket("TK-open", "Document the next bounded action", "open"),
             ticket("TK-closed", "Preserve the source-backed route map", "closed", owner="worker-02"),
         ]
+        records = {
+            "TK-human": activity(
+                "TK-human", "validation", "blocked", attempt=1,
+                actor="AI-synthetic-03", next_action="Record the requested human decision.",
+                blocker="A rollout window is required.",
+            ),
+            "TK-review": activity(
+                "TK-review", "review", "waiting", attempt=1,
+                actor=None, next_action="An independent reviewer must claim the submission.",
+            ),
+            "TK-working": activity(
+                "TK-working", "work", "running", attempt=1,
+                actor="AI-synthetic-01", next_action="Continue the current work attempt.",
+            ),
+            "TK-stale": activity(
+                "TK-stale", "work", "stale", attempt=2,
+                actor="AI-synthetic-03", next_action="Reconcile stale evidence before continuing.",
+                freshness="stale", blocker="The last meaningful update is stale.",
+            ),
+            "TK-open": activity(
+                "TK-open", "work", "retrying", attempt=2,
+                actor=None, next_action="Claim the next attempt and address review feedback.",
+            ),
+            "TK-closed": activity(
+                "TK-closed", "completed", "completed", attempt=1,
+                actor="AI-synthetic-02", next_action="No further lifecycle action is required.",
+                boundary="integration",
+            ),
+        }
+        for row in rows:
+            row["activity"] = records[row["id"]]
+        return rows
 
     @staticmethod
     def _agents() -> list[dict]:
@@ -181,7 +245,7 @@ class AcceptanceCache:
                     "tickets": tickets,
                     "events": events,
                     "coordinator_heartbeat": "2030-01-02T11:59:30Z",
-                    "snapshot_truncation": {"returned": 5, "total": 8},
+                    "snapshot_truncation": {"returned": 6, "total": 9},
                     "human_requests": [
                         {
                             "request_id": "HR-synthetic-01",

@@ -183,6 +183,16 @@ Work groups current work into waiting/open, working, review, and recently done
 states. Use **Details** for the ticket record or **Flow** for its lane. Rejected
 submissions are called out instead of being blended into ordinary review work.
 
+When Central supplies lifecycle activity version 1, each row also shows the
+current stage and state, work attempt, stable actor identity, last meaningful
+update and freshness, configured completion boundary, blocking reason, next
+recorded action, and bounded evidence references. A worker estimate appears only
+when the current holder explicitly recorded a valid range and confidence; Fleet
+does not calculate percent or ETA from stage order, elapsed time, heartbeats, or
+lease renewal. Review approval, PR creation, integration, and delivery remain
+separate facts. If the connected server is older, Work keeps its legacy
+status/progress presentation and labels unknown data rather than inventing it.
+
 ![Work grouped by ticket state](img/fleet-work.png)
 
 ### Team

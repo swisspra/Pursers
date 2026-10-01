@@ -130,6 +130,10 @@ from runtime_health import (
 )
 from scrub import Policy, ScrubRejected, scrub
 from transactional_sqlite import TransactionalSQLiteStore
+try:  # Package import in installed/runtime use; top-level import in focused tests.
+    from .activity import project_ticket_activity
+except ImportError:  # pragma: no cover - exercised by the top-level test loader.
+    from activity import project_ticket_activity
 
 
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
@@ -320,6 +324,19 @@ PROGRESS_EVENT_FIELDS = frozenset(
         "progress_reset_at",
         "fixture_provenance",
         "recipient_identities",
+    }
+)
+ACTIVITY_EVENT_FIELDS = frozenset(
+    {
+        "activity_schema_version",
+        "activity_stage",
+        "activity_state",
+        "activity_attempt_id",
+        "activity_actor_id",
+        "activity_updated_at",
+        "activity_freshness",
+        "activity_completion_boundary",
+        "activity_ref",
     }
 )
 SCRUB_EVENT_FIELDS = frozenset(
@@ -821,6 +838,9 @@ def project_ticket_read(
     summary["progress_freshness"] = ticket.get(
         "progress_freshness", "unknown"
     )
+    activity = ticket.get("activity")
+    if isinstance(activity, Mapping):
+        summary["activity"] = copy.deepcopy(dict(activity))
     progress = ticket.get("progress")
     if isinstance(progress, Mapping):
         summary["progress"] = {
@@ -888,6 +908,7 @@ def project_ticket_read(
         "reviewed_by", "reviewed_by_agent_id", "reviewed_by_agent_name",
         "reviewed_by_principal_id", "rejection_count", "abandoned_count",
         "work_attempt", "progress", "progress_freshness", "progress_updated_at",
+        "activity",
     ):
         if key in ticket:
             work[key] = copy.deepcopy(ticket[key])
@@ -1219,6 +1240,7 @@ class CentralJournal(Journal):
             REVIEW_CORE_OVERRIDE_FIELDS
             | INTAKE_CORE_OVERRIDE_FIELDS
             | PROGRESS_EVENT_FIELDS
+            | ACTIVITY_EVENT_FIELDS
         )
         if kind in CORE_JOURNAL_KINDS and not custom_core_fields.intersection(event):
             return super().append(board_id, event)
@@ -1257,6 +1279,7 @@ class CentralJournal(Journal):
             | PARK_EVENT_FIELDS
             | ARCHIVE_EVENT_FIELDS
             | PROGRESS_EVENT_FIELDS
+            | ACTIVITY_EVENT_FIELDS
             | SEAT_IDENTITY_EVENT_FIELDS
         )
         semantic = {
@@ -1338,6 +1361,7 @@ class CentralJournal(Journal):
             | PARK_EVENT_FIELDS
             | ARCHIVE_EVENT_FIELDS
             | PROGRESS_EVENT_FIELDS
+            | ACTIVITY_EVENT_FIELDS
             | SEAT_IDENTITY_EVENT_FIELDS
         )
         semantic = {
@@ -3490,6 +3514,33 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
         return register
 
+    def activity_event_projection(
+        board_id: str, fields: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Attach a bounded cue so reconnecting consumers can refetch activity."""
+        ticket_id = fields.get("ticket_id")
+        if not isinstance(ticket_id, str) or not ticket_id:
+            return {}
+        document = service.load(board_id)
+        ticket = document.get("tickets", {}).get(ticket_id)
+        if not isinstance(ticket, Mapping):
+            return {}
+        activity = project_ticket_activity(
+            ticket, board_id=board_id, now=time.time()
+        )
+        projected = {
+            "activity_schema_version": activity["schema_version"],
+            "activity_stage": activity["stage"],
+            "activity_state": activity["state"],
+            "activity_attempt_id": activity.get("attempt_id"),
+            "activity_actor_id": activity.get("actor_id"),
+            "activity_updated_at": activity.get("updated_at"),
+            "activity_freshness": activity["freshness"],
+            "activity_completion_boundary": activity["completion_boundary"],
+            "activity_ref": f"board://{board_id}/ticket/{ticket_id}#activity-v1",
+        }
+        return {key: value for key, value in projected.items() if value is not None}
+
     async def append_and_publish(
         board_id: str,
         actor: dict[str, Any],
@@ -3499,6 +3550,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ctx: Context | None = None,
         **fields: Any,
     ) -> dict[str, Any]:
+        event_fields = {**fields, **activity_event_projection(board_id, fields)}
         try:
             event = service.journal.append(
                 board_id,
@@ -3508,7 +3560,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "payload_ref": payload_ref,
                     "recipient_identities": recipients,
                     "fixture_provenance": "pursers-personal-runtime",
-                    **fields,
+                    **event_fields,
                 },
             )
         except MCPError:
@@ -3548,6 +3600,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         unique_fields: tuple[str, ...],
         **fields: Any,
     ) -> tuple[dict[str, Any], bool]:
+        event_fields = {**fields, **activity_event_projection(board_id, fields)}
         try:
             event, created = service.journal.append_once(
                 board_id,
@@ -3557,7 +3610,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "payload_ref": payload_ref,
                     "recipient_identities": recipients,
                     "fixture_provenance": "pursers-personal-runtime",
-                    **fields,
+                    **event_fields,
                 },
                 unique_fields=unique_fields,
             )
@@ -5173,6 +5226,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         now = time.time()
         projected["progress_freshness"] = _progress_freshness(
             projected.get("progress"), now
+        )
+        projected["activity"] = project_ticket_activity(
+            projected, board_id=board_id, now=now
         )
 
         def elapsed_seconds(value: Any) -> int | None:

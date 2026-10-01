@@ -41,6 +41,23 @@ def valid_checks():
     return {'validation': {'source_sha': S, 'target_sha': T, 'passed': True}, 'policies': [{'enabled': True, 'blocking': True, 'status': 'approved'}]}
 
 
+@pytest.mark.parametrize(
+    ('boundary', 'state', 'expected'),
+    [
+        ('integration', 'integration_pending', 'integration_pending'),
+        ('integration', 'integration_blocked', 'integration_blocked'),
+        ('integration', 'in_delivery', 'integration_merged'),
+        ('pull_request', 'integration_pending', 'pr_pending'),
+        ('pull_request', 'integration_blocked', 'pr_blocked'),
+        ('pull_request', 'in_delivery', 'pr_created'),
+    ],
+)
+def test_delivery_notice_state_matches_configured_boundary(boundary, state, expected):
+    from test_source_intake import butler
+
+    assert butler._delivery_notice_state(boundary, state) == expected
+
+
 def test_reserves_before_completion_then_waits_for_remote_confirmation():
     result,calls=run(checks=valid_checks())
     assert [x[0] for x in calls]==['reserve','complete']
@@ -254,6 +271,7 @@ def test_resident_branch_only_uses_resolved_policy_and_makes_zero_pr_calls(tmp_p
     })
     poller._maybe_writeback = AsyncMock(side_effect=AssertionError('legacy PR path called'))
     poller._delivery_tool = AsyncMock(side_effect=AssertionError('PR connector called'))
+    poller.ticket_annotator = AsyncMock()
     draft_policy, _ = poller._resolved_batch_policy(project)
     assert draft_policy == {
         'mode': 'inactive',
@@ -331,3 +349,10 @@ def test_resident_branch_only_uses_resolved_policy_and_makes_zero_pr_calls(tmp_p
     assert poller.index.entries[entry_key]['status'] == 'delivered'
     poller._maybe_writeback.assert_not_called()
     poller._delivery_tool.assert_not_called()
+    delivery_notices = [
+        json.loads(call.args[2].removeprefix('pursers-delivery: '))
+        for call in poller.ticket_annotator.await_args_list
+        if call.args[2].startswith('pursers-delivery: ')
+    ]
+    assert delivery_notices[-1]['state'] == 'integration_merged'
+    assert delivery_notices[-1]['completion_boundary'] == 'integration'

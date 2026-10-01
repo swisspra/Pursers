@@ -819,8 +819,12 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
             {
                 "ticket_id", "title", "status", "priority", "parked",
                 "assigned", "updated_at", "counts", "dispatch_summary",
-                "progress_freshness",
+                "progress_freshness", "activity",
             },
+        )
+        self.assertEqual(summary_ticket["activity"]["schema_version"], 1)
+        self.assertLessEqual(
+            len(summary_ticket["activity"]["evidence_refs"]), 8
         )
         work_payload = work.structured_content
         work_ticket = work_payload["ticket"]
