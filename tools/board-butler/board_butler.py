@@ -6503,7 +6503,8 @@ class SourceIntakePoller:
             return
         sources = {s.source_id: s for s in self.sources}
         keys = sorted(k for k, e in self.index.entries.items()
-                      if e.get("delivery_state") != "integration_merged" and e.get("status") == "delivered" and e.get("source_id") in sources)
+                      if e.get("delivery_state") != "integration_merged" and e.get("status") == "delivered"
+                      and e.get("source_id") in sources and e.get("target_branch"))
         if not keys:
             return
         offset = self._integration_offset % len(keys)
@@ -6514,20 +6515,20 @@ class SourceIntakePoller:
         pending = [k for k in keys if self.index.entries[k].get("integration_attempt")]
         candidates = {}
         for candidate in pending + rotated:
-            candidates.setdefault(self.index.entries[candidate]["board_id"], candidate)
-        batch = list(candidates.values())[:SOURCE_INTAKE_WRITEBACK_CHECKS_PER_CYCLE]
+            candidates.setdefault(self.index.entries[candidate]["board_id"], []).append(candidate)
+        batch = list(candidates.items())[:SOURCE_INTAKE_WRITEBACK_CHECKS_PER_CYCLE]
         self._integration_offset = offset + 1
-        seen = set()
-        for key in batch:
-            entry = self.index.entries[key]
-            board_id = entry["board_id"]
-            if board_id in seen:
-                continue
+        for board_id, board_keys in batch:
             project = await self.project_reader(board_id)
             policy = integration_policy(project)
+            # Only PRs originally delivered to this route are integration
+            # candidates. A policy edit does not adopt or relabel legacy PRs.
             if policy is None:
                 continue
-            seen.add(board_id)
+            key = next((k for k in board_keys if self.index.entries[k].get("target_branch") == policy["integration_branch"]), None)
+            if key is None:
+                continue
+            entry = self.index.entries[key]
             source = sources[entry["source_id"]]
             if source.writeback is None or source.writeback.tool != "ado_pull_request_create":
                 continue

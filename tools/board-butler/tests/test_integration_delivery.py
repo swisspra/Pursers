@@ -92,9 +92,9 @@ def test_resident_reconciler_persists_and_reconciles_without_repeating(tmp_path,
         poller._writeback_fields = AsyncMock(return_value=fields)
         notice = 'pursers-delivery: ' + json.dumps({'state':'pr_created','pr_id':7})
         poller.index.entries = {'a': {'board_id':'b','source_id':'s','ticket_id':'TK-one',
-                                     'status':'delivered','delivery_notice':notice,'approved_sha':S},
+                                     'status':'delivered','delivery_notice':notice,'approved_sha':S,'target_branch':'Pursers'},
                                'z': {'board_id':'b','source_id':'s','ticket_id':'TK-two',
-                                     'status':'delivered','delivery_notice':notice,'approved_sha':S}}
+                                     'status':'delivered','delivery_notice':notice,'approved_sha':S,'target_branch':'Pursers'}}
         remote = pr(repository={'name':'repo','project':{'name':'sample'}})
         if mode == 'old_target': remote['targetRefName'] = 'refs/heads/dev'
         calls = []
@@ -144,3 +144,22 @@ def test_completion_tool_must_have_mutating_policy_gate(effect, risky):
     with pytest.raises(butler.ConnectorDenied):
         asyncio.run(poller._delivery_tool(runtime,'ado_pull_request_update',{},mutate=True))
     runtime.call_tool.assert_not_called()
+
+
+def test_legacy_deliveries_are_not_adopted_by_a_later_policy(tmp_path):
+    from unittest.mock import AsyncMock
+    from types import SimpleNamespace
+    from test_source_intake import butler
+    poller=object.__new__(butler.SourceIntakePoller)
+    poller.index=butler.SourceIntakeIndex(tmp_path/'index.json')
+    poller.index.entries={'old':{'status':'delivered','board_id':'b','source_id':'s'}}
+    poller.project_reader=AsyncMock(return_value={'delivery_workflow':POLICY})
+    poller.sources=[SimpleNamespace(source_id='s')]
+    poller._integration_offset=0
+    poller._delivery_tool=AsyncMock()
+    asyncio.run(poller._integration_pass([]))
+    poller._delivery_tool.assert_not_called()
+    poller.index.entries['old']['target_branch']='dev'
+    asyncio.run(poller._integration_pass([]))
+    poller._delivery_tool.assert_not_called()
+    assert 'delivery_state' not in poller.index.entries['old']
