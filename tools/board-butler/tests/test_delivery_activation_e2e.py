@@ -6,6 +6,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -15,11 +16,12 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "packages" / "client" / "src"))
 sys.path.insert(0, str(ROOT / "tools" / "fleet-dashboard"))
 sys.path.insert(0, str(ROOT / "tools" / "wait-bridge"))
+sys.path.insert(0, str(ROOT / "tools" / "board-butler"))
 
+import board_butler
 import fleet_dashboard as dashboard
 import registry_admin
 import registry_doctor
-from pursers_client.delivery_workflow import resolve_delivery_policy
 from pursers_client.project_registry import parse_project_registry
 
 
@@ -201,13 +203,25 @@ def test_dashboard_activation_roundtrip_drives_one_frozen_customer_pr(tmp_path):
             "proposed_registry"
         ]["projects"]["sample"]["delivery_policy_activation"]["policy_revision"]
 
-    project = {
-        **client_registry["projects"]["sample"],
-        "__registry__": client_registry,
-        "__project_name__": "sample",
-    }
-    resolved = resolve_delivery_policy(client_registry, "sample")
-    resident_policy = runtime_api.runtime_policy_from_resolved(resolved, project)
+    class StateClient:
+        async def board_state_get(self, key):
+            assert key == "project_registry"
+            return central_result
+
+    @asynccontextmanager
+    async def connection(board_id):
+        assert board_id == "pursers"
+        yield StateClient()
+
+    backend = object.__new__(board_butler.CentralBackend)
+    backend.args = SimpleNamespace(home_board="pursers")
+    backend._client_for_board = connection
+    project = asyncio.run(backend._source_project_reader("sample-board"))
+    assert project is not None
+    poller = object.__new__(board_butler.SourceIntakePoller)
+    resolved_batch = poller._resolved_batch_policy(project)
+    assert resolved_batch is not None
+    resident_policy, resolved = resolved_batch
     assert project["delivery_policy_activation"]["policy_revision"] == resident_policy[
         "policy_revision"
     ]
