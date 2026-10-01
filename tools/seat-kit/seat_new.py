@@ -1593,6 +1593,9 @@ async def _execute(args: argparse.Namespace) -> None:
     board_id = os.environ["ONBOARD_BOARD_ID"]
     agent_name = os.environ["ONBOARD_AGENT_NAME"]
 
+    passive_options = {}
+    if args.command == "wait" and "renewal_source" in inspect.signature(BoardClient).parameters:
+        passive_options["renewal_source"] = "keepalive"
     async with BoardClient(
         central_url,
         token,
@@ -1600,6 +1603,7 @@ async def _execute(args: argparse.Namespace) -> None:
         agent_name=agent_name,
         role=ROLE,
         allow_takeover=True,
+        **passive_options,
     ) as client:
         if supports_capabilities:
             await client.board_join(

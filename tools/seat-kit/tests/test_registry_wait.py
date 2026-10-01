@@ -251,6 +251,7 @@ def test_active_generated_stable_seat_resumes_registry_and_wakes_on_held_update(
         "agent_name": "worker-agent",
         "capabilities": module._seat_capabilities(),
         "allow_takeover": True,
+        "renewal_source": "keepalive",
     }]
 
 

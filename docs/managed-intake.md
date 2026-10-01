@@ -279,7 +279,8 @@ operator choices. Cap 15 does not create 15 seat templates. Onboarding's
 ## Event-driven seats
 
 `tools/seat-kit/event_seat.py --config /PATH/TO/config/seat.json` runs a bounded
-Goose turn only after a relevant registry event. Supply private configuration:
+Goose turn after a relevant registry event or a verified unfinished owned lease.
+Supply private configuration:
 
 ```json
 {
@@ -293,6 +294,7 @@ Goose turn only after a relevant registry event. Supply private configuration:
   "central_url": "https://central.example/mcp", "home_board": "pursers",
   "repository_root": "/PATH/TO/clones",
   "max_runs_per_hour": 5, "max_turns": 30, "turn_timeout_s": 1800,
+  "max_owned_recoveries": 1,
   "git_credentials_config": "/PATH/TO/config/git-credentials.json"
 }
 ```
@@ -312,6 +314,29 @@ cursors and pending events survive restart. The hourly model-run budget stops th
 runner with pending events retained; investigate before restarting. A run reserved
 before an uncertain failure is not automatically replayed. This budget counts
 Goose runs; `max_turns` separately bounds steps within each run.
+
+The runner checks Central for unfinished leases before waiting again, including
+after startup and after a model turn exits. A successful process exit is not proof
+of ticket completion: only the authoritative submit/review/human-input state is.
+An exact live holder can receive a separate continuation that preserves the ticket,
+worktree, commits and evidence. Other identities, expired leases and completed or
+paused tickets are never resumed. Claim epochs distinguish later legitimate work.
+
+`max_owned_recoveries` defaults to **1** continuation per claim epoch (integer 0–10).
+This allows one recovery after a turn limit, interrupted process or incomplete
+submission without paying for an endless retry loop. Zero requests intervention
+immediately. Recovery reservations persist before model launch; restarting cannot
+reset the budget. Continuations also obey the existing hourly/turn/timeout limits.
+When exhausted, the actual holder requests human input and releases its work or
+review lease. No approval or review verdict is fabricated. Resolve the surfaced
+request after addressing the blocker to authorize fresh work.
+
+Passive joins from supervisors and registry waits report `renewal_source=keepalive`.
+They do not update the last-model-progress timestamp. The state file records the
+last turn's ticket, timestamps and exit/interruption status without model output or
+credentials. Deploy Central, client and event runner together, and regenerate
+managed seat helpers with `--upgrade` so home-board waits also use passive joins.
+Keep cursors, recovery counters and partial repository work during upgrades.
 
 ## Migration, checks and rollback
 

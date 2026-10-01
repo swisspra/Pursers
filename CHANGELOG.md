@@ -7,6 +7,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Recover unfinished event-seat work/review leases with a durable bounded
+  continuation instead of waiting forever after a model exits. Exhausted recovery
+  surfaces human input and releases the lease; exact review holders can request
+  that pause. Passive joins now report keepalive rather than model progress.
+
 - Track fleet idle grace independently for workers, reviewers and ACP workers,
   so demand in one role does not keep unrelated idle seats running.
 
