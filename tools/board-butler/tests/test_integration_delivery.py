@@ -255,7 +255,53 @@ def test_resident_branch_only_uses_resolved_policy_and_makes_zero_pr_calls(tmp_p
     poller._maybe_writeback = AsyncMock(side_effect=AssertionError('legacy PR path called'))
     poller._delivery_tool = AsyncMock(side_effect=AssertionError('PR connector called'))
     draft_policy, _ = poller._resolved_batch_policy(project)
-    assert draft_policy == {'mode': 'per_ticket_pr'}
+    assert draft_policy == {
+        'mode': 'inactive',
+        'configured_mode': 'branch_only',
+        'reason_code': 'delivery_policy_not_activated',
+    }
+    draft_entry = dict(poller.index.entries[entry_key])
+    findings = []
+    written = asyncio.run(poller._writeback_pass(findings))
+    assert written == 0
+    assert poller.index.entries[entry_key] == draft_entry
+    assert poller.index.dirty is False
+    assert not poller.index.path.exists()
+    assert poller._batch_delivery_runtimes == {}
+    poller._writeback_fields.assert_not_called()
+    poller._maybe_writeback.assert_not_called()
+    poller._delivery_tool.assert_not_called()
+    assert findings == [{
+        'kind': 'source-intake-delivery-inactive',
+        'level': 'warn',
+        'status': 'inactive',
+        'source_id': 's',
+        'ticket_id': 'TK-one',
+        'configured_mode': 'branch_only',
+        'reason_code': 'delivery_policy_not_activated',
+        'message': 'Configured delivery policy is a saved draft and has not been activated.',
+    }]
+
+    monkeypatch.setattr(
+        butler._delivery_policy_api, 'resolve_delivery_policy',
+        lambda registry, project_name: {'policy': {'mode': 'per_ticket_pr'}},
+        raising=False,
+    )
+    legacy_policy, _ = poller._resolved_batch_policy(project)
+    assert legacy_policy == {'mode': 'per_ticket_pr'}
+    poller._maybe_writeback = AsyncMock(return_value=True)
+    findings = []
+    written = asyncio.run(poller._writeback_pass(findings))
+    assert written == 1
+    assert findings == []
+    poller._maybe_writeback.assert_awaited_once()
+    poller._delivery_tool.assert_not_called()
+    monkeypatch.setattr(
+        butler._delivery_policy_api, 'resolve_delivery_policy',
+        lambda registry, project_name: {'policy': effective},
+        raising=False,
+    )
+    poller._maybe_writeback = AsyncMock(side_effect=AssertionError('legacy PR path called'))
 
     activation = {
         'schema_version': 1, 'state': 'active', 'activation_id': 'apply-1',
