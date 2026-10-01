@@ -1001,6 +1001,9 @@ def _parser() -> argparse.ArgumentParser:
         submit.add_argument("summary")
         submit.add_argument("notes")
         submit.add_argument("files_csv")
+        evidence = submit.add_mutually_exclusive_group()
+        evidence.add_argument("--test-output", help="literal test result (max 5000 characters)")
+        evidence.add_argument("--test-output-file", help="UTF-8 file containing literal test results")
         wait = commands.add_parser("wait", help="block until work arrives (subscriptions/listen)")
         _wait_args(wait)
     else:
@@ -1847,9 +1850,15 @@ async def _execute(args: argparse.Namespace) -> None:
                             "characters",
                             file=sys.stderr,
                         )
+                    evidence_kwargs = {}
+                    if args.test_output_file is not None:
+                        evidence_kwargs["test_output"] = Path(args.test_output_file).read_text(encoding="utf-8")
+                    elif args.test_output is not None:
+                        evidence_kwargs["test_output"] = args.test_output
                     result = await target.ticket_submit(
                         args.ticket_id, summary=args.summary, notes=notes,
                         files_changed=files, stay_active=True, repository=source_repo,
+                        **evidence_kwargs,
                     )
                     if truncation is not None:
                         result["input_truncation"] = {"notes": truncation}
@@ -2186,7 +2195,7 @@ bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>
 2. **UNDERSTAND** -- Use the offer's `ticket_id`, `board_id`, and registered fleet clone `work_dir`; never guess or use the operator checkout.
 3. **CLAIM** -- Claim a ticket offered to this seat. A work broadcast is also claimable only when GET confirms an open ticket with `dispatch_state.state=broadcast` and no live offer; Central resolves the race. Never claim a ticket offered to another seat. If the offer expired, was revoked, or belongs to another seat, go back to WAIT.
 4. **DO** -- Work only in the returned fleet clone (or this seat's own clone). The operator checkout is read-only for seats. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
-5. **SUBMIT** -- Push the candidate, put exactly one `branch_and_commit: platform/branch @ <full-40-hex-sha>` line in code-ticket notes, then run `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Preflight verifies the exact remote tip before `ticket_submit` and adds machine-derived metadata. Correct any preflight error and retry. Normal `board_join` may renew an already-held lease. Notes are capped at 5000 characters.
+5. **SUBMIT** -- Push the candidate, put exactly one `branch_and_commit: platform/branch @ <full-40-hex-sha>` line in code-ticket notes, then run `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Preflight verifies the exact remote tip before `ticket_submit` and adds machine-derived metadata. Correct any preflight error and retry. Normal `board_join` may renew an already-held lease. Notes are capped at 5000 characters. Pass literal test results using `--test-output-file <results.txt>` (or `--test-output <text>`); MCP callers use the `test_output` argument. Test output has a separate 5000-character limit; use a truthful result tail. Missing required code-ticket evidence is refused before review and preserves your claim.
 6. **RE-ARM** -- After a successful submit, leave its branch immutable and return immediately to WAIT for the next eligible ticket; do not wait for review.
 7. **RETRY CUES** -- On a later rejection cue, GET the ticket, reuse its existing branch when the fix allows it, follow the fix instructions, resubmit, then re-arm again. Do not create a remote branch per rejection attempt.
 8. **CLEAN UP** -- After the ticket closes, retain the remote branch for Butler delivery. You may delete your own remote ticket branch only after the PR is confirmed merged or the operator authorizes cleanup; review approval alone is not landing.

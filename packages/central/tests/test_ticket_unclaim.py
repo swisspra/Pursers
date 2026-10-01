@@ -356,6 +356,47 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
             sha,
         )
 
+    async def test_explicit_test_output_survives_submission_and_history(self) -> None:
+        ticket_id = await self.create_and_claim(required_fields=["commit_hash", "test_output"])
+        sha = "a" * 40
+        output = "Tests: 12 passed, 12 total\nTime: 3.89 s"
+        result = await self.call(
+            "ticket_submit", agent_name="member-agent", ticket_id=ticket_id,
+            summary="verified candidate", test_output=output,
+            notes=f"branch_and_commit: pursers/TK-one@{sha}\ntest_output: legacy result",
+            submission_preflight=self.submission_preflight(ticket_id, "pursers/TK-one", sha),
+        )
+        ticket = result.structured_content["ticket"]
+        self.assertEqual(ticket["test_output"], output)
+        self.assertEqual(ticket["submission_history"][-1]["test_output"], output)
+        self.assertEqual(ticket["commit_hash"], sha)
+
+    async def test_code_submit_missing_required_output_preserves_claim(self) -> None:
+        for evidence in ({}, {"test_output": "   "}):
+            ticket_id = await self.create_and_claim(required_fields=["commit_hash", "test_output"])
+            sha = "a" * 40
+            before = self.service.load("pursers")["tickets"][ticket_id]
+            with self.assertRaisesRegex(ToolError, "test_output is required"):
+                await self.call(
+                    "ticket_submit", agent_name="member-agent", ticket_id=ticket_id,
+                    summary="missing evidence",
+                    notes=f"branch_and_commit: pursers/TK-one@{sha}" + ("\ntest_output: legacy result" if evidence else ""),
+                    submission_preflight=self.submission_preflight(ticket_id, "pursers/TK-one", sha),
+                    **evidence,
+                )
+            after = self.service.load("pursers")["tickets"][ticket_id]
+            self.assertEqual(after, before)
+
+    async def test_explicit_test_output_is_bounded_and_scrubbed(self) -> None:
+        ticket_id = await self.create_and_claim()
+        for output, error in (("x" * 5001, "at most 5000"), ("/" + "Users/private/project", "scrub policy")):
+            with self.assertRaisesRegex(ToolError, error):
+                await self.call(
+                    "ticket_submit", agent_name="member-agent", ticket_id=ticket_id,
+                    summary="invalid evidence", test_output=output,
+                )
+            self.assertEqual(self.service.load("pursers")["tickets"][ticket_id]["status"], "claimed")
+
     async def test_legacy_commit_field_stores_verified_structured_evidence(self) -> None:
         ticket_id = await self.create_and_claim(required_fields=["commit_hash", "test_output"])
         sha = "b" * 40
@@ -378,7 +419,7 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
                 await self.call("ticket_claim", agent_name="member-agent", ticket_id=ticket_id)
             await self.call(
                 "ticket_submit", agent_name="member-agent", ticket_id=ticket_id,
-                summary="same candidate", notes=f"branch_and_commit: pursers/TK-one@{sha}",
+                summary="same candidate", notes=f"branch_and_commit: pursers/TK-one@{sha}\ntest_output: 1 passed",
                 submission_preflight=self.submission_preflight(ticket_id, "pursers/TK-one", sha),
             )
             self.principal = self.admin

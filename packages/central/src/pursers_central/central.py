@@ -11691,12 +11691,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         summary: str | None = None,
         files_changed: list[str] | None = None,
         notes: str | None = None,
+        test_output: str | None = None,
         stay_active: bool = True,
         expected_generation: str | None = None,
         submission_preflight: dict[str, str] | None = None,
         model_usage: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Submit only work claimed by this authenticated agent identity."""
+        """Submit claimed work; put literal test evidence in test_output (max 5000 chars).
+
+        Legacy notes labels remain supported. Required code-ticket evidence is
+        checked before review dispatch; an error preserves the work claim.
+        """
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
         principal = current_principal()
@@ -11807,11 +11812,25 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "released": released,
                     "renewed": renewed,
                 }
+            # An explicit field is authoritative, including an explicit empty
+            # value. Never replace it with older evidence from a prior attempt.
+            output = test_output if test_output is not None else submission_test_output(safe_notes)
+            safe_test_output = clean_text(
+                "test_output", output, required=False, max_length=5_000,
+                scrub_profile=profile, allow_counts=allow_counts,
+            )
+            if verified_preflight is not None and "test_output" in required_fields and not safe_test_output:
+                raise ValueError(
+                    "test_output is required for this code ticket; pass the literal "
+                    "test result in the test_output argument (max 5000 characters), "
+                    "or use a labeled 'test_output:' section in notes; claim preserved"
+                )
             old_status = str(ticket["status"])
             submission = {
                 "summary": safe_summary or "",
                 "files_changed": safe_files,
                 "notes": safe_notes,
+                "test_output": safe_test_output or "",
                 "submitted_by_agent_id": actor["agent_id"],
                 "submitted_by_principal_id": principal.principal_id,
                 "submitted_at": iso_at(now),
@@ -11819,7 +11838,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if verified_preflight is not None:
                 submission["branch"] = verified_preflight["branch"]
                 submission["commit_hash"] = verified_preflight["commit"]
-                submission["test_output"] = submission_test_output(safe_notes)
                 submission["submission_preflight"] = copy.deepcopy(
                     verified_preflight
                 )

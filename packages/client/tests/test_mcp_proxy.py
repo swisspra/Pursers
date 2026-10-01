@@ -421,6 +421,7 @@ async def _verified_submit_runs_through_real_relay_and_central(
                 tool for tool in listed.tools if tool.name == "ticket_submit"
             )
             assert "repository" in submit_tool.input_schema["properties"]
+            assert "test_output" in submit_tool.input_schema["properties"]
             assert "submission_preflight" not in submit_tool.input_schema["properties"]
 
             missing = await host.call_tool(
@@ -464,7 +465,8 @@ async def _verified_submit_runs_through_real_relay_and_central(
                 {
                     "ticket_id": ticket_id,
                     "summary": "verified through relay",
-                    "notes": exact_notes,
+                    "notes": f"branch_and_commit: codex/TK-relay @ {remote_sha}",
+                    "test_output": "Tests: 12 passed",
                     "repository": str(repository),
                 },
             )
@@ -473,6 +475,7 @@ async def _verified_submit_runs_through_real_relay_and_central(
 
     assert not submitted.is_error
     assert submitted.structured_content["ticket"]["status"] == "submitted"
+    assert submitted.structured_content["ticket"]["test_output"] == "Tests: 12 passed"
     serialized = json.dumps(
         {
             "tools": [tool.model_dump() for tool in listed.tools],

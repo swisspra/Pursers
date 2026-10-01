@@ -48,8 +48,8 @@ def submission_identity(submission: Mapping[str, Any]) -> tuple[str, str]:
 
 def submission_test_output(notes: str | None) -> str:
     match = re.search(
-        r"(?ims)^[ \t]*test_output[ \t]*:[ \t]*(.*?)"
-        r"(?=^[ \t]*(?:branch_and_commit|commit_hash|submission_preflight|model)[ \t]*:|\Z)",
+        r"(?ims)^[ \t]*(?:Required[ \t]+)?test_output[ \t]*:[ \t]*(.*?)"
+        r"(?=^[ \t]*(?:Required[ \t]+)?(?:branch_and_commit|commit_hash|submission_preflight|model)[ \t]*:|\Z)",
         notes or "",
     )
     if match:

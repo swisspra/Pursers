@@ -1480,6 +1480,7 @@ class BoardClient:
         summary: str | None = None,
         files_changed: list[str] | None = None,
         notes: str | None = None,
+        test_output: str | None = None,
         stay_active: bool = True,
         repository: Path | str | None = None,
         model_usage: dict[str, Any] | None = None,
@@ -1517,6 +1518,7 @@ class BoardClient:
             "summary": summary,
             "files_changed": files_changed,
             "notes": notes,
+            "test_output": test_output,
             "submission_preflight": submission_preflight,
             "model_usage": model_usage,
         }
