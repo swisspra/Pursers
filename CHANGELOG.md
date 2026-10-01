@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- A small versioned MCP help index with lazy role, workflow, authorized board,
+  and ticket resources, plus host-neutral role-aware prompts. The Zed relay keeps
+  legacy prompt/resource discovery, rechecks board authorization on every dynamic
+  read, and reports unavailable digest engines explicitly instead of presenting a
+  fake empty board.
+
 - Configurable delivery policy inheritance across global defaults, explicit named
   groups, and repository overrides, with field provenance, presets, reset-to-inherit,
   guarded activation and draft-only visibility for runtime capabilities that are not

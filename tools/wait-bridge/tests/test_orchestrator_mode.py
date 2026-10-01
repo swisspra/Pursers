@@ -269,6 +269,17 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
         engine.load_state()
         return client, engine
 
+    async def test_digest_resource_reports_missing_engine_explicitly(self) -> None:
+        with patch.object(wait_server, "_get_orchestrator_engine", return_value=None):
+            content = await wait_server.board_digest_resource("missing-engine-board")
+
+        payload = json.loads(content)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "unavailable")
+        self.assertEqual(payload["code"], "orchestrator_engine_unavailable")
+        self.assertEqual(payload["board_id"], "missing-engine-board")
+        self.assertIn("no empty board result", payload["detail"])
+
     async def test_background_subscriber_receives_cues_without_any_tool_call(
         self,
     ) -> None:

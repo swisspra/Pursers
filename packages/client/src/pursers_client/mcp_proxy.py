@@ -31,6 +31,14 @@ from .client import (
     SUBMIT_BRANCH_LABEL_RE,
     signed_remote_submission,
 )
+from .discovery import (
+    DISCOVERY_SCHEMA,
+    DISCOVERY_VERSION,
+    capability_index,
+    role_document,
+    unavailable,
+    workflow_document,
+)
 
 LOG = logging.getLogger("pursers-mcp")
 SETUP_STATUS_TOOL = "pursers_setup_status"
@@ -1140,43 +1148,98 @@ class CentralRelay:
         return None
 
 
-def _prompt_text(name: str, argument: str | None, board: str) -> str:
+async def _prompt_role(relay: CentralRelay) -> str:
+    if relay.tools_mode in ROLE_TOOL_PROFILES:
+        return relay.tools_mode
+    if not relay._identity_discovery_succeeded:
+        await relay._discover_existing_identity()
+    if relay._resolved_agent_name is not None:
+        return relay._principal_agent_roles.get(relay._resolved_agent_name, "member")
+    return "member"
+
+
+def _prompt_text(name: str, argument: str | None, board: str, role: str) -> str:
     if name == "setup":
         return (
-            f"Set up Pursers for `{board}` in this chat. Check the local setup status, "
-            "explain what is missing, then run the setup tool. The setup tool asks me "
-            "for confirmation before it creates files or starts Central. After setup, "
-            "continue in this same chat with the newly available board tools."
+            f"Set up Pursers for `{board}` as `{role}`. Check local prerequisites and "
+            "explain what is missing. Preview any filesystem or process changes, then "
+            "ask for explicit consent before provisioning. After setup, verify access "
+            "with one harmless board read and show the next action allowed for this role."
         )
     if name == "board":
         return (
-            f"Your work on `{board}` at a glance: its board ID and board-wide key "
+            f"Your `{role}` view of `{board}` at a glance: its board ID and board-wide key "
             "counts, followed by a clearly labeled subset of up to 10 active tickets "
             "needing attention. Each row leads with its ticket ID and gives its specific "
-            "reason for needing attention. This view stays on this board."
+            "reason for needing attention. This is a read-only bounded view; open one "
+            "exact ticket before taking the role's next authorized action."
         )
     if name == "create":
         return (
-            f"New work for `{board}`: {argument!r}. Any missing required detail comes "
-            "first; creation happens once under Zed's single confirmation, followed by "
-            "the new ticket ID and a brief recap."
+            f"Prepare new work for `{board}` as `{role}`: {argument!r}. Collect only "
+            "missing required detail, show the final scope, and ask for authorization "
+            "before the single create action. Then report the new ticket ID and recap."
         )
     if name == "watch":
         return (
-            f"Live changes for `{board}`: work, reviews, and questions needing attention, "
-            "limited to changed IDs and next steps. The watch resumes from its latest "
-            "saved position and stays on this board."
+            f"Watch `{board}` for actionable `{role}` changes: work, reviews, and questions, "
+            "limited to changed IDs and safe next steps. Resume only from the returned "
+            "positive cursor, and never treat a notification as permission to mutate."
         )
     if name == "evidence":
         return (
-            f"Evidence for `{argument}` on `{board}`: the ticket ID first, then its exact "
+            f"Read evidence for `{argument}` on `{board}` as `{role}`: the ticket ID first, "
+            "then its exact "
             "branch and commit, changed files, literal test results, and independent-review "
-            "state. The view contains no unrelated tickets."
+            "state. Keep the read to that ticket and verify the exact commit before any "
+            "separately authorized delivery action."
         )
     return (
-        f"Answer for {argument!r} on `{board}`: the exact ticket's pending question is "
-        "resolved once, followed by its ticket ID and resulting state. This stays on this board."
+        f"Prepare an answer for {argument!r} on `{board}` as `{role}`. Read only the exact "
+        "pending question, show the proposed answer, and ask for authorization before "
+        "resolving it once. Then report its ticket ID and resulting state."
     )
+
+
+async def _authorized_board_resource(
+    relay: CentralRelay,
+    *,
+    board_id: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> str:
+    uri = (
+        f"pursers://boards/{board_id}/summary"
+        if tool_name == "board_status"
+        else f"pursers://boards/{board_id}/tickets/{arguments['ticket_id']}"
+    )
+    if board_id != relay.board:
+        payload = unavailable(
+            "board_not_selected",
+            "This relay can read only its configured board. Select an authorized "
+            "board connection and retry.",
+        )
+    else:
+        result = await relay.call_tool(tool_name, {"board_id": board_id, **arguments})
+        data = relay._result_payload(result)
+        if result.is_error or data is None:
+            payload = unavailable(
+                "not_authorized_or_unavailable",
+                "Central did not authorize or could not provide this board resource. "
+                "Use the equivalent tool for a typed error.",
+            )
+        else:
+            payload = {
+                "schema": DISCOVERY_SCHEMA,
+                "version": DISCOVERY_VERSION,
+                "ok": True,
+                "kind": "authorized_board_read",
+                "uri": uri,
+                "source_tool": tool_name,
+                "cache": "none",
+                "data": data,
+            }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def build_server(relay: CentralRelay) -> MCPServer[Any]:
@@ -1186,6 +1249,9 @@ def build_server(relay: CentralRelay) -> MCPServer[Any]:
         instructions=(
             "Credential-safe stdio bridge. Downstream clients may negotiate MCP 2025-11-25; "
             "Central is contacted independently with MCP 2026-07-28. "
+            "Read pursers://help/index for versioned role, workflow, and authorized-resource "
+            "discovery. Hosts without resources or prompts use the short tool help and "
+            "docs/guides/connecting-clients.md. "
             f"{PROMPT_BEHAVIOR_INSTRUCTIONS}"
         ),
     )
@@ -1209,29 +1275,95 @@ def build_server(relay: CentralRelay) -> MCPServer[Any]:
 
     lowlevel.create_initialization_options = create_initialization_options
 
+    @server.resource(
+        "pursers://help/index",
+        name="pursers-help-index",
+        title="Pursers capability and help index",
+        description="Small versioned catalog; read role, workflow, and board content on demand.",
+        mime_type="application/json",
+    )
+    def help_index_resource() -> str:
+        return json.dumps(capability_index(), ensure_ascii=False, separators=(",", ":"))
+
+    @server.resource(
+        "pursers://help/roles/{role}",
+        name="pursers-role-help",
+        title="Pursers role help",
+        description="Static prerequisites, boundaries, and safe next actions for one role.",
+        mime_type="application/json",
+    )
+    def role_help_resource(role: str) -> str:
+        return json.dumps(role_document(role), ensure_ascii=False, separators=(",", ":"))
+
+    @server.resource(
+        "pursers://help/workflows/{workflow}",
+        name="pursers-workflow-help",
+        title="Pursers workflow help",
+        description="Static purpose and safe next action for one workflow.",
+        mime_type="application/json",
+    )
+    def workflow_help_resource(workflow: str) -> str:
+        return json.dumps(
+            workflow_document(workflow), ensure_ascii=False, separators=(",", ":")
+        )
+
+    @server.resource(
+        "pursers://boards/{board_id}/summary",
+        name="pursers-board-summary",
+        title="Authorized Pursers board summary",
+        description="Fresh board_status-equivalent read; no dynamic cache or added authority.",
+        mime_type="application/json",
+    )
+    async def board_summary_resource(board_id: str) -> str:
+        return await _authorized_board_resource(
+            relay, board_id=board_id, tool_name="board_status", arguments={}
+        )
+
+    @server.resource(
+        "pursers://boards/{board_id}/tickets/{ticket_id}",
+        name="pursers-ticket-summary",
+        title="Authorized Pursers ticket summary",
+        description=(
+            "Fresh compact ticket_get-equivalent read; no dynamic cache or added "
+            "authority."
+        ),
+        mime_type="application/json",
+    )
+    async def ticket_summary_resource(board_id: str, ticket_id: str) -> str:
+        return await _authorized_board_resource(
+            relay,
+            board_id=board_id,
+            tool_name="ticket_get",
+            arguments={"ticket_id": ticket_id, "view": "summary"},
+        )
+
     @server.prompt(name="board", description="Compact board summary and Needs you list")
-    def board_prompt() -> str:
-        return _prompt_text("board", None, relay.board)
+    async def board_prompt() -> str:
+        return _prompt_text("board", None, relay.board, await _prompt_role(relay))
 
     @server.prompt(name="create", description="Create a ticket from one summary")
-    def create_prompt(summary: str) -> str:
-        return _prompt_text("create", summary, relay.board)
+    async def create_prompt(summary: str) -> str:
+        return _prompt_text("create", summary, relay.board, await _prompt_role(relay))
 
     @server.prompt(name="watch", description="Watch this board for actionable changes")
-    def watch_prompt() -> str:
-        return _prompt_text("watch", None, relay.board)
+    async def watch_prompt() -> str:
+        return _prompt_text("watch", None, relay.board, await _prompt_role(relay))
 
     @server.prompt(name="evidence", description="Show bounded evidence for one ticket")
-    def evidence_prompt(ticket_id: str) -> str:
-        return _prompt_text("evidence", ticket_id, relay.board)
+    async def evidence_prompt(ticket_id: str) -> str:
+        return _prompt_text(
+            "evidence", ticket_id, relay.board, await _prompt_role(relay)
+        )
 
     @server.prompt(name="answer", description="Answer one pending human question")
-    def answer_prompt(ticket_and_answer: str) -> str:
-        return _prompt_text("answer", ticket_and_answer, relay.board)
+    async def answer_prompt(ticket_and_answer: str) -> str:
+        return _prompt_text(
+            "answer", ticket_and_answer, relay.board, await _prompt_role(relay)
+        )
 
     @server.prompt(name="setup", description="Set up a local Pursers board in this chat")
-    def setup_prompt() -> str:
-        return _prompt_text("setup", None, relay.board)
+    async def setup_prompt() -> str:
+        return _prompt_text("setup", None, relay.board, await _prompt_role(relay))
 
     return server
 
