@@ -651,6 +651,46 @@ def test_live_lease_is_never_drained_or_stopped_when_demand_drops_to_zero() -> N
     assert plan.operations == ()
 
 
+@pytest.mark.parametrize('idle_role,active_demand', [
+    ('worker', {'review': 1}),
+    ('reviewer', {'work': 1}),
+    ('acp_worker', {'review': 1}),
+])
+def test_role_idle_grace_expires_while_other_role_has_work(idle_role, active_demand):
+    engine = reconciler()
+    idle = seat('idle-seat', idle_role, lifecycle='ready')
+    current = snapshot({'pursers': demand(**active_demand)}, [idle])
+    first = engine.plan(current, {})
+    assert first.desired['pursers'][idle_role] == 1
+    saved = engine._persisted_plan(first, current, {})
+    assert saved['boards']['pursers']['role_idle_since'][idle_role] == NOW.isoformat()
+    restarted = reconciler()
+    before = snapshot(current.demands, [idle], now=NOW + timedelta(seconds=30))
+    assert restarted.plan(before, saved).operations == ()
+    after = snapshot(current.demands, [idle], now=NOW + timedelta(seconds=61))
+    plan = restarted.plan(after, saved)
+    assert plan.desired['pursers'][idle_role] == 0
+    assert [(o.action, o.seat_id) for o in plan.operations] == [('drain', 'idle-seat')]
+    protected = snapshot(current.demands, [seat('idle-seat', idle_role,
+        lifecycle='busy', busy=True, live=True)], now=after.observed_at)
+    assert restarted.plan(protected, saved).operations == ()
+
+
+def test_returning_role_demand_resets_only_its_idle_timer():
+    engine = reconciler()
+    old = (NOW - timedelta(minutes=10)).isoformat()
+    prior = {'boards': {'pursers': {'role_idle_since': {
+        'worker': old, 'reviewer': old, 'acp_worker': old}}}}
+    current = snapshot({'pursers': demand(work=1)}, [])
+    saved = engine._persisted_plan(engine.plan(current, prior), current, prior)
+    timers = saved['boards']['pursers']['role_idle_since']
+    assert timers == {'worker': None, 'reviewer': old, 'acp_worker': old}
+    # Explicit null must not inherit an older board-wide grace timestamp.
+    saved['boards']['pursers']['idle_since'] = old
+    zero = snapshot({'pursers': demand()}, [seat('worker', 'worker', lifecycle='ready')])
+    assert engine.plan(zero, saved).operations == ()
+
+
 def test_existing_live_oversubscription_never_raises_desired_above_hard_cap() -> None:
     policy = board_policy(maximum=1, provider_maximums={"direct": 1})
     holders = [

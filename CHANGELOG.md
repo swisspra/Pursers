@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+- Track fleet idle grace independently for workers, reviewers and ACP workers,
+  so demand in one role does not keep unrelated idle seats running.
+
 - Attribute fleet lease protection to the work/review holder while preserving unknown-holder guards.
   Reject event runner repository boundaries that exclude active registry clones before model calls.
 
