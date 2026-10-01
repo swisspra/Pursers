@@ -173,8 +173,67 @@
 }
 
 .team-roster-card .team-lifecycle {
-  order: 9;
+  order: 10;
   border-top: 1px solid var(--team-rule);
+}
+
+.team-roster-card .team-display-names,
+.team-roster-card .team-display-unavailable {
+  order: 9;
+}
+
+.team-display-names {
+  border-top: 1px solid var(--team-rule);
+}
+
+.team-display-names > summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  cursor: pointer;
+  color: var(--team-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.team-display-list,
+.team-display-form,
+.team-display-form label {
+  display: grid;
+  gap: 8px;
+}
+
+.team-display-form {
+  padding: 12px 0;
+  border-top: 1px solid var(--team-rule);
+}
+
+.team-display-form:first-child {
+  border-top: 0;
+}
+
+.team-display-form input {
+  min-height: 44px;
+  padding: 8px 10px;
+}
+
+.team-display-form p {
+  margin: 0;
+}
+
+.team-display-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.team-display-actions button {
+  min-height: 44px;
+}
+
+.agent-operational-name {
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .team-lifecycle > summary {

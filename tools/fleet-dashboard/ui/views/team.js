@@ -12,13 +12,13 @@
     defaultCentral, agentIdentity, agentMatchesFilters,
     agentDisplayState, workerForAgent, liveAgentCard, renderGuide, agentCountStrip,
     agentFilterBar, agentPoolScope, inactiveAgentDrawer, autonomousRows,
-    autonomousStateLabel, autonomousObservationLabel;
+    autonomousStateLabel, autonomousObservationLabel, refreshCentral, renderHub;
   function useContext(context) {
     ({esc, pageHead, fleetData, hubWorkers, hubSeatInventory, centralLabels,
       defaultCentral, agentIdentity, agentMatchesFilters,
       agentDisplayState, workerForAgent, liveAgentCard, renderGuide, agentCountStrip,
       agentFilterBar, agentPoolScope, inactiveAgentDrawer, autonomousRows,
-      autonomousStateLabel, autonomousObservationLabel} = context);
+      autonomousStateLabel, autonomousObservationLabel, refreshCentral, renderHub} = context);
   }
 function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){const key=`${central}/${agentIdentity(a)}/${a.agent_name||''}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}}for(const [central,d] of Object.entries(hubWorkers)){const live=fleetData[central]?.agents||[];for(const w of d.workers||[]){const stable=Boolean(w.agent_id||w.principal_id),represented=live.some(a=>agentIdentity(a)===agentIdentity(w));if(represented||(!stable&&live.some(a=>a.agent_name===w.name)))continue;const work=w.current_work||[],a={agent_name:w.name,agent_id:w.agent_id,principal_id:w.principal_id,pool_status:work.length?'busy':'offline',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null},key=`${central}/${agentIdentity(a)}/${a.agent_name||''}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}}const visible=records.filter(agentMatchesFilters),cards=visible.sort((a,b)=>{const rank={working:0,available:1,connected:2,stale:3,offline:4},as=agentDisplayState(a.agent,workerForAgent(a.central,a.agent)),bs=agentDisplayState(b.agent,workerForAgent(b.central,b.agent));return rank[as]-rank[bs]||String(a.agent.agent_name||'').localeCompare(String(b.agent.agent_name||''))||a.central.localeCompare(b.central)||agentIdentity(a.agent).localeCompare(agentIdentity(b.agent))}).map(x=>liveAgentCard(x.central,x.agent).replace('<article class="agent-card ','<article class="agent-card team-roster-card ').replace('<div class="agent-board-list">',`${typeof teamCostSummary==='function'?teamCostSummary(x.agent):'<span class="team-cost meta">Cost unknown</span>'}<div class="agent-board-list">`)),empty=records.length===0?'No seats exist in the covered boards.':'No seats match the selected filters.',scope=agentPoolScope(),unknownModel=Object.values(fleetData).reduce((total,d)=>total+Number(d.pool_summary?.unknown_model||0),0),action='<div class="agent-actions"><button id="new-agent" class="primary-action" type="button">+ New agent</button></div>',filterMarkup=agentFilterBar(records),activeFilters=(filterMarkup.match(/ selected/g)||[]).length,existingFilters=typeof document==='undefined'?null:document.querySelector('.team-filter-disclosure'),narrow=typeof matchMedia==='function'&&matchMedia('(max-width: 720px)').matches,filtersOpen=existingFilters?existingFilters.open:!narrow;return`<div class="agents-hub team-roster">${pageHead('Team','Unified agent pool','Status and ownership first; source-backed runtime details follow.',action)}${renderGuide()}<section class="strip agent-model-summary" aria-label="Model attribution coverage"><div class="metric"><span>Unknown model</span><b>${esc(unknownModel)}</b></div></section>${agentCountStrip(records)}<details class="team-filter-disclosure" data-state-key="team-filters" ${filtersOpen?'open':''}><summary>Filters${activeFilters?` · ${activeFilters} active`:''}</summary>${filterMarkup}</details>${scope}<p id="hub-agent-status" class="muted">Showing ${cards.length} of ${records.length} seats</p><section class="agent-grid dense-agent-grid team-roster-grid" data-pursers-panel="agents" data-pursers-state="${cards.length?'ready':'empty'}" aria-label="Agent roster">${cards.join('')||`<p class="empty">${esc(empty)}</p>`}</section>${inactiveAgentDrawer()}</div>`}
 
@@ -51,6 +51,65 @@ function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d]
       : 'time window unavailable';
     const coverage = usage.complete ? 'complete' : 'incomplete';
     return `<span class="team-cost meta" data-team-cost-status="known" data-team-cost-coverage="${coverage}">Cost ${esc(formatCostMicrounits(usage.cost_microunits, usage.currency))} · verified ${esc(sources)} · ${esc(scope)} · ${esc(window)} · ${coverage}</span>`;
+  }
+
+  function displayNameEditor(central, agent) {
+    const profiles = agent.display_name_profiles || (agent.seats || []).map(seat => ({
+      board_id: seat.board_id,
+      agent_id: seat.agent_id,
+      display_name: seat.profile?.display_name || null,
+      display_label: seat.profile?.display_label || agent.agent_name,
+      revision: seat.profile?.revision || 0
+    }));
+    const editable = profiles.filter(profile => profile.board_id && profile.agent_id);
+    if (!editable.length) {
+      return '<span class="meta team-display-unavailable">Display-name editing unavailable until a stable board identity is observed.</span>';
+    }
+    return `<details class="team-display-names"><summary>Display names · board scoped</summary><div class="team-display-list">${editable.map(profile => {
+      const value = profile.display_name || '';
+      return `<form class="team-display-form" data-agent-display-form data-central="${esc(central)}" data-board="${esc(profile.board_id)}" data-agent="${esc(profile.agent_id)}" data-revision="${esc(profile.revision)}" data-original="${esc(value)}"><label>Display name on ${esc(profile.board_id)}<input name="display_name" value="${esc(value)}" placeholder="${esc(agent.agent_name)}" maxlength="80" autocomplete="off" aria-describedby="display-status-${esc(profile.agent_id)}-${esc(profile.board_id)}"></label><p class="meta">Operational name stays <code>${esc(agent.agent_name)}</code>. Duplicate labels are allowed.</p><div class="team-display-actions"><button type="submit">Save</button><button type="button" data-display-reset>Reset to operational name</button><button type="button" data-display-cancel>Cancel</button></div><p id="display-status-${esc(profile.agent_id)}-${esc(profile.board_id)}" class="team-display-status meta" role="status" aria-live="polite"></p></form>`;
+    }).join('')}</div></details>`;
+  }
+
+  async function saveDisplayName(form, displayName) {
+    const status = form.querySelector('.team-display-status');
+    const buttons = form.querySelectorAll('button');
+    buttons.forEach(button => { button.disabled = true; });
+    status.className = 'team-display-status meta';
+    status.textContent = displayName === null ? 'Resetting…' : 'Saving…';
+    try {
+      const response = await fetch(`/api/agents/display-name?central=${encodeURIComponent(form.dataset.central)}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          board_id: form.dataset.board,
+          agent_id: form.dataset.agent,
+          display_name: displayName,
+          expected_revision: Number(form.dataset.revision)
+        })
+      });
+      let body = {};
+      try { body = await response.json(); } catch (_error) {}
+      if (!response.ok) throw new Error(body.error || body.detail || `HTTP ${response.status}`);
+      status.textContent = displayName === null ? 'Reset saved.' : 'Display name saved.';
+      delete form.dataset.dirty;
+      await refreshCentral(form.dataset.central);
+      renderHub();
+    } catch (error) {
+      status.className = 'team-display-status error';
+      status.textContent = `Save failed: ${error.message}`;
+      buttons.forEach(button => { button.disabled = false; });
+    }
+  }
+
+  function cancelDisplayName(form) {
+    const input = form.elements.display_name;
+    input.value = form.dataset.original || '';
+    delete form.dataset.dirty;
+    const status = form.querySelector('.team-display-status');
+    status.className = 'team-display-status meta';
+    status.textContent = 'Changes canceled.';
+    input.focus();
   }
 
   function configuredSeatForAgent(central, agent) {
@@ -181,7 +240,7 @@ function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d]
         '<span class="meta">Configured seat · process authority follows the host type below.</span>'
       );
     }
-    return card.replace('</article>', `${lifecyclePanel(central, agent)}</article>`);
+    return card.replace('</article>', `${displayNameEditor(central, agent)}${lifecyclePanel(central, agent)}</article>`);
   }
 
   function renderLifecycleAgentsHub() {
@@ -262,4 +321,35 @@ function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d]
     ],
     render(context) { useContext(context); return renderLifecycleAgentsHub() + renderAutonomousTeam(); }
   });
+  if (typeof document !== 'undefined') {
+    document.addEventListener('submit', event => {
+      const form = event.target.closest?.('[data-agent-display-form]');
+      if (!form) return;
+      event.preventDefault();
+      const value = form.elements.display_name.value;
+      if (!value.trim()) {
+        const status = form.querySelector('.team-display-status');
+        status.className = 'team-display-status error';
+        status.textContent = 'Enter a display name or use Reset to operational name.';
+        return;
+      }
+      saveDisplayName(form, value);
+    });
+    document.addEventListener('click', event => {
+      const reset = event.target.closest?.('[data-display-reset]');
+      if (reset) {
+        saveDisplayName(reset.closest('[data-agent-display-form]'), null);
+        return;
+      }
+      const cancel = event.target.closest?.('[data-display-cancel]');
+      if (cancel) cancelDisplayName(cancel.closest('[data-agent-display-form]'));
+    });
+    document.addEventListener('keydown', event => {
+      const form = event.target.closest?.('[data-agent-display-form]');
+      if (form && event.key === 'Escape') {
+        event.preventDefault();
+        cancelDisplayName(form);
+      }
+    });
+  }
 })();

@@ -3433,9 +3433,10 @@ def test_ticket_activity_renders_newest_three_and_empty_state() -> None:
         [
             source("const esc="),
             source("const fmt="),
-            source("function detailActivityNotices("),
-            source("function eventTypeSummary("),
-            source("function ticketActivityView("),
+                source("function detailActivityNotices("),
+                source("function eventTypeSummary("),
+                "const agentPresentation=(_central,_board,name)=>name;",
+                source("function ticketActivityView("),
             f"const data={{events:{json.dumps(events)},event_window_truncated:true,event_resync_required:true,board:{{board_id:'pursers'}}}};",
             "const route={central:'personal'};",
             "console.log(JSON.stringify({filled:ticketActivityView(data,route,{id:'TK-one'}),empty:ticketActivityView({...data,events:[],event_window_truncated:false,event_resync_required:false},route,{id:'TK-empty'})}));",
@@ -9481,6 +9482,122 @@ def test_lifecycle_http_endpoints_use_same_origin_json_guard() -> None:
     assert calls == [
         ("agent", "pursers", "AI-target"),
         ("inert", "pursers", None),
+    ]
+
+
+def test_display_name_projection_keeps_board_identity_and_duplicates() -> None:
+    now = datetime.now(timezone.utc)
+    raw = {
+        "board_id": "pursers",
+        "label": "Pursers",
+        "snapshot": {
+            "board": {"board_id": "pursers"},
+            "agents": [
+                {
+                    "agent_id": "AI-one",
+                    "principal_id": "PR-one",
+                    "agent_name": "worker-one",
+                    "display_name": '<img src=x onerror="alert(1)">',
+                    "display_name_revision": 2,
+                    "role": "worker",
+                    "status": "idle",
+                    "last_activity_at": now.isoformat(),
+                    "capabilities": {"can_work": True},
+                },
+                {
+                    "agent_id": "AI-two",
+                    "principal_id": "PR-two",
+                    "agent_name": "worker-two",
+                    "display_name": '<img src=x onerror="alert(1)">',
+                    "display_name_revision": 1,
+                    "role": "worker",
+                    "status": "idle",
+                    "last_activity_at": now.isoformat(),
+                    "capabilities": {"can_work": True},
+                },
+            ],
+            "tickets": [],
+        },
+        "events": [],
+    }
+    projected = dashboard.aggregate_fleet([raw], stale_seconds=300, now=now)
+    agents = {row["agent_name"]: row for row in projected["agents"]}
+    first = agents["worker-one"]
+    assert first["display_name"] == '<img src=x onerror="alert(1)">'
+    assert first["duplicate_display_name"] is True
+    assert first["display_name_profiles"] == [
+        {
+            "board_id": "pursers",
+            "agent_id": "AI-one",
+            "display_name": '<img src=x onerror="alert(1)">',
+            "display_label": '<img src=x onerror="alert(1)">',
+            "revision": 2,
+        }
+    ]
+
+
+def test_display_name_ui_contract_escapes_and_supports_keyboard_states() -> None:
+    assert "/api/agents/display-name" in dashboard.HTML
+    assert "data-agent-display-form" in dashboard.HTML
+    assert "data-display-reset" in dashboard.HTML
+    assert "data-display-cancel" in dashboard.HTML
+    assert "event.key === 'Escape'" in dashboard.HTML
+    assert "Operational name ${esc(a.agent_name)}" in dashboard.HTML
+    assert "<h3>${esc(displayName)}</h3>" in dashboard.HTML
+    assert "function agentPresentation(" in dashboard.HTML
+    assert "agentPresentation(r.central,d.board.board_id,e.actor" in dashboard.HTML
+    assert 'role="status" aria-live="polite"' in dashboard.HTML
+
+
+def test_display_name_http_endpoint_uses_same_origin_json_guard() -> None:
+    calls: list[tuple[str, str, object]] = []
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            return value or "default"
+
+        def save_agent_display_name(
+            self, board_id: str, payload: object
+        ) -> dict:
+            calls.append(("display", board_id, payload))
+            return {"ok": True, "profile": {"revision": 4}}
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=SimpleNamespace())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    payload = {
+        "board_id": "pursers",
+        "agent_id": "AI-target",
+        "display_name": "Friendly",
+        "expected_revision": 3,
+    }
+    try:
+        request = urllib.request.Request(
+            base + "/api/agents/display-name",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            assert json.load(response)["profile"]["revision"] == 4
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert calls == [
+        (
+            "display",
+            "pursers",
+            {
+                "agent_id": "AI-target",
+                "display_name": "Friendly",
+                "expected_revision": 3,
+            },
+        )
     ]
 
 

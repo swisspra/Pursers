@@ -50,6 +50,7 @@ types.ToolAnnotations.model_rebuild(force=True)
 types.Tool.model_rebuild(force=True)
 from pursers_client import (
     ADMISSION_EVENT_KINDS,
+    AGENT_DISPLAY_NAME_CHANGED,
     AGENT_LIFECYCLE_EVENT_KINDS,
     ARCHIVE_EVENT_KINDS,
     CLAIM_TTL_EVENT_KINDS,
@@ -110,6 +111,12 @@ from butler_commands import (
     validate_config_authority,
     validate_host_seat_cap_command_authority,
 )
+from agent_profile import (
+    append_profile_audit,
+    display_name_revision,
+    normalize_display_name,
+    profile_projection,
+)
 
 from cursor import CursorStore
 from instance_lock import CentralDataLock
@@ -134,13 +141,21 @@ from transactional_sqlite import TransactionalSQLiteStore
 
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 SEAT_NAME_COLLISION = "seat_name_collision"
-SEAT_IDENTITY_EVENT_KINDS = frozenset({SEAT_NAME_COLLISION})
+SEAT_IDENTITY_EVENT_KINDS = frozenset(
+    {SEAT_NAME_COLLISION, AGENT_DISPLAY_NAME_CHANGED}
+)
 SEAT_IDENTITY_EVENT_FIELDS = frozenset(
     {
         "attempted_agent_id",
         "attempted_agent_name",
         "principal_id",
         "refusal_reason",
+        "target_agent_id",
+        "target_agent_name",
+        "display_name_old",
+        "display_name_new",
+        "display_name_revision",
+        "display_name_reset",
         "fixture_provenance",
         "recipient_identities",
     }
@@ -1719,6 +1734,8 @@ class CentralBoard:
             "butler_config": None,
             "butler_config_history": [],
             "butler_config_mutations": {},
+            "agent_profile_audit": [],
+            "next_agent_profile_audit_seq": 1,
         }
 
     def ensure_schema(self, document: dict[str, Any]) -> None:
@@ -1919,6 +1936,18 @@ class CentralBoard:
             raise ValueError("Butler config history is invalid")
         if not isinstance(document.setdefault("butler_config_mutations", {}), dict):
             raise ValueError("Butler config mutations are invalid")
+        agent_profile_audit = document.setdefault("agent_profile_audit", [])
+        if not isinstance(agent_profile_audit, list):
+            raise ValueError("agent profile audit is invalid")
+        next_agent_profile_audit_seq = document.setdefault(
+            "next_agent_profile_audit_seq", 1
+        )
+        if (
+            isinstance(next_agent_profile_audit_seq, bool)
+            or not isinstance(next_agent_profile_audit_seq, int)
+            or next_agent_profile_audit_seq < 1
+        ):
+            raise ValueError("agent profile audit sequence is invalid")
         board_id = document.get("board_id")
         if not isinstance(board_id, str) or not board_id:
             raise ValueError("board document is missing board_id")
@@ -5299,6 +5328,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             projected.append(
                 {
                     **copy.deepcopy(member),
+                    "profile": profile_projection(member),
                     "capabilities": member_capabilities(member),
                     "readiness": readiness,
                     "membership_role": membership["role"],
@@ -7715,6 +7745,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "board_id": board_id,
                 "agent_id": member["agent_id"],
                 "agent_name": agent_name,
+                "profile": profile_projection(member),
                 "principal_id": principal.principal_id,
                 "identity_tuple": [board_id, principal.principal_id, agent_name],
                 "role": member["role"],
@@ -7922,6 +7953,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "board_id": board_id,
             "agent_id": result["actor"]["agent_id"],
             "agent_name": agent_name,
+            "profile": profile_projection(result["actor"]),
             "principal_id": principal.principal_id,
             "role": result["actor"]["role"],
             "membership_role": result["actor"]["membership_role"],
@@ -8487,6 +8519,127 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "journal_compaction": compacted,
             "renewed_ticket_ids": result["renewed"],
             "events": events,
+        }
+
+    @tool()
+    async def agent_display_name_set(
+        board_id: str,
+        agent_name: str,
+        display_name: str | None,
+        expected_revision: int,
+        ctx: Context,
+        target_agent_id: str | None = None,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Set or reset a board-scoped display name without changing identity."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        if target_agent_id is not None:
+            target_agent_id = require_id("target_agent_id", target_agent_id)
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise ValueError("expected_revision must be a non-negative integer")
+        normalized = normalize_display_name(display_name)
+        principal = current_principal()
+        if not (
+            {"board:write", "board:review", COORDINATOR_SCOPE} & principal.scopes
+        ):
+            raise PermissionError(
+                "display-name update requires board writer, reviewer, or coordinator authorization"
+            )
+        now = time.time()
+
+        def update_profile(document: dict[str, Any]) -> dict[str, Any]:
+            actor = resolve_active_actor(document, principal, agent_name)
+            membership = service.resolve_board_context(
+                document, principal.principal_id
+            )
+            resolved_target_id = target_agent_id or actor["agent_id"]
+            target = document["members"].get(resolved_target_id)
+            if target is None:
+                raise ValueError("target agent not found")
+            if target.get("lifecycle_status", "active") != "active":
+                raise ValueError("target agent is not active")
+            self_update = resolved_target_id == actor["agent_id"]
+            if not self_update and membership.get("role") != "admin":
+                raise PermissionError(
+                    "display-name update requires identity ownership or board admin"
+                )
+            revision = display_name_revision(target)
+            if revision != expected_revision:
+                raise ValueError(
+                    "display-name revision conflict: "
+                    f"expected {expected_revision}, current {revision}"
+                )
+            old_name = target.get("display_name")
+            old_name = old_name if isinstance(old_name, str) and old_name else None
+            if old_name == normalized:
+                return {
+                    "actor": copy.deepcopy(actor),
+                    "target": copy.deepcopy(target),
+                    "changed": False,
+                    "audit": None,
+                    "recipients": [],
+                }
+            next_revision = revision + 1
+            if normalized is None:
+                target.pop("display_name", None)
+            else:
+                target["display_name"] = normalized
+            target["display_name_revision"] = next_revision
+            target["display_name_updated_at"] = iso_at(now)
+            target["display_name_updated_by_agent_id"] = actor["agent_id"]
+            sequence = int(document["next_agent_profile_audit_seq"])
+            document["next_agent_profile_audit_seq"] = sequence + 1
+            audit = {
+                "audit_id": f"AP-{sequence:012d}",
+                "target_agent_id": target["agent_id"],
+                "target_agent_name": target["agent_name"],
+                "old_display_name": old_name,
+                "new_display_name": normalized,
+                "revision": next_revision,
+                "changed_at": iso_at(now),
+                "changed_by_agent_id": actor["agent_id"],
+                "changed_by_principal_id": principal.principal_id,
+            }
+            append_profile_audit(document, audit)
+            return {
+                "actor": copy.deepcopy(actor),
+                "target": copy.deepcopy(target),
+                "changed": True,
+                "audit": copy.deepcopy(audit),
+                "recipients": service.admitted_agent_ids(document),
+            }
+
+        result = service.mutate(board_id, update_profile)
+        event = None
+        if result["changed"]:
+            target = result["target"]
+            audit = result["audit"]
+            event = await append_and_publish(
+                board_id,
+                result["actor"],
+                AGENT_DISPLAY_NAME_CHANGED,
+                resource_uri(board_id, "agent", target["agent_id"]),
+                result["recipients"],
+                ctx,
+                target_agent_id=target["agent_id"],
+                target_agent_name=target["agent_name"],
+                display_name_old=audit["old_display_name"],
+                display_name_new=audit["new_display_name"],
+                display_name_revision=audit["revision"],
+                display_name_reset=audit["new_display_name"] is None,
+            )
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "profile": profile_projection(result["target"]),
+            "changed": result["changed"],
+            "audit": result["audit"],
+            "event": event,
         }
 
     @tool()

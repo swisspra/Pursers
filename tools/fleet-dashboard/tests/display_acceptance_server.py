@@ -56,6 +56,9 @@ class AcceptanceCache:
         self.dashboard = dashboard
         self.mode = mode
         self.revision = 0
+        self.display_names: dict[str, dict[str, object]] = {
+            "AI-synthetic-01": {"display_name": "Atlas", "revision": 0}
+        }
 
     @staticmethod
     def labels() -> list[str]:
@@ -77,8 +80,7 @@ class AcceptanceCache:
             ticket("TK-closed", "Preserve the source-backed route map", "closed", owner="worker-02"),
         ]
 
-    @staticmethod
-    def _agents() -> list[dict]:
+    def _agents(self) -> list[dict]:
         rows = []
         for index in range(35):
             working = index == 0
@@ -97,11 +99,26 @@ class AcceptanceCache:
                         "lease_expires_at": "2030-01-02T12:15:00Z",
                     }
                 ]
+            agent_id = f"AI-synthetic-{index + 1:02d}"
+            profile = self.display_names.get(
+                agent_id, {"display_name": None, "revision": 0}
+            )
+            display_name = profile["display_name"]
             rows.append(
                 {
                     "agent_name": name,
-                    "agent_id": f"AI-synthetic-{index + 1:02d}",
+                    "agent_id": agent_id,
                     "principal_id": f"PR-synthetic-{index + 1:02d}",
+                    "display_name": display_name,
+                    "display_name_profiles": [
+                        {
+                            "board_id": "fixture-board",
+                            "agent_id": agent_id,
+                            "display_name": display_name,
+                            "display_label": display_name or name,
+                            "revision": profile["revision"],
+                        }
+                    ],
                     "pool_status": "busy" if working else "stale" if stale else "available",
                     "boards": ["fixture-board"],
                     "board_scope": ["fixture-board"],
@@ -109,6 +126,7 @@ class AcceptanceCache:
                     "last_seen": "2030-01-02T11:59:00Z" if not stale else "2030-01-02T10:00:00Z",
                     "seats": [
                         {
+                            "agent_id": agent_id,
                             "board_id": "fixture-board",
                             "project": "Fixture Project",
                             "role": "worker",
@@ -122,12 +140,72 @@ class AcceptanceCache:
                                 "can_work": True,
                                 "can_review": False,
                             },
+                            "profile": {
+                                "display_name": display_name,
+                                "display_label": display_name or name,
+                                "revision": profile["revision"],
+                            },
                         }
                     ],
                     "current_work": work,
                 }
             )
+        label_counts: dict[str, int] = {}
+        for row in rows:
+            if row["display_name"]:
+                label_counts[row["display_name"]] = (
+                    label_counts.get(row["display_name"], 0) + 1
+                )
+        for row in rows:
+            row["duplicate_name"] = bool(
+                row["display_name"]
+                and label_counts.get(row["display_name"], 0) > 1
+            )
         return rows
+
+    def save_agent_display_name(
+        self, board_id: str, payload: object, central: str | None = None
+    ) -> dict:
+        self.resolve_central(central)
+        if board_id != "fixture-board" or not isinstance(payload, dict):
+            raise ValueError("invalid display-name target")
+        agent_id = payload.get("agent_id")
+        display_name = payload.get("display_name")
+        expected_revision = payload.get("expected_revision")
+        if not isinstance(agent_id, str) or not agent_id.startswith("AI-synthetic-"):
+            raise ValueError("target agent not found")
+        current = self.display_names.get(
+            agent_id, {"display_name": None, "revision": 0}
+        )
+        if expected_revision != current["revision"]:
+            raise ValueError(
+                "display-name revision conflict: "
+                f"expected {expected_revision}, current {current['revision']}"
+            )
+        if display_name is not None and not isinstance(display_name, str):
+            raise ValueError("display_name must be a string or null")
+        normalized = display_name.strip() if isinstance(display_name, str) else None
+        if display_name is not None and not normalized:
+            raise ValueError("display_name must not be empty; use null to reset")
+        changed = normalized != current["display_name"]
+        revision = int(current["revision"]) + (1 if changed else 0)
+        self.display_names[agent_id] = {
+            "display_name": normalized,
+            "revision": revision,
+        }
+        return {
+            "ok": True,
+            "changed": changed,
+            "profile": {
+                "agent_id": agent_id,
+                "agent_name": agent_id.replace("AI-synthetic-", "synthetic-worker-"),
+                "display_name": normalized,
+                "display_label": normalized or agent_id.replace(
+                    "AI-synthetic-", "synthetic-worker-"
+                ),
+                "revision": revision,
+            },
+        }
 
     def get(self, central: str | None = None) -> dict:
         self.resolve_central(central)
