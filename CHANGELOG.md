@@ -7,6 +7,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.9] - 2026-10-01
+
+This release includes `pursers-central==0.1.6`,
+`pursers-client==0.1.7`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.0.9`, `pursers==5.0.9`,
+`pursers-wait-bridge==0.1.5`, and
+`pursers-acp==0.1.6`.
+
+This release brings managed Sonar intake, grouped repair tasks, capacity-aware
+dispatch, and verified Azure DevOps PR delivery into one automated workflow.
+It also fixes unfinished model turns that could leave work or review leases
+held indefinitely while an idle runner appeared busy.
+
+Upgrade Central, client, and managed runners together. Regenerate existing seat
+helpers so passive waits use keepalive renewal, retain cursors and intake indexes,
+and preserve in-flight branches and evidence. Source intake and local fleet
+execution remain opt-in; upgrading does not add providers or start extra seats.
+See the [configuration and migration guide](docs/managed-intake.md).
+
 - Recover unfinished event-seat work/review leases with a durable bounded
   continuation instead of waiting forever after a model exits. Exhausted recovery
   surfaces human input and releases the lease; exact review holders can request
@@ -120,7 +139,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   runtime configuration, preventing stale seat capability mismatches.
 - Scoped Git helpers accept repeated authentication challenges while refusing
   credential output to terminals and regular log files.
-
 
 ## [5.0.8] - 2026-09-29
 
