@@ -23,7 +23,13 @@ def delivery_route_changed(existing, proposed):
 
 def public_delivery_settings(registry: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows = []
-    groups = sorted((registry.get('delivery_policy_groups') or {}).keys())
+    raw_groups = registry.get('delivery_policy_groups') or {}
+    groups = sorted(raw_groups.keys())
+    layers = {
+        'global': parse_delivery_policy(registry.get('delivery_policy_defaults'), partial=True) or {},
+        'groups': {name: parse_delivery_policy(raw_groups[name], partial=True) or {}
+                   for name in groups},
+    }
     for name, row in sorted(registry['projects'].items()):
         resolved = resolve_delivery_policy(registry, name)
         rows.append({'name': name, 'board_id': row['board_id'], 'status': row['status'],
@@ -35,7 +41,9 @@ def public_delivery_settings(registry: Mapping[str, Any]) -> list[dict[str, Any]
                      'delivery_policy_group': resolved['group'],
                      'delivery_policy_provenance': resolved['provenance'],
                      'delivery_runtime': resolved['runtime'],
-                     'delivery_policy_groups': groups})
+                     'delivery_policy_groups': groups,
+                     'delivery_policy_layers': {**copy.deepcopy(layers),
+                                                'repository': resolved['overrides']}})
     return rows
 
 

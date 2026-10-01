@@ -190,6 +190,188 @@ console.log(JSON.stringify(evidence));
     }
 
 
+def test_delivery_shared_layer_editor_preserves_scope_and_does_not_copy_repository_values() -> None:
+    """Exercise the real UI when a shared policy preview rerenders the editor."""
+    task_space_id = os.environ.get("PURSERS_EGO_TASK_SPACE_ID")
+    ego_browser = shutil.which("ego-browser")
+    if not task_space_id or not ego_browser:
+        pytest.skip("requires PURSERS_EGO_TASK_SPACE_ID and ego-browser")
+
+    requests: list[dict] = []
+
+    class Cache:
+        @staticmethod
+        def labels() -> list[str]:
+            return ["fixture"]
+
+        @staticmethod
+        def resolve_central(value: str | None) -> str:
+            if value not in {None, "fixture"}:
+                raise KeyError(value)
+            return "fixture"
+
+        @staticmethod
+        def get(_central: str | None = None) -> dict:
+            return {"generated_at": "2030-01-01T00:00:00Z", "boards": [], "agents": []}
+
+        @staticmethod
+        def get_project_registry(_central: str | None = None) -> dict:
+            return {"registry": {"schema_version": 1, "projects": {}}, "expected_sha256": "a" * 64}
+
+        @staticmethod
+        def get_project_delivery_settings(_central: str | None = None) -> dict:
+            effective = {
+                "mode": "branch_only", "mapped_base": "dev", "integration_branch": "alpha-delivery",
+                "snapshot_branch_prefix": "alpha-snap", "final_pr_target": None,
+                "release_trigger": {"kind": "ready"}, "pr_update": "rolling",
+                "auto_integrate": False, "collection_paused": False, "final_merge": "manual",
+                "validation": {"test_commands": ["pytest -q alpha"], "required_reviewers": 1,
+                               "independent_review": True, "require_upstream_policies": True},
+                "conflict_policy": "pause",
+            }
+            return {"central": "fixture", "projects": [{
+                "name": "alpha", "board_id": "alpha", "status": "active",
+                "integration_ref": "dev", "repository_configured": True,
+                "delivery_policy": effective,
+                "delivery_policy_overrides": {
+                    "mode": "branch_only", "integration_branch": "alpha-delivery",
+                    "snapshot_branch_prefix": "alpha-snap", "final_pr_target": None,
+                    "validation": {"test_commands": ["pytest -q alpha"]},
+                },
+                "delivery_policy_group": "backend",
+                "delivery_policy_provenance": {"mode": "repository:alpha"},
+                "delivery_runtime": {"ready": False, "blockers": ["branch_only runtime is not installed"]},
+                "delivery_policy_groups": ["backend"],
+                "delivery_policy_layers": {
+                    "global": {"snapshot_branch_prefix": "global-snap"},
+                    "groups": {"backend": {"conflict_policy": "repair_then_review"}},
+                    "repository": {
+                        "mode": "branch_only", "integration_branch": "alpha-delivery",
+                        "snapshot_branch_prefix": "alpha-snap", "final_pr_target": None,
+                        "validation": {"test_commands": ["pytest -q alpha"]},
+                    },
+                },
+            }]}
+
+        @staticmethod
+        def plan_project_lifecycle(request: dict, central: str | None = None) -> dict:
+            requests.append(json.loads(json.dumps(request)))
+            label = "global defaults" if request["scope"] == "global" else request["name"]
+            return {
+                "schema_version": 1, "kind": "project-delivery-policy", "central": central or "fixture",
+                "project": label, "scope": request["scope"], "blocked": False,
+                "blockers": [], "warnings": [], "preserved": [], "rollback": [],
+                "operations": [], "affected_projects": [{"project": "alpha"}],
+                "delivery_policy": {**request["delivery_policy"], "mode": "per_ticket_pr",
+                                    "mapped_base": "dev", "release_trigger": {"kind": "ready"}},
+                "expires_at": "2030-01-01T00:10:00Z", "confirmation": f"CONFIGURE {label}",
+                "plan_id": "plan-1", "plan_digest": "b" * 64,
+            }
+
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), dashboard.make_handler(Cache()))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/#/projects"
+    try:
+        script = f"""
+const task = await taskSpace({int(task_space_id)});
+const page = task.page("p1");
+let stage = 'load';
+try {{
+await page.goto({json.dumps(url)});
+await page.waitForFunction(() => document.querySelector('#project-delivery-form select[name="name"]')?.value === 'alpha', undefined, {{timeout: 10000}});
+stage = 'global-layer';
+await page.selectOption('#project-delivery-form select[name="scope"]', 'global');
+await page.waitForFunction(() => document.querySelector('#project-delivery-form select[name="scope"]')?.value === 'global', undefined, {{timeout: 10000}});
+const globalBefore = await page.evaluate(() => {{
+  const form = document.querySelector('#project-delivery-form');
+  return {{scope: form.elements.scope.value, snapshot: form.elements.snapshot_branch_prefix.value,
+    mode: form.elements.mode.value, integration: form.elements.integration_branch.value,
+    commands: form.elements.test_commands.value, activateDisabled: form.elements.activate.disabled}};
+}});
+await page.fill('#project-delivery-form input[name="snapshot_branch_prefix"]', 'global-edited');
+await page.click('#project-delivery-form button[type="submit"]');
+await page.waitForSelector('.projects-lifecycle-preview', {{state: 'visible', timeout: 10000}});
+stage = 'group-layer';
+const globalAfter = await page.evaluate(() => {{
+  const form = document.querySelector('#project-delivery-form');
+  return {{scope: form.elements.scope.value, snapshot: form.elements.snapshot_branch_prefix.value,
+    mode: form.elements.mode.value, integration: form.elements.integration_branch.value,
+    commands: form.elements.test_commands.value}};
+}});
+await page.selectOption('#project-delivery-form select[name="scope"]', 'group');
+await page.waitForFunction(() => document.querySelector('#project-delivery-form select[name="scope"]')?.value === 'group', undefined, {{timeout: 10000}});
+const groupLayer = await page.evaluate(() => {{
+  const form = document.querySelector('#project-delivery-form');
+  return {{scope: form.elements.scope.value, group: form.elements.delivery_policy_group.value,
+    conflict: form.elements.conflict_policy.value, snapshot: form.elements.snapshot_branch_prefix.value,
+    mode: form.elements.mode.value, integration: form.elements.integration_branch.value,
+    commands: form.elements.test_commands.value}};
+}});
+await page.selectOption('#project-delivery-form select[name="scope"]', 'repository');
+await page.waitForFunction(() => document.querySelector('#project-delivery-form select[name="scope"]')?.value === 'repository' && document.querySelector('#project-delivery-form select[name="mode"]')?.value === 'branch_only', undefined, {{timeout: 10000}});
+stage = 'repository-draft';
+await page.selectOption('#project-delivery-form select[name="preset"]', 'receive-batches');
+await page.fill('#project-delivery-form input[name="snapshot_branch_prefix"]', 'repo-draft');
+await page.evaluate(() => {{
+  const field = document.querySelector('#project-delivery-form textarea[name="test_commands"]');
+  field.value = 'pytest -q edited';
+  field.dispatchEvent(new InputEvent('input', {{bubbles: true, inputType: 'insertText', data: 'pytest -q edited'}}));
+}});
+await page.click('#project-delivery-form input[name="activate"]');
+await page.click('#project-delivery-form button[type="submit"]');
+await page.waitForFunction(() => document.querySelector('.projects-lifecycle-preview h2')?.textContent.includes('alpha') && document.querySelector('#project-delivery-form input[name="snapshot_branch_prefix"]')?.value === 'repo-draft', undefined, {{timeout: 10000}});
+const repositoryAfter = await page.evaluate(() => {{
+  const form = document.querySelector('#project-delivery-form');
+  return {{scope: form.elements.scope.value, preset: form.elements.preset.value,
+    activate: form.elements.activate.checked, snapshot: form.elements.snapshot_branch_prefix.value,
+    mode: form.elements.mode.value, integration: form.elements.integration_branch.value,
+    commands: form.elements.test_commands.value}};
+}});
+console.log(JSON.stringify({{globalBefore, globalAfter, groupLayer, repositoryAfter}}));
+}} catch (error) {{
+  const state = await page.evaluate(() => {{ const form = document.querySelector('#project-delivery-form'); return form ? {{scope: form.elements.scope.value, mode: form.elements.mode.value, preset: form.elements.preset.value, snapshot: form.elements.snapshot_branch_prefix.value, activate: form.elements.activate.checked, preview: document.querySelector('.projects-lifecycle-preview h2')?.textContent || null}} : {{form: false}}; }});
+  console.log(JSON.stringify({{stage, state, error: String(error)}}));
+  throw error;
+}}
+"""
+        completed = subprocess.run(
+            [ego_browser, "nodejs", "-e", script], check=False, capture_output=True,
+            text=True, timeout=30,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert completed.returncode == 0, completed.stderr
+    evidence = json.loads(completed.stderr.strip().splitlines()[-1])
+    assert evidence == {
+        "globalBefore": {"scope": "global", "snapshot": "global-snap", "mode": "",
+                         "integration": "", "commands": "", "activateDisabled": True},
+        "globalAfter": {"scope": "global", "snapshot": "global-edited", "mode": "",
+                        "integration": "", "commands": ""},
+        "groupLayer": {"scope": "group", "group": "backend",
+                       "conflict": "repair_then_review", "snapshot": "", "mode": "",
+                       "integration": "", "commands": ""},
+        "repositoryAfter": {"scope": "repository", "preset": "receive-batches",
+                            "activate": True, "snapshot": "repo-draft", "mode": "batch_pr",
+                            "integration": "alpha-delivery", "commands": "pytest -q edited"},
+    }
+    assert requests == [
+        {"action": "delivery", "scope": "global", "name": "alpha",
+         "delivery_policy_group": "backend", "activate": False,
+         "delivery_policy": {"snapshot_branch_prefix": "global-edited"}},
+        {"action": "delivery", "scope": "repository", "name": "alpha",
+         "delivery_policy_group": "backend", "activate": True,
+         "delivery_policy": {
+             "mode": "batch_pr", "integration_branch": "alpha-delivery",
+             "snapshot_branch_prefix": "repo-draft", "release_trigger": {"kind": "manual"},
+             "validation": {"test_commands": ["pytest -q edited"]},
+         }},
+    ]
+
+
 def test_projects_route_loads_owned_css_in_real_browser() -> None:
     task_space_id = os.environ.get("PURSERS_EGO_TASK_SPACE_ID")
     ego_browser = shutil.which("ego-browser")

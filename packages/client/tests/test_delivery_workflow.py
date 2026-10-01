@@ -82,6 +82,9 @@ def test_delivery_policy_resolves_global_group_repository_with_field_provenance(
 @pytest.mark.parametrize('policy,match', [
     ({'release_trigger': {'kind': 'scheduled', 'timezone': 'Not/AZone', 'schedule': '0 9 * * 1'}}, 'timezone'),
     ({'release_trigger': {'kind': 'scheduled', 'timezone': 'UTC', 'schedule': 'daily'}}, 'five-field'),
+    ({'release_trigger': {'kind': 'scheduled', 'timezone': 'UTC', 'schedule': '99 99 99 99 99'}}, 'five-field'),
+    ({'release_trigger': {'kind': 'scheduled', 'timezone': 'UTC', 'schedule': '0 9 1-32 * 1'}}, 'five-field'),
+    ({'release_trigger': {'kind': 'scheduled', 'timezone': 'UTC', 'schedule': '*/0 9 * * 1'}}, 'five-field'),
     ({'validation': {'require_upstream_policies': False}}, 'cannot weaken'),
     ({'validation': {'independent_review': False}}, 'cannot weaken'),
     ({'mode': 'branch_only', 'final_pr_target': ''}, 'valid short'),
@@ -89,6 +92,11 @@ def test_delivery_policy_resolves_global_group_repository_with_field_provenance(
 def test_delivery_policy_invalid_or_weakening_values_fail_closed(policy, match):
     with pytest.raises(ValueError, match=match):
         parse_delivery_policy(policy)
+
+
+def test_delivery_policy_accepts_semantically_valid_numeric_cron_ranges_and_steps():
+    trigger = {'kind': 'scheduled', 'timezone': 'UTC', 'schedule': '*/15 9-17 * * 1-5'}
+    assert parse_delivery_policy({'release_trigger': trigger}) == {'release_trigger': trigger}
 
 
 def test_delivery_policy_false_empty_and_null_have_deliberate_meanings():
