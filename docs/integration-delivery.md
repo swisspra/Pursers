@@ -125,16 +125,18 @@ Projects without a policy retain direct-delivery behavior until explicitly migra
 ### Runtime capability gate
 
 The schema intentionally describes more policy than the current runtime executes.
-Today `per_ticket_pr` and `branch_only` with the `ready` trigger, rolling updates,
-the `codex` snapshot prefix, one independent reviewer, no custom test-command list,
-and `pause` conflict handling can be activated. `batch_pr`, manual/scheduled release,
+Today only `per_ticket_pr` with the `ready` trigger, rolling updates, the `codex`
+snapshot prefix, one independent reviewer, no custom test-command list, and `pause`
+conflict handling can be activated. `branch_only`, `batch_pr`, manual/scheduled release,
 `freeze_on_ready`, custom snapshot prefixes, custom test commands, multiple required
 reviewers, and `repair_then_review` remain visible configuration drafts until their
 runtime follow-up lands. The dashboard labels those combinations **Draft only** and
 activation fails closed; it never substitutes per-ticket PR behavior.
 
-Activation compiles a supported policy into the existing `delivery_workflow` so
-current Butler and worker behavior stays explicit. Saving a draft does not modify
+`branch_only` does not compile to the legacy integration workflow: that runtime still
+creates one upstream PR per ticket, so treating it as branch-only would be a silent
+fallback. Activation compiles only a supported policy into the existing
+`delivery_workflow` so current Butler and worker behavior stays explicit. Saving a draft does not modify
 `integration_ref`, create a branch, or claim that batching/scheduling is operational.
 
 ## Integration and validation

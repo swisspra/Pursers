@@ -40,10 +40,12 @@ automatic integration, manual final merge, validation commands/reviewer count, a
 pause/repair conflict behavior. Shared edits preview every explicit member. Reset
 removes repository overrides instead of copying effective values into the registry.
 
-Runtime readiness is independent of schema validity. Unimplemented batching,
+Runtime readiness is independent of schema validity. Unimplemented branch-only delivery, batching,
 manual/scheduled release, freeze-on-ready, custom snapshot prefixes/test commands,
 multi-reviewer gates, and automatic conflict repair can be saved as drafts but cannot
-activate or silently fall back. Existing `direct`/`integration` policies keep their
+activate or silently fall back. In particular, branch-only cannot compile to legacy
+integration because legacy integration still creates per-ticket upstream PRs.
+Existing `direct`/`integration` policies keep their
 behavior until an operator explicitly activates a runtime-ready new policy.
 
 ## Integration gate

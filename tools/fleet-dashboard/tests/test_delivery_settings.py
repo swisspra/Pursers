@@ -196,10 +196,16 @@ def test_new_policy_apply_rechecks_active_work_before_runtime_activation(monkeyp
     from unittest.mock import AsyncMock, Mock
     import fleet_dashboard as dashboard
     original = registry()
+    original['projects']['sample'].update(
+        integration_ref='pursers-integration',
+        delivery_workflow=m.parse_delivery_workflow({
+            'mode': 'integration', 'base_branch': 'dev',
+            'integration_branch': 'pursers-integration'}),
+    )
     request = {'action': 'delivery', 'scope': 'repository', 'name': 'sample', 'activate': True,
-               'delivery_policy': {'mode': 'branch_only', 'mapped_base': 'dev',
+               'delivery_policy': {'mode': 'per_ticket_pr', 'mapped_base': 'dev',
                                    'integration_branch': 'pursers-integration',
-                                   'snapshot_branch_prefix': 'codex', 'final_pr_target': None,
+                                   'snapshot_branch_prefix': 'codex', 'final_pr_target': 'dev',
                                    'release_trigger': {'kind': 'ready'}, 'pr_update': 'rolling',
                                    'auto_integrate': False, 'collection_paused': False,
                                    'final_merge': 'manual',
@@ -211,7 +217,7 @@ def test_new_policy_apply_rechecks_active_work_before_runtime_activation(monkeyp
         request=request, registry=original, registry_expected_sha256='a'*64,
         actor='operator', central='default',
         observation={'complete': True, 'active_tickets': [], 'pending_offers': []},
-        refs={'dev': 'a'*40})
+        refs={'dev': 'a'*40, 'pursers-integration': 'b'*40})
     assert not plan['blocked']
     fetcher = object.__new__(dashboard.FleetFetcher)
     fetcher.config = SimpleNamespace(home_board='home')
@@ -233,5 +239,5 @@ def test_new_policy_apply_rechecks_active_work_before_runtime_activation(monkeyp
         assert result['kind'] == 'project-delivery-policy'
         branch.assert_called_once()
         saved = fetcher.save_project_registry.await_args.args[0]
-        assert saved['projects']['sample']['integration_ref'] == 'pursers-integration'
-        assert saved['projects']['sample']['delivery_workflow']['mode'] == 'integration'
+        assert saved['projects']['sample']['integration_ref'] == 'dev'
+        assert saved['projects']['sample']['delivery_workflow']['mode'] == 'direct'

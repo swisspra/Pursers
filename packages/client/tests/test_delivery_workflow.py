@@ -108,6 +108,13 @@ def test_runtime_gating_compiles_only_deployed_modes_without_fallback():
     assert any('batch_pr' in item for item in readiness['blockers'])
     with pytest.raises(ValueError, match='configuration-only'):
         compile_delivery_workflow(batch)
+    branch_only = {**per_ticket, 'mode': 'branch_only', 'final_pr_target': None}
+    readiness = delivery_runtime_readiness(branch_only)
+    assert not readiness['ready']
+    assert any('legacy integration still creates per-ticket PRs' in item
+               for item in readiness['blockers'])
+    with pytest.raises(ValueError, match='configuration-only'):
+        compile_delivery_workflow(branch_only)
 
 
 def test_existing_integration_workflow_projects_as_branch_only_until_migrated():
@@ -121,3 +128,4 @@ def test_existing_integration_workflow_projects_as_branch_only_until_migrated():
     assert resolved['policy']['mapped_base'] == 'Dev'
     assert resolved['policy']['final_pr_target'] is None
     assert resolved['policy']['auto_integrate'] is True
+    assert resolved['runtime']['ready'] is False

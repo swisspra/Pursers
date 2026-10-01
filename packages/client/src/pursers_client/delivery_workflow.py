@@ -239,6 +239,8 @@ def delivery_runtime_readiness(policy: Mapping[str, Any]) -> dict[str, Any]:
     blockers: list[str] = []
     if policy['mode'] == 'batch_pr':
         blockers.append('batch_pr runtime is not installed')
+    if policy['mode'] == 'branch_only':
+        blockers.append('branch_only runtime is not installed; legacy integration still creates per-ticket PRs')
     if policy['release_trigger']['kind'] != 'ready':
         blockers.append(f'{policy["release_trigger"]["kind"]} release trigger is not installed')
     if policy['pr_update'] != 'rolling':
@@ -253,7 +255,7 @@ def delivery_runtime_readiness(policy: Mapping[str, Any]) -> dict[str, Any]:
     if policy['conflict_policy'] != 'pause':
         blockers.append('automatic conflict repair is not installed')
     return {'ready': not blockers, 'blockers': blockers,
-            'supported_modes': ['per_ticket_pr', 'branch_only'],
+            'supported_modes': ['per_ticket_pr'],
             'supported_release_triggers': ['ready']}
 
 
@@ -290,12 +292,7 @@ def compile_delivery_workflow(policy: Mapping[str, Any]) -> tuple[dict[str, Any]
     readiness = delivery_runtime_readiness(parsed)
     if not readiness['ready']:
         raise ValueError('delivery policy is configuration-only: ' + '; '.join(readiness['blockers']))
-    if parsed['mode'] == 'per_ticket_pr':
-        return {'mode': 'direct'}, parsed['mapped_base']
-    return ({'mode': 'integration', 'base_branch': parsed['mapped_base'],
-             'integration_branch': parsed['integration_branch'],
-             'auto_integrate': parsed['auto_integrate'],
-             'collection_paused': parsed['collection_paused']}, parsed['integration_branch'])
+    return {'mode': 'direct'}, parsed['mapped_base']
 
 
 def parse_delivery_workflow(value: Any) -> dict[str, Any] | None:
