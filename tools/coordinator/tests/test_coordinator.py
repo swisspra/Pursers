@@ -4630,3 +4630,19 @@ def test_intake_hourly_limit_can_be_explicitly_disabled():
     _,updates=asyncio.run(coordinator.process_intakes([_intake_project()],snapshot,NOW,
         coordinator.RuntimeState.for_mode('active'),enabled=True,dry_run=False,create_ticket=create,rate_per_hour=None))
     assert updates=={'board-a':frozenset({'unlimited'})}
+
+
+def test_delivery_registry_uses_remote_tracking_ref_without_switching_operator_branch(monkeypatch, tmp_path):
+    row={'board_id':'sample','status':'active','work_dir':str(tmp_path/'operator'),
+         'fleet_clone_dir':str(tmp_path/'fleet'),'integration_ref':'pursers-integration',
+         'delivery_workflow':{'mode':'integration','base_branch':'dev'}}
+    project=coordinator.parse_registry({'state':{'value':json.dumps({'schema_version':1,'projects':{'sample':row}})}})[0]
+    assert project.work_dir==tmp_path/'fleet'
+    assert project.integration_ref=='refs/remotes/origin/pursers-integration'
+    calls=[]
+    def git(path,args,**kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args,0,'','')
+    monkeypatch.setattr(coordinator,'_git',git)
+    assert coordinator.evaluate_integration_watch(project,[])==([],0)
+    assert calls==[['fetch','--no-tags','origin','refs/heads/pursers-integration:refs/remotes/origin/pursers-integration']]

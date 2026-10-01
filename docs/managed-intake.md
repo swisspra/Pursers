@@ -12,6 +12,13 @@ Identical writes and findings refreshes emit no routing event. Deploy Central an
 the coordinator's client together to enable this event contract; older clients
 may filter the new event kind and leave intake waiting for an unrelated event.
 
+## Deliver on a separate branch
+
+Use [Delivery workflow setup](integration-delivery.md) to start from the mapped
+source branch and collect reviewed fixes on a dedicated branch for the team. Projects
+provides the guided form; Settings links to it. This workflow does not automatically
+merge into the mapped base or environment branches.
+
 ## Choose the operator interface and runner
 
 Zed is the primary GUI/IDE workflow for this integration. Use the existing

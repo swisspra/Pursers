@@ -37,7 +37,7 @@
     },
     "pursers-client": {
       "version": "0.1.7",
-      "wheel_sha256": "61590871eef0f9ebdbbaf12daa4b885096842cb9669573328d6be3d72f055a85",
+      "wheel_sha256": "feab3fca64e0ab0d421d17812137d9d948785da0a99baca38d3c99a37224f62e",
       "members": {
         "pursers_client-0.1.7.dist-info/METADATA": "e6ef01156db1754bbbcbd16ed6084dddc63829fd1836e8250b82929fafea8bc0",
         "pursers_client-0.1.7.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
@@ -46,12 +46,13 @@
         "pursers_client-0.1.7.dist-info/top_level.txt": "f1c543c98535c0f218812ac0a8b29ce27e28b6430eda69116c789ecc853cf7b4",
         "pursers_client/__init__.py": "bebb723e07d8beef1c9f5c360bef014f753f24d0d202f69ad37cc85b75b4aeff",
         "pursers_client/client.py": "6f1778eacca4100138a6e21575d40baaac4d92bb15547590936079e2b8df9766",
+        "pursers_client/delivery_workflow.py": "e3e5534cad8e215f63e482925151c3edd9d4819e5ad6555bde35142faae37b01",
         "pursers_client/events.py": "07e241f82339335fb9b85cf39d62b693e944a8d094301101c9424aacef6770ae",
         "pursers_client/human_input.py": "7f24495c05ffdcaafe710b2758cfbebd44bf9c94461d6a787c99e5adc6d3b24d",
         "pursers_client/instance_identity.py": "231151fa27e683433721652ef05d690a412e8e7d377d577375755390026a8144",
         "pursers_client/mcp_proxy.py": "0b64c0b17fd58a345497275527b54261df8750918fccc66aba0b2d655f998cc6",
         "pursers_client/personal_profile.py": "7f43514d55b55ff4c58a8d31dec03d04d2f6a72cf018c80300ce0a5b8955d6c0",
-        "pursers_client/project_registry.py": "22c598ad0e83e122e173ac9af9d68d66c33a2f6f9c8cfcab002c305485ed3d37",
+        "pursers_client/project_registry.py": "7f4c484b5bb7aba1d0dcb1f37f8e21fe764f903f16e4743adacda1634ba3d3de",
         "pursers_client/request_state.py": "0879fec5a8b20310d5091c6a95d04600974e0edcaefb892f8def28f86c507502",
         "pursers_client/submission_evidence.py": "a47ef69f3e4806c285820a9d5dac52236da8a0393feec67e4f690dfc4638351d"
       }

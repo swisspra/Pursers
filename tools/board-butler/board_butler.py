@@ -15,6 +15,7 @@ that cannot work.
 
 from __future__ import annotations
 
+from pursers_client.delivery_workflow import delivery_target, integration_policy
 from pursers_client.submission_evidence import submission_identity
 
 import argparse
@@ -5896,7 +5897,7 @@ def _repository_fields(project: Mapping[str, Any] | None) -> dict[str, str]:
         "repository_org": "",
         "repository_project": "",
         "repository_name": "",
-        "target_branch": str((project or {}).get("integration_ref") or "main"),
+        "target_branch": delivery_target(project),
     }
     match = _ADO_REPOSITORY_RE.match(url)
     if match is not None:
@@ -6196,6 +6197,7 @@ class SourceIntakePoller:
         self.decide = decide
         self.project_reader = project_reader
         self._writeback_offset = 0
+        self._integration_offset = 0
         self._writeback_grants: set[ConnectorPolicyRequest] = set()
         if authorize_writeback and self.active and self.index.path is not None:
             for runtime in self.runtimes.values():
@@ -6336,6 +6338,8 @@ class SourceIntakePoller:
         if url: delivery["url"] = url
         if reason: delivery["reason"] = reason
         if entry.get("approved_sha"): delivery["commit_hash"] = entry["approved_sha"]
+        if entry.get("target_branch"): delivery["target_branch"] = entry["target_branch"]
+        if entry.get("integration_merge_sha"): delivery["merge_sha"] = entry["integration_merge_sha"]
         text = "pursers-delivery: " + json.dumps(delivery, sort_keys=True, separators=(",", ":"))
         if entry.get("delivery_notice") != text:
             await self.ticket_annotator(entry["board_id"], entry["ticket_id"], text)
@@ -6409,6 +6413,7 @@ class SourceIntakePoller:
         if ado:
             if entry is not None:
                 entry["approved_sha"] = fields["approved_sha"]
+                entry["target_branch"] = fields["target_branch"]
                 self.index.dirty = True
             expected = {"project": fields["repository_project"], "repositoryId": fields["repository_name"],
                         "sourceRefName": "refs/heads/" + fields["source_branch"],
@@ -6475,6 +6480,121 @@ class SourceIntakePoller:
         self.index.set_status(key, "delivered")
         self.index.save()
         return True
+
+    async def _delivery_tool(self, runtime, tool_name, arguments, *, mutate=False):
+        tool = next((t for t in runtime.declaration.tools if t.name == tool_name), None)
+        if tool is None or (not mutate and tool.effect != "read_only"):
+            raise ConnectorDenied("delivery requires a declared " + tool_name + " tool")
+        operation = "source-delivery-" + hashlib.sha256(_canonical_json({"tool": tool_name, "args": arguments})).hexdigest()[:32]
+        grant = ConnectorPolicyRequest(runtime.board_id, runtime.project_id, runtime.declaration.connector_id,
+            operation, tool_name, tool.effect, hashlib.sha256(_canonical_json(arguments)).hexdigest())
+        if mutate:
+            self._writeback_grants.add(grant)
+        try:
+            result = await runtime.call_tool(operation, tool_name, arguments)
+            return _source_payload_document(result.payload)
+        finally:
+            self._writeback_grants.discard(grant)
+
+    async def _integration_pass(self, findings):
+        """Finite, deterministic reconciliation, one candidate per project per pass."""
+        if self.project_reader is None or self.index.path is None:
+            return
+        sources = {s.source_id: s for s in self.sources}
+        keys = sorted(k for k, e in self.index.entries.items()
+                      if e.get("delivery_state") != "integration_merged" and e.get("status") == "delivered" and e.get("source_id") in sources)
+        if not keys:
+            return
+        offset = self._integration_offset % len(keys)
+        # Reconcile an uncertain mutation before admitting any other PR on its
+        # board. Rotate ordinary candidates fairly without duplicate-board rows
+        # consuming the bounded reconciliation budget.
+        rotated = keys[offset:] + keys[:offset]
+        pending = [k for k in keys if self.index.entries[k].get("integration_attempt")]
+        candidates = {}
+        for candidate in pending + rotated:
+            candidates.setdefault(self.index.entries[candidate]["board_id"], candidate)
+        batch = list(candidates.values())[:SOURCE_INTAKE_WRITEBACK_CHECKS_PER_CYCLE]
+        self._integration_offset = offset + 1
+        seen = set()
+        for key in batch:
+            entry = self.index.entries[key]
+            board_id = entry["board_id"]
+            if board_id in seen:
+                continue
+            project = await self.project_reader(board_id)
+            policy = integration_policy(project)
+            if policy is None:
+                continue
+            seen.add(board_id)
+            source = sources[entry["source_id"]]
+            if source.writeback is None or source.writeback.tool != "ado_pull_request_create":
+                continue
+            runtime = self.runtimes[source.connector_id]
+            pr_id = None
+            try:
+                notice = json.loads(entry.get("delivery_notice", "").removeprefix("pursers-delivery: "))
+                pr_id = notice.get("pr_id")
+                if type(pr_id) is not int or pr_id < 1:
+                    continue
+                ticket = await self.ticket_reader(board_id, entry["ticket_id"])
+                if ticket is None or ticket.get("status") != "closed" or not _ticket_approved(ticket):
+                    continue
+                fields = await self._writeback_fields(source, board_id, entry["ticket_id"], ticket, entry)
+                args = {"project": fields["repository_project"], "repositoryId": fields["repository_name"], "pullRequestId": pr_id}
+                remote = await self._delivery_tool(runtime, "ado_pull_request_get", args)
+                remote = remote.get("pullRequest", remote) if isinstance(remote, Mapping) else {}
+                repository = remote.get("repository", {})
+                if (str(repository.get("name", "")).casefold() != fields["repository_name"].casefold()
+                        or str(repository.get("project", {}).get("name", "")).casefold() != fields["repository_project"].casefold()):
+                    raise ConnectorDenied("integration PR repository identity mismatch")
+                details = await self._delivery_tool(runtime, "ado_repository_details_get", {
+                    "project": fields["repository_project"], "repositoryId": fields["repository_name"],
+                    "includeRefs": True, "includeStatistics": False, "refFilter": "heads/" + policy["integration_branch"]})
+                if _repository_identity(details.get("repository", {}).get("remoteUrl", "")) != _repository_identity(fields["repository_url"]):
+                    raise ConnectorDenied("integration remote identity mismatch")
+                refs = details.get("refs", {}).get("value", [])
+                heads = [r.get("objectId") for r in refs if r.get("name") == "refs/heads/" + policy["integration_branch"]]
+                target_sha = heads[0] if len(heads) == 1 else ""
+                checks = None
+                if remote.get("status") == "active" and policy["auto_integrate"] and not policy["collection_paused"] and not entry.get("integration_attempt"):
+                    checks = await self._delivery_tool(runtime, "ado_pull_request_checks_get", args)
+                async def reserve(attempt):
+                    entry["integration_attempt"] = attempt
+                    self.index.dirty = True
+                    self.index.save()
+                async def complete():
+                    # Close the read/check gap as far as the connector permits;
+                    # upstream required policies must still enforce freshness at
+                    # completion. An uncertain reserved attempt is never replayed.
+                    latest = await self._delivery_tool(runtime, "ado_pull_request_get", args)
+                    latest = latest.get("pullRequest", latest) if isinstance(latest, Mapping) else {}
+                    for field in ("sourceRefName", "targetRefName", "lastMergeSourceCommit", "lastMergeTargetCommit", "repository"):
+                        if latest.get(field) != remote.get(field):
+                            raise ConnectorDenied("integration candidate changed during validation")
+                    if latest.get("status") != "active" or latest.get("isDraft") or latest.get("mergeStatus") != "succeeded":
+                        raise ConnectorDenied("integration candidate is no longer ready")
+                    if any(row.get("vote", 0) < 0 for row in latest.get("reviewers", [])):
+                        raise ConnectorDenied("integration reviewer vote changed during validation")
+                    await self._delivery_tool(runtime, "ado_pull_request_update", {**args, "status": "completed", "additionalProperties": {
+                        "lastMergeSourceCommit": {"commitId": fields["approved_sha"]},
+                        "completionOptions": {"mergeStrategy": "noFastForward", "deleteSourceBranch": False, "bypassPolicy": False, "transitionWorkItems": False}}}, mutate=True)
+                api = runpy.run_path(str(Path(__file__).with_name("integration_delivery.py")))
+                result = await api["integrate"](policy, approved_sha=fields["approved_sha"], source_ref="refs/heads/" + fields["source_branch"],
+                    target_sha=target_sha, remote=remote, checks=checks, prior_attempt=entry.get("integration_attempt"), reserve=reserve, complete=complete)
+                if result.get("merge_sha"):
+                    entry["integration_merge_sha"] = result["merge_sha"]
+                entry["target_branch"] = policy["integration_branch"]
+                await self._delivery_notice(entry, result["state"], pr_id=pr_id,
+                    url=notice.get("url"), reason=result.get("reason"))
+                if result["state"] == "integration_blocked":
+                    findings.append({"kind": "source-integration-blocked", "level": "warn", "ticket_id": entry["ticket_id"], "message": result["reason"]})
+            except Exception as exc:
+                state = "pr_uncertain" if entry.get("integration_attempt") else "integration_blocked"
+                await self._delivery_notice(entry, state, pr_id=pr_id, reason=type(exc).__name__)
+                findings.append({"kind": "source-integration-blocked", "level": "warn", "ticket_id": entry["ticket_id"],
+                    "message": "Integration needs confirmed connector validation; inspect delivery evidence."})
+
 
     async def _writeback_pass(self, findings: list[dict[str, Any]]) -> int:
         """Advance in-flight index entries from their ticket state.
@@ -6688,6 +6808,8 @@ class SourceIntakePoller:
         findings: list[dict[str, Any]] = []
         self._writeback_now = now
         writebacks = await self._writeback_pass(findings) if self.active else 0
+        if self.active:
+            await self._integration_pass(findings)
         allowance, order, decision = await self._allowance(findings, now)
         by_id = {source.source_id: source for source in self.sources}
         if decision.get("mode") == "unbounded":

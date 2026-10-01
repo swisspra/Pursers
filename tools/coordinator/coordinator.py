@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from pursers_client.delivery_workflow import delivery_target
+
 import argparse
 import asyncio
 import base64
@@ -118,6 +120,7 @@ class Project:
     integration_ref: str = "main"
     public: bool = False
     domain: str = "personal"
+    delivery_branch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -435,7 +438,11 @@ def parse_registry(raw: Mapping[str, Any]) -> list[Project]:
         if row.get("status") != "active":
             continue
         board_id, work_dir = row.get("board_id"), row.get("work_dir")
-        integration_ref = row.get("integration_ref", "main")
+        integration_ref = delivery_target(row)
+        delivery_branch = integration_ref if (row.get("delivery_workflow") or {}).get("mode") == "integration" else None
+        if delivery_branch:
+            integration_ref = "refs/remotes/origin/" + delivery_branch
+            work_dir = row.get("fleet_clone_dir") or work_dir
         domain = row.get("domain", "personal")
         if not all(isinstance(item, str) and item.strip() for item in (board_id, work_dir, integration_ref)):
             raise ValueError("active project routing is incomplete")
@@ -452,6 +459,7 @@ def parse_registry(raw: Mapping[str, Any]) -> list[Project]:
                 integration_ref=integration_ref,
                 public=row.get("public") is True,
                 domain=domain,
+                delivery_branch=delivery_branch,
             )
         )
     return sorted(projects, key=lambda item: (item.board_id, item.name))
@@ -1888,6 +1896,15 @@ def evaluate_integration_watch(
 ) -> tuple[list[dict[str, Any]], int]:
     findings: list[dict[str, Any]] = []
     suppressed_pre_watermark = 0
+    if project.delivery_branch:
+        # Refresh only the remote-tracking ref. Never switch, reset or write the
+        # operator's local branches to make a landing check succeed.
+        refreshed = _git(project.work_dir, ["fetch", "--no-tags", "origin",
+            "refs/heads/" + project.delivery_branch + ":" + project.integration_ref])
+        if refreshed.returncode:
+            return [_finding("integration-check-unavailable", "warn", project.board_id,
+                "The delivery branch could not be refreshed; landing status is unknown.",
+                project=project.name, integration_ref=project.integration_ref)], 0
     for ticket in tickets:
         if ticket.get("status") != "closed" or _review_has_no_merge_label(ticket):
             continue

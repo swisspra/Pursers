@@ -10,6 +10,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from pursers_client.submission_evidence import submission_identity
+from pursers_client.delivery_workflow import DELIVERY_STAGES, branch_name
 
 MAX_TITLE_CHARS = 160
 MAX_SUMMARY_CHARS = 1_000
@@ -97,7 +98,7 @@ def project_delivery(ticket: dict[str, Any]) -> dict[str, Any] | None:
             delivery = json.loads(text[len("pursers-delivery: "):])
         except (ValueError, TypeError):
             continue
-        if not isinstance(delivery, dict) or delivery.get("state") not in {"pr_pending", "pr_blocked", "pr_uncertain", "pr_created"}:
+        if not isinstance(delivery, dict) or delivery.get("state") not in DELIVERY_STAGES:
             continue
         if delivery.get("commit_hash") and delivery["commit_hash"] != sha:
             continue
@@ -112,6 +113,13 @@ def project_delivery(ticket: dict[str, Any]) -> dict[str, Any] | None:
                     safe["url"] = url
             except ValueError:
                 pass
+        if delivery.get("target_branch"):
+            try:
+                safe["target_branch"] = branch_name(delivery["target_branch"])
+            except ValueError:
+                pass
+        if re.fullmatch(r"[0-9a-f]{40}", str(delivery.get("merge_sha", ""))):
+            safe["merge_sha"] = delivery["merge_sha"]
         return safe
     if any(isinstance(a, dict) and re.match(r"^source-writeback-sha256:[0-9a-f]{64}(?:\n|$)", str(a.get("text", "")))
            for a in ticket.get("annotations", [])):

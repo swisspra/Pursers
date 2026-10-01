@@ -301,3 +301,18 @@ def test_config_requires_absolute_root_and_rejects_credentials(tmp_path: Path) -
     ] = "https://user:secret@example.invalid/alpha.git"
     with pytest.raises(ValueError, match="credentials"):
         onboarding.parse_source_policies(credential)
+
+
+def test_delivery_default_uses_each_mapping_base_without_pushing_to_it(tmp_path):
+    remote = make_remote(tmp_path, 'delivery')
+    registry = FakeRegistry()
+    registry.document['delivery_defaults'] = {'mode':'integration','base_branch':'dev','integration_branch':'pursers-integration'}
+    selected = policy(tmp_path, {'delivery': onboarding.RepositoryResolution(str(remote), 'main')})
+    before = subprocess.check_output(['git','--git-dir',str(remote),'rev-parse','refs/heads/main'],text=True).strip()
+    result = asyncio.run(onboarding.ProjectOnboarder(registry, {'sonarqube': selected}, clock=lambda: NOW).run_cycle([item('delivery')]))[0]
+    assert result.status == 'onboarded'
+    entry = registry.document['projects']['delivery']
+    assert entry['delivery_workflow']['base_branch'] == 'main'
+    assert entry['integration_ref'] == 'pursers-integration'
+    assert subprocess.check_output(['git','--git-dir',str(remote),'rev-parse','refs/heads/main'],text=True).strip() == before
+    assert subprocess.check_output(['git','--git-dir',str(remote),'rev-parse','refs/heads/pursers-integration'],text=True).strip() == before

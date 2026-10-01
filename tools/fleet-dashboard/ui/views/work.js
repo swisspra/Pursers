@@ -43,6 +43,9 @@
   function nextAction(ticket) {
     const status = ticket.status;
     if (ticket.delivery?.state === 'delivery_recorded') return 'Delivery recorded; inspect ticket evidence';
+    if (ticket.delivery?.state === 'integration_merged') return 'Ready on the delivery branch; your team handles the final merge';
+    if (ticket.delivery?.state === 'integration_pending') return 'Waiting for integration checks or collection to resume';
+    if (ticket.delivery?.state === 'integration_blocked') return 'Resolve the integration blocker in ticket evidence';
     if (ticket.delivery?.state === 'pr_pending') return 'Butler is preparing the pull request';
     if (ticket.delivery?.state === 'pr_created') return 'Review the pull request';
     if (['pr_blocked', 'pr_uncertain'].includes(ticket.delivery?.state)) return 'Check delivery evidence in ticket details';
