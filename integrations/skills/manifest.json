@@ -17,8 +17,8 @@
       "surface": "Zed Agent Skills; external ACP agents use their own skill discovery"
     },
     "codex": {
-      "project": ".codex/skills",
-      "user": ".codex/skills",
+      "project": ".agents/skills",
+      "user": ".agents/skills",
       "surface": "Codex project or user skills"
     },
     "goose": {

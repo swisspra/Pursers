@@ -18,13 +18,14 @@ Official host reference: <https://zed.dev/docs/ai/skills>
 
 ## Codex CLI
 
-Codex uses `<project>/.codex/skills/` for project scope and
-`~/.codex/skills/` for user scope. Prefer a project install and start Codex in
-that project. Verify MCP separately with `codex mcp list` and `/mcp`; skill
-presence does not prove that Central authentication works.
+Codex discovers repository skills from `.agents/skills/` directories between
+the current working directory and the repository root, and user skills from
+`~/.agents/skills/`. Prefer a project install and start Codex in that project.
+Verify MCP separately with `codex mcp list` and `/mcp`; skill presence does not
+prove that Central authentication works.
 
-Official format reference:
-<https://developers.openai.com/api/docs/guides/tools-skills>
+Official Codex product reference:
+<https://learn.chatgpt.com/docs/build-skills>
 
 ## goose CLI or Desktop
 

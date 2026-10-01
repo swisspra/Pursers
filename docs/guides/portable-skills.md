@@ -46,7 +46,9 @@ The paths and behavior were checked against the official
 
 ## Codex and goose
 
-Codex uses a project `.codex/skills/` directory:
+Codex discovers project skills from `.agents/skills/` directories between the
+current working directory and repository root, and user skills from
+`$HOME/.agents/skills/`:
 
 ```sh
 python3 integrations/skills/manage.py plan \
@@ -70,7 +72,7 @@ python3 integrations/skills/manage.py check \
 ```
 
 These paths were checked against the official
-[OpenAI skill guidance](https://developers.openai.com/api/docs/guides/tools-skills)
+[Codex product skill documentation](https://learn.chatgpt.com/docs/build-skills)
 and goose's
 [built-in extension documentation](https://github.com/aaif-goose/goose/blob/main/documentation/docs/getting-started/using-extensions.md)
 on 2026-10-02. Host support can change independently of Pursers. If the named

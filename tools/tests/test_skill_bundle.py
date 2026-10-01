@@ -153,7 +153,7 @@ def test_manager_rejects_a_broad_target(tmp_path: Path) -> None:
 def test_project_targets_match_each_host_contract(tmp_path: Path) -> None:
     expected = {
         "zed": ".agents/skills",
-        "codex": ".codex/skills",
+        "codex": ".agents/skills",
         "goose": ".agents/skills",
     }
     project = tmp_path / "project"
@@ -177,3 +177,26 @@ def test_project_targets_match_each_host_contract(tmp_path: Path) -> None:
         )
         assert result.returncode == 0, result.stderr
         assert Path(json.loads(result.stdout)["target"]) == project / relative
+
+    user_home = tmp_path / "home"
+    codex_user = subprocess.run(
+        [
+            sys.executable,
+            str(MANAGER),
+            "plan",
+            "--host",
+            "codex",
+            "--scope",
+            "user",
+            "--user-home",
+            str(user_home),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert codex_user.returncode == 0, codex_user.stderr
+    assert Path(json.loads(codex_user.stdout)["target"]) == (
+        user_home / ".agents/skills"
+    )
