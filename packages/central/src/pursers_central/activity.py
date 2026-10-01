@@ -249,7 +249,8 @@ def project_ticket_activity(
             result.update(
                 stage="work",
                 state="retrying",
-                actor_id=_actor(offer.get("agent_id") or ticket.get("assigned_to_agent_id")),
+                attempt_id=None,
+                actor_id=None,
                 updated_at=reviewed_at or _text(ticket.get("updated_at"), 40) or created_at,
                 next_action="An eligible worker must claim the next attempt.",
             )

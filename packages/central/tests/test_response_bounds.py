@@ -763,6 +763,18 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
                     "fix_instructions": "keep only the latest verdict",
                 }
             )
+            ticket["status"] = "claimed"
+            ticket["work_attempt"] = 2
+            ticket["progress"] = {
+                "attempt": 2,
+                "revision": 1,
+                "low_percent": 40,
+                "high_percent": 60,
+                "confidence": "medium",
+                "evidence": "PRIVATE CHECKPOINT EVIDENCE",
+                "assessed_at": "2030-01-02T11:00:00Z",
+                "fresh_until": "2030-01-02T12:00:00Z",
+            }
             ticket["dispatch_history"] = [
                 {"state": "offered", "kind": "work", "cycle": 0,
                  "agent_id": full_agent_id},
@@ -819,13 +831,14 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
             {
                 "ticket_id", "title", "status", "priority", "parked",
                 "assigned", "updated_at", "counts", "dispatch_summary",
-                "progress_freshness", "activity",
+                "progress_freshness", "activity", "progress",
             },
         )
         self.assertEqual(summary_ticket["activity"]["schema_version"], 1)
         self.assertLessEqual(
             len(summary_ticket["activity"]["evidence_refs"]), 8
         )
+        self.assertNotIn("evidence", summary_ticket["activity"]["estimate"])
         work_payload = work.structured_content
         work_ticket = work_payload["ticket"]
         self.assertEqual(work_payload["view"], "work")
@@ -833,6 +846,19 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("branch_and_commit", work_ticket["latest_submission"]["notes"])
         self.assertEqual(work_ticket["annotations"][0]["kind"], "decision")
         self.assertNotIn("dispatch_history", work_ticket)
+        self.assertEqual(
+            work_ticket["activity"]["estimate"]["evidence"],
+            "PRIVATE CHECKPOINT EVIDENCE",
+        )
+        self.assertEqual(
+            full_without_history.structured_content["ticket"]["activity"]
+            ["estimate"]["evidence"],
+            "PRIVATE CHECKPOINT EVIDENCE",
+        )
+        self.assertNotIn(
+            "evidence",
+            listed.structured_content["tickets"][0]["activity"]["estimate"],
+        )
         self.assertEqual(
             work_ticket["dispatch_summary"],
             {

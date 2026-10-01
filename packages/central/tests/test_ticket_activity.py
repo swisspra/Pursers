@@ -164,6 +164,44 @@ def test_activity_distinguishes_retry_stale_expired_failed_and_canceled() -> Non
     assert canceled["actor_id"] == "AI-worker"
 
 
+def test_activity_retry_offer_does_not_mix_rejected_attempt_with_next_actor() -> None:
+    rejected_review = [
+        {
+            "verdict": "reject",
+            "reviewed_at": "2030-01-02T11:20:00Z",
+            "reviewed_by_agent_id": "AI-reviewer",
+        }
+    ]
+    offered = project(
+        {
+            "status": "open",
+            "work_attempt": 1,
+            "rejection_count": 1,
+            "review_history": rejected_review,
+            "work_offer": {
+                "agent_id": "AI-next",
+                "offered_at": "2030-01-02T11:25:00Z",
+            },
+        }
+    )
+    reclaimed = project(
+        {
+            "status": "claimed",
+            "work_attempt": 2,
+            "rejection_count": 1,
+            "review_history": rejected_review,
+            "claimed_by_agent_id": "AI-next",
+            "claimed_at": "2030-01-02T11:30:00Z",
+            "lease_expires_at": "2030-01-02T12:15:00Z",
+        }
+    )
+
+    assert (offered["stage"], offered["state"]) == ("work", "retrying")
+    assert (offered["attempt_id"], offered["actor_id"]) == (None, None)
+    assert (reclaimed["stage"], reclaimed["state"]) == ("work", "retrying")
+    assert (reclaimed["attempt_id"], reclaimed["actor_id"]) == (2, "AI-next")
+
+
 def test_activity_keeps_review_pr_integration_and_delivery_distinct() -> None:
     submitted = project(
         {

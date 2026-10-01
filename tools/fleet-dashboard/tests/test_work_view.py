@@ -183,7 +183,7 @@ def test_work_view_renders_durable_activity_and_keeps_legacy_fallback() -> None:
                     "low_percent": 40,
                     "high_percent": 60,
                     "confidence": "medium",
-                    "evidence": "Focused checks pass.",
+                    "evidence": "PRIVATE CHECKPOINT EVIDENCE",
                     "assessed_at": "2030-01-02T11:55:00Z",
                 },
             },
@@ -243,7 +243,7 @@ console.log(JSON.stringify({{html}}));
     assert "Attempt 2 · Actor AI-reviewer" in html
     assert "Current · updated 2 min ago" in html
     assert "40–60% · medium confidence" in html
-    assert "Focused checks pass." in html
+    assert "PRIVATE CHECKPOINT EVIDENCE" not in html
     assert "Record an independent verdict." in html
     assert "Delivery · Blocked" in html
     assert "Remote checks failed." in html

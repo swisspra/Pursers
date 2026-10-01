@@ -809,12 +809,26 @@ def _progress_freshness(progress: Any, now: float) -> str:
     return "fresh" if parsed.timestamp() > now else "stale"
 
 
+def _project_ticket_activity(
+    activity: Mapping[str, Any], *, include_narrative_evidence: bool
+) -> dict[str, Any]:
+    projected = copy.deepcopy(dict(activity))
+    estimate = projected.get("estimate")
+    if isinstance(estimate, Mapping):
+        projected_estimate = copy.deepcopy(dict(estimate))
+        if not include_narrative_evidence:
+            projected_estimate.pop("evidence", None)
+        projected["estimate"] = projected_estimate
+    return projected
+
+
 def project_ticket_read(
     ticket: Mapping[str, Any],
     *,
     view: str,
     dispatch_history: list[dict[str, Any]],
     include_dispatch_history: bool,
+    include_activity_evidence: bool = True,
 ) -> dict[str, Any]:
     """Project one authorized ticket for model-facing read tools."""
     summary: dict[str, Any] = {
@@ -840,7 +854,12 @@ def project_ticket_read(
     )
     activity = ticket.get("activity")
     if isinstance(activity, Mapping):
-        summary["activity"] = copy.deepcopy(dict(activity))
+        summary["activity"] = _project_ticket_activity(
+            activity,
+            include_narrative_evidence=(
+                view != "summary" and include_activity_evidence
+            ),
+        )
     progress = ticket.get("progress")
     if isinstance(progress, Mapping):
         summary["progress"] = {
@@ -860,6 +879,10 @@ def project_ticket_read(
 
     if view == "full":
         full = copy.deepcopy(dict(ticket))
+        if isinstance(activity, Mapping) and not include_activity_evidence:
+            full["activity"] = _project_ticket_activity(
+                activity, include_narrative_evidence=False
+            )
         full["dispatch_summary"] = _dispatch_summary(dispatch_history)
         if include_dispatch_history:
             full["dispatch_history"] = copy.deepcopy(dispatch_history)
@@ -908,7 +931,6 @@ def project_ticket_read(
         "reviewed_by", "reviewed_by_agent_id", "reviewed_by_agent_name",
         "reviewed_by_principal_id", "rejection_count", "abandoned_count",
         "work_attempt", "progress", "progress_freshness", "progress_updated_at",
-        "activity",
     ):
         if key in ticket:
             work[key] = copy.deepcopy(ticket[key])
@@ -933,6 +955,7 @@ def project_ticket_read_response(
             view=view,
             dispatch_history=_dispatch_history_for_read(service, board_id, ticket),
             include_dispatch_history=include_dispatch_history,
+            include_activity_evidence=True,
         )
     tickets = projected.get("tickets")
     if isinstance(tickets, list):
@@ -942,6 +965,7 @@ def project_ticket_read_response(
                 view=view,
                 dispatch_history=_dispatch_history_for_read(service, board_id, ticket),
                 include_dispatch_history=include_dispatch_history,
+                include_activity_evidence=False,
             )
             for ticket in tickets
             if isinstance(ticket, Mapping)

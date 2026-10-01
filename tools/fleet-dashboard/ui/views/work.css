@@ -227,8 +227,7 @@
   overflow-wrap: anywhere;
 }
 
-.work-activity-blocker,
-.work-activity-estimate-evidence {
+.work-activity-blocker {
   margin: 2px 0 0;
   font-size: 13px;
   line-height: 18px;
@@ -237,10 +236,6 @@
 
 .work-activity-blocker {
   color: var(--work-stop);
-}
-
-.work-activity-estimate-evidence {
-  color: var(--work-ink);
 }
 
 .work-activity-evidence {

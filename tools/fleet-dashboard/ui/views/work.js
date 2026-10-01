@@ -192,14 +192,10 @@
       const rangeLabel = estimate.low_percent === estimate.high_percent
         ? `Agent-estimated progress ${estimate.low_percent} percent`
         : `Agent-estimated progress between ${estimate.low_percent} and ${estimate.high_percent} percent`;
-      const evidence = typeof estimate.evidence === 'string' && estimate.evidence.trim()
-        ? estimate.evidence.trim()
-        : '';
       estimateMarkup = `<span class="work-activity-estimate">${esc(label)} · ${esc(estimate.confidence)} confidence</span>
         <span class="work-progress-track" role="img" aria-label="${esc(rangeLabel)}">
           <span class="work-progress-range" style="--progress-low:${estimate.low_percent};--progress-high:${estimate.high_percent}"></span>
-        </span>
-        ${evidence ? `<p class="work-activity-estimate-evidence">${esc(evidence)}</p>` : ''}`;
+        </span>`;
     }
     const blocker = typeof activity.blocking_reason === 'string' && activity.blocking_reason.trim()
       ? `<p class="work-activity-blocker"><strong>Blocked:</strong> ${esc(activity.blocking_reason.trim())}</p>`
