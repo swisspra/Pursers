@@ -440,9 +440,13 @@ class FleetClient(Protocol):
     async def ticket_list(
         self,
         *,
+        status: str | None = None,
+        assigned_to: str | None = None,
         include_closed: bool = False,
+        include_archived: bool = True,
         limit: int = 100,
         view: str | None = None,
+        cursor: str | None = None,
     ) -> dict[str, Any]: ...
 
     async def board_dispatch_policy_set(
@@ -458,6 +462,66 @@ class FleetClient(Protocol):
     async def memory_read(
         self, *, memory_type: str | None = None, limit: int = 50
     ) -> list[dict[str, Any]]: ...
+
+
+async def _ticket_list_pages(
+    client: FleetClient,
+    *,
+    max_pages: int = 100,
+    **arguments: Any,
+) -> dict[str, Any]:
+    """Follow Central application cursors; stay honest with older servers."""
+    page = await client.ticket_list(**arguments)
+    result = dict(page)
+    rows: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_cursors: set[str] = set()
+    page_count = 0
+    pagination_supported = "next_cursor" in page
+    while True:
+        page_count += 1
+        page_rows = page.get("tickets")
+        for row in page_rows if isinstance(page_rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            ticket_id = row.get("ticket_id")
+            if isinstance(ticket_id, str):
+                if ticket_id in seen_ids:
+                    continue
+                seen_ids.add(ticket_id)
+            rows.append(row)
+        cursor = page.get("next_cursor")
+        if not pagination_supported or cursor is None:
+            break
+        if (
+            not isinstance(cursor, str)
+            or not cursor
+            or cursor in seen_cursors
+            or page_count >= max_pages
+        ):
+            break
+        seen_cursors.add(cursor)
+        page = await client.ticket_list(**arguments, cursor=cursor)
+    total = result.get("total_matching")
+    total = total if type(total) is int and total >= 0 else len(rows)
+    complete = (
+        page.get("next_cursor") is None
+        if pagination_supported
+        else len(rows) >= total
+    )
+    result.update(
+        {
+            "tickets": rows,
+            "count": len(rows),
+            "returned_count": len(rows),
+            "page_count": page_count,
+            "pagination_supported": pagination_supported,
+            "traversal_complete": complete,
+            "has_more": not complete,
+            "next_cursor": page.get("next_cursor") if pagination_supported else None,
+        }
+    )
+    return result
 
 
 def _state_value(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
@@ -4364,6 +4428,7 @@ def aggregate_fleet(
                 ),
                 "activity_window_seconds": activity_window_seconds,
                 "snapshot_truncation": snapshot.get("_snapshot_truncation"),
+                "ticket_pagination": snapshot.get("_ticket_pagination"),
                 "truncated": bool(
                     snapshot.get("truncated") or len(ticket_rows) > MAX_TICKET_ROWS
                 ),
@@ -5014,7 +5079,8 @@ class FleetFetcher:
                 )
                 events = event_feed["events"]
                 if snapshot.get("truncated") or ticket_omitted:
-                    active_page = await client.ticket_list(
+                    active_page = await _ticket_list_pages(
+                        client,
                         include_closed=False, limit=TICKET_LIST_LIMIT
                     )
                     active_tickets = active_page.get("tickets")
@@ -5024,9 +5090,13 @@ class FleetFetcher:
                     active_total = _nonnegative_int(
                         active_page.get("total_matching", len(active_tickets))
                     )
-                    if active_total > len(active_tickets):
+                    if (
+                        not active_page.get("traversal_complete", False)
+                        and active_total > len(active_tickets)
+                    ):
                         for status in ("open", "claimed", "submitted"):
-                            page = await client.ticket_list(
+                            page = await _ticket_list_pages(
+                                client,
                                 status=status,
                                 include_closed=False,
                                 limit=TICKET_LIST_LIMIT,
@@ -5072,6 +5142,12 @@ class FleetFetcher:
                         if isinstance(ticket, dict):
                             by_id[ticket_id] = ticket
                     snapshot["tickets"] = list(by_id.values())
+                    snapshot["_ticket_pagination"] = {
+                        "supported": bool(active_page.get("pagination_supported")),
+                        "complete": bool(active_page.get("traversal_complete")),
+                        "pages": _nonnegative_int(active_page.get("page_count", 1)),
+                        "has_more": bool(active_page.get("has_more")),
+                    }
                 snapshot["_snapshot_truncation"] = {
                     "returned": len(snapshot_tickets),
                     "total": max(ticket_total, len(snapshot_tickets)),

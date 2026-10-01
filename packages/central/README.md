@@ -134,6 +134,37 @@ and `warnings` as applicable). Their legacy rendered `content` copy remains in
 storage but is omitted from memory read projections, so the same information is
 not sent twice.
 
+## Ticket and retained-history pagination
+
+`ticket_list` keeps its existing defaults and response keys. It also accepts an
+optional opaque `cursor` and returns `next_cursor`, `has_more`,
+`returned_count`, `read_consistency`, and `watermark`. Continue with the exact
+same filters, view, archive setting, and authenticated principal. A changed
+filter or caller deliberately invalidates the cursor; restart without a cursor
+instead of treating that error as an empty page. Only `next_cursor=null` marks
+the end of that traversal.
+
+The order is priority followed by immutable ticket ID. Reads are live rather
+than snapshot-isolated: priority, status, or archive changes between pages may
+move a ticket across the cursor boundary. Consumers should deduplicate ticket
+IDs and restart after relevant journal events. On an unchanged board, following
+the cursor to the end returns every matching ID exactly once. A bounded page or
+truncated board snapshot is never proof that no matching work exists.
+
+`ticket_history_list` pages one named retained history (`annotations`,
+`dispatch`, `submissions`, `reviews`, or `progress`) from oldest to newest. It
+returns stable entry IDs, archive and unavailable counts, explicit retention
+completeness, and its own cursor. Large items remain available through the
+ticket detail reference; list reads do not destructively shorten stored text.
+
+Ticket cursors are integrity-protected with the private request-state keyring,
+and current board authorization is checked on every page. Key rotation follows
+the same overlap order described above. Removing an old key invalidates cursors
+sealed by that key; clients restart the read without a cursor. Rolling back to
+an older Central leaves cursor-free `ticket_list` behavior intact, while newer
+clients report pagination as unsupported and must not infer a complete board
+when `total_matching` exceeds the returned rows.
+
 ## Ticket model-usage accounting
 
 `ticket_create`, `ticket_submit`, and `ticket_review` accept a content-free

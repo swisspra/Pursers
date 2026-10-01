@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Opaque, integrity-protected, principal- and filter-bound keyset pagination for
+  ticket lists, with explicit live-read consistency, response byte bounds,
+  lazy archive hydration, retained-history pages, compatible client traversal,
+  and bounded Fleet Work controls. Existing cursor-free reads remain valid.
+
 - Configurable delivery policy inheritance across global defaults, explicit named
   groups, and repository overrides, with field provenance, presets, reset-to-inherit,
   guarded activation and draft-only visibility for runtime capabilities that are not

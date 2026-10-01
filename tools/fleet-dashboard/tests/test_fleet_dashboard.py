@@ -9845,6 +9845,42 @@ def test_truncated_snapshot_splices_active_ticket_list() -> None:
     }
 
 
+def test_ticket_list_pages_follows_cursor_and_old_server_falls_back() -> None:
+    class NewClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def ticket_list(self, **kwargs: object) -> dict:
+            self.calls.append(dict(kwargs))
+            if kwargs.get("cursor") == "next":
+                return {
+                    "tickets": [{"ticket_id": "TK-b"}, {"ticket_id": "TK-c"}],
+                    "next_cursor": None,
+                    "total_matching": 3,
+                }
+            return {
+                "tickets": [{"ticket_id": "TK-a"}, {"ticket_id": "TK-b"}],
+                "next_cursor": "next",
+                "total_matching": 3,
+            }
+
+    new = NewClient()
+    result = asyncio.run(dashboard._ticket_list_pages(new, limit=2))
+    assert [row["ticket_id"] for row in result["tickets"]] == ["TK-a", "TK-b", "TK-c"]
+    assert result["pagination_supported"] is True
+    assert result["traversal_complete"] is True
+    assert new.calls[1]["cursor"] == "next"
+
+    class OldClient:
+        async def ticket_list(self, **_kwargs: object) -> dict:
+            return {"tickets": [{"ticket_id": "TK-a"}], "total_matching": 3}
+
+    fallback = asyncio.run(dashboard._ticket_list_pages(OldClient(), limit=1))
+    assert fallback["pagination_supported"] is False
+    assert fallback["traversal_complete"] is False
+    assert fallback["has_more"] is True
+
+
 def test_push_wait_pressure_supersedes_poll_and_exposes_return_rate(
     tmp_path: Path,
 ) -> None:

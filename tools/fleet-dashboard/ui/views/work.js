@@ -13,6 +13,9 @@
   const knownStatuses = new Set(statusGroups.flatMap(group => group.statuses));
   let activeFilter = 'all';
   let latestContext = null;
+  const pageSize = 50;
+  let visibleLimit = pageSize;
+  let pageState = 'idle';
 
   function loadStyles() {
     if (typeof document === 'undefined') return;
@@ -202,8 +205,14 @@
 
   function renderWarmWork() {
     const context = latestContext;
-    const {pageHead, warmTruthStrip, warmTickets} = context;
-    const tickets = warmTickets();
+    const {esc, pageHead, warmTruthStrip, warmTickets} = context;
+    const seen = new Set();
+    const tickets = warmTickets().filter(item => {
+      const key = JSON.stringify([item.central, item.board.board_id, item.ticket.id]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     const counts = Object.fromEntries(statusGroups.map(group => [
       group.key,
       tickets.filter(item => group.statuses.includes(item.ticket.status)).length,
@@ -216,9 +225,11 @@
         .map(group => filterButton(group.key, group.label, counts[group.key])),
       ...(counts.other ? [filterButton('other', 'Other', counts.other)] : []),
     ].join('');
-    const visible = activeFilter === 'all'
+    const matching = activeFilter === 'all'
       ? tickets
       : tickets.filter(item => groupFor(item.ticket.status).key === activeFilter);
+    const visible = matching.slice(0, visibleLimit);
+    const hasMore = visible.length < matching.length;
     const activeLabel = activeFilter === 'all' ? 'All visible' : groupLabel(activeFilter);
     const filterOpen = typeof matchMedia === 'function' && matchMedia('(min-width: 801px)').matches ? ' open' : '';
     const ledger = visible.length
@@ -247,8 +258,11 @@
         </details>
       </section>
       <h3 id="work-ledger-title" class="sr-only">${activeFilter === 'all' ? 'All visible work' : `${groupLabel(activeFilter)} work`}</h3>
-      <p class="work-result-count" aria-live="polite">Showing ${visible.length} of ${tickets.length} visible ticket${tickets.length === 1 ? '' : 's'}</p>
+      <p class="work-result-count" aria-live="polite">Showing ${visible.length} of ${matching.length} matching ticket${matching.length === 1 ? '' : 's'} (${tickets.length} loaded)</p>
       ${ledger}
+      <div class="work-page-controls" data-page-state="${esc(pageState)}">
+        ${hasMore ? `<button type="button" class="button" data-work-next-page ${pageState === 'loading' ? 'disabled' : ''}>${pageState === 'loading' ? 'Loading…' : `Show next ${Math.min(pageSize, matching.length - visible.length)}`}</button>` : '<span class="muted">End of loaded tickets</span>'}
+      </div>
     </div>`;
   }
 
@@ -256,6 +270,20 @@
     const button = event.target.closest('[data-work-filter]');
     if (!button || !latestContext || !document.querySelector('.work-view')) return;
     activeFilter = button.dataset.workFilter;
+    visibleLimit = pageSize;
+    pageState = 'idle';
+    const host = document.querySelector('#central-sections');
+    if (host) host.innerHTML = renderWarmWork();
+  });
+
+  document.addEventListener('click', event => {
+    const button = event.target.closest('[data-work-next-page]');
+    if (!button || !latestContext || !document.querySelector('.work-view')) return;
+    pageState = 'loading';
+    button.disabled = true;
+    button.textContent = 'Loading…';
+    visibleLimit += pageSize;
+    pageState = 'idle';
     const host = document.querySelector('#central-sections');
     if (host) host.innerHTML = renderWarmWork();
   });

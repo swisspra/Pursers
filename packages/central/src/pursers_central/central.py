@@ -121,6 +121,14 @@ from journal import (
     _board_token,
     _require_text,
 )
+from ticket_pagination import (
+    DEFAULT_PAGE_MAX_BYTES,
+    HISTORY_FIELDS,
+    TicketCursorCodec,
+    entry_id as history_entry_id,
+    history_timestamp,
+    serialized_bytes,
+)
 from jwt_verifier import BOARD_CLAIM, JWTTokenVerifier, JWTVerifierConfig
 from runtime_health import (
     RuntimeDiagnostics,
@@ -835,6 +843,9 @@ def project_ticket_read(
         }
     if ticket.get("archived") is True:
         summary["archived"] = True
+    for key in ("omitted_sections", "detail_ref", "oversized_for_list"):
+        if key in ticket:
+            summary[key] = copy.deepcopy(ticket[key])
     if view == "summary":
         return summary
 
@@ -3233,10 +3244,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         os.environ.get("CENTRAL_REQUEST_STATE_KEY_FILE", "").strip()
         or data_root / "request-state.keys"
     )
+    request_state_keys = load_or_create_request_state_keys(request_state_key_path)
     request_state_security = RequestStateSecurity(
-        keys=load_or_create_request_state_keys(request_state_key_path),
+        keys=request_state_keys,
         ttl=REQUEST_STATE_TTL_S,
     )
+    ticket_cursor_codec = TicketCursorCodec(request_state_keys)
     reaper_context = Context(subscriptions=subscription_bus)
     reaper_principal = Principal(
         "PR-central-reaper", "central-reaper", frozenset()
@@ -12768,6 +12781,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ticket_ids: list[str] | None = None,
         view: str = DEFAULT_TICKET_READ_VIEW,
         include_dispatch_history: bool = False,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         """List authorized tickets with bounded server-side filters.
 
@@ -12783,6 +12797,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError("include_dispatch_history must be a boolean")
         if type(include_archived) is not bool:
             raise ValueError("include_archived must be a boolean")
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise ValueError("cursor must be a non-empty opaque string")
         if status is not None and status not in ACTIVE_TICKET_STATES | TERMINAL_TICKET_STATES:
             raise ValueError("unsupported ticket status")
         if not 1 <= limit <= 500:
@@ -12798,6 +12814,36 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         require_scope(principal, "board:read")
         document = service.load(board_id)
         service.principal_members(document, principal.principal_id)
+        cursor_filters = {
+            "status": status,
+            "assigned_to": assigned_to,
+            "include_closed": include_closed,
+            "include_archived": include_archived,
+            "review_unclaimed_only": review_unclaimed_only,
+            "ticket_ids": sorted(selected_ticket_ids)
+            if selected_ticket_ids is not None else None,
+            "agent_name": agent_name,
+            "view": view,
+            "include_dispatch_history": include_dispatch_history,
+            "ordering": "priority-ticket-id-v1",
+        }
+        after_key: tuple[int, str] | None = None
+        if cursor is not None:
+            position = ticket_cursor_codec.decode(
+                cursor,
+                kind="ticket-list",
+                board_id=board_id,
+                principal_id=principal.principal_id,
+                filters=cursor_filters,
+            )
+            if (
+                len(position) != 2
+                or isinstance(position[0], bool)
+                or not isinstance(position[0], int)
+                or not isinstance(position[1], str)
+            ):
+                raise ValueError("cursor position is invalid; restart without cursor")
+            after_key = (position[0], position[1])
         tickets = list(document["tickets"].values())
         if selected_ticket_ids is not None:
             tickets = [
@@ -12881,56 +12927,120 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 str(pair[0].get("ticket_id") or ""),
             )
         )
-        projected = []
-        for item, is_archived in combined[:limit]:
+        def item_key(pair: tuple[dict[str, Any], bool]) -> tuple[int, str]:
+            return (
+                priority_order.get(pair[0].get("priority", "medium"), 9),
+                str(pair[0].get("ticket_id") or ""),
+            )
+
+        eligible = [
+            pair for pair in combined
+            if after_key is None or item_key(pair) > after_key
+        ]
+        projected: list[dict[str, Any]] = []
+        returned_keys: list[tuple[int, str]] = []
+        archive_hydrated_count = 0
+        response_bytes_estimate = 2_048
+        for item, is_archived in eligible[:limit]:
+            # Reserve enough room for the compact oversized-item stub before
+            # hydrating an archive body. Every hydrated archive row is returned.
+            if response_bytes_estimate + 4_096 > DEFAULT_PAGE_MAX_BYTES:
+                break
             if is_archived:
                 archived_id = str(item.get("ticket_id") or "")
                 full = (
                     service.merged_archived_ticket(board_id, archived_id)
                     if archived_id else None
                 )
+                archive_hydrated_count += 1
                 if full is None:
-                    compact_row = copy.deepcopy(item)
-                    projected.append(compact_row)
-                    continue
-                archived_row = project_ticket(
-                    board_id, full, include_annotations=False,
+                    row = copy.deepcopy(item)
+                else:
+                    row = project_ticket(
+                        board_id, full, include_annotations=False,
+                        document=document, principal=principal,
+                    )
+                    row["archived"] = True
+            else:
+                row = project_ticket(
+                    board_id, item, include_annotations=False,
                     document=document, principal=principal,
                 )
-                archived_row["archived"] = True
-                projected.append(archived_row)
-                continue
-            row = project_ticket(
-                board_id, item, include_annotations=False,
-                document=document, principal=principal,
+                lease = item.get("review_lease")
+                if item.get("status") == "submitted":
+                    if not review_lease_is_live(item, now) or not isinstance(lease, Mapping):
+                        row["review_state"] = "unclaimed"
+                    elif (
+                        lease.get("reviewer_principal_id") == principal.principal_id
+                        and (
+                            reviewer_agent_id is None
+                            or lease.get("reviewer_agent_id") == reviewer_agent_id
+                        )
+                    ):
+                        row["review_state"] = "claimed_by_me"
+                        row["review_claimed_by"] = lease.get("reviewer_agent_name")
+                        row["review_lease_expires_at"] = lease.get("expires_at")
+                    else:
+                        row["review_state"] = "claimed_by_other"
+                        row["review_claimed_by"] = lease.get("reviewer_agent_name")
+                        row["review_lease_expires_at"] = lease.get("expires_at")
+
+            read_row = project_ticket_read(
+                row,
+                view=view,
+                dispatch_history=_dispatch_history_for_read(service, board_id, row),
+                include_dispatch_history=include_dispatch_history,
             )
-            lease = item.get("review_lease")
-            if item.get("status") != "submitted":
-                projected.append(row)
-                continue
-            if not review_lease_is_live(item, now) or not isinstance(lease, Mapping):
-                row["review_state"] = "unclaimed"
-            elif (
-                lease.get("reviewer_principal_id") == principal.principal_id
-                and (
-                    reviewer_agent_id is None
-                    or lease.get("reviewer_agent_id") == reviewer_agent_id
+            row_bytes = serialized_bytes(read_row)
+            # Keep room for the response envelope and opaque continuation cursor.
+            if response_bytes_estimate + row_bytes + 4_096 > DEFAULT_PAGE_MAX_BYTES:
+                row = {
+                    key: copy.deepcopy(row.get(key))
+                    for key in (
+                        "ticket_id", "title", "status", "priority", "parked",
+                        "assigned_to", "assigned_to_agent_id", "assigned_to_kind",
+                        "claimed_by", "claimed_by_agent_id", "updated_at", "archived",
+                    )
+                    if key in row
+                }
+                row["omitted_sections"] = [
+                    "description", "annotations", "submission_history",
+                    "review_history", "dispatch_history",
+                ]
+                row["detail_ref"] = resource_uri(
+                    board_id, "ticket", str(row.get("ticket_id") or "")
                 )
-            ):
-                row["review_state"] = "claimed_by_me"
-                row["review_claimed_by"] = lease.get("reviewer_agent_name")
-                row["review_lease_expires_at"] = lease.get("expires_at")
-            else:
-                row["review_state"] = "claimed_by_other"
-                row["review_claimed_by"] = lease.get("reviewer_agent_name")
-                row["review_lease_expires_at"] = lease.get("expires_at")
+                row["oversized_for_list"] = True
+                row_bytes = serialized_bytes(row)
             projected.append(row)
+            returned_keys.append(item_key((item, is_archived)))
+            response_bytes_estimate += row_bytes
+
+        remaining_after_page = len(eligible) > len(projected)
+        next_cursor = None
+        if remaining_after_page and returned_keys:
+            next_cursor = ticket_cursor_codec.encode(
+                kind="ticket-list",
+                board_id=board_id,
+                principal_id=principal.principal_id,
+                filters=cursor_filters,
+                position=returned_keys[-1],
+            )
+        watermark = latest_seq(board_id)
         return {
             "ok": True,
             "tickets": projected,
             "count": len(projected),
+            "returned_count": len(projected),
             "total_matching": len(combined),
             "archived_matching": len(archived_rows),
+            "next_cursor": next_cursor,
+            "has_more": remaining_after_page,
+            "read_consistency": "live",
+            "watermark": watermark,
+            "response_max_bytes": DEFAULT_PAGE_MAX_BYTES,
+            "response_bytes_estimate": response_bytes_estimate,
+            "archive_hydrated_count": archive_hydrated_count,
             "filters": {
                 "status": status,
                 "assigned_to": assigned_to,
@@ -12940,7 +13050,154 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "ticket_ids": sorted(selected_ticket_ids)
                 if selected_ticket_ids is not None else None,
             },
-            "latest_seq": latest_seq(board_id),
+            "latest_seq": watermark,
+        }
+
+    @tool()
+    async def ticket_history_list(
+        board_id: str,
+        ticket_id: str,
+        history: str,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        """Page one retained ticket history without loading unrelated histories."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        if history not in HISTORY_FIELDS:
+            raise ValueError(
+                "history must be annotations, dispatch, submissions, reviews, or progress"
+            )
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise ValueError("cursor must be a non-empty opaque string")
+        principal = current_principal()
+        require_scope(principal, "board:read")
+        document = service.load(board_id)
+        service.principal_members(document, principal.principal_id)
+        field = HISTORY_FIELDS[history]
+        ticket = document["tickets"].get(ticket_id)
+        archive_document = service.load_archive_document(board_id, ticket_id)
+        archive_hydrated = archive_document is not None
+        if ticket is None:
+            ticket = service.merged_archived_ticket(board_id, ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            overflow: list[Any] = []
+        else:
+            raw_overflow = (
+                archive_document.get("history_overflow", {}).get(field, [])
+                if isinstance(archive_document, Mapping)
+                and isinstance(archive_document.get("history_overflow"), Mapping)
+                else []
+            )
+            overflow = list(raw_overflow) if isinstance(raw_overflow, list) else []
+        inline = ticket.get(field, [])
+        inline = list(inline) if isinstance(inline, list) else []
+        retained = [*overflow, *inline]
+        reported_omitted = ticket.get(f"{field}_omitted_count", 0)
+        reported_omitted = (
+            reported_omitted
+            if type(reported_omitted) is int and reported_omitted > 0
+            else 0
+        )
+        unavailable_before_count = max(0, reported_omitted - len(overflow))
+        filters = {"ticket_id": ticket_id, "history": history, "ordering": "ordinal-v1"}
+        after_ordinal = -1
+        after_entry_id: str | None = None
+        if cursor is not None:
+            position = ticket_cursor_codec.decode(
+                cursor,
+                kind="ticket-history",
+                board_id=board_id,
+                principal_id=principal.principal_id,
+                filters=filters,
+            )
+            if (
+                len(position) != 2
+                or isinstance(position[0], bool)
+                or not isinstance(position[0], int)
+                or position[0] < 0
+                or not isinstance(position[1], str)
+            ):
+                raise ValueError("cursor position is invalid; restart without cursor")
+            after_ordinal, after_entry_id = position
+            if after_ordinal >= len(retained):
+                raise ValueError(
+                    "cursor history boundary is no longer retained; restart without cursor"
+                )
+            boundary = retained[after_ordinal]
+            if not isinstance(boundary, Mapping) or history_entry_id(
+                field, boundary, after_ordinal
+            ) != after_entry_id:
+                raise ValueError(
+                    "cursor history boundary changed; restart without cursor"
+                )
+
+        entries: list[dict[str, Any]] = []
+        response_bytes_estimate = 1_024
+        next_position: tuple[int, str] | None = None
+        for ordinal in range(after_ordinal + 1, min(len(retained), after_ordinal + 1 + limit)):
+            value = retained[ordinal]
+            if not isinstance(value, Mapping):
+                value = {"value": copy.deepcopy(value)}
+            identifier = history_entry_id(field, value, ordinal)
+            row = {
+                "entry_id": identifier,
+                "ordinal": ordinal,
+                "occurred_at": history_timestamp(value),
+                "value": copy.deepcopy(dict(value)),
+            }
+            row_bytes = serialized_bytes(row)
+            # Keep room for the response envelope and opaque continuation cursor.
+            if response_bytes_estimate + row_bytes + 4_096 > DEFAULT_PAGE_MAX_BYTES:
+                if entries:
+                    break
+                row = {
+                    "entry_id": identifier,
+                    "ordinal": ordinal,
+                    "occurred_at": history_timestamp(value),
+                    "omitted_sections": ["value"],
+                    "oversized_for_history_page": True,
+                    "detail_ref": (
+                        resource_uri(board_id, "ticket", ticket_id)
+                        + f"#history-{history}-{ordinal}"
+                    ),
+                }
+                row_bytes = serialized_bytes(row)
+            entries.append(row)
+            response_bytes_estimate += row_bytes
+            next_position = (ordinal, identifier)
+
+        has_more = bool(next_position) and next_position[0] < len(retained) - 1
+        next_cursor = None
+        if has_more and next_position is not None:
+            next_cursor = ticket_cursor_codec.encode(
+                kind="ticket-history",
+                board_id=board_id,
+                principal_id=principal.principal_id,
+                filters=filters,
+                position=next_position,
+            )
+        return {
+            "ok": True,
+            "ticket_id": ticket_id,
+            "history": history,
+            "entries": entries,
+            "count": len(entries),
+            "returned_count": len(entries),
+            "retained_count": len(retained),
+            "archived_count": len(overflow),
+            "unavailable_before_count": unavailable_before_count,
+            "retention_complete": unavailable_before_count == 0,
+            "archive_hydrated": archive_hydrated,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+            "read_consistency": "live-append-only",
+            "watermark": latest_seq(board_id),
+            "response_max_bytes": DEFAULT_PAGE_MAX_BYTES,
+            "response_bytes_estimate": response_bytes_estimate,
         }
 
     @tool()
