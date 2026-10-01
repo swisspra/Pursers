@@ -6483,7 +6483,8 @@ class SourceIntakePoller:
 
     async def _delivery_tool(self, runtime, tool_name, arguments, *, mutate=False):
         tool = next((t for t in runtime.declaration.tools if t.name == tool_name), None)
-        if tool is None or (not mutate and tool.effect != "read_only"):
+        if (tool is None or tool.effect != ("mutating" if mutate else "read_only")
+                or (mutate and tool_name not in runtime.declaration.risky_tools)):
             raise ConnectorDenied("delivery requires a declared " + tool_name + " tool")
         operation = "source-delivery-" + hashlib.sha256(_canonical_json({"tool": tool_name, "args": arguments})).hexdigest()[:32]
         grant = ConnectorPolicyRequest(runtime.board_id, runtime.project_id, runtime.declaration.connector_id,

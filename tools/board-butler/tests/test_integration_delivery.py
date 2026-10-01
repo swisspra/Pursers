@@ -132,3 +132,15 @@ def test_resident_reconciler_persists_and_reconciles_without_repeating(tmp_path,
         assert 'delivery_state' not in poller.index.entries['z']
         assert poller.index.entries['a']['delivery_state'] == ('integration_merged' if mode == 'success' else 'pr_uncertain')
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('effect,risky', [('read_only',[]),('mutating',[])])
+def test_completion_tool_must_have_mutating_policy_gate(effect, risky):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from test_source_intake import butler
+    poller=object.__new__(butler.SourceIntakePoller)
+    runtime=SimpleNamespace(declaration=SimpleNamespace(tools=[SimpleNamespace(name='ado_pull_request_update',effect=effect)],risky_tools=risky),call_tool=AsyncMock())
+    with pytest.raises(butler.ConnectorDenied):
+        asyncio.run(poller._delivery_tool(runtime,'ado_pull_request_update',{},mutate=True))
+    runtime.call_tool.assert_not_called()
