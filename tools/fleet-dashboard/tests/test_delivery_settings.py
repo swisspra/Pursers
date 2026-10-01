@@ -92,7 +92,7 @@ def test_delivery_apply_checks_permissions_and_cas_before_git(monkeypatch, failu
     fetcher.config=SimpleNamespace(home_board='home')
     fetcher._require_board_admin=AsyncMock(side_effect=PermissionError('denied') if failure=='permission' else None)
     fetcher.fetch_project_registry=AsyncMock(return_value={'registry':original,'expected_sha256':('b' if failure=='stale_registry' else 'a')*64})
-    fetcher._project_removal_observation=AsyncMock(return_value={'complete':True,'active_tickets':[{'id':'TK-live'}] if failure=='active_work' else [],'pending_offers':[]})
+    fetcher._delivery_observation=AsyncMock(return_value={'complete':True,'active_tickets':[{'id':'TK-live'}] if failure=='active_work' else [],'pending_offers':[]})
     fetcher.save_project_registry=AsyncMock()
     branch=Mock();monkeypatch.setattr(dashboard,'prepare_delivery_branch',branch)
     if failure!='none':
@@ -107,3 +107,29 @@ def test_delivery_apply_checks_permissions_and_cas_before_git(monkeypatch, failu
         assert saved['delivery_defaults']['base_branch']=='dev'
         assert saved['projects']['sample']['private_extra']=='preserve'
         branch.assert_called_once()
+
+
+@pytest.mark.parametrize('variant', ['empty','active','offer','truncated','missing_count','malformed'])
+def test_delivery_observation_uses_complete_nonterminal_scan_not_truncated_history(variant):
+    import asyncio
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+    from types import SimpleNamespace
+    import fleet_dashboard as dashboard
+    rows=[]
+    if variant=='active':rows=[{'ticket_id':'TK-active','status':'claimed'}]
+    if variant=='offer':rows=[{'ticket_id':'TK-offer','status':'open','dispatch_state':{'state':'offered'}}]
+    if variant=='malformed':rows=[{}]
+    page={'tickets':rows,'count':len(rows),'total_matching':len(rows),'truncated':False}
+    if variant=='truncated':page['total_matching']=501;page['truncated']=True
+    if variant=='missing_count':page.pop('total_matching')
+    client=SimpleNamespace(ticket_list=AsyncMock(return_value=page),board_snapshot=AsyncMock(return_value={'truncated':True,'omitted_counts':{'tickets':1000}}))
+    @asynccontextmanager
+    async def connection(board):yield client
+    fetcher=object.__new__(dashboard.FleetFetcher);fetcher._client=connection
+    result=asyncio.run(fetcher._delivery_observation('sample'))
+    assert result['complete'] is (variant not in ('truncated','missing_count','malformed'))
+    assert bool(result['active_tickets']) is (variant=='active')
+    assert bool(result['pending_offers']) is (variant=='offer')
+    client.board_snapshot.assert_not_called()
+    client.ticket_list.assert_awaited_once_with(include_closed=False,limit=500,view='work')

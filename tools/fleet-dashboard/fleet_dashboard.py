@@ -6995,6 +6995,31 @@ class FleetFetcher:
             else None,
         }
 
+    async def _delivery_observation(self, board_id: str) -> dict[str, Any]:
+        """Prove route quiescence from all non-terminal tickets, not history size."""
+        try:
+            async with self._client(board_id) as client:
+                page = await client.ticket_list(include_closed=False, limit=500, view="work")
+        except Exception:
+            return {"complete": False, "active_tickets": [], "pending_offers": []}
+        rows = page.get("tickets") if isinstance(page, dict) else None
+        total = page.get("total_matching") if isinstance(page, dict) else None
+        complete = (isinstance(rows, list) and type(total) is int
+                    and total == len(rows) and page.get("count") == total
+                    and not page.get("truncated")
+                    and all(isinstance(row, dict) and isinstance(row.get("ticket_id"), str)
+                            and isinstance(row.get("status"), str) for row in rows))
+        rows = rows if isinstance(rows, list) else []
+        active_states = {"claimed", "in_progress", "creating_report", "submitted", "reviewing", "in_review"}
+        active = [{"ticket_id": row["ticket_id"], "status": row["status"]}
+                  for row in rows if isinstance(row, dict) and row.get("status") in active_states
+                  and isinstance(row.get("ticket_id"), str)]
+        offers = [{"ticket_id": row.get("ticket_id"), "status": row.get("status")}
+                  for row in rows if isinstance(row, dict) and isinstance(row.get("dispatch_state"), dict)
+                  and row["dispatch_state"].get("state") == "offered"]
+        return {"complete": complete, "active_tickets": active[:50], "pending_offers": offers[:50],
+                "ticket_count": len(rows)}
+
     async def build_project_lifecycle_plan(
         self, request: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -7013,7 +7038,7 @@ class FleetFetcher:
             if not isinstance(entry, dict):
                 raise ProjectLifecycleError("project is not registered")
             await self._require_board_admin(entry["board_id"])
-            observation = await self._project_removal_observation(entry["board_id"])
+            observation = await self._delivery_observation(entry["board_id"])
             refs = await asyncio.to_thread(remote_branches, entry)
             return build_delivery_plan(
                 request=request, registry=registry,
@@ -7092,7 +7117,7 @@ class FleetFetcher:
 
         if plan.get("kind") == "project-delivery":
             await self._require_board_admin(str(plan["board_id"]))
-            observed = await self._project_removal_observation(str(plan["board_id"]))
+            observed = await self._delivery_observation(str(plan["board_id"]))
             if not observed.get("complete") or (delivery_route_changed(plan["existing_entry"], plan["proposed_entry"])
                     and (observed.get("active_tickets") or observed.get("pending_offers"))):
                 raise ProjectLifecycleConflictError("Active work changed; refresh the delivery plan")
