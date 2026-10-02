@@ -44,6 +44,59 @@ def test_empty_irrelevant_and_repeated_events_do_not_run_model(tmp_path):
     assert len(resumed.state['pending']) == 1
 
 
+@pytest.mark.parametrize(('role', 'event_kind', 'expected_skill'), [
+    ('worker', 'ticket_offered', 'pursers-work'),
+    ('reviewer', 'review_offered', 'pursers-review'),
+])
+def test_run_activates_skills_and_selects_role_skill_on_demand(
+    tmp_path, role, event_kind, expected_skill
+):
+    cfg=config(tmp_path);cfg.update(role=role,seat_id=f'{role}-a')
+    runner=api()['EventSeatRunner'](cfg);calls=[]
+    runner.run_command=lambda argv,**kwargs:calls.append(argv)
+    runner.process({'new_seq':{'home':42},'events':[
+        {'kind':event_kind,'board_id':'home','ticket_id':'TK-one','id':'event-one'}
+    ]},100)
+    assert len(calls)==1
+    argv=calls[0]
+    assert argv[argv.index('--with-builtin')+1]=='developer,skills'
+    assert '--no-profile' in argv
+    assert f'--tools {role}' in argv[argv.index('--with-extension')+1]
+    prompt=argv[argv.index('--text')+1]
+    assert f'Use ${expected_skill}.' in prompt
+    other='pursers-review' if role=='worker' else 'pursers-work'
+    assert f'${other}' not in prompt
+
+
+def test_run_role_skills_opt_out_keeps_developer_only(tmp_path):
+    cfg=config(tmp_path);cfg['enable_role_skills']=False
+    runner=api()['EventSeatRunner'](cfg);calls=[]
+    runner.run_command=lambda argv,**kwargs:calls.append(argv)
+    runner.process({'new_seq':{'home':42},'events':[
+        {'kind':'ticket_offered','board_id':'home','ticket_id':'TK-one','id':'event-one'}
+    ]},100)
+    argv=calls[0]
+    assert argv[argv.index('--with-builtin')+1]=='developer'
+    prompt=argv[argv.index('--text')+1]
+    assert '$pursers-work' not in prompt and '$pursers-review' not in prompt
+
+
+@pytest.mark.parametrize('setting',[None,0,1,'true',[],{}])
+def test_invalid_role_skills_setting_is_rejected(tmp_path,setting):
+    cfg=config(tmp_path);cfg['enable_role_skills']=setting
+    with pytest.raises(ValueError,match='role skills'):
+        api()['validate_config'](cfg)
+
+
+def test_generation_rejects_invalid_role_skills_setting(tmp_path):
+    from test_seat_new import args, seat_new
+    cfg=config(tmp_path);cfg.update(seat_id='seat-test',enable_role_skills='yes')
+    path=tmp_path/'event.json';path.write_text(json.dumps(cfg));path.chmod(0o600)
+    parsed=args(tmp_path);parsed.name='seat-test';parsed.event_config=path
+    with pytest.raises(ValueError,match='role skills'):
+        seat_new.apply_event_config(parsed)
+
+
 def test_cursor_validation_never_accepts_zero(tmp_path):
     runner=api()['EventSeatRunner'](config(tmp_path))
     with pytest.raises(ValueError,match='cursor'):runner.process({'new_seq':{'home':0},'events':[]},100)

@@ -59,6 +59,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Managed Goose event sessions now activate the isolated Developer and Skills
+  built-ins explicitly, then load the worker or reviewer Pursers skill on
+  demand. Private runtime configuration has a validated Developer-only opt-out;
+  profile isolation, authorization and lease behavior are unchanged.
+
 - Preserve the Board Butler batch engine's durable `in_delivery` state while
   projecting boundary-specific `pr_created` or `integration_merged` activity.
   Legacy per-ticket PR records keep their existing `pr_*` storage contract.

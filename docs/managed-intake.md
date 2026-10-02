@@ -330,6 +330,7 @@ Supply private configuration:
   "repository_root": "/PATH/TO/clones",
   "max_runs_per_hour": 5, "max_turns": 30, "turn_timeout_s": 1800,
   "max_owned_recoveries": 1,
+  "enable_role_skills": true,
   "git_credentials_config": "/PATH/TO/config/git-credentials.json"
 }
 ```
@@ -341,6 +342,13 @@ seat files with `--upgrade` during migration; an old `board.sh` can advertise a
 different tier and correctly fail readiness checks. Configure the executor's approved
 command to invoke the event runner with that config; retain the executor's existing
 provisioning, template digest and authorization checks.
+
+`enable_role_skills` defaults to `true` and must be a JSON boolean. The isolated
+Goose turn keeps `--no-profile`, explicitly activates the Developer and Skills
+built-ins, and requests `pursers-work` for workers or `pursers-review` for
+reviewers. Set it to `false` only for an intentional Developer-only rollback;
+provider, model, MCP extension, credentials, quotas, leases and retry behavior
+are unaffected.
 
 New board cursors come from Central's authoritative snapshot watermark, never a
 hardcoded value or cursor-zero scan. The runner freezes each wait's board selection

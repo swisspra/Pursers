@@ -69,7 +69,18 @@ python3 integrations/skills/manage.py install \
   --host goose --scope project --project-root /PATH/TO/PROJECT --apply
 python3 integrations/skills/manage.py check \
   --host goose --scope project --project-root /PATH/TO/PROJECT
+goose skills list
 ```
+
+`manage.py check` and `goose skills list` confirm that goose can discover the
+installed files; they do not prove that a particular session activated the
+Skills extension. Managed event seats use `--no-profile` for isolation, so the
+runner explicitly starts the `developer,skills` built-ins and names
+`$pursers-work` for workers or `$pursers-review` for reviewers. Goose then loads
+that role's instructions on demand. Set `"enable_role_skills": false` in the
+private event-seat configuration only when an operator intentionally needs the
+legacy Developer-only session; the MCP role and all existing authorization
+boundaries remain unchanged.
 
 These paths were checked against the official
 [Codex product skill documentation](https://learn.chatgpt.com/docs/build-skills)

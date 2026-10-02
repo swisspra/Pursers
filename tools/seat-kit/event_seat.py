@@ -37,6 +37,8 @@ def validate_config(config):
     recoveries = config.get('max_owned_recoveries', 1)
     if type(recoveries) is not int or not 0 <= recoveries <= 10:
         raise ValueError('invalid owned recovery limit')
+    if type(config.get('enable_role_skills', True)) is not bool:
+        raise ValueError('invalid role skills setting')
     return config
 
 
@@ -141,7 +143,11 @@ class EventSeatRunner:
             c=self.config
             extension='pursers: '+shlex.join([c['mcp'],'--central-url',c['central_url'],'--board',event['board'],
                 '--token-file',c['token_file'],'--tools',role,'--repository-root',c['repository_root']])
-            prompt=('$token-thrift. Process exactly one authorized Pursers event, then exit. '
+            role_skills_enabled = c.get('enable_role_skills', True)
+            role_skill = 'pursers-review' if role == 'reviewer' else 'pursers-work'
+            prompt=('$token-thrift. '
+                    + (f'Use ${role_skill}. ' if role_skills_enabled else '')
+                    + 'Process exactly one authorized Pursers event, then exit. '
                     f"Seat {c['seat_id']}; role {role}; board_id {event['board']}; ticket_id {event['ticket']}. "
                     'Read AGENTS.md and .goosehints. Use this exact board for every operation. '
                     'GET the ticket first and verify exact current ownership. If already held by this seat, resume it; '
@@ -155,7 +161,8 @@ class EventSeatRunner:
                 'started_at':now, 'outcome':'started'}
             PUBLISH(self.path,self.state)
             try:
-                self.run_command([c['goose'],'run','--no-session','--no-profile','--with-builtin','developer',
+                builtins = 'developer,skills' if role_skills_enabled else 'developer'
+                self.run_command([c['goose'],'run','--no-session','--no-profile','--with-builtin',builtins,
                     '--with-extension',extension,'--provider',c['provider'],'--model',c['model'],
                     '--max-turns',str(c.get('max_turns',30)),'--text',prompt])
             except BaseException as exc:
