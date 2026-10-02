@@ -18,6 +18,7 @@ from .client import (
 )
 from .events import (
     ADMISSION_EVENT_KINDS,
+    AGENT_DISPLAY_NAME_CHANGED,
     AGENT_LIFECYCLE_EVENT_KINDS,
     ARCHIVE_EVENT_KINDS,
     BUTLER_COMMAND_CREATED,
@@ -111,6 +112,7 @@ from .request_state import REQUEST_STATE_TTL_S, load_or_create_request_state_key
 
 __all__ = [
     "ADMISSION_EVENT_KINDS",
+    "AGENT_DISPLAY_NAME_CHANGED",
     "AGENT_LIFECYCLE_EVENT_KINDS",
     "ARCHIVE_EVENT_KINDS",
     "BUTLER_COMMAND_CREATED",

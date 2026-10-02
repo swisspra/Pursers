@@ -29,6 +29,13 @@ can continue to inspect work and answer questions from Zed.
 These are MCP prompts. If another server defines the same prompt name, Zed may
 prefix the command with the server ID, for example `/pursers.board`.
 
+The same relay also exposes `pursers://help/index` and lazy role, workflow,
+board-summary, and ticket-summary resources. Resource reads use the configured
+board and Central's current authorization; they do not grant access or perform
+the action described by a prompt. Zed's legacy MCP path supports list/read and
+the existing prompt names, but the relay does not falsely advertise legacy
+per-resource subscriptions. See the [URI manifest](../reference/mcp-discovery.md).
+
 ## First run
 
 You do not need to start Central, create a board, or find a token path before

@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import sys
+import threading
+import time
 from pathlib import Path
 
 
@@ -51,11 +53,59 @@ def ticket(
     }
 
 
+def activity(
+    ticket_id: str,
+    stage: str,
+    state: str,
+    *,
+    attempt: int | None,
+    actor: str | None,
+    next_action: str,
+    freshness: str = "fresh",
+    boundary: str = "unknown",
+    blocker: str | None = None,
+) -> dict:
+    value = {
+        "schema_version": 1,
+        "stage": stage,
+        "state": state,
+        "attempt_id": attempt,
+        "actor_id": actor,
+        "updated_at": "2030-01-02T11:58:00Z",
+        "freshness": freshness,
+        "evidence_refs": [
+            f"board://fixture-board/ticket/{ticket_id}#acceptance-evidence"
+        ],
+        "next_action": next_action,
+        "completion_boundary": boundary,
+    }
+    if blocker is not None:
+        value["blocking_reason"] = blocker
+    return value
+
+
 class AcceptanceCache:
-    def __init__(self, dashboard, mode: str = "populated") -> None:
+    def __init__(
+        self,
+        dashboard,
+        mode: str = "populated",
+        *,
+        ticket_count: int = 6,
+        detail_delay_ms: int = 0,
+        overhead_delay_ms: int = 0,
+    ) -> None:
         self.dashboard = dashboard
         self.mode = mode
+        self.ticket_count = ticket_count
+        self.detail_delay_ms = detail_delay_ms
+        self.overhead_delay_ms = overhead_delay_ms
+        self._detail_requests = 0
+        self._overhead_requests = 0
+        self._delay_lock = threading.Lock()
         self.revision = 0
+        self.display_names: dict[str, dict[str, object]] = {
+            "AI-synthetic-01": {"display_name": "Atlas", "revision": 0}
+        }
 
     @staticmethod
     def labels() -> list[str]:
@@ -67,18 +117,57 @@ class AcceptanceCache:
             raise KeyError(value)
         return "fixture"
 
-    @staticmethod
-    def _tickets() -> list[dict]:
-        return [
+    def _tickets(self) -> list[dict]:
+        rows = [
             ticket("TK-human", "Choose the safe rollout window", "needs_human"),
             ticket("TK-review", "Verify the submitted display evidence", "submitted", owner="reviewer-01"),
             ticket("TK-working", "Prepare the Fleet acceptance gallery", "claimed", owner="worker-01"),
+            ticket("TK-stale", "Reconcile the expired work evidence", "claimed", owner="worker-03"),
             ticket("TK-open", "Document the next bounded action", "open"),
             ticket("TK-closed", "Preserve the source-backed route map", "closed", owner="worker-02"),
         ]
+        records = {
+            "TK-human": activity(
+                "TK-human", "validation", "blocked", attempt=1,
+                actor="AI-synthetic-03", next_action="Record the requested human decision.",
+                blocker="A rollout window is required.",
+            ),
+            "TK-review": activity(
+                "TK-review", "review", "waiting", attempt=1,
+                actor=None, next_action="An independent reviewer must claim the submission.",
+            ),
+            "TK-working": activity(
+                "TK-working", "work", "running", attempt=1,
+                actor="AI-synthetic-01", next_action="Continue the current work attempt.",
+            ),
+            "TK-stale": activity(
+                "TK-stale", "work", "stale", attempt=2,
+                actor="AI-synthetic-03", next_action="Reconcile stale evidence before continuing.",
+                freshness="stale", blocker="The last meaningful update is stale.",
+            ),
+            "TK-open": activity(
+                "TK-open", "work", "retrying", attempt=2,
+                actor=None, next_action="Claim the next attempt and address review feedback.",
+            ),
+            "TK-closed": activity(
+                "TK-closed", "completed", "completed", attempt=1,
+                actor="AI-synthetic-02", next_action="No further lifecycle action is required.",
+                boundary="integration",
+            ),
+        }
+        for row in rows:
+            row["activity"] = records[row["id"]]
+        for index in range(len(rows), self.ticket_count):
+            rows.append(
+                ticket(
+                    f"TK-scale-{index:04d}",
+                    f"Representative bounded ticket {index:04d}",
+                    "open" if index % 3 else "closed",
+                )
+            )
+        return rows
 
-    @staticmethod
-    def _agents() -> list[dict]:
+    def _agents(self) -> list[dict]:
         rows = []
         for index in range(35):
             working = index == 0
@@ -97,11 +186,26 @@ class AcceptanceCache:
                         "lease_expires_at": "2030-01-02T12:15:00Z",
                     }
                 ]
+            agent_id = f"AI-synthetic-{index + 1:02d}"
+            profile = self.display_names.get(
+                agent_id, {"display_name": None, "revision": 0}
+            )
+            display_name = profile["display_name"]
             rows.append(
                 {
                     "agent_name": name,
-                    "agent_id": f"AI-synthetic-{index + 1:02d}",
+                    "agent_id": agent_id,
                     "principal_id": f"PR-synthetic-{index + 1:02d}",
+                    "display_name": display_name,
+                    "display_name_profiles": [
+                        {
+                            "board_id": "fixture-board",
+                            "agent_id": agent_id,
+                            "display_name": display_name,
+                            "display_label": display_name or name,
+                            "revision": profile["revision"],
+                        }
+                    ],
                     "pool_status": "busy" if working else "stale" if stale else "available",
                     "boards": ["fixture-board"],
                     "board_scope": ["fixture-board"],
@@ -109,6 +213,7 @@ class AcceptanceCache:
                     "last_seen": "2030-01-02T11:59:00Z" if not stale else "2030-01-02T10:00:00Z",
                     "seats": [
                         {
+                            "agent_id": agent_id,
                             "board_id": "fixture-board",
                             "project": "Fixture Project",
                             "role": "worker",
@@ -122,12 +227,72 @@ class AcceptanceCache:
                                 "can_work": True,
                                 "can_review": False,
                             },
+                            "profile": {
+                                "display_name": display_name,
+                                "display_label": display_name or name,
+                                "revision": profile["revision"],
+                            },
                         }
                     ],
                     "current_work": work,
                 }
             )
+        label_counts: dict[str, int] = {}
+        for row in rows:
+            if row["display_name"]:
+                label_counts[row["display_name"]] = (
+                    label_counts.get(row["display_name"], 0) + 1
+                )
+        for row in rows:
+            row["duplicate_name"] = bool(
+                row["display_name"]
+                and label_counts.get(row["display_name"], 0) > 1
+            )
         return rows
+
+    def save_agent_display_name(
+        self, board_id: str, payload: object, central: str | None = None
+    ) -> dict:
+        self.resolve_central(central)
+        if board_id != "fixture-board" or not isinstance(payload, dict):
+            raise ValueError("invalid display-name target")
+        agent_id = payload.get("agent_id")
+        display_name = payload.get("display_name")
+        expected_revision = payload.get("expected_revision")
+        if not isinstance(agent_id, str) or not agent_id.startswith("AI-synthetic-"):
+            raise ValueError("target agent not found")
+        current = self.display_names.get(
+            agent_id, {"display_name": None, "revision": 0}
+        )
+        if expected_revision != current["revision"]:
+            raise ValueError(
+                "display-name revision conflict: "
+                f"expected {expected_revision}, current {current['revision']}"
+            )
+        if display_name is not None and not isinstance(display_name, str):
+            raise ValueError("display_name must be a string or null")
+        normalized = display_name.strip() if isinstance(display_name, str) else None
+        if display_name is not None and not normalized:
+            raise ValueError("display_name must not be empty; use null to reset")
+        changed = normalized != current["display_name"]
+        revision = int(current["revision"]) + (1 if changed else 0)
+        self.display_names[agent_id] = {
+            "display_name": normalized,
+            "revision": revision,
+        }
+        return {
+            "ok": True,
+            "changed": changed,
+            "profile": {
+                "agent_id": agent_id,
+                "agent_name": agent_id.replace("AI-synthetic-", "synthetic-worker-"),
+                "display_name": normalized,
+                "display_label": normalized or agent_id.replace(
+                    "AI-synthetic-", "synthetic-worker-"
+                ),
+                "revision": revision,
+            },
+        }
 
     def get(self, central: str | None = None) -> dict:
         self.resolve_central(central)
@@ -181,7 +346,7 @@ class AcceptanceCache:
                     "tickets": tickets,
                     "events": events,
                     "coordinator_heartbeat": "2030-01-02T11:59:30Z",
-                    "snapshot_truncation": {"returned": 5, "total": 8},
+                    "snapshot_truncation": {"returned": 6, "total": 9},
                     "human_requests": [
                         {
                             "request_id": "HR-synthetic-01",
@@ -253,6 +418,11 @@ class AcceptanceCache:
         self.resolve_central(central)
         if board_id != "fixture-board":
             raise KeyError(board_id)
+        with self._delay_lock:
+            self._detail_requests += 1
+            cold_detail = self._detail_requests == 1
+        if self.detail_delay_ms and cold_detail:
+            time.sleep(self.detail_delay_ms / 1000)
         fleet = self.get(central)
         board = fleet["boards"][0]
         snapshot_tickets = []
@@ -274,7 +444,8 @@ class AcceptanceCache:
         result.update(
             {
                 "central": "fixture",
-                "generated_at": fleet["generated_at"],
+                # Exercise timestamp-only refreshes without changing semantic data.
+                "generated_at": f"2030-01-02T12:00:{min(self._detail_requests, 59):02d}Z",
             }
         )
         return result
@@ -298,6 +469,17 @@ class AcceptanceCache:
             "expected_sha256": "a" * 64,
         }
 
+    def get_overhead_thresholds(
+        self, central: str | None = None
+    ) -> dict[str, int | float]:
+        self.resolve_central(central)
+        with self._delay_lock:
+            self._overhead_requests += 1
+            cold_overhead = self._overhead_requests == 1
+        if self.overhead_delay_ms and cold_overhead:
+            time.sleep(self.overhead_delay_ms / 1000)
+        return self.dashboard.context_pressure_thresholds(None)
+
     def get_project_registry(self, central: str | None = None) -> dict:
         self.resolve_central(central)
         return {
@@ -314,12 +496,21 @@ def main() -> None:
     parser.add_argument(
         "--mode", choices=("populated", "empty", "error"), default="populated"
     )
+    parser.add_argument("--ticket-count", type=int, default=6)
+    parser.add_argument("--detail-delay-ms", type=int, default=0)
+    parser.add_argument("--overhead-delay-ms", type=int, default=0)
     args = parser.parse_args()
     repo = args.repo.resolve()
     state_dir = args.state_dir.resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     dashboard = load_dashboard(repo)
-    cache = AcceptanceCache(dashboard, args.mode)
+    cache = AcceptanceCache(
+        dashboard,
+        args.mode,
+        ticket_count=max(6, min(args.ticket_count, 2_000)),
+        detail_delay_ms=max(0, min(args.detail_delay_ms, 30_000)),
+        overhead_delay_ms=max(0, min(args.overhead_delay_ms, 30_000)),
+    )
     handler = dashboard.make_handler(
         cache,
         stats_path=state_dir / "bridge-stats.json",

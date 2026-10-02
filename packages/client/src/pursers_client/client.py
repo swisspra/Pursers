@@ -1620,6 +1620,7 @@ class BoardClient:
         ticket_ids: list[str] | None = None,
         view: str | None = None,
         include_dispatch_history: bool = False,
+        cursor: str | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -1638,7 +1639,104 @@ class BoardClient:
             arguments["view"] = view
         if include_dispatch_history:
             arguments["include_dispatch_history"] = True
+        if cursor is not None:
+            arguments["cursor"] = cursor
         return await self._call("ticket_list", arguments)
+
+    async def ticket_history_list(
+        self,
+        ticket_id: str,
+        history: str,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "ticket_id": ticket_id,
+            "history": history,
+            "limit": limit,
+        }
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        return await self._call("ticket_history_list", arguments)
+
+    async def ticket_list_all(
+        self,
+        *,
+        status: str | None = None,
+        assigned_to: str | None = None,
+        include_closed: bool = False,
+        include_archived: bool = True,
+        limit: int = 100,
+        review_unclaimed_only: bool = False,
+        ticket_ids: list[str] | None = None,
+        view: str | None = None,
+        include_dispatch_history: bool = False,
+        max_pages: int = 100,
+    ) -> dict[str, Any]:
+        """Enumerate a stable board, with an honest old-server fallback."""
+        if not 1 <= max_pages <= 1_000:
+            raise ValueError("max_pages must be between 1 and 1000")
+        options = {
+            "status": status,
+            "assigned_to": assigned_to,
+            "include_closed": include_closed,
+            "include_archived": include_archived,
+            "limit": limit,
+            "review_unclaimed_only": review_unclaimed_only,
+            "ticket_ids": ticket_ids,
+            "view": view,
+            "include_dispatch_history": include_dispatch_history,
+        }
+        page = await self.ticket_list(**options)
+        result = dict(page)
+        rows: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        cursors: set[str] = set()
+        page_count = 0
+        pagination_supported = "next_cursor" in page
+        while True:
+            page_count += 1
+            page_rows = page.get("tickets")
+            for row in page_rows if isinstance(page_rows, list) else []:
+                if not isinstance(row, dict):
+                    continue
+                ticket_id = row.get("ticket_id")
+                if isinstance(ticket_id, str):
+                    if ticket_id in seen_ids:
+                        continue
+                    seen_ids.add(ticket_id)
+                rows.append(row)
+            cursor = page.get("next_cursor")
+            if not pagination_supported or cursor is None:
+                break
+            if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                raise BoardClientError("ticket_list returned an invalid cursor sequence")
+            if page_count >= max_pages:
+                break
+            cursors.add(cursor)
+            page = await self.ticket_list(**options, cursor=cursor)
+
+        total_matching = result.get("total_matching")
+        total_matching = (
+            total_matching
+            if type(total_matching) is int and total_matching >= 0
+            else len(rows)
+        )
+        ended = page.get("next_cursor") is None if pagination_supported else len(rows) >= total_matching
+        result.update(
+            {
+                "tickets": rows,
+                "count": len(rows),
+                "returned_count": len(rows),
+                "page_count": page_count,
+                "pagination_supported": pagination_supported,
+                "traversal_complete": bool(ended),
+                "next_cursor": page.get("next_cursor") if pagination_supported else None,
+                "has_more": not ended,
+            }
+        )
+        return result
 
     async def dispatch_my_offers(self) -> dict[str, Any]:
         """Read the active offers scoped to this exact joined seat."""
@@ -1820,6 +1918,23 @@ class BoardClient:
         return await self._call(
             "agent_retire_inert", {"agent_name": self.agent_name}
         )
+
+    async def agent_display_name_set(
+        self,
+        display_name: str | None,
+        expected_revision: int,
+        *,
+        target_agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Set or reset presentation metadata for one exact board identity."""
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "display_name": display_name,
+            "expected_revision": expected_revision,
+        }
+        if target_agent_id is not None:
+            arguments["target_agent_id"] = target_agent_id
+        return await self._call("agent_display_name_set", arguments)
 
     async def board_stale_after_set(self, stale_after_days: int) -> dict[str, Any]:
         return await self._call(

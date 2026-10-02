@@ -13,6 +13,9 @@
   const knownStatuses = new Set(statusGroups.flatMap(group => group.statuses));
   let activeFilter = 'all';
   let latestContext = null;
+  const pageSize = 50;
+  let visibleLimit = pageSize;
+  let pageState = 'idle';
 
   function loadStyles() {
     if (typeof document === 'undefined') return;
@@ -41,6 +44,8 @@
   }
 
   function nextAction(ticket) {
+    const activity = activityRecord(ticket);
+    if (activity) return activity.next_action;
     const status = ticket.status;
     if (ticket.delivery?.state === 'delivery_recorded') return 'Delivery recorded; inspect ticket evidence';
     if (ticket.delivery?.state === 'integration_merged') return 'Ready on the delivery branch; your team handles the final merge';
@@ -58,6 +63,19 @@
     if (status === 'closed') return 'Review approved; inspect the result';
     if (['canceled', 'terminated'].includes(status)) return 'No further work is scheduled';
     return 'Open the ticket for its recorded next step';
+  }
+
+  function activityRecord(ticket) {
+    const value = ticket.activity;
+    if (!value || value.schema_version !== 1 || typeof value !== 'object') return null;
+    const stages = new Set(['intake', 'queued', 'work', 'validation', 'review', 'integration', 'delivery', 'completed']);
+    const states = new Set(['waiting', 'running', 'blocked', 'retrying', 'failed', 'canceled', 'stale', 'unknown', 'completed']);
+    if (!stages.has(value.stage) || !states.has(value.state) || typeof value.next_action !== 'string') return null;
+    return value;
+  }
+
+  function activityLabel(value) {
+    return value.replaceAll('_', ' ').replace(/(^|\s)\S/g, letter => letter.toUpperCase());
   }
 
   function ownerLabel(ticket) {
@@ -145,6 +163,67 @@
     </div>`;
   }
 
+  function activityCell(ticket, context) {
+    const activity = activityRecord(ticket);
+    if (!activity) return progressCell(ticket, context);
+    const {esc, fmt, relativeAge} = context;
+    const attempt = Number.isInteger(activity.attempt_id) && activity.attempt_id > 0
+      ? `Attempt ${activity.attempt_id}`
+      : 'Attempt unknown';
+    const actor = typeof activity.actor_id === 'string' && activity.actor_id
+      ? `Actor ${activity.actor_id}`
+      : 'Actor unknown';
+    const updatedAt = typeof activity.updated_at === 'string' ? activity.updated_at : '';
+    const freshness = ['fresh', 'stale', 'unknown'].includes(activity.freshness)
+      ? activity.freshness
+      : 'unknown';
+    const freshnessLabel = freshness === 'fresh'
+      ? 'Current'
+      : freshness === 'stale'
+      ? 'Stale'
+      : 'Freshness unknown';
+    const updatedLabel = updatedAt ? `updated ${relativeAge(updatedAt)}` : 'update time unknown';
+    const estimate = activity.estimate;
+    let estimateMarkup = '';
+    if (estimate && Number.isInteger(estimate.low_percent) && Number.isInteger(estimate.high_percent)
+        && estimate.low_percent >= 0 && estimate.high_percent <= 99
+        && estimate.low_percent <= estimate.high_percent
+        && ['low', 'medium', 'high'].includes(estimate.confidence)) {
+      const label = estimate.low_percent === estimate.high_percent
+        ? `About ${estimate.low_percent}%`
+        : `${estimate.low_percent}–${estimate.high_percent}%`;
+      const rangeLabel = estimate.low_percent === estimate.high_percent
+        ? `Agent-estimated progress ${estimate.low_percent} percent`
+        : `Agent-estimated progress between ${estimate.low_percent} and ${estimate.high_percent} percent`;
+      estimateMarkup = `<span class="work-activity-estimate">${esc(label)} · ${esc(estimate.confidence)} confidence</span>
+        <span class="work-progress-track" role="img" aria-label="${esc(rangeLabel)}">
+          <span class="work-progress-range" style="--progress-low:${estimate.low_percent};--progress-high:${estimate.high_percent}"></span>
+        </span>`;
+    }
+    const blocker = typeof activity.blocking_reason === 'string' && activity.blocking_reason.trim()
+      ? `<p class="work-activity-blocker"><strong>Blocked:</strong> ${esc(activity.blocking_reason.trim())}</p>`
+      : '';
+    const refs = Array.isArray(activity.evidence_refs)
+      ? activity.evidence_refs.filter(ref => typeof ref === 'string').slice(0, 8)
+      : [];
+    const evidenceMarkup = refs.length
+      ? `<details class="work-activity-evidence"><summary>Evidence references (${refs.length})</summary>
+          <ul>${refs.map(ref => `<li><code>${esc(ref)}</code></li>`).join('')}</ul>
+        </details>`
+      : '<span>No evidence reference supplied</span>';
+    return `<div class="work-progress-cell work-activity-cell" data-progress-state="${esc(freshness)}" data-activity-state="${esc(activity.state)}">
+      <span class="work-cell-label">Lifecycle activity</span>
+      <strong>${esc(activityLabel(activity.stage))} · ${esc(activityLabel(activity.state))}</strong>
+      <span>${esc(attempt)} · ${esc(actor)}</span>
+      <span>${esc(freshnessLabel)} · ${esc(updatedLabel)}</span>
+      ${updatedAt ? `<time class="sr-only" datetime="${esc(updatedAt)}">${esc(fmt(updatedAt))}</time>` : ''}
+      <span>Boundary · ${esc(activity.completion_boundary || 'unknown')}</span>
+      ${estimateMarkup}
+      ${blocker}
+      ${evidenceMarkup}
+    </div>`;
+  }
+
   function statusLabel(ticket) {
     return ticket.status_label || groupFor(ticket.status).label;
   }
@@ -166,7 +245,7 @@
         <span class="work-ticket-id">${esc(ticket.id)}</span>
         <span class="work-project">${esc(board.label)} · ${esc(central)}</span>
       </div>
-      ${progressCell(ticket, context)}
+      ${activityCell(ticket, context)}
       <div class="work-owner-cell">
         <span class="work-cell-label">Owner</span>
         <strong>${esc(ownerLabel(ticket))}</strong>
@@ -202,8 +281,14 @@
 
   function renderWarmWork() {
     const context = latestContext;
-    const {pageHead, warmTruthStrip, warmTickets} = context;
-    const tickets = warmTickets();
+    const {esc, pageHead, warmTruthStrip, warmTickets} = context;
+    const seen = new Set();
+    const tickets = warmTickets().filter(item => {
+      const key = JSON.stringify([item.central, item.board.board_id, item.ticket.id]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     const counts = Object.fromEntries(statusGroups.map(group => [
       group.key,
       tickets.filter(item => group.statuses.includes(item.ticket.status)).length,
@@ -216,15 +301,17 @@
         .map(group => filterButton(group.key, group.label, counts[group.key])),
       ...(counts.other ? [filterButton('other', 'Other', counts.other)] : []),
     ].join('');
-    const visible = activeFilter === 'all'
+    const matching = activeFilter === 'all'
       ? tickets
       : tickets.filter(item => groupFor(item.ticket.status).key === activeFilter);
+    const visible = matching.slice(0, visibleLimit);
+    const hasMore = visible.length < matching.length;
     const activeLabel = activeFilter === 'all' ? 'All visible' : groupLabel(activeFilter);
     const filterOpen = typeof matchMedia === 'function' && matchMedia('(min-width: 801px)').matches ? ' open' : '';
     const ledger = visible.length
       ? `<section class="work-ledger" aria-labelledby="work-ledger-title">
           <div class="work-ledger-head" aria-hidden="true">
-            <span>State</span><span>Work item</span><span>Progress</span><span>Owner and lease</span><span>Next action</span><span>Open</span>
+            <span>State</span><span>Work item</span><span>Activity</span><span>Owner and lease</span><span>Next action</span><span>Open</span>
           </div>
           <div class="work-ledger-body">${visible.map(item => ticketRow(item, context)).join('')}</div>
         </section>`
@@ -247,8 +334,11 @@
         </details>
       </section>
       <h3 id="work-ledger-title" class="sr-only">${activeFilter === 'all' ? 'All visible work' : `${groupLabel(activeFilter)} work`}</h3>
-      <p class="work-result-count" aria-live="polite">Showing ${visible.length} of ${tickets.length} visible ticket${tickets.length === 1 ? '' : 's'}</p>
+      <p class="work-result-count" aria-live="polite">Showing ${visible.length} of ${matching.length} matching ticket${matching.length === 1 ? '' : 's'} (${tickets.length} loaded)</p>
       ${ledger}
+      <div class="work-page-controls" data-page-state="${esc(pageState)}">
+        ${hasMore ? `<button type="button" class="button" data-work-next-page ${pageState === 'loading' ? 'disabled' : ''}>${pageState === 'loading' ? 'Loading…' : `Show next ${Math.min(pageSize, matching.length - visible.length)}`}</button>` : '<span class="muted">End of loaded tickets</span>'}
+      </div>
     </div>`;
   }
 
@@ -256,6 +346,20 @@
     const button = event.target.closest('[data-work-filter]');
     if (!button || !latestContext || !document.querySelector('.work-view')) return;
     activeFilter = button.dataset.workFilter;
+    visibleLimit = pageSize;
+    pageState = 'idle';
+    const host = document.querySelector('#central-sections');
+    if (host) host.innerHTML = renderWarmWork();
+  });
+
+  document.addEventListener('click', event => {
+    const button = event.target.closest('[data-work-next-page]');
+    if (!button || !latestContext || !document.querySelector('.work-view')) return;
+    pageState = 'loading';
+    button.disabled = true;
+    button.textContent = 'Loading…';
+    visibleLimit += pageSize;
+    pageState = 'idle';
     const host = document.querySelector('#central-sections');
     if (host) host.innerHTML = renderWarmWork();
   });

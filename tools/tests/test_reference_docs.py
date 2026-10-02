@@ -28,6 +28,30 @@ def test_generator_metadata_exactly_covers_live_tool_registry() -> None:
     assert set(generate_reference_docs.TOOL_SCOPES) == live
 
 
+def test_new_experience_tools_have_correct_groups_and_authorization() -> None:
+    groups = {
+        name: heading
+        for heading, names in generate_reference_docs.TOOL_GROUPS
+        for name in names
+    }
+    assert groups["agent_display_name_set"] == "Onboarding & membership"
+    assert groups["ticket_history_list"] == "Tickets"
+
+    assert generate_reference_docs.TOOL_SCOPES["agent_display_name_set"] == (
+        "`board:write`, `board:review`, or `board:coordinate`; updating another "
+        "identity also requires board-admin membership"
+    )
+    assert generate_reference_docs._direct_alternative_scopes()[
+        "agent_display_name_set"
+    ] == ("board:write", "board:review", "board:coordinate")
+    assert generate_reference_docs._direct_required_scopes()[
+        "ticket_history_list"
+    ] == ("board:read",)
+    assert generate_reference_docs.TOOL_SCOPES["ticket_history_list"] == (
+        "`board:read` and board membership"
+    )
+
+
 def test_ticket_cancel_scope_matches_unconditional_authorization() -> None:
     assert generate_reference_docs._direct_required_scopes()["ticket_cancel"] == (
         "board:write",

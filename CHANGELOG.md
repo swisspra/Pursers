@@ -9,6 +9,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Opaque, integrity-protected, principal- and filter-bound keyset pagination for
+  ticket lists, with explicit live-read consistency, response byte bounds,
+  lazy archive hydration, retained-history pages, compatible client traversal,
+  and bounded Fleet Work controls. Existing cursor-free reads remain valid.
+
+- Add an additive version-1 ticket `activity` projection across intake, queue,
+  work, validation, independent review, integration, delivery, and configured
+  completion. Fleet now shows the authoritative attempt, actor, meaningful-update
+  freshness, blocker, next action, bounded evidence references, and optional
+  worker estimate without treating lease keepalive as progress. Delivery notices
+  preserve whether the supported boundary is a pull request or integration.
+
+- A small versioned MCP help index with lazy role, workflow, authorized board,
+  and ticket resources, plus host-neutral role-aware prompts. The Zed relay keeps
+  legacy prompt/resource discovery, rechecks board authorization on every dynamic
+  read, and reports unavailable digest engines explicitly instead of presenting a
+  fake empty board.
+
+- Optional board-scoped agent display names with compare-and-set updates,
+  reset-to-operational-name behavior, bounded audit history, and Team UI editing.
+  Display labels survive Central restarts and credential refresh while stable
+  `agent_id`, `agent_name`, principal, roles, leases, and historical actor
+  evidence remain unchanged. Older clients continue to use `agent_name`.
+
+- A versioned portable `pursers-start`, `pursers-work`, `pursers-review`, and
+  `pursers-operate` Agent Skills bundle, with progressive role references and a
+  dry-run-first project or user installer for Zed, Codex, and goose. Conflicts
+  are preserved explicitly, repeat installs are idempotent, exact copies can be
+  removed safely, and the skills never configure credentials or expand roles.
+
 - Configurable delivery policy inheritance across global defaults, explicit named
   groups, and repository overrides, with field provenance, presets, reset-to-inherit,
   guarded activation and draft-only visibility for runtime capabilities that are not
@@ -28,6 +58,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   validation blocks integration. See [delivery setup](docs/integration-delivery.md).
 
 ### Fixed
+
+- Preserve the Board Butler batch engine's durable `in_delivery` state while
+  projecting boundary-specific `pr_created` or `integration_merged` activity.
+  Legacy per-ticket PR records keep their existing `pr_*` storage contract.
+
+- Fleet Home cold opens now return bounded per-board summaries before optional
+  ticket, event, handoff, and human-request enrichment. Slow boards remain
+  visibly pending instead of contributing false zeroes, the browser coalesces
+  refreshes, and expired full results are labelled stale while one background
+  refresh runs. Registry discovery is also bounded: a slow first discovery
+  returns the known home board as an explicit lower-bound view, while an empty
+  timed-out browser request retries after one second instead of five.
+
+- Fleet dashboard board navigation now paints the already-loaded bounded summary
+  immediately, coalesces each route's reads, cancels stale route work, backs off
+  while hidden or disconnected, and skips unchanged DOM renders. Optional overhead
+  metrics no longer delay useful Team/Home data; read-only Central calls can overlap
+  while mutation calls retain their serialization boundary.
 
 - Add explicit `test_output` to Central and client submission tools and
   `--test-output` / `--test-output-file` to generated worker helpers. Preserve

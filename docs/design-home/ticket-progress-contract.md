@@ -330,6 +330,23 @@ and project stored version-1 records read-only. A later cleanup may archive the
 optional fields only after the retention window. Never rewrite them into lease
 metadata.
 
+### Additive lifecycle activity
+
+The estimate above is one optional input to the broader `activity` schema version
+1. Activity projects authoritative workflow evidence into `intake`, `queued`,
+`work`, `validation`, `review`, `integration`, `delivery`, or `completed`, with a
+state of `waiting`, `running`, `blocked`, `retrying`, `failed`, `canceled`,
+`stale`, `unknown`, or `completed`. It also carries `attempt_id`, stable
+`actor_id`, `updated_at`, `freshness`, bounded `evidence_refs`, `next_action`,
+optional `blocking_reason`/`estimate`, and `completion_boundary`.
+
+Activity is read-only and additive. Unknown old fields remain unknown; a closed
+review is not silently promoted to PR, integration, release, or delivery. Current
+delivery annotations supply actual PR/integration facts and their supported
+boundary. Journal events carry bounded scalar activity cues and a reference to
+the durable ticket projection. Heartbeats and all lease renewal variants remain
+outside meaningful-update freshness.
+
 ## Acceptance and negative tests
 
 1. **Schema:** boundaries 0, 1, 98, 99; equal bounds; low greater than high;

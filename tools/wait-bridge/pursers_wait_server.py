@@ -4690,7 +4690,25 @@ async def board_digest_resource(board_id: str) -> str:
     """Read current board digest JSON without a tool call."""
     engine = _get_orchestrator_engine()
     if engine is None:
-        return "{}"
+        return json.dumps(
+            {
+                "schema": "pursers.digest.v1",
+                "ok": False,
+                "status": "unavailable",
+                "code": "orchestrator_engine_unavailable",
+                "detail": (
+                    "The compatibility digest requires pursers-wait-bridge "
+                    "orchestrator mode; no empty board result was synthesized."
+                ),
+                "board_id": board_id,
+                "fallback": {
+                    "tool": "board_digest",
+                    "guide": "docs/guides/connecting-clients.md",
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     digest = await engine.build_digest(boards=[board_id])
     return json.dumps(digest, ensure_ascii=False, indent=2)
 
@@ -4878,10 +4896,7 @@ async def _ticket_projection(
     *,
     ticket_ids: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]] | None, bool, dict[str, Any] | None]:
-    """Fetch one bounded active-ticket projection inside the wait deadline."""
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        return None, False, {"code": "ticket_projection_timeout"}
+    """Drain a bounded active-ticket projection inside the wait deadline."""
     arguments: dict[str, Any] = {
         "include_closed": False,
         "limit": CATCHUP_PAGE_LIMIT,
@@ -4892,50 +4907,104 @@ async def _ticket_projection(
     # away from submitted (verdict/cancel), so holder updates are not dropped.
     if wait_for == WAIT_FOR_SUBMITTED and not ticket_ids:
         arguments["status"] = "submitted"
-    try:
-        listed = await asyncio.wait_for(
-            client.ticket_list(**arguments), timeout=remaining
-        )
-    except TimeoutError:
-        return None, False, {"code": "ticket_projection_timeout"}
-    except Exception as exc:
-        return None, False, {
-            "code": "ticket_projection_failed",
-            "detail": str(exc),
-        }
-    raw_tickets = list(listed.get("tickets", []))
-    tickets = raw_tickets
+    requested_ids = sorted(ticket_ids) if ticket_ids else None
+    raw_tickets: list[dict[str, Any]] = []
     keyed_filter_supported = True
+    total: int | None = None
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    warning: dict[str, Any] | None = None
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            warning = {
+                "code": "ticket_projection_timeout",
+                "returned": len(raw_tickets),
+            }
+            break
+        page_arguments = dict(arguments)
+        if cursor is not None:
+            page_arguments["cursor"] = cursor
+        try:
+            listed = await asyncio.wait_for(
+                client.ticket_list(**page_arguments), timeout=remaining
+            )
+        except TimeoutError:
+            warning = {
+                "code": "ticket_projection_timeout",
+                "returned": len(raw_tickets),
+            }
+            break
+        except Exception as exc:
+            warning = {
+                "code": "ticket_projection_failed",
+                "detail": str(exc),
+                "returned": len(raw_tickets),
+            }
+            break
+
+        page_tickets = [
+            ticket for ticket in listed.get("tickets", [])
+            if isinstance(ticket, dict)
+        ]
+        raw_tickets.extend(page_tickets)
+        try:
+            page_total = int(listed.get("total_matching", len(page_tickets)))
+        except (TypeError, ValueError):
+            page_total = len(raw_tickets) + 1
+        total = page_total if total is None else max(total, page_total)
+
+        if requested_ids is not None:
+            filters = listed.get("filters")
+            keyed_filter_supported = bool(
+                keyed_filter_supported
+                and isinstance(filters, dict)
+                and filters.get("ticket_ids") == requested_ids
+            )
+            if not keyed_filter_supported:
+                warning = {
+                    "code": "ticket_projection_key_filter_unavailable",
+                    "returned": len(raw_tickets),
+                    "requested": len(ticket_ids or ()),
+                    "total_matching": total,
+                }
+                break
+
+        if not listed.get("has_more"):
+            break
+        next_cursor = listed.get("next_cursor")
+        if (
+            not isinstance(next_cursor, str)
+            or not next_cursor
+            or next_cursor in seen_cursors
+        ):
+            warning = {
+                "code": "ticket_projection_cursor_stalled",
+                "returned": len(raw_tickets),
+                "total_matching": total,
+            }
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+    tickets = raw_tickets
     if ticket_ids:
-        requested_ids = sorted(ticket_ids)
-        filters = listed.get("filters")
-        keyed_filter_supported = bool(
-            isinstance(filters, dict)
-            and filters.get("ticket_ids") == requested_ids
-        )
         tickets = [
             ticket for ticket in raw_tickets
             if isinstance(ticket, dict) and ticket.get("ticket_id") in ticket_ids
         ]
-    try:
-        total = int(listed.get("total_matching", len(raw_tickets)))
-    except (TypeError, ValueError):
+    if total is None:
         total = len(raw_tickets) + 1
     complete = keyed_filter_supported and total <= len(raw_tickets)
-    warning = None
-    if ticket_ids and not keyed_filter_supported:
-        warning = {
-            "code": "ticket_projection_key_filter_unavailable",
-            "returned": len(raw_tickets),
-            "requested": len(ticket_ids),
-            "total_matching": total,
-        }
-    elif not complete:
+    if warning is None and not complete:
         warning = {
             "code": "ticket_projection_truncated",
             "returned": len(raw_tickets),
             "total_matching": total,
         }
+    if not raw_tickets and warning is not None:
+        return None, False, warning
     return tickets, complete, warning
 
 

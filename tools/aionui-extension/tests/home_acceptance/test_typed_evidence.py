@@ -2756,12 +2756,23 @@ def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
     trace_config_path.chmod(0o600)
     state_dir = tmp_path / "state"
     state_dir.mkdir()
+    butler_state_dir = tmp_path / "board-butler-state"
+    butler_state_dir.mkdir()
+    butler_state_dir.chmod(0o700)
+    butler_secrets_dir = tmp_path / "board-butler-secrets"
+    butler_secrets_dir.mkdir()
+    butler_secrets_dir.chmod(0o700)
+    butler_entrypoint = checkout / "tools/board-butler/board_butler.py"
+    assert butler_entrypoint.is_file()
     port = _free_port()
     process = subprocess.Popen(
         [
             sys.executable, str(artifact), "--port", str(port),
             "--url", "http://127.0.0.1:1", "--token-file", str(token_path),
             "--seat-state-dir", str(state_dir),
+            "--butler-state-dir", str(butler_state_dir),
+            "--butler-entrypoint", str(butler_entrypoint),
+            "--butler-secrets-dir", str(butler_secrets_dir),
             "--evidence-trace-config", str(trace_config_path),
         ],
         cwd=checkout,

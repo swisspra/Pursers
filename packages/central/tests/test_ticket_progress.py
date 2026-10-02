@@ -165,6 +165,14 @@ class TicketProgressTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("evidence", update_event)
         self.assertEqual(update_event["progress_ref"], f"board://pursers/ticket/{ticket_id}#progress-1-1")
+        self.assertEqual(update_event["activity_schema_version"], 1)
+        self.assertEqual(update_event["activity_stage"], "work")
+        self.assertEqual(update_event["activity_state"], "running")
+        self.assertEqual(update_event["activity_attempt_id"], 1)
+        self.assertEqual(
+            update_event["activity_ref"],
+            f"board://pursers/ticket/{ticket_id}#activity-v1",
+        )
 
         conflict = await self.progress(
             ticket_id, low=1, high=1, evidence="One unit complete.", revision=0
@@ -246,9 +254,16 @@ class TicketProgressTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(central.time, "time", return_value=fresh_until - 0.01):
             fetched = await self.call("ticket_get", ticket_id=ticket_id)
         self.assertEqual(fetched.structured_content["ticket"]["progress_freshness"], "fresh")
+        activity_record = fetched.structured_content["ticket"]["activity"]
+        self.assertEqual(activity_record["schema_version"], 1)
+        self.assertEqual(activity_record["stage"], "work")
+        self.assertEqual(activity_record["state"], "running")
+        self.assertEqual(activity_record["freshness"], "fresh")
+        self.assertEqual(activity_record["estimate"]["low_percent"], 25)
         with patch.object(central.time, "time", return_value=fresh_until):
             fetched = await self.call("ticket_get", ticket_id=ticket_id)
         self.assertEqual(fetched.structured_content["ticket"]["progress_freshness"], "stale")
+        self.assertEqual(fetched.structured_content["ticket"]["activity"]["state"], "stale")
 
     async def test_pre_submission_states_and_exact_holder_boundary(self) -> None:
         self.configure(enabled=True)

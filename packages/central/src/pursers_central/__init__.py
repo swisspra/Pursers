@@ -20,6 +20,8 @@ _names = (
     "instance_lock",
     "runtime_health",
     "butler_commands",
+    "ticket_pagination",
+    "agent_profile",
 )
 _previous = {name: sys.modules.get(name) for name in _names}
 try:

@@ -88,6 +88,18 @@
   font-variant-numeric: tabular-nums;
 }
 
+.work-page-controls {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 52px;
+  margin-top: 16px;
+}
+
+.work-page-controls .button {
+  min-height: 44px;
+}
+
 .work-ledger {
   min-width: 0;
   border-top: 2px solid var(--work-ink);
@@ -217,6 +229,59 @@
   font-weight: 600;
   line-height: 20px;
   overflow-wrap: anywhere;
+}
+
+.work-activity-estimate,
+.work-activity-cell > span:not(.work-cell-label, .work-progress-track) {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.work-activity-blocker {
+  margin: 2px 0 0;
+  font-size: 13px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.work-activity-blocker {
+  color: var(--work-stop);
+}
+
+.work-activity-evidence {
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.work-activity-evidence > summary {
+  min-height: 44px;
+  color: var(--work-signal);
+  cursor: pointer;
+  font-weight: 600;
+  line-height: 44px;
+}
+
+.work-activity-evidence ul {
+  display: grid;
+  gap: 4px;
+  max-width: 100%;
+  margin: 0;
+  padding-inline-start: 18px;
+}
+
+.work-activity-evidence code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.work-activity-cell[data-activity-state="blocked"],
+.work-activity-cell[data-activity-state="failed"],
+.work-activity-cell[data-activity-state="stale"] {
+  border-inline-start: 3px solid var(--work-stop);
+  padding-inline-start: 8px;
 }
 
 .work-progress-cell > span:not(.work-cell-label, .work-progress-track) {
@@ -518,6 +583,9 @@
   .work-ledger,
   .work-ledger-row,
   .work-progress-track,
+  .work-activity-cell[data-activity-state="blocked"],
+  .work-activity-cell[data-activity-state="failed"],
+  .work-activity-cell[data-activity-state="stale"],
   .work-evidence nav {
     border-color: CanvasText;
   }

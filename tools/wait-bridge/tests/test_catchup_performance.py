@@ -574,8 +574,9 @@ class RealCentralCatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(
             sum(name == "board_catchup" for name, _ in first_calls), 8
         )
+        # Central may split the 210 active tickets across byte-bounded pages.
         self.assertLessEqual(
-            sum(name == "ticket_list" for name, _ in first_calls), 2
+            sum(name == "ticket_list" for name, _ in first_calls), 4
         )
 
         self.service.journal.append(
@@ -609,7 +610,7 @@ class RealCentralCatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
             sum(name == "board_catchup" for name, _ in second_calls), 1
         )
         self.assertLessEqual(
-            sum(name == "ticket_list" for name, _ in second_calls), 1
+            sum(name == "ticket_list" for name, _ in second_calls), 4
         )
 
 

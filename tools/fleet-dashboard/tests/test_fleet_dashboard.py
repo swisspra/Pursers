@@ -108,6 +108,17 @@ def test_primary_route_modules_own_renderers_and_receive_shared_context() -> Non
     assert "FleetViewModules.render(kind,fleetViewContext())" in app
 
 
+def test_home_pending_coverage_never_renders_false_zero_totals() -> None:
+    source = dashboard.UI_ASSETS["/ui/views/home.js"][1].decode("utf-8")
+
+    assert "const observed = value => pending ? `≥${value}` : value;" in source
+    assert "enriching && !hasSummary ? '…'" in source
+    assert "<dd>${esc(observed(working))}</dd>" in source
+    assert "<dd>${esc(observed(blocked))}</dd>" in source
+    assert "<dd>${esc(observed(submitted))}</dd>" in source
+    assert "<dd>${esc(observed(open))}</dd>" in source
+
+
 def _render_team_lifecycle(
     *,
     agents: list[dict[str, Any]],
@@ -3433,9 +3444,10 @@ def test_ticket_activity_renders_newest_three_and_empty_state() -> None:
         [
             source("const esc="),
             source("const fmt="),
-            source("function detailActivityNotices("),
-            source("function eventTypeSummary("),
-            source("function ticketActivityView("),
+                source("function detailActivityNotices("),
+                source("function eventTypeSummary("),
+                "const agentPresentation=(_central,_board,name)=>name;",
+                source("function ticketActivityView("),
             f"const data={{events:{json.dumps(events)},event_window_truncated:true,event_resync_required:true,board:{{board_id:'pursers'}}}};",
             "const route={central:'personal'};",
             "console.log(JSON.stringify({filled:ticketActivityView(data,route,{id:'TK-one'}),empty:ticketActivityView({...data,events:[],event_window_truncated:false,event_resync_required:false},route,{id:'TK-empty'})}));",
@@ -4688,14 +4700,18 @@ def test_hung_central_times_out_after_healthy_central_renders() -> None:
             source("async function fetchJson("),
             source("async function fetchWithTimeout("),
             source("async function refreshCentral("),
+            source("let fleetRefreshPromise="),
+            source("function fleetRefreshDelay("),
+            source("function scheduleFleetRefresh("),
             source("async function refreshFleet("),
             "const apiCentral=label=>`central=${encodeURIComponent(label)}`;",
+            "const document={hidden:false};",
             "const route=()=>null;",
             "let centralLabels=['personal','work'],fleetData={},fleetErrors={};",
             "const renders=[];",
             "function renderFleet(){renders.push({data:Object.keys(fleetData),errors:{...fleetErrors}})}",
             "global.fetch=path=>path.includes('work')?new Promise(()=>{}):Promise.resolve({ok:true,json:async()=>({central:'personal'})});",
-            "refreshFleet(20).then(()=>console.log(JSON.stringify(renders)));",
+            "refreshFleet(20).then(()=>{console.log(JSON.stringify(renders));process.exit(0)});",
         ]
     )
     completed = subprocess.run(
@@ -4710,6 +4726,48 @@ def test_hung_central_times_out_after_healthy_central_renders() -> None:
     assert renders[0] == {"data": ["personal"], "errors": {}}
     assert renders[-1]["data"] == ["personal"]
     assert renders[-1]["errors"] == {"work": "TimeoutError"}
+
+
+def test_first_fleet_timeout_retries_on_incomplete_cadence() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            source("async function refreshCentral("),
+            source("let fleetRefreshPromise="),
+            source("function fleetRefreshDelay("),
+            source("function scheduleFleetRefresh("),
+            source("async function refreshFleet("),
+            "const document={hidden:false};",
+            "const route=()=>null,refreshPaused=()=>false,renderFleet=()=>{};",
+            "const apiCentral=label=>label;",
+            "const connectionFailureDetail=()=>({errorClass:'TimeoutError'});",
+            "const markConnectionFailure=()=>{},markConnectionSuccess=()=>{};",
+            "const loadCentrals=async()=>{};",
+            "const fetchWithTimeout=async()=>{throw new Error('timed out')};",
+            "let centralLabels=['personal'],fleetData={},fleetErrors={};",
+            "const scheduled=[];const setTimeout=(_fn,delay)=>{scheduled.push(delay);return 1};const clearTimeout=()=>{};",
+            "refreshFleet(20).then(()=>console.log(JSON.stringify({scheduled,fleetData,fleetErrors})));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+
+    result = json.loads(completed.stdout)
+    assert result == {
+        "scheduled": [1000],
+        "fleetData": {},
+        "fleetErrors": {"personal": "TimeoutError"},
+    }
 
 
 def test_filter_behavior_removes_unrelated_home_rows_and_change_counts() -> None:
@@ -7404,8 +7462,8 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
     # Network reads continue while editing so disconnects and cached data stay
     # truthful; only destructive rendering remains paused until the form resumes.
     for fn in (
-        "async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(!centralLabels.length)",
-        "async function refreshHubExtras(){if(hubExtrasBusy||!centralLabels.length)return;",
+        "async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(fleetRefreshPromise)return fleetRefreshPromise;",
+        "async function refreshHubExtras(){if(hubExtrasBusy||!centralLabels.length||document.hidden)return;",
         "async function refreshAttentionState(){try",
         "async function refreshAutonomousButler(){if(!['settings','team','activity'].includes(navKind()))return;",
         "async function refreshButler(){if(navKind()!=='settings')return;",
@@ -7419,8 +7477,8 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
         "navKind()==='seats'&&centralLabels.length&&!refreshPaused())await refreshSeats()",
         "includes(navKind())&&!refreshPaused())renderHub()",
         "navKind()==='overview'&&!refreshPaused())renderHub()",
-        "detailData=data;markConnectionSuccess(key);if(refreshPaused())return;renderDetail(data)",
-        "markConnectionSuccess(key);if(refreshPaused())return;renderOverhead(data)",
+        "detailData=data;markConnectionSuccess(key);if(refreshPaused())return;if(changed)renderDetail(data)",
+        "markConnectionSuccess(key);if(refreshPaused())return;if(payloadChanged(key,data))renderOverhead(data)",
         "markConnectionSuccess(key);if(!refreshPaused())renderConfig(data)",
         "if(navKind()==='seats'&&!refreshPaused())renderHub()",
     ):
@@ -7436,6 +7494,96 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
         assert fn in html, fn
     assert "node.matches?.('input,textarea,select')&&node.form?.dataset.dirty" in html
     assert "node.matches?.('input,textarea,select')){const type=" not in html
+
+
+def test_dashboard_slow_read_coordination_contract() -> None:
+    html = dashboard.HTML
+    for marker in (
+        "const DETAIL_REQUEST_TIMEOUT_MS=20000,requestFlights=new Map(),responseStamps=new Map()",
+        "const active=requestFlights.get(key);if(active)return active.promise",
+        "abortRequestGroup('detail:'",
+        "version!==detailRouteVersion",
+        "document.hidden?30000:connectionFailures.has(key)?15000:5000",
+        "if(payloadChanged(key,data))renderOverhead(data)",
+        "if(changed)renderDetail(data)",
+        "Loading full activity…",
+        "void Promise.allSettled(centralLabels.map(central=>fetchCoordinated(`hub-overhead:",
+    ):
+        assert marker in html, marker
+    assert "detailTimer=setInterval(refreshDetail,5000)" not in html
+    assert "fetchJson(`/api/board/${encodeURIComponent(r.board)}?" not in html
+
+
+def test_dashboard_semantic_payload_stamp_skips_generated_at_only_rerender() -> None:
+    source = dashboard.UI_ASSETS["/ui/assets/app.js"][1].decode("utf-8")
+    lines = source.splitlines()
+
+    def function(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            "const responseStamps=new Map();",
+            function("function payloadStamp("),
+            function("function payloadChanged("),
+            "let renders=0;",
+            "const first={generated_at:'2030-01-01T00:00:00Z',latest_seq:7,board:{board_id:'pursers'},tickets:[{id:'TK-1',title:'First'}],routes:{window_start:'2030-01-01T00:00:00Z',rows:[{id:'TK-1'}]}};",
+            "const timestampOnly={...first,generated_at:'2030-01-01T00:00:05Z',routes:{...first.routes,window_start:'2030-01-01T00:00:05Z'}};",
+            "const changedContent={...timestampOnly,tickets:[{id:'TK-1',title:'Changed'}]};",
+            "const outcomes=[first,timestampOnly,changedContent].map(data=>{const changed=payloadChanged('detail:pursers',data);if(changed)renders++;return changed});",
+            "console.log(JSON.stringify({outcomes,renders,stable:payloadStamp(first)===payloadStamp(timestampOnly),contentDetected:payloadStamp(timestampOnly)!==payloadStamp(changedContent)}));",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+
+    assert result == {
+        "outcomes": [True, False, True],
+        "renders": 2,
+        "stable": True,
+        "contentDetected": True,
+    }
+
+
+def test_dashboard_rapid_route_abort_neither_renders_nor_marks_failure() -> None:
+    source = dashboard.UI_ASSETS["/ui/assets/app.js"][1].decode("utf-8")
+    lines = source.splitlines()
+
+    def function(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            "const CENTRAL_REQUEST_TIMEOUT_MS=4000;",
+            function("const DETAIL_REQUEST_TIMEOUT_MS="),
+            function("function abortReason("),
+            function("async function fetchCoordinated("),
+            function("function abortRequestGroup("),
+            function("async function refreshDetail("),
+            "let currentRoute={kind:'board',central:'fleet',board:'board-one'},failureCount=0,renderCount=0,abortName='',detailData=null;",
+            "const route=()=>currentRoute,apiCentral=()=>'',refreshPaused=()=>false,markConnectionSuccess=()=>{},refreshIntake=()=>{},scheduleRouteRefresh=()=>{};",
+            "const panel={children:[],innerHTML:''};const document={querySelector:()=>panel};",
+            "const renderDetail=()=>{renderCount++},markConnectionFailure=()=>{failureCount++},payloadChanged=()=>true;",
+            "const fetchJson=(_path,{signal})=>new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>{abortName=signal.reason?.name||typeof signal.reason;reject(signal.reason)},{once:true}));",
+            "(async()=>{const pending=refreshDetail();currentRoute={kind:'board',central:'fleet',board:'board-two'};detailRouteVersion++;abortRequestGroup('detail:','detail:fleet:board-two');await pending;console.log(JSON.stringify({abortName,failureCount,renderCount,flights:requestFlights.size,panel:panel.innerHTML}))})().catch(error=>{console.error(error);process.exit(1)});",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+
+    assert result == {
+        "abortName": "AbortError",
+        "failureCount": 0,
+        "renderCount": 0,
+        "flights": 0,
+        "panel": "",
+    }
 
 
 def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
@@ -9484,6 +9632,122 @@ def test_lifecycle_http_endpoints_use_same_origin_json_guard() -> None:
     ]
 
 
+def test_display_name_projection_keeps_board_identity_and_duplicates() -> None:
+    now = datetime.now(timezone.utc)
+    raw = {
+        "board_id": "pursers",
+        "label": "Pursers",
+        "snapshot": {
+            "board": {"board_id": "pursers"},
+            "agents": [
+                {
+                    "agent_id": "AI-one",
+                    "principal_id": "PR-one",
+                    "agent_name": "worker-one",
+                    "display_name": '<img src=x onerror="alert(1)">',
+                    "display_name_revision": 2,
+                    "role": "worker",
+                    "status": "idle",
+                    "last_activity_at": now.isoformat(),
+                    "capabilities": {"can_work": True},
+                },
+                {
+                    "agent_id": "AI-two",
+                    "principal_id": "PR-two",
+                    "agent_name": "worker-two",
+                    "display_name": '<img src=x onerror="alert(1)">',
+                    "display_name_revision": 1,
+                    "role": "worker",
+                    "status": "idle",
+                    "last_activity_at": now.isoformat(),
+                    "capabilities": {"can_work": True},
+                },
+            ],
+            "tickets": [],
+        },
+        "events": [],
+    }
+    projected = dashboard.aggregate_fleet([raw], stale_seconds=300, now=now)
+    agents = {row["agent_name"]: row for row in projected["agents"]}
+    first = agents["worker-one"]
+    assert first["display_name"] == '<img src=x onerror="alert(1)">'
+    assert first["duplicate_display_name"] is True
+    assert first["display_name_profiles"] == [
+        {
+            "board_id": "pursers",
+            "agent_id": "AI-one",
+            "display_name": '<img src=x onerror="alert(1)">',
+            "display_label": '<img src=x onerror="alert(1)">',
+            "revision": 2,
+        }
+    ]
+
+
+def test_display_name_ui_contract_escapes_and_supports_keyboard_states() -> None:
+    assert "/api/agents/display-name" in dashboard.HTML
+    assert "data-agent-display-form" in dashboard.HTML
+    assert "data-display-reset" in dashboard.HTML
+    assert "data-display-cancel" in dashboard.HTML
+    assert "event.key === 'Escape'" in dashboard.HTML
+    assert "Operational name ${esc(a.agent_name)}" in dashboard.HTML
+    assert "<h3>${esc(displayName)}</h3>" in dashboard.HTML
+    assert "function agentPresentation(" in dashboard.HTML
+    assert "agentPresentation(r.central,d.board.board_id,e.actor" in dashboard.HTML
+    assert 'role="status" aria-live="polite"' in dashboard.HTML
+
+
+def test_display_name_http_endpoint_uses_same_origin_json_guard() -> None:
+    calls: list[tuple[str, str, object]] = []
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            return value or "default"
+
+        def save_agent_display_name(
+            self, board_id: str, payload: object
+        ) -> dict:
+            calls.append(("display", board_id, payload))
+            return {"ok": True, "profile": {"revision": 4}}
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=SimpleNamespace())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    payload = {
+        "board_id": "pursers",
+        "agent_id": "AI-target",
+        "display_name": "Friendly",
+        "expected_revision": 3,
+    }
+    try:
+        request = urllib.request.Request(
+            base + "/api/agents/display-name",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            assert json.load(response)["profile"]["revision"] == 4
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert calls == [
+        (
+            "display",
+            "pursers",
+            {
+                "agent_id": "AI-target",
+                "display_name": "Friendly",
+                "expected_revision": 3,
+            },
+        )
+    ]
+
+
 def test_dispatch_http_endpoints_use_same_origin_json_guard() -> None:
     calls: list[tuple[str, object]] = []
 
@@ -9843,6 +10107,42 @@ def test_truncated_snapshot_splices_active_ticket_list() -> None:
         "TK-open",
         "TK-submitted",
     }
+
+
+def test_ticket_list_pages_follows_cursor_and_old_server_falls_back() -> None:
+    class NewClient:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def ticket_list(self, **kwargs: object) -> dict:
+            self.calls.append(dict(kwargs))
+            if kwargs.get("cursor") == "next":
+                return {
+                    "tickets": [{"ticket_id": "TK-b"}, {"ticket_id": "TK-c"}],
+                    "next_cursor": None,
+                    "total_matching": 3,
+                }
+            return {
+                "tickets": [{"ticket_id": "TK-a"}, {"ticket_id": "TK-b"}],
+                "next_cursor": "next",
+                "total_matching": 3,
+            }
+
+    new = NewClient()
+    result = asyncio.run(dashboard._ticket_list_pages(new, limit=2))
+    assert [row["ticket_id"] for row in result["tickets"]] == ["TK-a", "TK-b", "TK-c"]
+    assert result["pagination_supported"] is True
+    assert result["traversal_complete"] is True
+    assert new.calls[1]["cursor"] == "next"
+
+    class OldClient:
+        async def ticket_list(self, **_kwargs: object) -> dict:
+            return {"tickets": [{"ticket_id": "TK-a"}], "total_matching": 3}
+
+    fallback = asyncio.run(dashboard._ticket_list_pages(OldClient(), limit=1))
+    assert fallback["pagination_supported"] is False
+    assert fallback["traversal_complete"] is False
+    assert fallback["has_more"] is True
 
 
 def test_push_wait_pressure_supersedes_poll_and_exposes_return_rate(
@@ -12852,6 +13152,75 @@ def _cache_runner(value):
     return value
 
 
+def test_reusable_async_runner_overlaps_reads_but_serializes_mutations() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    runner = dashboard._ReusableAsyncRunner()
+    active = 0
+    peak = 0
+
+    async def operation() -> dict:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        return {"ok": True}
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(runner.run_read, operation()) for _ in range(2)]
+            assert all(future.result()["ok"] for future in futures)
+        assert peak == 2
+
+        peak = 0
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(runner.run, operation()) for _ in range(2)]
+            assert all(future.result()["ok"] for future in futures)
+        assert peak == 1
+    finally:
+        runner.close()
+
+
+def test_overhead_thresholds_serve_defaults_while_scoped_refresh_runs() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowThresholdFetcher(FakeCentralFetcher):
+        async def fetch_config(self) -> dict:
+            started.set()
+            await asyncio.to_thread(release.wait, 5)
+            return {
+                "config": {
+                    "thresholds": {"context_watch_tokens_per_poll": 12345}
+                }
+            }
+
+    cache = dashboard.DashboardCache(SlowThresholdFetcher("work"), 5)
+    try:
+        before = time.monotonic()
+        initial = cache.get_overhead_thresholds("work")
+        assert time.monotonic() - before < 0.25
+        assert initial == dashboard.context_pressure_thresholds(None)
+        assert started.wait(1)
+
+        release.set()
+        for _ in range(200):
+            refreshed = cache._overhead_thresholds["work"]
+            if not refreshed._refreshing:
+                break
+            threading.Event().wait(0.01)
+        assert (
+            cache.get_overhead_thresholds("work")[
+                "context_watch_tokens_per_poll"
+            ]
+            == 12345
+        )
+    finally:
+        release.set()
+        cache.close()
+
+
 def test_timed_cache_serves_stale_value_while_one_background_refresh_runs() -> None:
     import threading
 
@@ -12878,6 +13247,277 @@ def test_timed_cache_serves_stale_value_while_one_background_refresh_runs() -> N
             break
         threading.Event().wait(0.01)
     assert cache._value == {"n": 2}
+
+
+def test_timed_cache_first_load_serves_summary_and_coalesces_enrichment() -> None:
+    import threading
+
+    enrichment_started = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def summary_loader() -> dict:
+        calls.append("summary")
+        return {"refresh": {"complete": False}, "boards": [{"board_id": "fast"}]}
+
+    def full_loader() -> dict:
+        calls.append("full")
+        enrichment_started.set()
+        assert release.wait(5)
+        return {"refresh": {"complete": True}, "boards": [{"board_id": "fast"}]}
+
+    cache = dashboard.TimedCache(
+        5.0,
+        full_loader,
+        _cache_runner,
+        initial_loader=summary_loader,
+    )
+
+    initial = cache.get()
+    assert initial["refresh"]["complete"] is False
+    assert enrichment_started.wait(1)
+    assert cache.get() == initial
+    assert calls == ["summary", "full"]
+
+    release.set()
+    for _ in range(200):
+        if not cache._refreshing:
+            break
+        threading.Event().wait(0.01)
+    assert cache.get()["refresh"]["complete"] is True
+    assert calls == ["summary", "full"]
+
+
+def test_timed_cache_marks_expired_full_value_stale_during_refresh() -> None:
+    import threading
+
+    refresh_started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def loader() -> dict:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            refresh_started.set()
+            assert release.wait(5)
+        return {"refresh": {"phase": "complete", "complete": True}, "count": calls}
+
+    cache = dashboard.TimedCache(0.0, loader, _cache_runner)
+    assert cache.get()["refresh"]["complete"] is True
+    stale = cache.get()
+    assert refresh_started.wait(1)
+    assert stale["count"] == 1
+    assert stale["refresh"] == {
+        "phase": "refreshing-stale",
+        "complete": False,
+        "stale": True,
+    }
+    assert calls == 2
+
+    release.set()
+    for _ in range(200):
+        if not cache._refreshing:
+            break
+        threading.Event().wait(0.01)
+    assert cache.get()["count"] == 2
+
+
+def test_fetch_summary_bounds_stalled_board_and_never_fabricates_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory_calls: list[tuple[str, dict[str, object]]] = []
+
+    class Client:
+        def __init__(self, board_id: str) -> None:
+            self.board_id = board_id
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_snapshot(self, **_kwargs: object) -> dict:
+            if self.board_id == "stalled":
+                await asyncio.sleep(0.2)
+            return {
+                "latest_seq": 1,
+                "agents": [],
+                "tickets": [
+                    {"ticket_id": f"TK-{self.board_id}", "status": "open"}
+                ],
+            }
+
+    def factory(
+        _url: str, _token: str, board_id: str, **kwargs: object
+    ) -> Client:
+        factory_calls.append((board_id, dict(kwargs)))
+        return Client(board_id)
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="fast",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=factory)
+
+    async def boards(**_kwargs: object) -> list[tuple[str, str]]:
+        fetcher._readable_boards = [("Fast", "fast"), ("Stalled", "stalled")]
+        fetcher._active_registry_boards = ["fast", "stalled"]
+        return list(fetcher._readable_boards)
+
+    monkeypatch.setattr(fetcher, "_summary_boards", boards)
+    monkeypatch.setattr(dashboard, "FLEET_SUMMARY_BOARD_TIMEOUT_SECONDS", 0.02)
+    started = time.monotonic()
+    try:
+        result = asyncio.run(fetcher.fetch_summary())
+    finally:
+        fetcher.close()
+
+    assert time.monotonic() - started < 0.15
+    by_id = {row["board_id"]: row for row in result["boards"]}
+    assert by_id["fast"]["counts"]["open"] == 1
+    assert by_id["fast"]["coverage"]["human_requests"] == "pending"
+    assert by_id["stalled"]["status"] == "pending"
+    assert by_id["stalled"]["counts"] is None
+    assert result["refresh"] == {
+        "phase": "enriching",
+        "complete": False,
+        "pending_boards": ["stalled"],
+        "covered_board_count": 1,
+        "total_board_count": 2,
+    }
+    assert {board_id for board_id, _kwargs in factory_calls} == {"fast", "stalled"}
+    assert all(
+        kwargs["capabilities"] == {"can_work": False, "can_review": False}
+        and kwargs["agent_name"] == "fleet-dashboard-session-default"
+        for _board_id, kwargs in factory_calls
+    )
+
+
+def test_fetch_summary_discovers_registry_without_optional_board_list() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Client:
+        def __init__(self, board_id: str) -> None:
+            self.board_id = board_id
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_state_get(self, *, key: str) -> dict:
+            calls.append((self.board_id, f"state:{key}"))
+            return registry(
+                {
+                    "Active": {
+                        "board_id": "board-active",
+                        "status": "active",
+                        "work_dir": "/repo/active",
+                    }
+                }
+            )
+
+        async def board_list(self) -> dict:
+            raise AssertionError("summary discovery must not enumerate optional boards")
+
+        async def board_snapshot(self, **_kwargs: object) -> dict:
+            calls.append((self.board_id, "snapshot"))
+            return {"latest_seq": 1, "agents": [], "tickets": []}
+
+    def factory(
+        _url: str, _token: str, board_id: str, **_kwargs: object
+    ) -> Client:
+        return Client(board_id)
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=factory)
+    try:
+        result = asyncio.run(fetcher.fetch_summary())
+    finally:
+        fetcher.close()
+
+    assert [row["board_id"] for row in result["boards"]] == [
+        "pursers",
+        "board-active",
+    ]
+    assert calls.count(("pursers", "state:project_registry")) == 1
+    assert {call for call in calls if call[1] == "snapshot"} == {
+        ("pursers", "snapshot"),
+        ("board-active", "snapshot"),
+    }
+
+
+def test_fetch_summary_bounds_registry_discovery_and_marks_lower_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_snapshot(self, **_kwargs: object) -> dict:
+            return {
+                "latest_seq": 1,
+                "agents": [],
+                "tickets": [{"ticket_id": "TK-home", "status": "open"}],
+            }
+
+    def factory(
+        _url: str, _token: str, _board_id: str, **_kwargs: object
+    ) -> Client:
+        return Client()
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=factory)
+
+    async def stalled_boards(**_kwargs: object) -> list[tuple[str, str]]:
+        await asyncio.sleep(0.2)
+        raise AssertionError("discovery should have timed out")
+
+    monkeypatch.setattr(fetcher, "_summary_boards", stalled_boards)
+    monkeypatch.setattr(dashboard, "FLEET_SUMMARY_DISCOVERY_TIMEOUT_SECONDS", 0.02)
+    started = time.monotonic()
+    try:
+        result = asyncio.run(fetcher.fetch_summary())
+    finally:
+        fetcher.close()
+
+    assert time.monotonic() - started < 0.15
+    assert result["boards"][0]["board_id"] == "pursers"
+    assert result["boards"][0]["counts"]["open"] == 1
+    assert result["refresh"] == {
+        "phase": "enriching",
+        "complete": False,
+        "pending_boards": [],
+        "covered_board_count": 1,
+        "total_board_count": 1,
+        "discovery_complete": False,
+        "total_board_count_is_lower_bound": True,
+    }
+    assert result["pool_scope"]["discovery"] == "pending"
 
 
 def test_timed_cache_raises_refresh_error_once_the_value_is_too_old() -> None:
