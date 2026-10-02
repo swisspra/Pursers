@@ -1045,6 +1045,10 @@ async def test_agent_lifecycle_arguments_are_forwarded(monkeypatch) -> None:
     await board.board_status(include_retired=True)
     await board.agent_retire("AI-target")
     await board.agent_retire_inert()
+    await board.agent_display_name_set(
+        "Friendly", 2, target_agent_id="AI-target"
+    )
+    await board.agent_display_name_set(None, 3)
     await board.board_stale_after_set(7)
 
     assert calls == [
@@ -1055,6 +1059,23 @@ async def test_agent_lifecycle_arguments_are_forwarded(monkeypatch) -> None:
             {"agent_name": "env-default", "target_agent_id": "AI-target"},
         ),
         ("agent_retire_inert", {"agent_name": "env-default"}),
+        (
+            "agent_display_name_set",
+            {
+                "agent_name": "env-default",
+                "display_name": "Friendly",
+                "expected_revision": 2,
+                "target_agent_id": "AI-target",
+            },
+        ),
+        (
+            "agent_display_name_set",
+            {
+                "agent_name": "env-default",
+                "display_name": None,
+                "expected_revision": 3,
+            },
+        ),
         (
             "board_stale_after_set",
             {"agent_name": "env-default", "stale_after_days": 7},

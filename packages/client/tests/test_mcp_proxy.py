@@ -510,8 +510,8 @@ def test_worker_and_reviewer_profiles_are_exact_and_materially_smaller(
 async def _worker_and_reviewer_profiles_are_exact_and_materially_smaller(
     tmp_path: Path,
 ) -> None:
-    assert len(WORKER_TOOLS) == 9
-    assert len(REVIEWER_TOOLS) == 9
+    assert len(WORKER_TOOLS) == 10
+    assert len(REVIEWER_TOOLS) == 10
     token_file = tmp_path / "credential.jwt"
     token_file.write_text("opaque-test-credential", encoding="utf-8")
     profile_names = WORKER_TOOLS | REVIEWER_TOOLS

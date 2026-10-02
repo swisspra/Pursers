@@ -27,6 +27,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   read, and reports unavailable digest engines explicitly instead of presenting a
   fake empty board.
 
+- Optional board-scoped agent display names with compare-and-set updates,
+  reset-to-operational-name behavior, bounded audit history, and Team UI editing.
+  Display labels survive Central restarts and credential refresh while stable
+  `agent_id`, `agent_name`, principal, roles, leases, and historical actor
+  evidence remain unchanged. Older clients continue to use `agent_name`.
+
 - Configurable delivery policy inheritance across global defaults, explicit named
   groups, and repository overrides, with field provenance, presets, reset-to-inherit,
   guarded activation and draft-only visibility for runtime capabilities that are not

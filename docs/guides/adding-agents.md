@@ -49,6 +49,37 @@ The reviewer must use a different credential and principal from the worker.
 Changing only `agent_name` does not make a review independent: two names that
 authenticate with the same credential still have the same principal.
 
+### Display names are presentation only
+
+`agent_name` is the stable operational name used to derive `agent_id`; keep it
+unchanged across restarts. An optional display name is board-scoped presentation
+metadata on that exact identity. It does not change credentials, permissions,
+roles, leases, assignment keys, URLs, or historical actor evidence.
+
+An identity owner can update its own label. A board administrator can update any
+existing identity on that board. Both use compare-and-set revision control:
+
+```text
+agent_display_name_set(
+  board_id="quickstart",
+  agent_name="worker-1",
+  display_name="Build worker",
+  expected_revision=0
+)
+```
+
+Pass `display_name=null` with the current revision to reset the label to the
+operational `agent_name`. Labels are limited to 80 characters and 256 UTF-8
+bytes. Surrounding whitespace is removed; control and bidirectional-control
+characters are rejected. Normal international names are supported. Duplicate
+labels are allowed, so always use `agent_id` for selection and assignment and
+show the operational name and board when disambiguation is needed.
+
+The revision, updater, old/new values, and timestamp are stored in bounded board
+audit history. Existing records and older clients have no display-name fields and
+fall back to `agent_name`. Rolling back the UI or client leaves the additive
+metadata readable and does not require a destructive migration.
+
 ## 1. Create the quickstart instance
 
 Install Pursers in a dedicated virtual environment, then initialize a private

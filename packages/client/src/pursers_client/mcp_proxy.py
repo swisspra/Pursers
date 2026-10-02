@@ -49,6 +49,7 @@ SETUP_AGENT_NAME = "zed-local-owner"
 DEFAULT_TOOLS = frozenset(
     {
         "a2a_wait",
+        "agent_display_name_set",
         "board_catchup",
         "board_list",
         "board_question_inbox",
@@ -80,6 +81,7 @@ DEFAULT_TOOLS = frozenset(
 WORKER_TOOLS = frozenset(
     {
         "lease_renew",
+        "agent_display_name_set",
         "ticket_annotate",
         "ticket_claim",
         "ticket_get",
@@ -93,6 +95,7 @@ WORKER_TOOLS = frozenset(
 REVIEWER_TOOLS = frozenset(
     {
         "dispatch_my_offers",
+        "agent_display_name_set",
         "lease_renew",
         "ticket_annotate",
         "ticket_get",

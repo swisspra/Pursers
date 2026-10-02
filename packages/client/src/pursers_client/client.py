@@ -1919,6 +1919,23 @@ class BoardClient:
             "agent_retire_inert", {"agent_name": self.agent_name}
         )
 
+    async def agent_display_name_set(
+        self,
+        display_name: str | None,
+        expected_revision: int,
+        *,
+        target_agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Set or reset presentation metadata for one exact board identity."""
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "display_name": display_name,
+            "expected_revision": expected_revision,
+        }
+        if target_agent_id is not None:
+            arguments["target_agent_id"] = target_agent_id
+        return await self._call("agent_display_name_set", arguments)
+
     async def board_stale_after_set(self, stale_after_days: int) -> dict[str, Any]:
         return await self._call(
             "board_stale_after_set",

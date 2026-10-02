@@ -38,6 +38,7 @@ TICKET_ARCHIVED = "ticket_archived"
 TICKET_PROGRESS_UPDATED = "ticket_progress_updated"
 TICKET_PROGRESS_RESET = "ticket_progress_reset"
 SEAT_NAME_COLLISION = "seat_name_collision"
+AGENT_DISPLAY_NAME_CHANGED = "agent_display_name_changed"
 BUTLER_COMMAND_CREATED = "butler_command_created"
 BUTLER_COMMAND_TRANSITIONED = "butler_command_transitioned"
 BUTLER_CONFIG_CHANGED = "butler_config_changed"
@@ -96,6 +97,7 @@ CORE_EVENT_KINDS = frozenset(
         HUMAN_INPUT_REQUESTED,
         HUMAN_INPUT_RESOLVED,
         SEAT_NAME_COLLISION,
+        AGENT_DISPLAY_NAME_CHANGED,
         TICKET_PROGRESS_UPDATED,
         TICKET_PROGRESS_RESET,
     }

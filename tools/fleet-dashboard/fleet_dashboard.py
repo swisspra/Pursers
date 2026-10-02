@@ -427,6 +427,14 @@ class FleetClient(Protocol):
 
     async def agent_retire_inert(self) -> dict[str, Any]: ...
 
+    async def agent_display_name_set(
+        self,
+        display_name: str | None,
+        expected_revision: int,
+        *,
+        target_agent_id: str | None = None,
+    ) -> dict[str, Any]: ...
+
     async def board_catchup(
         self,
         *,
@@ -4125,6 +4133,16 @@ def aggregate_fleet(
                         "agent_id": _clip(agent_id, MAX_LABEL_CHARS) or None,
                         "principal_id": _clip(principal_id, MAX_LABEL_CHARS),
                         "agent_name": _clip(agent_name, MAX_LABEL_CHARS),
+                        "display_name": _clip(
+                            agent.get("display_name"), MAX_LABEL_CHARS
+                        )
+                        or None,
+                        "display_name_revision": (
+                            agent.get("display_name_revision", 0)
+                            if isinstance(agent.get("display_name_revision", 0), int)
+                            and not isinstance(agent.get("display_name_revision", 0), bool)
+                            else 0
+                        ),
                         "board_id": board_id,
                         "project": label,
                         "role": _clip(
@@ -4149,6 +4167,7 @@ def aggregate_fleet(
                     "boards": set(),
                     "seats": {},
                     "agent_ids_by_board": {},
+                    "display_names_by_board": {},
                     "last_seen": None,
                     "busy": False,
                     "live": False,
@@ -4204,6 +4223,31 @@ def aggregate_fleet(
                     else None
                 ),
                 "last_seen": seen_at.isoformat() if seen_at else None,
+            }
+            profile = agent.get("profile")
+            profile = profile if isinstance(profile, dict) else {}
+            raw_display_name = profile.get("display_name", agent.get("display_name"))
+            display_name = (
+                _clip(raw_display_name, MAX_LABEL_CHARS)
+                if isinstance(raw_display_name, str) and raw_display_name
+                else None
+            )
+            raw_revision = profile.get(
+                "revision", agent.get("display_name_revision", 0)
+            )
+            revision = (
+                raw_revision
+                if isinstance(raw_revision, int)
+                and not isinstance(raw_revision, bool)
+                and raw_revision >= 0
+                else 0
+            )
+            group["display_names_by_board"][board_id] = {
+                "board_id": board_id,
+                "agent_id": _clip(agent_id, MAX_LABEL_CHARS) or None,
+                "display_name": display_name,
+                "display_label": display_name or _clip(agent_name, MAX_LABEL_CHARS),
+                "revision": revision,
             }
             if "capabilities" in agent:
                 seat_projection["capabilities"] = (
@@ -4513,11 +4557,26 @@ def aggregate_fleet(
                 "missing_boards": missing,
                 "extra_boards": extra,
             }
+        display_name_profiles = sorted(
+            group["display_names_by_board"].values(),
+            key=lambda item: item["board_id"],
+        )
+        distinct_display_names = {
+            row["display_name"] for row in display_name_profiles if row["display_name"]
+        }
+        common_display_name = (
+            next(iter(distinct_display_names))
+            if len(distinct_display_names) == 1
+            and all(row["display_name"] for row in display_name_profiles)
+            else None
+        )
         agent_rows.append(
             {
                 "agent_id": agent_ids[0] if len(agent_ids) == 1 else None,
                 "principal_id": group["principal_id"],
                 "agent_name": group["agent_name"],
+                "display_name": common_display_name,
+                "display_name_profiles": display_name_profiles,
                 "boards": joined_boards,
                 "seats": sorted(
                     group["seats"].values(),
@@ -4534,6 +4593,22 @@ def aggregate_fleet(
                 "usage_attribution": _seat_usage_attribution(group),
                 **({"board_scope": board_scope} if scope_available else {}),
             }
+        )
+    display_name_counts: dict[tuple[str, str], int] = {}
+    for row in agent_rows:
+        for profile in row["display_name_profiles"]:
+            label = profile.get("display_name")
+            if label:
+                key = (str(profile["board_id"]), str(label))
+                display_name_counts[key] = display_name_counts.get(key, 0) + 1
+    for row in agent_rows:
+        row["duplicate_display_name"] = any(
+            profile.get("display_name")
+            and display_name_counts.get(
+                (str(profile["board_id"]), str(profile["display_name"])), 0
+            )
+            > 1
+            for profile in row["display_name_profiles"]
         )
     rank = {"busy": 0, "available": 1, "connected": 2, "stale": 3}
     agent_rows.sort(key=lambda item: (rank[item["pool_status"]], item["agent_name"]))
@@ -5550,6 +5625,42 @@ class FleetFetcher:
             raise ValueError("board_id is not registry-active")
         async with self._client(board_id) as client:
             return await client.agent_retire_inert()
+
+    async def save_agent_display_name(
+        self, board_id: str, payload: Any
+    ) -> dict[str, Any]:
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        if not isinstance(payload, dict) or set(payload) != {
+            "agent_id",
+            "display_name",
+            "expected_revision",
+        }:
+            raise ValueError(
+                "display-name request must contain agent_id, display_name, and expected_revision"
+            )
+        agent_id = payload["agent_id"]
+        display_name = payload["display_name"]
+        expected_revision = payload["expected_revision"]
+        if not isinstance(agent_id, str) or not agent_id:
+            raise ValueError("invalid agent_id")
+        if display_name is not None and not isinstance(display_name, str):
+            raise ValueError("display_name must be a string or null")
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise ValueError("expected_revision must be a non-negative integer")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        async with self._client(board_id) as client:
+            return await client.agent_display_name_set(
+                display_name,
+                expected_revision,
+                target_agent_id=agent_id,
+            )
 
     async def fetch_config(self) -> dict[str, Any]:
         async with self._client(self.config.home_board) as client:
@@ -10245,6 +10356,7 @@ def make_handler(
                 "/api/dispatch",
                 "/api/agents/retire",
                 "/api/agents/retire-inert",
+                "/api/agents/display-name",
                 "/api/attention",
                 "/api/human/resolve",
                 "/api/butler/mark",
@@ -10470,6 +10582,28 @@ def make_handler(
                     body = _json_bytes(
                         cache_call(
                             "retire_inert", request["board_id"], central=central
+                        )
+                    )
+                elif route == "/api/agents/display-name":
+                    if not isinstance(request, dict) or set(request) != {
+                        "board_id",
+                        "agent_id",
+                        "display_name",
+                        "expected_revision",
+                    }:
+                        raise ValueError(
+                            "request must contain board_id, agent_id, display_name, and expected_revision"
+                        )
+                    body = _json_bytes(
+                        cache_call(
+                            "save_agent_display_name",
+                            request["board_id"],
+                            {
+                                "agent_id": request["agent_id"],
+                                "display_name": request["display_name"],
+                                "expected_revision": request["expected_revision"],
+                            },
+                            central=central,
                         )
                     )
                 elif route == "/api/attention":
