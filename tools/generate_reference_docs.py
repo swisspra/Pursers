@@ -31,13 +31,14 @@ TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         "board_member_add", "board_member_remove", "board_member_set_role",
         "board_members", "agent_retire", "agent_retire_inert",
         "agent_capabilities_set", "agent_readiness_set",
+        "agent_display_name_set",
     )),
     ("Tickets", (
         "ticket_get", "ticket_create", "ticket_update",
         "ticket_progress_update", "ticket_annotate",
         "ticket_assign", "ticket_claim", "ticket_unclaim", "lease_renew",
         "board_reap", "ticket_submit", "ticket_cancel", "dispatch_my_offers",
-        "ticket_list",
+        "ticket_list", "ticket_history_list",
     )),
     ("Review", (
         "ticket_review_claim", "ticket_review_release", "ticket_review",
@@ -84,6 +85,10 @@ TOOL_SCOPES: dict[str, str] = {
         "`board:write` for the authenticated worker seat, or `board:review` "
         "for the authenticated reviewer seat"
     ),
+    "agent_display_name_set": (
+        "`board:write`, `board:review`, or `board:coordinate`; updating another "
+        "identity also requires board-admin membership"
+    ),
     "ticket_get": "`board:read` and visibility of the ticket",
     "ticket_create": "`board:write`, or restricted `board:intake`",
     "ticket_update": "`board:write` or `board:coordinate`; creator/admin checks also apply",
@@ -98,6 +103,7 @@ TOOL_SCOPES: dict[str, str] = {
     "ticket_cancel": "`board:write`; creator/executor/reviewer checks apply",
     "dispatch_my_offers": "`board:read` for the caller-owned seat",
     "ticket_list": "`board:read`; server-side visibility filters still apply",
+    "ticket_history_list": "`board:read` and board membership",
     "ticket_review_claim": "`board:review` and a live review offer or assignment",
     "ticket_review_release": "`board:review` and the current review lease",
     "ticket_review": "`board:review` and the current review lease",
@@ -482,6 +488,53 @@ def _direct_required_scopes() -> dict[str, tuple[str, ...]]:
     return scopes
 
 
+def _direct_alternative_scopes() -> dict[str, tuple[str, ...]]:
+    """Return literal scope alternatives checked in top-level tool guards."""
+    source = ROOT / "packages/central/src/pursers_central/central.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    constants = {
+        target.id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    scopes: dict[str, tuple[str, ...]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        decorated = any(
+            isinstance(item, ast.Call)
+            and isinstance(item.func, ast.Name)
+            and item.func.id == "tool"
+            for item in node.decorator_list
+        )
+        if not decorated:
+            continue
+        alternatives: list[str] = []
+        for statement in node.body:
+            if not isinstance(statement, ast.If):
+                continue
+            for candidate in ast.walk(statement.test):
+                if not isinstance(candidate, ast.Set):
+                    continue
+                for item in candidate.elts:
+                    value = (
+                        item.value
+                        if isinstance(item, ast.Constant)
+                        else constants.get(item.id)
+                        if isinstance(item, ast.Name)
+                        else None
+                    )
+                    if isinstance(value, str) and value.startswith("board:"):
+                        alternatives.append(value)
+        if alternatives:
+            scopes[node.name] = tuple(dict.fromkeys(alternatives))
+    return scopes
+
+
 def render_mcp_tools() -> str:
     tools = _load_central_tools()
     by_name = {tool.name: tool for tool in tools}
@@ -493,13 +546,18 @@ def render_mcp_tools() -> str:
         )
     if set(TOOL_SCOPES) != expected:
         raise ValueError("scope metadata does not exactly cover the Central registry")
-    for name, scopes in _direct_required_scopes().items():
+    authorization_scopes = _direct_required_scopes()
+    for name, alternatives in _direct_alternative_scopes().items():
+        authorization_scopes[name] = tuple(
+            dict.fromkeys((*authorization_scopes.get(name, ()), *alternatives))
+        )
+    for name, scopes in authorization_scopes.items():
         if name not in TOOL_SCOPES:
             continue
         missing = [scope for scope in scopes if f"`{scope}`" not in TOOL_SCOPES[name]]
         if missing:
             raise ValueError(
-                f"scope metadata for {name} omits unconditional authorization: {missing}"
+                f"scope metadata for {name} omits authorization scopes: {missing}"
             )
     source_fields = _direct_response_fields()
     lines = [
