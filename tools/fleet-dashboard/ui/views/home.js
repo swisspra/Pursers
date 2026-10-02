@@ -38,15 +38,24 @@
     return count;
   }
 
+  function coveragePending() {
+    return Object.values(fleetData).some(data => data?.refresh?.complete === false) ||
+      warmBoards().some(item =>
+        item?.board?.status === 'pending' ||
+        item?.board?.coverage?.human_requests === 'pending'
+      );
+  }
+
   function renderHealthRow(label) {
     const data = fleetData[label];
     const summary = data?.pool_summary || {};
+    const enriching = data?.refresh?.complete === false;
     const stale = Number(summary.stale || 0);
-    const tone = !data ? 'danger' : stale ? 'warning' : 'good';
-    const state = !data ? 'Reconnecting' : stale ? `${stale} stale` : 'Healthy';
+    const tone = !data ? 'danger' : enriching || stale ? 'warning' : 'good';
+    const state = !data ? 'Reconnecting' : enriching ? 'Summary ready; enriching' : stale ? `${stale} stale` : 'Healthy';
     return `<a class="home-health-row" data-tone="${tone}" href="${esc(centralHref(label, 'overhead'))}">
       <span class="home-health-name"><span class="home-health-dot" aria-hidden="true"></span><b>${esc(label)}</b><span class="sr-only">${esc(state)}</span></span>
-      <span class="home-health-counts">${data ? `${esc(summary.busy || 0)} working · ${esc(summary.available || 0)} ready${stale ? ` · ${esc(stale)} stale` : ''}` : state}</span>
+      <span class="home-health-counts">${data ? `${esc(summary.busy ?? '…')} working · ${esc(summary.available ?? '…')} ready${stale ? ` · ${esc(stale)} stale` : ''}${enriching ? ' · optional detail pending' : ''}` : state}</span>
     </a>`;
   }
 
@@ -57,8 +66,14 @@
     return `<a href="${esc(centralHref(item.central, 'overhead'))}">Inspect</a>`;
   }
 
-  function renderOperationalAttention(items) {
+  function renderOperationalAttention(items, pending) {
     if (!items.length) {
+      if (pending) {
+        return `<section class="home-attention" data-state="pending" aria-label="Attention status" aria-busy="true">
+          <div><h3>Checking remaining attention</h3><p class="muted">Available summaries are visible. Human requests, history, and slow projects are still loading; no zero or calm state is assumed.</p></div>
+          <a href="#/projects">View available projects</a>
+        </section>`;
+      }
       return `<section class="home-attention" data-state="calm" aria-label="Attention status">
         <span class="home-calm-mark" aria-hidden="true">✓</span>
         <div><h3>No operational blockers</h3><p class="muted">No unacknowledged Fleet signal needs intervention in this bounded view.</p></div>
@@ -93,13 +108,14 @@
       (b.level === 'critical') - (a.level === 'critical') || (b.age || 0) - (a.age || 0)
     );
     const humanPending = pendingHumanCount();
+    const pending = coveragePending();
     const working = tickets.filter(item => ['claimed', 'in_progress', 'creating_report'].includes(item.ticket.status)).length;
     const blocked = tickets.filter(item => item.ticket.status === 'needs_human' || item.ticket.parked === true).length;
     const submitted = tickets.filter(item => item.ticket.status === 'submitted').length;
     const open = tickets.filter(item => item.ticket.status === 'open').length;
     const readyForTeam = tickets.filter(item => item.ticket.delivery?.state === 'integration_merged').length;
     const attention = humanPending + operationalAttention.length;
-    const pressure = attention || blocked ? 'high' : 'calm';
+    const pressure = attention || blocked ? 'high' : pending ? 'pending' : 'calm';
 
     const command = next ? `<article class="home-command" data-pressure="${pressure}">
       <div class="home-command-copy"><p class="home-kicker">${esc(next.eyebrow)}</p><h3>${esc(next.title)}</h3><p>${esc(next.copy)}</p></div>
@@ -108,12 +124,12 @@
 
     return `${pageHead('Home', 'Your team, at a glance', 'See what needs judgment, what is moving, what is blocked, and the next safe action.')}${warmTruthStrip()}
       <section class="home-briefing">${command}<aside class="home-pulse" aria-labelledby="home-team-status">
-        <div class="home-panel-head"><h3 id="home-team-status">Team status</h3><span class="home-scope">${esc(boards.length)} projects · ${esc(tickets.length)} visible tickets · bounded</span></div>
-        <dl class="home-stats"><div><dt>In progress</dt><dd>${esc(working)}</dd></div><div class="${blocked ? 'is-alert' : ''}"><dt>Blocked</dt><dd>${esc(blocked)}</dd></div><div><dt>Review ready</dt><dd>${esc(submitted)}</dd></div><div><dt>Open queue</dt><dd>${esc(open)}</dd></div></dl>
+        <div class="home-panel-head"><h3 id="home-team-status">Team status</h3><span class="home-scope">${esc(boards.length)} projects · ${esc(tickets.length)} visible tickets · ${pending ? 'partial, enriching' : 'bounded and fresh'}</span></div>
+        <dl class="home-stats"><div><dt>In progress</dt><dd>${esc(working)}</dd></div><div class="${blocked ? 'is-alert' : ''}"><dt>Blocked</dt><dd>${pending ? '…' : esc(blocked)}</dd></div><div><dt>Review ready</dt><dd>${esc(submitted)}</dd></div><div><dt>Open queue</dt><dd>${esc(open)}</dd></div></dl>
         <div class="home-health-list" aria-label="Central health">${centralLabels.map(renderHealthRow).join('')}</div>
       </aside></section>
       ${readyForTeam ? `<section class="home-human-queue"><h3>Ready for your team</h3><p>${esc(readyForTeam)} visible ticket${readyForTeam === 1 ? '' : 's'} confirmed on the delivery branch. Your team handles the final merge.</p><a href="#/work">Inspect delivered work</a></section>` : ''}
-      ${renderOperationalAttention(operationalAttention)}
+      ${renderOperationalAttention(operationalAttention, pending)}
       ${humanPending ? `<section class="home-human-queue" aria-label="Human decision queue">${renderWaitingForYou()}</section>` : ''}`;
   }
 

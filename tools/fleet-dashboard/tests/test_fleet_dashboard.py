@@ -4689,14 +4689,18 @@ def test_hung_central_times_out_after_healthy_central_renders() -> None:
             source("async function fetchJson("),
             source("async function fetchWithTimeout("),
             source("async function refreshCentral("),
+            source("let fleetRefreshPromise="),
+            source("function fleetRefreshDelay("),
+            source("function scheduleFleetRefresh("),
             source("async function refreshFleet("),
             "const apiCentral=label=>`central=${encodeURIComponent(label)}`;",
+            "const document={hidden:false};",
             "const route=()=>null;",
             "let centralLabels=['personal','work'],fleetData={},fleetErrors={};",
             "const renders=[];",
             "function renderFleet(){renders.push({data:Object.keys(fleetData),errors:{...fleetErrors}})}",
             "global.fetch=path=>path.includes('work')?new Promise(()=>{}):Promise.resolve({ok:true,json:async()=>({central:'personal'})});",
-            "refreshFleet(20).then(()=>console.log(JSON.stringify(renders)));",
+            "refreshFleet(20).then(()=>{console.log(JSON.stringify(renders));process.exit(0)});",
         ]
     )
     completed = subprocess.run(
@@ -7405,7 +7409,7 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
     # Network reads continue while editing so disconnects and cached data stay
     # truthful; only destructive rendering remains paused until the form resumes.
     for fn in (
-        "async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(!centralLabels.length)",
+        "async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(fleetRefreshPromise)return fleetRefreshPromise;",
         "async function refreshHubExtras(){if(hubExtrasBusy||!centralLabels.length||document.hidden)return;",
         "async function refreshAttentionState(){try",
         "async function refreshAutonomousButler(){if(!['settings','team','activity'].includes(navKind()))return;",
@@ -13190,6 +13194,156 @@ def test_timed_cache_serves_stale_value_while_one_background_refresh_runs() -> N
             break
         threading.Event().wait(0.01)
     assert cache._value == {"n": 2}
+
+
+def test_timed_cache_first_load_serves_summary_and_coalesces_enrichment() -> None:
+    import threading
+
+    enrichment_started = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    def summary_loader() -> dict:
+        calls.append("summary")
+        return {"refresh": {"complete": False}, "boards": [{"board_id": "fast"}]}
+
+    def full_loader() -> dict:
+        calls.append("full")
+        enrichment_started.set()
+        assert release.wait(5)
+        return {"refresh": {"complete": True}, "boards": [{"board_id": "fast"}]}
+
+    cache = dashboard.TimedCache(
+        5.0,
+        full_loader,
+        _cache_runner,
+        initial_loader=summary_loader,
+    )
+
+    initial = cache.get()
+    assert initial["refresh"]["complete"] is False
+    assert enrichment_started.wait(1)
+    assert cache.get() == initial
+    assert calls == ["summary", "full"]
+
+    release.set()
+    for _ in range(200):
+        if not cache._refreshing:
+            break
+        threading.Event().wait(0.01)
+    assert cache.get()["refresh"]["complete"] is True
+    assert calls == ["summary", "full"]
+
+
+def test_timed_cache_marks_expired_full_value_stale_during_refresh() -> None:
+    import threading
+
+    refresh_started = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def loader() -> dict:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            refresh_started.set()
+            assert release.wait(5)
+        return {"refresh": {"phase": "complete", "complete": True}, "count": calls}
+
+    cache = dashboard.TimedCache(0.0, loader, _cache_runner)
+    assert cache.get()["refresh"]["complete"] is True
+    stale = cache.get()
+    assert refresh_started.wait(1)
+    assert stale["count"] == 1
+    assert stale["refresh"] == {
+        "phase": "refreshing-stale",
+        "complete": False,
+        "stale": True,
+    }
+    assert calls == 2
+
+    release.set()
+    for _ in range(200):
+        if not cache._refreshing:
+            break
+        threading.Event().wait(0.01)
+    assert cache.get()["count"] == 2
+
+
+def test_fetch_summary_bounds_stalled_board_and_never_fabricates_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory_calls: list[tuple[str, dict[str, object]]] = []
+
+    class Client:
+        def __init__(self, board_id: str) -> None:
+            self.board_id = board_id
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_snapshot(self, **_kwargs: object) -> dict:
+            if self.board_id == "stalled":
+                await asyncio.sleep(0.2)
+            return {
+                "latest_seq": 1,
+                "agents": [],
+                "tickets": [
+                    {"ticket_id": f"TK-{self.board_id}", "status": "open"}
+                ],
+            }
+
+    def factory(
+        _url: str, _token: str, board_id: str, **kwargs: object
+    ) -> Client:
+        factory_calls.append((board_id, dict(kwargs)))
+        return Client(board_id)
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="fast",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=factory)
+
+    async def boards(**_kwargs: object) -> list[tuple[str, str]]:
+        fetcher._readable_boards = [("Fast", "fast"), ("Stalled", "stalled")]
+        fetcher._active_registry_boards = ["fast", "stalled"]
+        return list(fetcher._readable_boards)
+
+    monkeypatch.setattr(fetcher, "_boards", boards)
+    monkeypatch.setattr(dashboard, "FLEET_SUMMARY_BOARD_TIMEOUT_SECONDS", 0.02)
+    started = time.monotonic()
+    try:
+        result = asyncio.run(fetcher.fetch_summary())
+    finally:
+        fetcher.close()
+
+    assert time.monotonic() - started < 0.15
+    by_id = {row["board_id"]: row for row in result["boards"]}
+    assert by_id["fast"]["counts"]["open"] == 1
+    assert by_id["fast"]["coverage"]["human_requests"] == "pending"
+    assert by_id["stalled"]["status"] == "pending"
+    assert by_id["stalled"]["counts"] is None
+    assert result["refresh"] == {
+        "phase": "enriching",
+        "complete": False,
+        "pending_boards": ["stalled"],
+        "covered_board_count": 1,
+        "total_board_count": 2,
+    }
+    assert {board_id for board_id, _kwargs in factory_calls} == {"fast", "stalled"}
+    assert all(
+        kwargs["capabilities"] == {"can_work": False, "can_review": False}
+        and kwargs["agent_name"] == "fleet-dashboard-session-default"
+        for _board_id, kwargs in factory_calls
+    )
 
 
 def test_timed_cache_raises_refresh_error_once_the_value_is_too_old() -> None:

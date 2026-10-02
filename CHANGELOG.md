@@ -59,6 +59,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Fleet Home cold opens now return bounded per-board summaries before optional
+  ticket, event, handoff, and human-request enrichment. Slow boards remain
+  visibly pending instead of contributing false zeroes, the browser coalesces
+  refreshes, and expired full results are labelled stale while one background
+  refresh runs.
+
 - Fleet dashboard board navigation now paints the already-loaded bounded summary
   immediately, coalesces each route's reads, cancels stale route work, backs off
   while hidden or disconnected, and skips unchanged DOM renders. Optional overhead

@@ -371,6 +371,15 @@ route work, renders the bounded board summary before full activity arrives, and
 backs off refresh while hidden or disconnected. Unchanged payloads do not replace
 the current DOM, preserving focus, selection, and scroll.
 
+The first Fleet Home request bounds every board summary independently and omits
+optional seat definitions, activity, handoff, human-request, and ticket-detail
+enrichment from the critical path. Its `refresh` object reports covered and
+pending boards; pending or unavailable boards keep counts unknown rather than
+fabricating zeroes. One coalesced background load completes the optional detail
+and reuses successful summary snapshots. After cache expiry the last complete
+view remains usable, but is labelled `refreshing-stale` until the replacement is
+ready.
+
 The dashboard session
 identity must be in the reserved `fleet-dashboard-session-*` namespace and has
 explicit `can_work=false` and `can_review=false` capabilities. A restart may
