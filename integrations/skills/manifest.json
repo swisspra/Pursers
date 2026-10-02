@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "bundle_name": "pursers",
+  "bundle_version": "1.0.0",
+  "description": "Portable, role-scoped workflows for connecting to and operating Pursers.",
+  "discovery": {
+    "schema_version": 1,
+    "index_uri": "pursers://help/index",
+    "role_uri_template": "pursers://help/roles/{role}",
+    "workflow_uri_template": "pursers://help/workflows/{workflow}",
+    "fallback": "Use the installed tool descriptions and the canonical guides when these resources are unavailable or report an unsupported version."
+  },
+  "hosts": {
+    "zed": {
+      "project": ".agents/skills",
+      "user": ".agents/skills",
+      "surface": "Zed Agent Skills; external ACP agents use their own skill discovery"
+    },
+    "codex": {
+      "project": ".agents/skills",
+      "user": ".agents/skills",
+      "surface": "Codex project or user skills"
+    },
+    "goose": {
+      "project": ".agents/skills",
+      "user": ".agents/skills",
+      "surface": "goose Skills extension with the shared Agent Skills path"
+    }
+  },
+  "skills": [
+    {
+      "name": "pursers-start",
+      "path": "pursers-start",
+      "roles": ["coordinator", "operator", "reviewer", "worker"],
+      "files": ["SKILL.md", "references/hosts.md"]
+    },
+    {
+      "name": "pursers-work",
+      "path": "pursers-work",
+      "roles": ["worker"],
+      "files": ["SKILL.md", "references/evidence-and-recovery.md"]
+    },
+    {
+      "name": "pursers-review",
+      "path": "pursers-review",
+      "roles": ["reviewer"],
+      "files": ["SKILL.md", "references/reviewer-scenarios.md"]
+    },
+    {
+      "name": "pursers-operate",
+      "path": "pursers-operate",
+      "roles": ["coordinator", "butler", "release-operator"],
+      "files": [
+        "SKILL.md",
+        "references/butler.md",
+        "references/coordinator.md",
+        "references/integration.md",
+        "references/release.md"
+      ]
+    }
+  ],
+  "canonical_guides": [
+    "docs/GETTING-STARTED.md",
+    "docs/guides/connecting-clients.md",
+    "docs/guides/zed.md",
+    "docs/guides/zed-first-ticket.md",
+    "docs/guides/running-a-fleet.md",
+    "docs/guides/autonomous-fleet.md",
+    "docs/release-train.md"
+  ]
+}

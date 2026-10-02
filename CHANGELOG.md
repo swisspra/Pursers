@@ -33,6 +33,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `agent_id`, `agent_name`, principal, roles, leases, and historical actor
   evidence remain unchanged. Older clients continue to use `agent_name`.
 
+- A versioned portable `pursers-start`, `pursers-work`, `pursers-review`, and
+  `pursers-operate` Agent Skills bundle, with progressive role references and a
+  dry-run-first project or user installer for Zed, Codex, and goose. Conflicts
+  are preserved explicitly, repeat installs are idempotent, exact copies can be
+  removed safely, and the skills never configure credentials or expand roles.
+
 - Configurable delivery policy inheritance across global defaults, explicit named
   groups, and repository overrides, with field provenance, presets, reset-to-inherit,
   guarded activation and draft-only visibility for runtime capabilities that are not
