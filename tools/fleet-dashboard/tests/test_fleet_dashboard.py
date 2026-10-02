@@ -7457,6 +7457,78 @@ def test_dashboard_slow_read_coordination_contract() -> None:
     assert "fetchJson(`/api/board/${encodeURIComponent(r.board)}?" not in html
 
 
+def test_dashboard_semantic_payload_stamp_skips_generated_at_only_rerender() -> None:
+    source = dashboard.UI_ASSETS["/ui/assets/app.js"][1].decode("utf-8")
+    lines = source.splitlines()
+
+    def function(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            "const responseStamps=new Map();",
+            function("function payloadStamp("),
+            function("function payloadChanged("),
+            "let renders=0;",
+            "const first={generated_at:'2030-01-01T00:00:00Z',latest_seq:7,board:{board_id:'pursers'},tickets:[{id:'TK-1',title:'First'}],routes:{window_start:'2030-01-01T00:00:00Z',rows:[{id:'TK-1'}]}};",
+            "const timestampOnly={...first,generated_at:'2030-01-01T00:00:05Z',routes:{...first.routes,window_start:'2030-01-01T00:00:05Z'}};",
+            "const changedContent={...timestampOnly,tickets:[{id:'TK-1',title:'Changed'}]};",
+            "const outcomes=[first,timestampOnly,changedContent].map(data=>{const changed=payloadChanged('detail:pursers',data);if(changed)renders++;return changed});",
+            "console.log(JSON.stringify({outcomes,renders,stable:payloadStamp(first)===payloadStamp(timestampOnly),contentDetected:payloadStamp(timestampOnly)!==payloadStamp(changedContent)}));",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+
+    assert result == {
+        "outcomes": [True, False, True],
+        "renders": 2,
+        "stable": True,
+        "contentDetected": True,
+    }
+
+
+def test_dashboard_rapid_route_abort_neither_renders_nor_marks_failure() -> None:
+    source = dashboard.UI_ASSETS["/ui/assets/app.js"][1].decode("utf-8")
+    lines = source.splitlines()
+
+    def function(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            "const CENTRAL_REQUEST_TIMEOUT_MS=4000;",
+            function("const DETAIL_REQUEST_TIMEOUT_MS="),
+            function("function abortReason("),
+            function("async function fetchCoordinated("),
+            function("function abortRequestGroup("),
+            function("async function refreshDetail("),
+            "let currentRoute={kind:'board',central:'fleet',board:'board-one'},failureCount=0,renderCount=0,abortName='',detailData=null;",
+            "const route=()=>currentRoute,apiCentral=()=>'',refreshPaused=()=>false,markConnectionSuccess=()=>{},refreshIntake=()=>{},scheduleRouteRefresh=()=>{};",
+            "const panel={children:[],innerHTML:''};const document={querySelector:()=>panel};",
+            "const renderDetail=()=>{renderCount++},markConnectionFailure=()=>{failureCount++},payloadChanged=()=>true;",
+            "const fetchJson=(_path,{signal})=>new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>{abortName=signal.reason?.name||typeof signal.reason;reject(signal.reason)},{once:true}));",
+            "(async()=>{const pending=refreshDetail();currentRoute={kind:'board',central:'fleet',board:'board-two'};detailRouteVersion++;abortRequestGroup('detail:','detail:fleet:board-two');await pending;console.log(JSON.stringify({abortName,failureCount,renderCount,flights:requestFlights.size,panel:panel.innerHTML}))})().catch(error=>{console.error(error);process.exit(1)});",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+
+    assert result == {
+        "abortName": "AbortError",
+        "failureCount": 0,
+        "renderCount": 0,
+        "flights": 0,
+        "panel": "",
+    }
+
+
 def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
     html = dashboard.HTML
 

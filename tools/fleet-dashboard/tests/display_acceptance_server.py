@@ -444,7 +444,8 @@ class AcceptanceCache:
         result.update(
             {
                 "central": "fixture",
-                "generated_at": fleet["generated_at"],
+                # Exercise timestamp-only refreshes without changing semantic data.
+                "generated_at": f"2030-01-02T12:00:{min(self._detail_requests, 59):02d}Z",
             }
         )
         return result
