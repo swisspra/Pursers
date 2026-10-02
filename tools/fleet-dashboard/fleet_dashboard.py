@@ -7431,24 +7431,62 @@ class FleetFetcher:
 
 
 class _ReusableAsyncRunner:
-    """Run dashboard coroutines on one event loop across HTTP requests."""
+    """Run dashboard coroutines on one shared event loop across HTTP requests.
+
+    Read-only work may overlap on the loop.  Mutations still use ``run`` and
+    retain their historical serialization boundary.
+    """
 
     def __init__(self) -> None:
-        self._runner = asyncio.Runner()
-        self._lock = threading.Lock()
+        self._loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._mutation_lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._closed = False
+        self._thread = threading.Thread(
+            target=self._serve,
+            name="fleet-dashboard-async",
+            daemon=True,
+        )
+        self._thread.start()
+        self._ready.wait()
+
+    def _serve(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._ready.set()
+        try:
+            self._loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            self._loop.close()
+
+    def run_read(self, awaitable: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+        with self._state_lock:
+            if self._closed:
+                close = getattr(awaitable, "close", None)
+                if callable(close):
+                    close()
+                raise RuntimeError("dashboard async runner is closed")
+            future = asyncio.run_coroutine_threadsafe(awaitable, self._loop)
+        return future.result()
 
     def run(self, awaitable: Awaitable[dict[str, Any]]) -> dict[str, Any]:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("dashboard async runner is closed")
-            return self._runner.run(awaitable)
+        with self._mutation_lock:
+            return self.run_read(awaitable)
 
     def close(self) -> None:
-        with self._lock:
-            if not self._closed:
-                self._runner.close()
-                self._closed = True
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join()
 
 
 class TimedCache:
@@ -7490,6 +7528,17 @@ class TimedCache:
         self._loaded_at = now
         self._expires_at = now + self.ttl_seconds
         self._refresh_error = None
+
+    def prime(self, value: dict[str, Any], *, fresh_for: float = 0.0) -> None:
+        """Seed a safe value without making the first reader wait for I/O."""
+        with self._lock:
+            self._store(value)
+            self._expires_at = time.monotonic() + max(0.0, fresh_for)
+
+    def invalidate(self) -> None:
+        """Expire the value; the next reader starts one scoped refresh."""
+        with self._lock:
+            self._expires_at = 0.0
 
     def _refresh(self) -> None:
         try:
@@ -9125,15 +9174,27 @@ class DashboardCache:
         # Preserve these public attributes for single-central callers/tests.
         self.fetcher = self.fetchers[self.default_central]
         self.ttl_seconds = ttl_seconds
-        self.fleet = TimedCache(ttl_seconds, self.fetcher.fetch, self._async_runner.run)
+        self.fleet = TimedCache(
+            ttl_seconds, self.fetcher.fetch, self._async_runner.run_read
+        )
         self._fleets = {
             label: self.fleet
             if label == self.default_central
-            else TimedCache(ttl_seconds, item.fetch, self._async_runner.run)
+            else TimedCache(ttl_seconds, item.fetch, self._async_runner.run_read)
             for label, item in self.fetchers.items()
         }
         self._detail_lock = threading.Lock()
         self._details: dict[tuple[str, str], TimedCache] = {}
+        self._overhead_thresholds: dict[str, TimedCache] = {}
+        for label in self.fetchers:
+            cache = TimedCache(
+                max(30.0, ttl_seconds),
+                lambda label=label: self._fetch_overhead_thresholds(label),
+                self._async_runner.run_read,
+                max_stale_seconds=max(300.0, 12 * ttl_seconds),
+            )
+            cache.prime(context_pressure_thresholds(None))
+            self._overhead_thresholds[label] = cache
         self.project_lifecycle = ProjectLifecycleStore()
 
     def labels(self) -> list[str]:
@@ -9175,7 +9236,7 @@ class DashboardCache:
                 cache = TimedCache(
                     self.ttl_seconds,
                     lambda: self.fetchers[label].fetch_board(board_id),
-                    self._async_runner.run,
+                    self._async_runner.run_read,
                 )
                 self._details[key] = cache
         try:
@@ -9190,7 +9251,7 @@ class DashboardCache:
     def get_config(self, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            self._async_runner.run(self.fetchers[label].fetch_config()), label
+            self._async_runner.run_read(self.fetchers[label].fetch_config()), label
         )
 
     def get_autonomous_butler(
@@ -9262,13 +9323,19 @@ class DashboardCache:
             label,
         )
 
-    def get_overhead_thresholds(
-        self, central: str | None = None
+    async def _fetch_overhead_thresholds(
+        self, label: str
     ) -> dict[str, int | float]:
-        payload = self.get_config(central)
+        payload = await self.fetchers[label].fetch_config()
         config = payload.get("config")
         thresholds = config.get("thresholds") if isinstance(config, dict) else None
         return context_pressure_thresholds(thresholds)
+
+    def get_overhead_thresholds(
+        self, central: str | None = None
+    ) -> dict[str, int | float]:
+        label = self.resolve_central(central)
+        return self._overhead_thresholds[label].get()
 
     def get_intake(self, board_id: str, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
@@ -9349,12 +9416,14 @@ class DashboardCache:
         central: str | None = None,
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
-        return self._labeled(
+        result = self._labeled(
             self._async_runner.run(
                 self.fetchers[label].save_config(value, expected_sha256)
             ),
             label,
         )
+        self._overhead_thresholds[label].invalidate()
+        return result
 
     def save_intake(
         self, board_id: Any, text: Any, central: str | None = None

@@ -7406,7 +7406,7 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
     # truthful; only destructive rendering remains paused until the form resumes.
     for fn in (
         "async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(!centralLabels.length)",
-        "async function refreshHubExtras(){if(hubExtrasBusy||!centralLabels.length)return;",
+        "async function refreshHubExtras(){if(hubExtrasBusy||!centralLabels.length||document.hidden)return;",
         "async function refreshAttentionState(){try",
         "async function refreshAutonomousButler(){if(!['settings','team','activity'].includes(navKind()))return;",
         "async function refreshButler(){if(navKind()!=='settings')return;",
@@ -7420,8 +7420,8 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
         "navKind()==='seats'&&centralLabels.length&&!refreshPaused())await refreshSeats()",
         "includes(navKind())&&!refreshPaused())renderHub()",
         "navKind()==='overview'&&!refreshPaused())renderHub()",
-        "detailData=data;markConnectionSuccess(key);if(refreshPaused())return;renderDetail(data)",
-        "markConnectionSuccess(key);if(refreshPaused())return;renderOverhead(data)",
+        "detailData=data;markConnectionSuccess(key);if(refreshPaused())return;if(changed)renderDetail(data)",
+        "markConnectionSuccess(key);if(refreshPaused())return;if(payloadChanged(key,data))renderOverhead(data)",
         "markConnectionSuccess(key);if(!refreshPaused())renderConfig(data)",
         "if(navKind()==='seats'&&!refreshPaused())renderHub()",
     ):
@@ -7437,6 +7437,24 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
         assert fn in html, fn
     assert "node.matches?.('input,textarea,select')&&node.form?.dataset.dirty" in html
     assert "node.matches?.('input,textarea,select')){const type=" not in html
+
+
+def test_dashboard_slow_read_coordination_contract() -> None:
+    html = dashboard.HTML
+    for marker in (
+        "const DETAIL_REQUEST_TIMEOUT_MS=20000,requestFlights=new Map(),responseStamps=new Map()",
+        "const active=requestFlights.get(key);if(active)return active.promise",
+        "abortRequestGroup('detail:'",
+        "version!==detailRouteVersion",
+        "document.hidden?30000:connectionFailures.has(key)?15000:5000",
+        "if(payloadChanged(key,data))renderOverhead(data)",
+        "if(changed)renderDetail(data)",
+        "Loading full activity…",
+        "void Promise.allSettled(centralLabels.map(central=>fetchCoordinated(`hub-overhead:",
+    ):
+        assert marker in html, marker
+    assert "detailTimer=setInterval(refreshDetail,5000)" not in html
+    assert "fetchJson(`/api/board/${encodeURIComponent(r.board)}?" not in html
 
 
 def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
@@ -13003,6 +13021,75 @@ def test_ticket_rows_expose_semantic_status_and_active_marker() -> None:
 
 def _cache_runner(value):
     return value
+
+
+def test_reusable_async_runner_overlaps_reads_but_serializes_mutations() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    runner = dashboard._ReusableAsyncRunner()
+    active = 0
+    peak = 0
+
+    async def operation() -> dict:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.05)
+        active -= 1
+        return {"ok": True}
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(runner.run_read, operation()) for _ in range(2)]
+            assert all(future.result()["ok"] for future in futures)
+        assert peak == 2
+
+        peak = 0
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(runner.run, operation()) for _ in range(2)]
+            assert all(future.result()["ok"] for future in futures)
+        assert peak == 1
+    finally:
+        runner.close()
+
+
+def test_overhead_thresholds_serve_defaults_while_scoped_refresh_runs() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowThresholdFetcher(FakeCentralFetcher):
+        async def fetch_config(self) -> dict:
+            started.set()
+            await asyncio.to_thread(release.wait, 5)
+            return {
+                "config": {
+                    "thresholds": {"context_watch_tokens_per_poll": 12345}
+                }
+            }
+
+    cache = dashboard.DashboardCache(SlowThresholdFetcher("work"), 5)
+    try:
+        before = time.monotonic()
+        initial = cache.get_overhead_thresholds("work")
+        assert time.monotonic() - before < 0.25
+        assert initial == dashboard.context_pressure_thresholds(None)
+        assert started.wait(1)
+
+        release.set()
+        for _ in range(200):
+            refreshed = cache._overhead_thresholds["work"]
+            if not refreshed._refreshing:
+                break
+            threading.Event().wait(0.01)
+        assert (
+            cache.get_overhead_thresholds("work")[
+                "context_watch_tokens_per_poll"
+            ]
+            == 12345
+        )
+    finally:
+        release.set()
+        cache.close()
 
 
 def test_timed_cache_serves_stale_value_while_one_background_refresh_runs() -> None:

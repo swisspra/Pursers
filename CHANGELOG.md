@@ -59,6 +59,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Fleet dashboard board navigation now paints the already-loaded bounded summary
+  immediately, coalesces each route's reads, cancels stale route work, backs off
+  while hidden or disconnected, and skips unchanged DOM renders. Optional overhead
+  metrics no longer delay useful Team/Home data; read-only Central calls can overlap
+  while mutation calls retain their serialization boundary.
+
 - Add explicit `test_output` to Central and client submission tools and
   `--test-output` / `--test-output-file` to generated worker helpers. Preserve
   bounded, scrubbed evidence in submission history; accept legacy
