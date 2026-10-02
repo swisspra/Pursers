@@ -211,3 +211,145 @@ console.log(JSON.stringify({{
         "secondCount": 100,
         "secondSummary": True,
     }
+
+
+def test_work_view_renders_durable_activity_and_keeps_legacy_fallback() -> None:
+    registry = dashboard.UI_ASSETS["/ui/view-registry.js"][1].decode("utf-8")
+    work = dashboard.UI_ASSETS["/ui/views/work.js"][1].decode("utf-8")
+    tickets = [
+        {
+            "id": "TK-activity",
+            "title": "Durable review evidence",
+            "status": "submitted",
+            "activity": {
+                "schema_version": 1,
+                "stage": "review",
+                "state": "running",
+                "attempt_id": 2,
+                "actor_id": "AI-reviewer",
+                "updated_at": "2030-01-02T11:58:00Z",
+                "freshness": "fresh",
+                "evidence_refs": [
+                    "board://private-board/ticket/TK-activity#submission",
+                    "board://private-board/ticket/TK-activity#review",
+                ],
+                "next_action": "Record an independent verdict.",
+                "completion_boundary": "unknown",
+                "estimate": {
+                    "low_percent": 40,
+                    "high_percent": 60,
+                    "confidence": "medium",
+                    "evidence": "PRIVATE CHECKPOINT EVIDENCE",
+                    "assessed_at": "2030-01-02T11:55:00Z",
+                },
+            },
+        },
+        {
+            "id": "TK-blocked",
+            "title": "Blocked delivery",
+            "status": "closed",
+            "activity": {
+                "schema_version": 1,
+                "stage": "delivery",
+                "state": "blocked",
+                "attempt_id": 1,
+                "actor_id": "AI-butler",
+                "updated_at": "2030-01-02T11:50:00Z",
+                "freshness": "fresh",
+                "evidence_refs": [
+                    "board://private-board/ticket/TK-blocked#annotation-AN-one"
+                ],
+                "next_action": "Resolve the recorded delivery blocker.",
+                "blocking_reason": "Remote checks failed.",
+                "completion_boundary": "delivery",
+            },
+        },
+        {"id": "TK-legacy", "title": "Legacy server", "status": "open"},
+    ]
+    program = f"""
+global.document = {{
+  querySelector: () => null,
+  createElement: () => ({{dataset: {{}}}}),
+  head: {{append: () => {{}}}},
+  addEventListener: () => {{}},
+}};
+global.matchMedia = () => ({{matches: true}});
+eval({json.dumps(registry)});
+eval({json.dumps(work)});
+const html = globalThis.FleetViewModules.render('work', {{
+  esc: value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'),
+  fmt: value => value,
+  relativeAge: value => value === '2030-01-02T11:58:00Z' ? '2 min ago' : '10 min ago',
+  ticketHref: (central, board, ticket) => `#/${{central}}/${{board}}/${{ticket}}`,
+  boardHref: (central, board, route) => `#/${{central}}/${{board}}/${{route}}`,
+  pageHead: () => '', warmTruthStrip: () => '',
+  warmTickets: () => {json.dumps(tickets)}.map(ticket => ({{
+    central: 'private', board: {{board_id: 'private-board', label: 'Private board'}}, ticket,
+  }})),
+}});
+console.log(JSON.stringify({{html}}));
+"""
+    html = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )["html"]
+
+    assert "Review · Running" in html
+    assert "Attempt 2 · Actor AI-reviewer" in html
+    assert "Current · updated 2 min ago" in html
+    assert "40–60% · medium confidence" in html
+    assert "PRIVATE CHECKPOINT EVIDENCE" not in html
+    assert "Record an independent verdict." in html
+    assert "Delivery · Blocked" in html
+    assert "Remote checks failed." in html
+    assert "Boundary · delivery" in html
+    assert "annotation-AN-one" in html
+    assert "Progress not assessed" in html
+
+
+def test_dashboard_reload_prefers_durable_snapshot_over_duplicate_event_order() -> None:
+    activity_record = {
+        "schema_version": 1,
+        "stage": "work",
+        "state": "retrying",
+        "attempt_id": 3,
+        "actor_id": "AI-worker",
+        "updated_at": "2030-01-02T11:58:00Z",
+        "freshness": "fresh",
+        "evidence_refs": ["board://private/ticket/TK-retry#claim-3"],
+        "next_action": "Address the latest review feedback.",
+        "completion_boundary": "unknown",
+    }
+    source = {
+        "board_id": "private",
+        "label": "Private",
+        "snapshot": {
+            "agents": [],
+            "tickets": [
+                {
+                    "ticket_id": "TK-retry",
+                    "title": "Retry durable work",
+                    "status": "claimed",
+                    "activity": activity_record,
+                }
+            ],
+        },
+        "events": [
+            {"seq": 9, "kind": "ticket_progress_updated", "ticket_id": "TK-retry"},
+            {"seq": 8, "kind": "ticket_reviewed", "ticket_id": "TK-retry"},
+            {"seq": 9, "kind": "ticket_progress_updated", "ticket_id": "TK-retry"},
+        ],
+    }
+
+    first = dashboard.aggregate_fleet(
+        [source], stale_seconds=300, now=datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    )
+    reconnected = dashboard.aggregate_fleet(
+        [{**source, "events": list(reversed(source["events"]))}],
+        stale_seconds=300,
+        now=datetime(2030, 1, 2, 12, tzinfo=timezone.utc),
+    )
+
+    assert first["boards"][0]["tickets"][0]["activity"] == activity_record
+    assert reconnected["boards"][0]["tickets"][0]["activity"] == activity_record

@@ -165,6 +165,28 @@ an older Central leaves cursor-free `ticket_list` behavior intact, while newer
 clients report pagination as unsupported and must not infer a complete board
 when `total_matching` exceeds the returned rows.
 
+## Lifecycle activity projection
+
+Ticket reads include an additive `activity` schema version 1. It is a read-only
+projection of existing ticket, review, and delivery facts; it is not a second
+workflow state machine. The record reports the current `stage`, `state`,
+`attempt_id`, stable `actor_id`, meaningful `updated_at`, `freshness`, bounded
+`evidence_refs`, `next_action`, optional `blocking_reason` and `estimate`, and a
+truthful `completion_boundary`. Journal transitions include scalar activity cues
+plus an `activity_ref`, so reconnecting consumers can reload the durable ticket
+instead of reconstructing state from browser memory.
+
+The activity projection is always additive and needs no configuration switch.
+Its optional estimate appears only when a valid current `ticket_progress_v1`
+record exists; disabling that capability preserves older records read-only and
+does not remove lifecycle facts. Lease renewal and heartbeat paths never update
+activity freshness. Older clients may ignore `activity`; newer dashboards fall
+back to legacy status/progress rendering when connected to an older server.
+
+Rollback is therefore non-destructive: restore the older dashboard/server code
+while retaining stored ticket, progress, review, and delivery records. No data
+migration or backfill is required.
+
 ## Ticket model-usage accounting
 
 `ticket_create`, `ticket_submit`, and `ticket_review` accept a content-free

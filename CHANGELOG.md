@@ -14,6 +14,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   lazy archive hydration, retained-history pages, compatible client traversal,
   and bounded Fleet Work controls. Existing cursor-free reads remain valid.
 
+- Add an additive version-1 ticket `activity` projection across intake, queue,
+  work, validation, independent review, integration, delivery, and configured
+  completion. Fleet now shows the authoritative attempt, actor, meaningful-update
+  freshness, blocker, next action, bounded evidence references, and optional
+  worker estimate without treating lease keepalive as progress. Delivery notices
+  preserve whether the supported boundary is a pull request or integration.
+
 - Configurable delivery policy inheritance across global defaults, explicit named
   groups, and repository overrides, with field provenance, presets, reset-to-inherit,
   guarded activation and draft-only visibility for runtime capabilities that are not
