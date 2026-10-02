@@ -63,6 +63,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   projecting boundary-specific `pr_created` or `integration_merged` activity.
   Legacy per-ticket PR records keep their existing `pr_*` storage contract.
 
+- Fleet Home cold opens now return bounded per-board summaries before optional
+  ticket, event, handoff, and human-request enrichment. Slow boards remain
+  visibly pending instead of contributing false zeroes, the browser coalesces
+  refreshes, and expired full results are labelled stale while one background
+  refresh runs. Registry discovery is also bounded: a slow first discovery
+  returns the known home board as an explicit lower-bound view, while an empty
+  timed-out browser request retries after one second instead of five.
+
+- Fleet dashboard board navigation now paints the already-loaded bounded summary
+  immediately, coalesces each route's reads, cancels stale route work, backs off
+  while hidden or disconnected, and skips unchanged DOM renders. Optional overhead
+  metrics no longer delay useful Team/Home data; read-only Central calls can overlap
+  while mutation calls retain their serialization boundary.
+
 - Add explicit `test_output` to Central and client submission tools and
   `--test-output` / `--test-output-file` to generated worker helpers. Preserve
   bounded, scrubbed evidence in submission history; accept legacy

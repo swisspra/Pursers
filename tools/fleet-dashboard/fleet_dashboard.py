@@ -143,6 +143,8 @@ MAX_ANNOTATION_TEXT_CHARS = 4_000
 MAX_HANDOFF_MEMORIES = 500
 MAX_FINDINGS = 50
 MAX_FINDING_CHARS = 500
+FLEET_SUMMARY_BOARD_TIMEOUT_SECONDS = 1.25
+FLEET_SUMMARY_DISCOVERY_TIMEOUT_SECONDS = 0.60
 MAX_OVERHEAD_FILE_BYTES = 2_000_000
 MAX_OVERHEAD_SEATS = 200
 MAX_OVERHEAD_TOOLS = 5
@@ -4074,7 +4076,24 @@ def aggregate_fleet(
         ):
             activity_window_seconds = stale_seconds
         activity_window_seconds = int(activity_window_seconds)
+        pending = bool(raw.get("pending"))
         error = raw.get("error")
+        if pending:
+            boards.append(
+                {
+                    "board_id": board_id,
+                    "label": label,
+                    "status": "pending",
+                    "counts": None,
+                    "human_requests": None,
+                    "tickets": [],
+                    "events": [],
+                    "coverage": raw.get("coverage") or {"summary": "pending"},
+                    "activity_window_seconds": activity_window_seconds,
+                    "truncated": False,
+                }
+            )
+            continue
         if error:
             boards.append(
                 {
@@ -4082,14 +4101,11 @@ def aggregate_fleet(
                     "label": label,
                     "status": "error",
                     "error": _clip(error, MAX_LABEL_CHARS),
-                    "counts": {
-                        "open": 0,
-                        "claimed": 0,
-                        "submitted": 0,
-                        "closed_today": 0,
-                    },
+                    "counts": None,
+                    "human_requests": None,
                     "tickets": [],
                     "events": [],
+                    "coverage": raw.get("coverage") or {"summary": "unavailable"},
                     "activity_window_seconds": activity_window_seconds,
                     "truncated": False,
                 }
@@ -4461,6 +4477,13 @@ def aggregate_fleet(
                 "status": "ready",
                 "counts": rendered_counts,
                 "human_requests": human_rows,
+                "coverage": raw.get("coverage") or {
+                    "summary": "fresh",
+                    "events": "fresh",
+                    "human_requests": "fresh",
+                    "handoffs": "fresh",
+                    "ticket_enrichment": "fresh",
+                },
                 "tickets": ticket_rows[:MAX_TICKET_ROWS],
                 "events": events,
                 "coordinator_heartbeat": (
@@ -4914,6 +4937,7 @@ class FleetFetcher:
         self._door_plan_lock = threading.Lock()
         self._door_audit_lock = threading.Lock()
         self._client_pool = _FleetClientPool(config, client_factory)
+        self._summary_snapshots: dict[str, dict[str, Any]] = {}
 
     def enable_client_reuse(self) -> None:
         """Keep one joined client per board for this viewer process."""
@@ -4927,13 +4951,18 @@ class FleetFetcher:
     def close(self) -> None:
         self._client_pool.close()
 
-    async def _boards(self) -> list[tuple[str, str]]:
+    async def _boards(
+        self, *, include_seat_definitions: bool = True
+    ) -> list[tuple[str, str]]:
         async with self._client(self.config.home_board) as client:
             registry = await client.board_state_get(key="project_registry")
-            try:
-                seat_registry = await client.board_state_get(key="seat_registry")
-                self._seat_definitions = parse_seat_registry(seat_registry)
-            except Exception:  # noqa: BLE001 - older/read-only Centrals may omit it.
+            if include_seat_definitions:
+                try:
+                    seat_registry = await client.board_state_get(key="seat_registry")
+                    self._seat_definitions = parse_seat_registry(seat_registry)
+                except Exception:  # noqa: BLE001 - older/read-only Centrals may omit it.
+                    self._seat_definitions = {}
+            else:
                 self._seat_definitions = {}
             try:
                 listed = await _client_call(client, "board_list", {})
@@ -4991,6 +5020,20 @@ class FleetFetcher:
             "registry": registry,
             "expected_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
         }
+
+    async def _summary_boards(self) -> list[tuple[str, str]]:
+        """Discover active boards without optional readable-board enumeration."""
+        async with self._client(self.config.home_board) as client:
+            registry = await client.board_state_get(key="project_registry")
+        self._board_work_dirs = parse_project_work_dirs(
+            registry, self.config.home_board
+        )
+        boards = parse_project_registry(registry, self.config.home_board)[:MAX_BOARDS]
+        self._active_registry_boards = sorted({board_id for _label, board_id in boards})
+        self._readable_boards = list(boards)
+        self._excluded_readable_boards = []
+        self._configured_but_unreadable = []
+        return boards
 
     async def project_evidence_state(
         self, project_name: str, board_id: str
@@ -5079,6 +5122,75 @@ class FleetFetcher:
             "truncated": bool(result.get("truncated") or result.get("has_more")),
         }
 
+    async def _read_board_summary(
+        self, label: str, board_id: str
+    ) -> dict[str, Any]:
+        """Read only the bounded snapshot needed for a truthful first Home paint."""
+        try:
+            async with self._client(board_id) as client:
+                snapshot = await asyncio.wait_for(
+                    client.board_snapshot(
+                        limit=SNAPSHOT_LIMIT,
+                        max_bytes=SNAPSHOT_MAX_BYTES,
+                        include_retired=True,
+                    ),
+                    timeout=FLEET_SUMMARY_BOARD_TIMEOUT_SECONDS,
+                )
+            snapshot_tickets = snapshot.get("tickets")
+            snapshot_tickets = (
+                snapshot_tickets if isinstance(snapshot_tickets, list) else []
+            )
+            total_counts = snapshot.get("total_counts")
+            ticket_total = (
+                total_counts.get("tickets")
+                if isinstance(total_counts, dict)
+                and type(total_counts.get("tickets")) is int
+                else len(snapshot_tickets)
+            )
+            omitted_counts = snapshot.get("omitted_counts")
+            ticket_omitted = (
+                _nonnegative_int(omitted_counts.get("tickets"))
+                if isinstance(omitted_counts, dict)
+                else max(0, ticket_total - len(snapshot_tickets))
+            )
+            snapshot["_snapshot_truncation"] = {
+                "returned": len(snapshot_tickets),
+                "total": max(ticket_total, len(snapshot_tickets)),
+                "omitted": ticket_omitted,
+                "hidden_active": ticket_omitted,
+            }
+            self._summary_snapshots[board_id] = copy.deepcopy(snapshot)
+            return {
+                "label": label,
+                "board_id": board_id,
+                "snapshot": snapshot,
+                "events": [],
+                "human_requests": [],
+                "handoff_memories": [],
+                "activity_window_seconds": self.config.stale_seconds,
+                "coverage": {
+                    "summary": "fresh",
+                    "events": "pending",
+                    "human_requests": "pending",
+                    "handoffs": "pending",
+                    "ticket_enrichment": "pending",
+                },
+            }
+        except asyncio.TimeoutError:
+            return {
+                "label": label,
+                "board_id": board_id,
+                "pending": True,
+                "coverage": {"summary": "pending"},
+            }
+        except Exception as exc:  # noqa: BLE001 - isolate one unavailable board.
+            return {
+                "label": label,
+                "board_id": board_id,
+                "error": type(exc).__name__,
+                "coverage": {"summary": "unavailable"},
+            }
+
     async def _read_board(
         self,
         label: str,
@@ -5088,10 +5200,12 @@ class FleetFetcher:
     ) -> dict[str, Any]:
         try:
             async with self._client(board_id) as client:
-                snapshot = await client.board_snapshot(
-                    limit=SNAPSHOT_LIMIT, max_bytes=SNAPSHOT_MAX_BYTES,
-                    include_retired=True,
-                )
+                snapshot = self._summary_snapshots.pop(board_id, None)
+                if snapshot is None:
+                    snapshot = await client.board_snapshot(
+                        limit=SNAPSHOT_LIMIT, max_bytes=SNAPSHOT_MAX_BYTES,
+                        include_retired=True,
+                    )
                 try:
                     status = await _client_call(
                         client, "board_status", {"include_retired": True}
@@ -5338,6 +5452,13 @@ class FleetFetcher:
                 "human_requests": human_requests[:10],
                 "handoff_memories": handoff_memories,
                 "activity_window_seconds": activity_window_seconds,
+                "coverage": {
+                    "summary": "fresh",
+                    "events": "fresh",
+                    "human_requests": "fresh",
+                    "handoffs": "fresh",
+                    "ticket_enrichment": "fresh",
+                },
             }
         except Exception as exc:  # noqa: BLE001 - isolate one unavailable board.
             return {
@@ -5345,6 +5466,87 @@ class FleetFetcher:
                 "board_id": board_id,
                 "error": type(exc).__name__,
             }
+
+    def _aggregate_rows(
+        self, rows: list[dict[str, Any]], *, phase: str
+    ) -> dict[str, Any]:
+        result = aggregate_fleet(
+            rows,
+            stale_seconds=self.config.stale_seconds,
+            now=self.now_factory(),
+            seat_definitions=self._seat_definitions,
+            active_registry_boards=self._active_registry_boards,
+            case_study_manifests=self.config.case_study_manifests,
+        )
+        readable_ids = {board_id for _label, board_id in self._readable_boards}
+        covered = {
+            row.get("board_id")
+            for row in rows
+            if isinstance(row, dict)
+            and not row.get("error")
+            and not row.get("pending")
+            and row.get("board_id") in readable_ids
+        }
+        excluded = list(self._excluded_readable_boards)
+        excluded.extend(
+            {
+                "board_id": str(row.get("board_id") or "unknown"),
+                "reason": f"read unavailable: {row.get('error')}",
+            }
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("error")
+            and row.get("board_id") in readable_ids
+        )
+        pending = sorted(
+            str(row.get("board_id"))
+            for row in rows
+            if isinstance(row, dict) and row.get("pending")
+        )
+        result["pool_scope"] = {
+            "readable_boards": [board_id for _label, board_id in self._readable_boards],
+            "covered_boards": sorted(board_id for board_id in covered if board_id),
+            "excluded_boards": excluded,
+            "configured_but_unreadable": self._configured_but_unreadable,
+        }
+        result["refresh"] = {
+            "phase": phase,
+            "complete": phase == "complete",
+            "pending_boards": pending,
+            "covered_board_count": len(covered),
+            "total_board_count": len(rows),
+        }
+        return result
+
+    async def fetch_summary(self) -> dict[str, Any]:
+        """Return bounded, useful Home data without optional enrichment."""
+        discovery_pending = False
+        try:
+            boards = await asyncio.wait_for(
+                self._summary_boards(),
+                timeout=FLEET_SUMMARY_DISCOVERY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # The configured home board is always known without waiting for the
+            # registry/list round trip.  Reading just that board gives Home a
+            # truthful first payload while full enrichment discovers the rest.
+            discovery_pending = True
+            boards = [(self.config.home_board, self.config.home_board)]
+            self._readable_boards = list(boards)
+            self._active_registry_boards = [self.config.home_board]
+        rows = await asyncio.gather(
+            *(self._read_board_summary(label, board_id) for label, board_id in boards)
+        )
+        result = self._aggregate_rows(rows, phase="enriching")
+        if discovery_pending:
+            result["refresh"].update(
+                {
+                    "discovery_complete": False,
+                    "total_board_count_is_lower_bound": True,
+                }
+            )
+            result["pool_scope"]["discovery"] = "pending"
+        return result
 
     async def fetch(self) -> dict[str, Any]:
         boards = await self._boards()
@@ -5358,41 +5560,7 @@ class FleetFetcher:
                 for label, board_id in boards
             )
         )
-        result = aggregate_fleet(
-            rows,
-            stale_seconds=self.config.stale_seconds,
-            now=self.now_factory(),
-            seat_definitions=self._seat_definitions,
-            active_registry_boards=self._active_registry_boards,
-            case_study_manifests=self.config.case_study_manifests,
-        )
-        covered = {
-            row.get("board_id")
-            for row in rows
-            if isinstance(row, dict)
-            and not row.get("error")
-            and row.get("board_id")
-            in {board_id for _label, board_id in self._readable_boards}
-        }
-        excluded = list(self._excluded_readable_boards)
-        excluded.extend(
-            {
-                "board_id": str(row.get("board_id") or "unknown"),
-                "reason": f"read unavailable: {row.get('error')}",
-            }
-            for row in rows
-            if isinstance(row, dict)
-            and row.get("error")
-            and row.get("board_id")
-            in {board_id for _label, board_id in self._readable_boards}
-        )
-        result["pool_scope"] = {
-            "readable_boards": [board_id for _label, board_id in self._readable_boards],
-            "covered_boards": sorted(board_id for board_id in covered if board_id),
-            "excluded_boards": excluded,
-            "configured_but_unreadable": self._configured_but_unreadable,
-        }
-        return result
+        return self._aggregate_rows(rows, phase="complete")
 
     async def fetch_board(self, board_id: str) -> dict[str, Any]:
         if not BOARD_ID_RE.fullmatch(board_id):
@@ -7431,24 +7599,62 @@ class FleetFetcher:
 
 
 class _ReusableAsyncRunner:
-    """Run dashboard coroutines on one event loop across HTTP requests."""
+    """Run dashboard coroutines on one shared event loop across HTTP requests.
+
+    Read-only work may overlap on the loop.  Mutations still use ``run`` and
+    retain their historical serialization boundary.
+    """
 
     def __init__(self) -> None:
-        self._runner = asyncio.Runner()
-        self._lock = threading.Lock()
+        self._loop = asyncio.new_event_loop()
+        self._ready = threading.Event()
+        self._mutation_lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._closed = False
+        self._thread = threading.Thread(
+            target=self._serve,
+            name="fleet-dashboard-async",
+            daemon=True,
+        )
+        self._thread.start()
+        self._ready.wait()
+
+    def _serve(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._ready.set()
+        try:
+            self._loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            self._loop.close()
+
+    def run_read(self, awaitable: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+        with self._state_lock:
+            if self._closed:
+                close = getattr(awaitable, "close", None)
+                if callable(close):
+                    close()
+                raise RuntimeError("dashboard async runner is closed")
+            future = asyncio.run_coroutine_threadsafe(awaitable, self._loop)
+        return future.result()
 
     def run(self, awaitable: Awaitable[dict[str, Any]]) -> dict[str, Any]:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("dashboard async runner is closed")
-            return self._runner.run(awaitable)
+        with self._mutation_lock:
+            return self.run_read(awaitable)
 
     def close(self) -> None:
-        with self._lock:
-            if not self._closed:
-                self._runner.close()
-                self._closed = True
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join()
 
 
 class TimedCache:
@@ -7469,6 +7675,7 @@ class TimedCache:
         *,
         max_stale_seconds: float | None = None,
         background: bool = True,
+        initial_loader: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self.ttl_seconds = ttl_seconds
         self.loader = loader
@@ -7477,6 +7684,7 @@ class TimedCache:
             max(60.0, 12 * ttl_seconds) if max_stale_seconds is None else max_stale_seconds
         )
         self.background = background
+        self.initial_loader = initial_loader
         self._lock = threading.Lock()
         self._expires_at = 0.0
         self._loaded_at = 0.0
@@ -7490,6 +7698,17 @@ class TimedCache:
         self._loaded_at = now
         self._expires_at = now + self.ttl_seconds
         self._refresh_error = None
+
+    def prime(self, value: dict[str, Any], *, fresh_for: float = 0.0) -> None:
+        """Seed a safe value without making the first reader wait for I/O."""
+        with self._lock:
+            self._store(value)
+            self._expires_at = time.monotonic() + max(0.0, fresh_for)
+
+    def invalidate(self) -> None:
+        """Expire the value; the next reader starts one scoped refresh."""
+        with self._lock:
+            self._expires_at = 0.0
 
     def _refresh(self) -> None:
         try:
@@ -7507,7 +7726,15 @@ class TimedCache:
         with self._lock:
             now = time.monotonic()
             if self._value is None or (not self.background and now >= self._expires_at):
-                self._store(self.runner(self.loader()))
+                loader = self.initial_loader or self.loader
+                self._store(self.runner(loader()))
+                if self.initial_loader is not None and self.background:
+                    self._refreshing = True
+                    threading.Thread(
+                        target=self._refresh,
+                        name="fleet-cache-initial-enrichment",
+                        daemon=True,
+                    ).start()
                 return self._value
             if now >= self._expires_at and not self._refreshing:
                 self._refreshing = True
@@ -7519,7 +7746,24 @@ class TimedCache:
                 and now - self._loaded_at > self.max_stale_seconds
             ):
                 raise self._refresh_error
-            return self._value
+            value = self._value
+            refresh = value.get("refresh")
+            if (
+                self._refreshing
+                and now >= self._expires_at
+                and isinstance(refresh, dict)
+                and refresh.get("complete") is True
+            ):
+                return {
+                    **value,
+                    "refresh": {
+                        **refresh,
+                        "phase": "refreshing-stale",
+                        "complete": False,
+                        "stale": True,
+                    },
+                }
+            return value
 
 
 class SeatConfigManager:
@@ -9125,15 +9369,35 @@ class DashboardCache:
         # Preserve these public attributes for single-central callers/tests.
         self.fetcher = self.fetchers[self.default_central]
         self.ttl_seconds = ttl_seconds
-        self.fleet = TimedCache(ttl_seconds, self.fetcher.fetch, self._async_runner.run)
+        self.fleet = TimedCache(
+            ttl_seconds,
+            self.fetcher.fetch,
+            self._async_runner.run_read,
+            initial_loader=getattr(self.fetcher, "fetch_summary", None),
+        )
         self._fleets = {
             label: self.fleet
             if label == self.default_central
-            else TimedCache(ttl_seconds, item.fetch, self._async_runner.run)
+            else TimedCache(
+                ttl_seconds,
+                item.fetch,
+                self._async_runner.run_read,
+                initial_loader=getattr(item, "fetch_summary", None),
+            )
             for label, item in self.fetchers.items()
         }
         self._detail_lock = threading.Lock()
         self._details: dict[tuple[str, str], TimedCache] = {}
+        self._overhead_thresholds: dict[str, TimedCache] = {}
+        for label in self.fetchers:
+            cache = TimedCache(
+                max(30.0, ttl_seconds),
+                lambda label=label: self._fetch_overhead_thresholds(label),
+                self._async_runner.run_read,
+                max_stale_seconds=max(300.0, 12 * ttl_seconds),
+            )
+            cache.prime(context_pressure_thresholds(None))
+            self._overhead_thresholds[label] = cache
         self.project_lifecycle = ProjectLifecycleStore()
 
     def labels(self) -> list[str]:
@@ -9175,7 +9439,7 @@ class DashboardCache:
                 cache = TimedCache(
                     self.ttl_seconds,
                     lambda: self.fetchers[label].fetch_board(board_id),
-                    self._async_runner.run,
+                    self._async_runner.run_read,
                 )
                 self._details[key] = cache
         try:
@@ -9190,7 +9454,7 @@ class DashboardCache:
     def get_config(self, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
-            self._async_runner.run(self.fetchers[label].fetch_config()), label
+            self._async_runner.run_read(self.fetchers[label].fetch_config()), label
         )
 
     def get_autonomous_butler(
@@ -9262,13 +9526,19 @@ class DashboardCache:
             label,
         )
 
-    def get_overhead_thresholds(
-        self, central: str | None = None
+    async def _fetch_overhead_thresholds(
+        self, label: str
     ) -> dict[str, int | float]:
-        payload = self.get_config(central)
+        payload = await self.fetchers[label].fetch_config()
         config = payload.get("config")
         thresholds = config.get("thresholds") if isinstance(config, dict) else None
         return context_pressure_thresholds(thresholds)
+
+    def get_overhead_thresholds(
+        self, central: str | None = None
+    ) -> dict[str, int | float]:
+        label = self.resolve_central(central)
+        return self._overhead_thresholds[label].get()
 
     def get_intake(self, board_id: str, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
@@ -9349,12 +9619,14 @@ class DashboardCache:
         central: str | None = None,
     ) -> dict[str, Any]:
         label = self.resolve_central(central)
-        return self._labeled(
+        result = self._labeled(
             self._async_runner.run(
                 self.fetchers[label].save_config(value, expected_sha256)
             ),
             label,
         )
+        self._overhead_thresholds[label].invalidate()
+        return result
 
     def save_intake(
         self, board_id: Any, text: Any, central: str | None = None

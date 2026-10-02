@@ -363,7 +363,27 @@ Tailscale Serve remains an operator-owned reverse proxy: `/pursersfleet` and
 loopback-only. Upgrades do not rewrite or restart Tailscale Serve; the stable
 loopback port keeps the proxy configuration independent of checkout changes.
 
-The dashboard uses one persistent, serialized Central session per board. Its
+The dashboard uses persistent Central sessions per board. Read-only cache fills
+share one background event loop and may overlap, so a slow board or optional
+overhead-threshold read does not head-of-line block another board. Mutation calls
+remain serialized. Each browser route coalesces one in-flight read, aborts stale
+route work, renders the bounded board summary before full activity arrives, and
+backs off refresh while hidden or disconnected. Unchanged payloads do not replace
+the current DOM, preserving focus, selection, and scroll.
+
+The first Fleet Home request bounds every board summary independently and omits
+optional seat definitions, activity, handoff, human-request, and ticket-detail
+enrichment from the critical path. Its `refresh` object reports covered and
+pending boards; pending or unavailable boards keep counts unknown rather than
+fabricating zeroes. Registry discovery is bounded separately; if it misses that
+budget, Home returns the known home board and marks discovery incomplete and the
+board total as a lower bound. One coalesced background load completes discovery
+and optional detail, reusing successful summary snapshots. If an initial browser
+request times out before any Fleet payload exists, it retries on the one-second
+incomplete cadence. After cache expiry the last complete view remains usable, but
+is labelled `refreshing-stale` until the replacement is ready.
+
+The dashboard session
 identity must be in the reserved `fleet-dashboard-session-*` namespace and has
 explicit `can_work=false` and `can_review=false` capabilities. A restart may
 reclaim that fixed, dashboard-only identity with `allow_takeover=True`. The
@@ -750,9 +770,11 @@ full submission history is never sent to the browser. The activity feed uses
 `board_catchup(max_events=100, ack=false)` and stays oldest-to-newest.
 
 The browser polls `/api/fleet?central=<label>` every five seconds. While a detail
-route is open, it also polls `/api/board/<board-id>?central=<label>` every five
-seconds; the detail poll stops when the route closes. Server reads are cached
-for five seconds. Every board
+route is open, it refreshes `/api/board/<board-id>?central=<label>` five seconds
+after the prior read completes, so one slow response cannot overlap another for
+the same route. The detail refresh stops when the route closes, backs off while
+hidden or disconnected, and ignores an aborted route's response. Server reads
+are cached for five seconds. Every board
 snapshot is capped at 1,000 items per collection and 300,000 bytes; detail JSON
 is capped at 300,000 bytes and reports omitted ticket rows. Truncated fleet
 ticket counts are shown as lower bounds with a `>=` prefix. Paused registry

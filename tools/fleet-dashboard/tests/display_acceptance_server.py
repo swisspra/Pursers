@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import sys
+import threading
+import time
 from pathlib import Path
 
 
@@ -83,9 +85,23 @@ def activity(
 
 
 class AcceptanceCache:
-    def __init__(self, dashboard, mode: str = "populated") -> None:
+    def __init__(
+        self,
+        dashboard,
+        mode: str = "populated",
+        *,
+        ticket_count: int = 6,
+        detail_delay_ms: int = 0,
+        overhead_delay_ms: int = 0,
+    ) -> None:
         self.dashboard = dashboard
         self.mode = mode
+        self.ticket_count = ticket_count
+        self.detail_delay_ms = detail_delay_ms
+        self.overhead_delay_ms = overhead_delay_ms
+        self._detail_requests = 0
+        self._overhead_requests = 0
+        self._delay_lock = threading.Lock()
         self.revision = 0
         self.display_names: dict[str, dict[str, object]] = {
             "AI-synthetic-01": {"display_name": "Atlas", "revision": 0}
@@ -101,8 +117,7 @@ class AcceptanceCache:
             raise KeyError(value)
         return "fixture"
 
-    @staticmethod
-    def _tickets() -> list[dict]:
+    def _tickets(self) -> list[dict]:
         rows = [
             ticket("TK-human", "Choose the safe rollout window", "needs_human"),
             ticket("TK-review", "Verify the submitted display evidence", "submitted", owner="reviewer-01"),
@@ -142,6 +157,14 @@ class AcceptanceCache:
         }
         for row in rows:
             row["activity"] = records[row["id"]]
+        for index in range(len(rows), self.ticket_count):
+            rows.append(
+                ticket(
+                    f"TK-scale-{index:04d}",
+                    f"Representative bounded ticket {index:04d}",
+                    "open" if index % 3 else "closed",
+                )
+            )
         return rows
 
     def _agents(self) -> list[dict]:
@@ -395,6 +418,11 @@ class AcceptanceCache:
         self.resolve_central(central)
         if board_id != "fixture-board":
             raise KeyError(board_id)
+        with self._delay_lock:
+            self._detail_requests += 1
+            cold_detail = self._detail_requests == 1
+        if self.detail_delay_ms and cold_detail:
+            time.sleep(self.detail_delay_ms / 1000)
         fleet = self.get(central)
         board = fleet["boards"][0]
         snapshot_tickets = []
@@ -416,7 +444,8 @@ class AcceptanceCache:
         result.update(
             {
                 "central": "fixture",
-                "generated_at": fleet["generated_at"],
+                # Exercise timestamp-only refreshes without changing semantic data.
+                "generated_at": f"2030-01-02T12:00:{min(self._detail_requests, 59):02d}Z",
             }
         )
         return result
@@ -440,6 +469,17 @@ class AcceptanceCache:
             "expected_sha256": "a" * 64,
         }
 
+    def get_overhead_thresholds(
+        self, central: str | None = None
+    ) -> dict[str, int | float]:
+        self.resolve_central(central)
+        with self._delay_lock:
+            self._overhead_requests += 1
+            cold_overhead = self._overhead_requests == 1
+        if self.overhead_delay_ms and cold_overhead:
+            time.sleep(self.overhead_delay_ms / 1000)
+        return self.dashboard.context_pressure_thresholds(None)
+
     def get_project_registry(self, central: str | None = None) -> dict:
         self.resolve_central(central)
         return {
@@ -456,12 +496,21 @@ def main() -> None:
     parser.add_argument(
         "--mode", choices=("populated", "empty", "error"), default="populated"
     )
+    parser.add_argument("--ticket-count", type=int, default=6)
+    parser.add_argument("--detail-delay-ms", type=int, default=0)
+    parser.add_argument("--overhead-delay-ms", type=int, default=0)
     args = parser.parse_args()
     repo = args.repo.resolve()
     state_dir = args.state_dir.resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
     dashboard = load_dashboard(repo)
-    cache = AcceptanceCache(dashboard, args.mode)
+    cache = AcceptanceCache(
+        dashboard,
+        args.mode,
+        ticket_count=max(6, min(args.ticket_count, 2_000)),
+        detail_delay_ms=max(0, min(args.detail_delay_ms, 30_000)),
+        overhead_delay_ms=max(0, min(args.overhead_delay_ms, 30_000)),
+    )
     handler = dashboard.make_handler(
         cache,
         stats_path=state_dir / "bridge-stats.json",
