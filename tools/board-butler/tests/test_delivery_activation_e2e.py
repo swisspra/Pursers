@@ -420,6 +420,15 @@ def test_real_poller_releases_same_file_fence_after_integration_while_pr_is_open
     assert second["new_asks"] == 1
     assert poller.index.entries[entry_key]["status"] == "delivered"
     assert poller.index.entries[entry_key]["delivery_state"] == "in_delivery"
+    persisted = board_butler.SourceIntakeIndex(poller.index.path)
+    assert persisted.entries[entry_key]["delivery_state"] == "in_delivery"
+    delivery_notices = [
+        json.loads(annotation["text"].removeprefix("pursers-delivery: "))
+        for annotation in board.tickets[entry["ticket_id"]]["annotations"]
+        if annotation["text"].startswith("pursers-delivery: ")
+    ]
+    assert delivery_notices[-1]["state"] == "pr_created"
+    assert delivery_notices[-1]["completion_boundary"] == "pull_request"
     assert len(board.asks()) == 2
     assert len(prs) == 1 and prs[0]["status"] == "active"
     integration = git(
@@ -429,3 +438,84 @@ def test_real_poller_releases_same_file_fence_after_integration_while_pr_is_open
     assert git(clone, "merge-base", "--is-ancestor", reviewed, integration) == ""
     assert git(clone, "ls-remote", "--heads", "origin", "refs/heads/main").split()[0] == base
     assert "ado_pull_request_create" in delivery_calls
+
+
+def test_real_poller_preserves_blocked_batch_state_without_duplicate_notice(tmp_path):
+    from test_batch_delivery_runtime import FakeAdapter
+    from test_grouped_intake import Board, NOW, grouped_poller, issue
+
+    effective = {
+        "mode": "batch_pr", "mapped_base": "main",
+        "integration_branch": "pursers-integration",
+        "snapshot_branch_prefix": "pursers/delivery",
+        "final_pr_target": "customer-review",
+        "release_trigger": {"kind": "ready"}, "pr_update": "freeze_on_ready",
+        "auto_integrate": False, "final_merge": "manual",
+        "validation": {"test_commands": [], "required_reviewers": 1,
+                       "independent_review": True, "require_upstream_policies": True},
+        "conflict_policy": "pause", "collection_paused": False,
+    }
+    project_row = {
+        "board_id": "board-a", "integration_ref": "main", "status": "active",
+        "domain": "work", "repository_url": "https://example.invalid/repo",
+        "fleet": True, "fleet_clone_dir": str(tmp_path / "unused-clone"),
+        "work_dir_owner": "fleet", "delivery_policy": effective,
+        "delivery_policy_activation": activate_delivery_policy(effective),
+    }
+    registry = {"schema_version": 1, "projects": {"Alpha": project_row}}
+    project = {**project_row, "__registry__": registry, "__project_name__": "Alpha"}
+
+    board = Board()
+    poller, _calls = grouped_poller(
+        tmp_path, board, [issue(0, project="alpha")], [[0]],
+    )
+    poller.sources = (
+        replace(poller.sources[0], writeback=SimpleNamespace(tool="ado_pull_request_create")),
+    )
+    first = asyncio.run(poller.run_cycle(NOW))
+    assert first["new_asks"] == 1
+    entry_key, entry = next(iter(poller.index.entries.items()))
+    approved_sha = "a" * 40
+    board.tickets[entry["ticket_id"]] = {
+        "status": "closed", "latest_verdict": {"verdict": "approve"},
+        "title": "Reviewed conflicting repair",
+        "latest_submission": {
+            "branch": "reviewed/one", "commit_hash": approved_sha,
+            "test_output": "plain pytest passed",
+        },
+    }
+    poller.project_reader = AsyncMock(return_value=project)
+    policy, _resolved = poller._resolved_batch_policy(project)
+    adapter = FakeAdapter()
+    adapter.refs = {
+        policy["base_branch"]: "b" * 40,
+        policy["integration_branch"]: "b" * 40,
+        policy["target_branch"]: "b" * 40,
+        "reviewed/one": approved_sha,
+    }
+    adapter.merge_results = [{"status": "conflict", "source_sha": approved_sha}]
+    batch_runtime = runtime_api.BatchDeliveryRuntime(
+        runtime_api.BatchLedger(tmp_path / "batch-ledger.json"), adapter,
+    )
+    poller._batch_delivery_runtimes[(entry["board_id"], policy["policy_revision"])] = (
+        batch_runtime
+    )
+
+    second = asyncio.run(poller.run_cycle(NOW.replace(minute=NOW.minute + 1)))
+    assert second["writebacks"] == 0
+    assert any(
+        finding["kind"] == "source-batch-delivery-blocked"
+        for finding in second["findings"]
+    )
+    persisted = board_butler.SourceIntakeIndex(poller.index.path)
+    assert persisted.entries[entry_key]["delivery_state"] == "integration_blocked"
+    delivery_notices = [
+        json.loads(annotation["text"].removeprefix("pursers-delivery: "))
+        for annotation in board.tickets[entry["ticket_id"]]["annotations"]
+        if annotation["text"].startswith("pursers-delivery: ")
+    ]
+    assert delivery_notices == [{
+        "completion_boundary": "pull_request",
+        "reason": "conflict_runner_unavailable",
+        "state": "pr_blocked",
+    }]

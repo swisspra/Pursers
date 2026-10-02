@@ -6475,7 +6475,8 @@ class SourceIntakePoller:
         raise ConnectorResultError("PR reconciliation pagination is incomplete")
 
     async def _delivery_notice(self, entry, state, *, pr_id=None, url=None, reason=None,
-                               completion_boundary=None):
+                               completion_boundary=None, index_state=None):
+        """Publish a boundary state without rewriting the batch engine's state."""
         delivery = {"state": state}
         if pr_id is not None: delivery["pr_id"] = pr_id
         if url: delivery["url"] = url
@@ -6489,7 +6490,7 @@ class SourceIntakePoller:
         if entry.get("delivery_notice") != text:
             await self.ticket_annotator(entry["board_id"], entry["ticket_id"], text)
             entry["delivery_notice"] = text
-        entry["delivery_state"] = state
+        entry["delivery_state"] = state if index_state is None else index_state
         self.index.dirty = True
         self.index.save()
 
@@ -6875,6 +6876,7 @@ class SourceIntakePoller:
                 self.index.set_status(key, "delivered")
                 continue
             runtime = self.runtimes[source.connector_id]
+            batch_delivery = False
             try:
                 project = await self.project_reader(board_id) if self.project_reader is not None else None
                 resolved_batch = self._resolved_batch_policy(project)
@@ -6894,6 +6896,7 @@ class SourceIntakePoller:
                     })
                     continue
                 if resolved_batch is not None and resolved_batch[0].get('mode') != 'per_ticket_pr':
+                    batch_delivery = True
                     policy, resolved = resolved_batch
                     batch_runtime, result = await self._collect_batch_member(
                         source, runtime, board_id, ticket_id, ticket, entry,
@@ -6903,9 +6906,23 @@ class SourceIntakePoller:
                     notice_state = _delivery_notice_state(boundary, collection_state)
                     await self._delivery_notice(
                         entry, notice_state, reason=result.get('reason'),
-                        completion_boundary=boundary)
+                        completion_boundary=boundary, index_state=collection_state)
                     batch_key = result.get('batch_key')
-                    if result.get('state') == 'integration_blocked' or not isinstance(batch_key, str):
+                    if collection_state == 'integration_blocked':
+                        entry['retry_after'] = str(now.timestamp() + 60)
+                        entry['last_error_class'] = 'BatchDeliveryBlocked'
+                        self.index.dirty = True
+                        self.index.save()
+                        findings.append({
+                            'kind': 'source-batch-delivery-blocked',
+                            'level': 'warn',
+                            'status': 'needs_operator',
+                            'source_id': source.source_id,
+                            'ticket_id': ticket_id,
+                            'message': result.get('reason', 'batch delivery collection blocked'),
+                        })
+                        continue
+                    if not isinstance(batch_key, str):
                         raise ConnectorDenied(result.get('reason', 'batch delivery collection blocked'))
                     pending = pending_batches.setdefault(
                         (id(batch_runtime), batch_key), (batch_runtime, policy, []))
@@ -6915,7 +6932,12 @@ class SourceIntakePoller:
                     source, runtime, board_id, ticket_id, ticket, entry
                 )
             except Exception as exc:
-                if source.writeback.tool == "ado_pull_request_create":
+                if batch_delivery:
+                    entry["retry_after"] = str(now.timestamp() + 60)
+                    entry["last_error_class"] = type(exc).__name__
+                    self.index.dirty = True
+                    self.index.save()
+                elif source.writeback.tool == "ado_pull_request_create":
                     state = "pr_uncertain" if entry.get("status") == "delivering" else "pr_blocked"
                     entry["retry_after"] = str(now.timestamp() + 60)
                     entry["delivery_state"] = state
@@ -6959,7 +6981,8 @@ class SourceIntakePoller:
                 notice_state = _delivery_notice_state(boundary, result.get('state'))
                 await self._delivery_notice(
                     entry, notice_state, pr_id=result.get('pr_id'),
-                    reason=result.get('reason'), completion_boundary=boundary)
+                    reason=result.get('reason'), completion_boundary=boundary,
+                    index_state=result.get('state'))
             if result.get('state') == 'integration_blocked':
                 findings.append({'kind': 'source-batch-delivery-blocked', 'level': 'warn',
                                  'message': result.get('reason', 'batch delivery blocked')})

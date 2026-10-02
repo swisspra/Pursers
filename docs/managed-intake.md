@@ -159,6 +159,14 @@ not prevent approved delivery. Ticket evidence and the dashboard distinguish
 `pr_pending`, `pr_blocked`, `pr_uncertain` and `pr_created`; legacy completion
 markers appear as delivery recorded without inventing a PR identifier.
 
+Activated batch delivery keeps its raw engine state in the private intake index:
+for example, `in_delivery` means the reviewed member has reached the released
+batch while the customer PR may still be open. The public `pursers-delivery`
+annotation projects that same fact as `pr_created` at a `pull_request` completion
+boundary, or as `integration_merged` at an `integration` boundary. This projection
+must not overwrite the raw index state. Legacy per-ticket PR records continue to
+store the public `pr_*` states because they do not use the batch engine.
+
 ### Submission evidence and repeated review
 
 The worker helper writes `branch_and_commit: pursers/<ticket_id>@<full-40-hex-sha>`.
