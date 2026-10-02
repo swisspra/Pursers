@@ -420,6 +420,15 @@ def test_real_poller_releases_same_file_fence_after_integration_while_pr_is_open
     assert second["new_asks"] == 1
     assert poller.index.entries[entry_key]["status"] == "delivered"
     assert poller.index.entries[entry_key]["delivery_state"] == "in_delivery"
+    persisted = board_butler.SourceIntakeIndex(poller.index.path)
+    assert persisted.entries[entry_key]["delivery_state"] == "in_delivery"
+    delivery_notices = [
+        json.loads(annotation["text"].removeprefix("pursers-delivery: "))
+        for annotation in board.tickets[entry["ticket_id"]]["annotations"]
+        if annotation["text"].startswith("pursers-delivery: ")
+    ]
+    assert delivery_notices[-1]["state"] == "pr_created"
+    assert delivery_notices[-1]["completion_boundary"] == "pull_request"
     assert len(board.asks()) == 2
     assert len(prs) == 1 and prs[0]["status"] == "active"
     integration = git(

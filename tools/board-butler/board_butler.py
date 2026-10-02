@@ -6475,7 +6475,8 @@ class SourceIntakePoller:
         raise ConnectorResultError("PR reconciliation pagination is incomplete")
 
     async def _delivery_notice(self, entry, state, *, pr_id=None, url=None, reason=None,
-                               completion_boundary=None):
+                               completion_boundary=None, index_state=None):
+        """Publish a boundary state without rewriting the batch engine's state."""
         delivery = {"state": state}
         if pr_id is not None: delivery["pr_id"] = pr_id
         if url: delivery["url"] = url
@@ -6489,7 +6490,7 @@ class SourceIntakePoller:
         if entry.get("delivery_notice") != text:
             await self.ticket_annotator(entry["board_id"], entry["ticket_id"], text)
             entry["delivery_notice"] = text
-        entry["delivery_state"] = state
+        entry["delivery_state"] = state if index_state is None else index_state
         self.index.dirty = True
         self.index.save()
 
@@ -6903,7 +6904,7 @@ class SourceIntakePoller:
                     notice_state = _delivery_notice_state(boundary, collection_state)
                     await self._delivery_notice(
                         entry, notice_state, reason=result.get('reason'),
-                        completion_boundary=boundary)
+                        completion_boundary=boundary, index_state=collection_state)
                     batch_key = result.get('batch_key')
                     if result.get('state') == 'integration_blocked' or not isinstance(batch_key, str):
                         raise ConnectorDenied(result.get('reason', 'batch delivery collection blocked'))
@@ -6959,7 +6960,8 @@ class SourceIntakePoller:
                 notice_state = _delivery_notice_state(boundary, result.get('state'))
                 await self._delivery_notice(
                     entry, notice_state, pr_id=result.get('pr_id'),
-                    reason=result.get('reason'), completion_boundary=boundary)
+                    reason=result.get('reason'), completion_boundary=boundary,
+                    index_state=result.get('state'))
             if result.get('state') == 'integration_blocked':
                 findings.append({'kind': 'source-batch-delivery-blocked', 'level': 'warn',
                                  'message': result.get('reason', 'batch delivery blocked')})

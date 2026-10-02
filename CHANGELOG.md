@@ -59,6 +59,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Preserve the Board Butler batch engine's durable `in_delivery` state while
+  projecting boundary-specific `pr_created` or `integration_merged` activity.
+  Legacy per-ticket PR records keep their existing `pr_*` storage contract.
+
 - Add explicit `test_output` to Central and client submission tools and
   `--test-output` / `--test-output-file` to generated worker helpers. Preserve
   bounded, scrubbed evidence in submission history; accept legacy

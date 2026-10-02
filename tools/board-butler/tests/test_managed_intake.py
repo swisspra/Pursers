@@ -857,7 +857,9 @@ def test_ado_reconciles_existing_and_uncertain_create_without_duplicates(tmp_pat
         entry=poller.index.get('sonar','one')
         assert entry['status']=='delivered'
         assert entry['delivery_state']=='pr_created'
-        assert '31' in entry['delivery_notice']
+        notice=json.loads(entry['delivery_notice'].removeprefix('pursers-delivery: '))
+        assert notice['state']=='pr_created' and notice['pr_id']==31
+        assert notice['completion_boundary']=='pull_request'
     asyncio.run(scenario())
 
 
