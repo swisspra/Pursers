@@ -375,10 +375,13 @@ The first Fleet Home request bounds every board summary independently and omits
 optional seat definitions, activity, handoff, human-request, and ticket-detail
 enrichment from the critical path. Its `refresh` object reports covered and
 pending boards; pending or unavailable boards keep counts unknown rather than
-fabricating zeroes. One coalesced background load completes the optional detail
-and reuses successful summary snapshots. After cache expiry the last complete
-view remains usable, but is labelled `refreshing-stale` until the replacement is
-ready.
+fabricating zeroes. Registry discovery is bounded separately; if it misses that
+budget, Home returns the known home board and marks discovery incomplete and the
+board total as a lower bound. One coalesced background load completes discovery
+and optional detail, reusing successful summary snapshots. If an initial browser
+request times out before any Fleet payload exists, it retries on the one-second
+incomplete cadence. After cache expiry the last complete view remains usable, but
+is labelled `refreshing-stale` until the replacement is ready.
 
 The dashboard session
 identity must be in the reserved `fleet-dashboard-session-*` namespace and has

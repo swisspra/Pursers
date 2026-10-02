@@ -63,7 +63,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   ticket, event, handoff, and human-request enrichment. Slow boards remain
   visibly pending instead of contributing false zeroes, the browser coalesces
   refreshes, and expired full results are labelled stale while one background
-  refresh runs.
+  refresh runs. Registry discovery is also bounded: a slow first discovery
+  returns the known home board as an explicit lower-bound view, while an empty
+  timed-out browser request retries after one second instead of five.
 
 - Fleet dashboard board navigation now paints the already-loaded bounded summary
   immediately, coalesces each route's reads, cancels stale route work, backs off

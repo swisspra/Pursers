@@ -144,6 +144,7 @@ MAX_HANDOFF_MEMORIES = 500
 MAX_FINDINGS = 50
 MAX_FINDING_CHARS = 500
 FLEET_SUMMARY_BOARD_TIMEOUT_SECONDS = 1.25
+FLEET_SUMMARY_DISCOVERY_TIMEOUT_SECONDS = 0.60
 MAX_OVERHEAD_FILE_BYTES = 2_000_000
 MAX_OVERHEAD_SEATS = 200
 MAX_OVERHEAD_TOOLS = 5
@@ -5020,6 +5021,20 @@ class FleetFetcher:
             "expected_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
         }
 
+    async def _summary_boards(self) -> list[tuple[str, str]]:
+        """Discover active boards without optional readable-board enumeration."""
+        async with self._client(self.config.home_board) as client:
+            registry = await client.board_state_get(key="project_registry")
+        self._board_work_dirs = parse_project_work_dirs(
+            registry, self.config.home_board
+        )
+        boards = parse_project_registry(registry, self.config.home_board)[:MAX_BOARDS]
+        self._active_registry_boards = sorted({board_id for _label, board_id in boards})
+        self._readable_boards = list(boards)
+        self._excluded_readable_boards = []
+        self._configured_but_unreadable = []
+        return boards
+
     async def project_evidence_state(
         self, project_name: str, board_id: str
     ) -> dict[str, Any]:
@@ -5505,11 +5520,33 @@ class FleetFetcher:
 
     async def fetch_summary(self) -> dict[str, Any]:
         """Return bounded, useful Home data without optional enrichment."""
-        boards = await self._boards(include_seat_definitions=False)
+        discovery_pending = False
+        try:
+            boards = await asyncio.wait_for(
+                self._summary_boards(),
+                timeout=FLEET_SUMMARY_DISCOVERY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # The configured home board is always known without waiting for the
+            # registry/list round trip.  Reading just that board gives Home a
+            # truthful first payload while full enrichment discovers the rest.
+            discovery_pending = True
+            boards = [(self.config.home_board, self.config.home_board)]
+            self._readable_boards = list(boards)
+            self._active_registry_boards = [self.config.home_board]
         rows = await asyncio.gather(
             *(self._read_board_summary(label, board_id) for label, board_id in boards)
         )
-        return self._aggregate_rows(rows, phase="enriching")
+        result = self._aggregate_rows(rows, phase="enriching")
+        if discovery_pending:
+            result["refresh"].update(
+                {
+                    "discovery_complete": False,
+                    "total_board_count_is_lower_bound": True,
+                }
+            )
+            result["pool_scope"]["discovery"] = "pending"
+        return result
 
     async def fetch(self) -> dict[str, Any]:
         boards = await self._boards()

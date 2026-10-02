@@ -108,6 +108,17 @@ def test_primary_route_modules_own_renderers_and_receive_shared_context() -> Non
     assert "FleetViewModules.render(kind,fleetViewContext())" in app
 
 
+def test_home_pending_coverage_never_renders_false_zero_totals() -> None:
+    source = dashboard.UI_ASSETS["/ui/views/home.js"][1].decode("utf-8")
+
+    assert "const observed = value => pending ? `≥${value}` : value;" in source
+    assert "enriching && !hasSummary ? '…'" in source
+    assert "<dd>${esc(observed(working))}</dd>" in source
+    assert "<dd>${esc(observed(blocked))}</dd>" in source
+    assert "<dd>${esc(observed(submitted))}</dd>" in source
+    assert "<dd>${esc(observed(open))}</dd>" in source
+
+
 def _render_team_lifecycle(
     *,
     agents: list[dict[str, Any]],
@@ -4715,6 +4726,48 @@ def test_hung_central_times_out_after_healthy_central_renders() -> None:
     assert renders[0] == {"data": ["personal"], "errors": {}}
     assert renders[-1]["data"] == ["personal"]
     assert renders[-1]["errors"] == {"work": "TimeoutError"}
+
+
+def test_first_fleet_timeout_retries_on_incomplete_cadence() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            source("async function refreshCentral("),
+            source("let fleetRefreshPromise="),
+            source("function fleetRefreshDelay("),
+            source("function scheduleFleetRefresh("),
+            source("async function refreshFleet("),
+            "const document={hidden:false};",
+            "const route=()=>null,refreshPaused=()=>false,renderFleet=()=>{};",
+            "const apiCentral=label=>label;",
+            "const connectionFailureDetail=()=>({errorClass:'TimeoutError'});",
+            "const markConnectionFailure=()=>{},markConnectionSuccess=()=>{};",
+            "const loadCentrals=async()=>{};",
+            "const fetchWithTimeout=async()=>{throw new Error('timed out')};",
+            "let centralLabels=['personal'],fleetData={},fleetErrors={};",
+            "const scheduled=[];const setTimeout=(_fn,delay)=>{scheduled.push(delay);return 1};const clearTimeout=()=>{};",
+            "refreshFleet(20).then(()=>console.log(JSON.stringify({scheduled,fleetData,fleetErrors})));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+
+    result = json.loads(completed.stdout)
+    assert result == {
+        "scheduled": [1000],
+        "fleetData": {},
+        "fleetErrors": {"personal": "TimeoutError"},
+    }
 
 
 def test_filter_behavior_removes_unrelated_home_rows_and_change_counts() -> None:
@@ -13317,7 +13370,7 @@ def test_fetch_summary_bounds_stalled_board_and_never_fabricates_zero(
         fetcher._active_registry_boards = ["fast", "stalled"]
         return list(fetcher._readable_boards)
 
-    monkeypatch.setattr(fetcher, "_boards", boards)
+    monkeypatch.setattr(fetcher, "_summary_boards", boards)
     monkeypatch.setattr(dashboard, "FLEET_SUMMARY_BOARD_TIMEOUT_SECONDS", 0.02)
     started = time.monotonic()
     try:
@@ -13344,6 +13397,127 @@ def test_fetch_summary_bounds_stalled_board_and_never_fabricates_zero(
         and kwargs["agent_name"] == "fleet-dashboard-session-default"
         for _board_id, kwargs in factory_calls
     )
+
+
+def test_fetch_summary_discovers_registry_without_optional_board_list() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class Client:
+        def __init__(self, board_id: str) -> None:
+            self.board_id = board_id
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_state_get(self, *, key: str) -> dict:
+            calls.append((self.board_id, f"state:{key}"))
+            return registry(
+                {
+                    "Active": {
+                        "board_id": "board-active",
+                        "status": "active",
+                        "work_dir": "/repo/active",
+                    }
+                }
+            )
+
+        async def board_list(self) -> dict:
+            raise AssertionError("summary discovery must not enumerate optional boards")
+
+        async def board_snapshot(self, **_kwargs: object) -> dict:
+            calls.append((self.board_id, "snapshot"))
+            return {"latest_seq": 1, "agents": [], "tickets": []}
+
+    def factory(
+        _url: str, _token: str, board_id: str, **_kwargs: object
+    ) -> Client:
+        return Client(board_id)
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=factory)
+    try:
+        result = asyncio.run(fetcher.fetch_summary())
+    finally:
+        fetcher.close()
+
+    assert [row["board_id"] for row in result["boards"]] == [
+        "pursers",
+        "board-active",
+    ]
+    assert calls.count(("pursers", "state:project_registry")) == 1
+    assert {call for call in calls if call[1] == "snapshot"} == {
+        ("pursers", "snapshot"),
+        ("board-active", "snapshot"),
+    }
+
+
+def test_fetch_summary_bounds_registry_discovery_and_marks_lower_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_snapshot(self, **_kwargs: object) -> dict:
+            return {
+                "latest_seq": 1,
+                "agents": [],
+                "tickets": [{"ticket_id": "TK-home", "status": "open"}],
+            }
+
+    def factory(
+        _url: str, _token: str, _board_id: str, **_kwargs: object
+    ) -> Client:
+        return Client()
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=factory)
+
+    async def stalled_boards(**_kwargs: object) -> list[tuple[str, str]]:
+        await asyncio.sleep(0.2)
+        raise AssertionError("discovery should have timed out")
+
+    monkeypatch.setattr(fetcher, "_summary_boards", stalled_boards)
+    monkeypatch.setattr(dashboard, "FLEET_SUMMARY_DISCOVERY_TIMEOUT_SECONDS", 0.02)
+    started = time.monotonic()
+    try:
+        result = asyncio.run(fetcher.fetch_summary())
+    finally:
+        fetcher.close()
+
+    assert time.monotonic() - started < 0.15
+    assert result["boards"][0]["board_id"] == "pursers"
+    assert result["boards"][0]["counts"]["open"] == 1
+    assert result["refresh"] == {
+        "phase": "enriching",
+        "complete": False,
+        "pending_boards": [],
+        "covered_board_count": 1,
+        "total_board_count": 1,
+        "discovery_complete": False,
+        "total_board_count_is_lower_bound": True,
+    }
+    assert result["pool_scope"]["discovery"] == "pending"
 
 
 def test_timed_cache_raises_refresh_error_once_the_value_is_too_old() -> None:

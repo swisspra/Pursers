@@ -50,12 +50,13 @@
     const data = fleetData[label];
     const summary = data?.pool_summary || {};
     const enriching = data?.refresh?.complete === false;
+    const hasSummary = Number(data?.refresh?.covered_board_count || 0) > 0;
     const stale = Number(summary.stale || 0);
     const tone = !data ? 'danger' : enriching || stale ? 'warning' : 'good';
     const state = !data ? 'Reconnecting' : enriching ? 'Summary ready; enriching' : stale ? `${stale} stale` : 'Healthy';
     return `<a class="home-health-row" data-tone="${tone}" href="${esc(centralHref(label, 'overhead'))}">
       <span class="home-health-name"><span class="home-health-dot" aria-hidden="true"></span><b>${esc(label)}</b><span class="sr-only">${esc(state)}</span></span>
-      <span class="home-health-counts">${data ? `${esc(summary.busy ?? '…')} working · ${esc(summary.available ?? '…')} ready${stale ? ` · ${esc(stale)} stale` : ''}${enriching ? ' · optional detail pending' : ''}` : state}</span>
+      <span class="home-health-counts">${data ? `${esc(enriching && !hasSummary ? '…' : summary.busy ?? '…')} working · ${esc(enriching && !hasSummary ? '…' : summary.available ?? '…')} ready${stale ? ` · ${esc(stale)} stale` : ''}${enriching ? ' · optional detail pending' : ''}` : state}</span>
     </a>`;
   }
 
@@ -116,6 +117,7 @@
     const readyForTeam = tickets.filter(item => item.ticket.delivery?.state === 'integration_merged').length;
     const attention = humanPending + operationalAttention.length;
     const pressure = attention || blocked ? 'high' : pending ? 'pending' : 'calm';
+    const observed = value => pending ? `≥${value}` : value;
 
     const command = next ? `<article class="home-command" data-pressure="${pressure}">
       <div class="home-command-copy"><p class="home-kicker">${esc(next.eyebrow)}</p><h3>${esc(next.title)}</h3><p>${esc(next.copy)}</p></div>
@@ -125,7 +127,7 @@
     return `${pageHead('Home', 'Your team, at a glance', 'See what needs judgment, what is moving, what is blocked, and the next safe action.')}${warmTruthStrip()}
       <section class="home-briefing">${command}<aside class="home-pulse" aria-labelledby="home-team-status">
         <div class="home-panel-head"><h3 id="home-team-status">Team status</h3><span class="home-scope">${esc(boards.length)} projects · ${esc(tickets.length)} visible tickets · ${pending ? 'partial, enriching' : 'bounded and fresh'}</span></div>
-        <dl class="home-stats"><div><dt>In progress</dt><dd>${esc(working)}</dd></div><div class="${blocked ? 'is-alert' : ''}"><dt>Blocked</dt><dd>${pending ? '…' : esc(blocked)}</dd></div><div><dt>Review ready</dt><dd>${esc(submitted)}</dd></div><div><dt>Open queue</dt><dd>${esc(open)}</dd></div></dl>
+        <dl class="home-stats"><div><dt>In progress</dt><dd>${esc(observed(working))}</dd></div><div class="${blocked ? 'is-alert' : ''}"><dt>Blocked</dt><dd>${esc(observed(blocked))}</dd></div><div><dt>Review ready</dt><dd>${esc(observed(submitted))}</dd></div><div><dt>Open queue</dt><dd>${esc(observed(open))}</dd></div></dl>
         <div class="home-health-list" aria-label="Central health">${centralLabels.map(renderHealthRow).join('')}</div>
       </aside></section>
       ${readyForTeam ? `<section class="home-human-queue"><h3>Ready for your team</h3><p>${esc(readyForTeam)} visible ticket${readyForTeam === 1 ? '' : 's'} confirmed on the delivery branch. Your team handles the final merge.</p><a href="#/work">Inspect delivered work</a></section>` : ''}
