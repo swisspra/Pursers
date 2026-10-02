@@ -23,6 +23,12 @@ the current official documentation on 2026-09-19:
 - [`mcp-remote` header files](https://github.com/punkpeye/mcp-remote#custom-headers)
 - [MCP Apps client support](https://blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps/)
 
+Clients with MCP resource support can begin with `pursers://help/index`, then
+read only the relevant role or workflow document. Authorized board and ticket
+resources are lazy, uncached reads; clients without resources keep the equivalent
+tools and this guide. See the [resource and prompt manifest](../reference/mcp-discovery.md)
+for stable URIs, host compatibility, and explicit unavailable behavior.
+
 ## Prepare file-backed authentication
 
 Do not paste a JWT into JSON, TOML, YAML, a command argument, shell history, or

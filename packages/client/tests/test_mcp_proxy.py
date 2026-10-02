@@ -18,6 +18,13 @@ from mcp import Client, StdioServerParameters, types
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pursers_central import central as central_module
+from pursers_client.discovery import (
+    ROLE_HELP,
+    WORKFLOW_HELP,
+    capability_index,
+    role_document,
+    workflow_document,
+)
 from pursers_client.mcp_proxy import (
     REVIEWER_TOOLS,
     SETUP_STATUS_TOOL,
@@ -1343,36 +1350,39 @@ async def _prompts_have_at_most_one_argument_and_human_facing_copy(
     text = {name: value.messages[0].content.text for name, value in rendered.items()}
     assert text == {
         "board": (
-            "Your work on `prompt-board` at a glance: its board ID and board-wide key "
+            "Your `member` view of `prompt-board` at a glance: its board ID and board-wide key "
             "counts, followed by a clearly labeled subset of up to 10 active tickets "
             "needing attention. Each row leads with its ticket ID and gives its specific "
-            "reason for needing attention. This view stays on this board."
+            "reason for needing attention. This is a read-only bounded view; open one "
+            "exact ticket before taking the role's next authorized action."
         ),
         "create": (
-            "New work for `prompt-board`: 'Ship the guide'. Any missing required detail "
-            "comes first; creation happens once under Zed's single confirmation, followed "
-            "by the new ticket ID and a brief recap."
+            "Prepare new work for `prompt-board` as `member`: 'Ship the guide'. Collect only "
+            "missing required detail, show the final scope, and ask for authorization "
+            "before the single create action. Then report the new ticket ID and recap."
         ),
         "watch": (
-            "Live changes for `prompt-board`: work, reviews, and questions needing "
-            "attention, limited to changed IDs and next steps. The watch resumes from its "
-            "latest saved position and stays on this board."
+            "Watch `prompt-board` for actionable `member` changes: work, reviews, and questions, "
+            "limited to changed IDs and safe next steps. Resume only from the returned "
+            "positive cursor, and never treat a notification as permission to mutate."
         ),
         "evidence": (
-            "Evidence for `TK-123` on `prompt-board`: the ticket ID first, then its exact "
+            "Read evidence for `TK-123` on `prompt-board` as `member`: the ticket ID first, "
+            "then its exact "
             "branch and commit, changed files, literal test results, and independent-review "
-            "state. The view contains no unrelated tickets."
+            "state. Keep the read to that ticket and verify the exact commit before any "
+            "separately authorized delivery action."
         ),
         "answer": (
-            "Answer for 'TK-123 approved' on `prompt-board`: the exact ticket's pending "
-            "question is resolved once, followed by its ticket ID and resulting state. "
-            "This stays on this board."
+            "Prepare an answer for 'TK-123 approved' on `prompt-board` as `member`. Read only "
+            "the exact pending question, show the proposed answer, and ask for authorization "
+            "before resolving it once. Then report its ticket ID and resulting state."
         ),
         "setup": (
-            "Set up Pursers for `prompt-board` in this chat. Check the local setup "
-            "status, explain what is missing, then run the setup tool. The setup tool "
-            "asks me for confirmation before it creates files or starts Central. After "
-            "setup, continue in this same chat with the newly available board tools."
+            "Set up Pursers for `prompt-board` as `member`. Check local prerequisites and "
+            "explain what is missing. Preview any filesystem or process changes, then "
+            "ask for explicit consent before provisioning. After setup, verify access "
+            "with one harmless board read and show the next action allowed for this role."
         ),
     }
     forbidden = (
@@ -1391,6 +1401,213 @@ async def _prompts_have_at_most_one_argument_and_human_facing_copy(
     assert "each row with its ID and specific reason" in server.instructions
     assert "host's single native confirmation" in server.instructions
     assert "resume only from a returned positive cursor" in server.instructions
+
+
+def test_resources_are_lazy_versioned_and_authorized(tmp_path: Path) -> None:
+    asyncio.run(_resources_are_lazy_versioned_and_authorized(tmp_path))
+
+
+async def _resources_are_lazy_versioned_and_authorized(tmp_path: Path) -> None:
+    token_file = tmp_path / "credential.jwt"
+    token_file.write_text("opaque-test-credential", encoding="utf-8")
+
+    class RevokingClient(FakeClient):
+        deny = False
+
+        async def call_tool(
+            self, name: str, arguments: dict[str, Any] | None = None, **_kwargs: Any
+        ) -> types.CallToolResult:
+            payload = arguments or {}
+            self.calls.append((name, payload))
+            if self.deny:
+                return types.CallToolResult(
+                    content=[types.TextContent(type="text", text="private denial detail")],
+                    isError=True,
+                )
+            if name == "ticket_get":
+                return _json_result(
+                    {
+                        "ok": True,
+                        "ticket": {
+                            "ticket_id": payload["ticket_id"],
+                            "status": "claimed",
+                        },
+                    }
+                )
+            return _json_result(
+                {"ok": True, "board_id": payload["board_id"], "ticket_count": 2}
+            )
+
+    upstream = RevokingClient()
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        yield upstream
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="resource-board",
+        token_file=token_file,
+        connection_factory=connect,
+        tools_mode="worker",
+    )
+    async with Client(build_server(relay), mode="2026-07-28", cache=None) as client:
+        async with client.listen(
+            resource_subscriptions=("pursers://help/index",)
+        ):
+            pass
+        listed = await client.list_resources()
+        templates = await client.list_resource_templates()
+        assert [str(item.uri) for item in listed.resources] == [
+            "pursers://help/index"
+        ]
+        assert {item.uri_template for item in templates.resource_templates} == {
+            "pursers://help/roles/{role}",
+            "pursers://help/workflows/{workflow}",
+            "pursers://boards/{board_id}/summary",
+            "pursers://boards/{board_id}/tickets/{ticket_id}",
+        }
+
+        index = json.loads(
+            (await client.read_resource("pursers://help/index")).contents[0].text
+        )
+        assert index["schema"] == "pursers.discovery.v1"
+        assert len(index["resources"]) == 5
+        assert "private" not in json.dumps(index).lower()
+
+        role = json.loads(
+            (await client.read_resource("pursers://help/roles/worker")).contents[0].text
+        )
+        assert role["role"] == "worker"
+        assert role["kind"] == "static_role_help"
+
+        workflow = json.loads(
+            (await client.read_resource("pursers://help/workflows/create")).contents[0].text
+        )
+        assert workflow["workflow"] == "create"
+        assert workflow["mutates"] is True
+
+        first = json.loads(
+            (
+                await client.read_resource(
+                    "pursers://boards/resource-board/summary", cache_mode="reload"
+                )
+            ).contents[0].text
+        )
+        assert first["ok"] is True
+        assert first["cache"] == "none"
+        assert first["data"]["ticket_count"] == 2
+
+        ticket = json.loads(
+            (
+                await client.read_resource(
+                    "pursers://boards/resource-board/tickets/TK-123",
+                    cache_mode="reload",
+                )
+            ).contents[0].text
+        )
+        assert ticket["ok"] is True
+        assert ticket["source_tool"] == "ticket_get"
+        assert ticket["data"]["ticket"]["ticket_id"] == "TK-123"
+
+        upstream.deny = True
+        revoked = json.loads(
+            (
+                await client.read_resource(
+                    "pursers://boards/resource-board/summary", cache_mode="reload"
+                )
+            ).contents[0].text
+        )
+        assert revoked["ok"] is False
+        assert revoked["code"] == "not_authorized_or_unavailable"
+        assert "private denial detail" not in json.dumps(revoked)
+
+        wrong_board = json.loads(
+            (
+                await client.read_resource(
+                    "pursers://boards/other-board/summary", cache_mode="reload"
+                )
+            ).contents[0].text
+        )
+        assert wrong_board["code"] == "board_not_selected"
+        assert upstream.calls == [
+            ("board_status", {"board_id": "resource-board"}),
+            (
+                "ticket_get",
+                {
+                    "board_id": "resource-board",
+                    "ticket_id": "TK-123",
+                    "view": "summary",
+                },
+            ),
+            ("board_status", {"board_id": "resource-board"}),
+        ]
+
+
+def test_role_profile_changes_prompt_next_action(tmp_path: Path) -> None:
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="role-board",
+        token_file=tmp_path / "unused.jwt",
+        tools_mode="reviewer",
+    )
+    rendered = asyncio.run(build_server(relay).get_prompt("board"))
+    text = rendered.messages[0].content.text
+    assert "`reviewer` view" in text
+    assert "read-only bounded view" in text
+
+
+def test_prompt_discovers_existing_identity_role_without_tool_listing(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_prompt_discovers_existing_identity_role_without_tool_listing(tmp_path))
+
+
+async def _prompt_discovers_existing_identity_role_without_tool_listing(
+    tmp_path: Path,
+) -> None:
+    token_file = tmp_path / "credential.jwt"
+    token_file.write_text("opaque-test-credential", encoding="utf-8")
+    upstream = ExistingIdentityClient(
+        ["existing-reviewer"], "PR-existing", roles=["reviewer"]
+    )
+
+    @asynccontextmanager
+    async def connect(_token: str):
+        yield upstream
+
+    relay = CentralRelay(
+        central_url="http://127.0.0.1:9999",
+        board="existing-board",
+        token_file=token_file,
+        connection_factory=connect,
+    )
+    rendered = await build_server(relay).get_prompt("board")
+
+    assert "`reviewer` view" in rendered.messages[0].content.text
+    assert [name for name, _ in upstream.calls] == ["board_list", "board_status"]
+
+
+def test_discovery_payloads_stay_small_and_lazy() -> None:
+    def encoded_size(value: object) -> int:
+        return len(
+            json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+        )
+
+    index_bytes = encoded_size(capability_index())
+    representative_bytes = (
+        index_bytes
+        + encoded_size(role_document("worker"))
+        + encoded_size(workflow_document("watch"))
+    )
+    all_static_bodies_bytes = sum(
+        encoded_size(role_document(role)) for role in ROLE_HELP
+    ) + sum(encoded_size(workflow_document(workflow)) for workflow in WORKFLOW_HELP)
+
+    assert index_bytes <= 2_048
+    assert representative_bytes <= 3_000
+    assert all_static_bodies_bytes <= 5_000
+    assert representative_bytes < index_bytes + all_static_bodies_bytes
 
 
 def test_long_call_does_not_block_another_call(tmp_path: Path) -> None:
@@ -1640,6 +1857,10 @@ async def _stdio_framing_has_no_stdout_noise_and_completes_initialize(
         tools = await client.list_tools()
         prompts = await client.list_prompts()
         rendered = await client.get_prompt("board")
+        resources = await client.list_resources()
+        templates = await client.list_resource_templates()
+        help_index = await client.read_resource("pursers://help/index")
+        resource_capability = client.server_capabilities.resources
     assert [tool.name for tool in tools.tools] == [SETUP_STATUS_TOOL, SETUP_TOOL]
     assert [prompt.name for prompt in prompts.prompts] == [
         "board",
@@ -1650,3 +1871,11 @@ async def _stdio_framing_has_no_stdout_noise_and_completes_initialize(
         "setup",
     ]
     assert "stdio-board" in rendered.messages[0].content.text
+    assert [str(resource.uri) for resource in resources.resources] == [
+        "pursers://help/index"
+    ]
+    assert len(templates.resource_templates) == 4
+    assert json.loads(help_index.contents[0].text)["schema"] == "pursers.discovery.v1"
+    assert resource_capability is not None
+    assert resource_capability.subscribe is False
+    assert resource_capability.list_changed is False

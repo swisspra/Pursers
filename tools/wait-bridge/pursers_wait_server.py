@@ -4690,7 +4690,25 @@ async def board_digest_resource(board_id: str) -> str:
     """Read current board digest JSON without a tool call."""
     engine = _get_orchestrator_engine()
     if engine is None:
-        return "{}"
+        return json.dumps(
+            {
+                "schema": "pursers.digest.v1",
+                "ok": False,
+                "status": "unavailable",
+                "code": "orchestrator_engine_unavailable",
+                "detail": (
+                    "The compatibility digest requires pursers-wait-bridge "
+                    "orchestrator mode; no empty board result was synthesized."
+                ),
+                "board_id": board_id,
+                "fallback": {
+                    "tool": "board_digest",
+                    "guide": "docs/guides/connecting-clients.md",
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     digest = await engine.build_digest(boards=[board_id])
     return json.dumps(digest, ensure_ascii=False, indent=2)
 
