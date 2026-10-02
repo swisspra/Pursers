@@ -6876,6 +6876,7 @@ class SourceIntakePoller:
                 self.index.set_status(key, "delivered")
                 continue
             runtime = self.runtimes[source.connector_id]
+            batch_delivery = False
             try:
                 project = await self.project_reader(board_id) if self.project_reader is not None else None
                 resolved_batch = self._resolved_batch_policy(project)
@@ -6895,6 +6896,7 @@ class SourceIntakePoller:
                     })
                     continue
                 if resolved_batch is not None and resolved_batch[0].get('mode') != 'per_ticket_pr':
+                    batch_delivery = True
                     policy, resolved = resolved_batch
                     batch_runtime, result = await self._collect_batch_member(
                         source, runtime, board_id, ticket_id, ticket, entry,
@@ -6906,7 +6908,21 @@ class SourceIntakePoller:
                         entry, notice_state, reason=result.get('reason'),
                         completion_boundary=boundary, index_state=collection_state)
                     batch_key = result.get('batch_key')
-                    if result.get('state') == 'integration_blocked' or not isinstance(batch_key, str):
+                    if collection_state == 'integration_blocked':
+                        entry['retry_after'] = str(now.timestamp() + 60)
+                        entry['last_error_class'] = 'BatchDeliveryBlocked'
+                        self.index.dirty = True
+                        self.index.save()
+                        findings.append({
+                            'kind': 'source-batch-delivery-blocked',
+                            'level': 'warn',
+                            'status': 'needs_operator',
+                            'source_id': source.source_id,
+                            'ticket_id': ticket_id,
+                            'message': result.get('reason', 'batch delivery collection blocked'),
+                        })
+                        continue
+                    if not isinstance(batch_key, str):
                         raise ConnectorDenied(result.get('reason', 'batch delivery collection blocked'))
                     pending = pending_batches.setdefault(
                         (id(batch_runtime), batch_key), (batch_runtime, policy, []))
@@ -6916,7 +6932,12 @@ class SourceIntakePoller:
                     source, runtime, board_id, ticket_id, ticket, entry
                 )
             except Exception as exc:
-                if source.writeback.tool == "ado_pull_request_create":
+                if batch_delivery:
+                    entry["retry_after"] = str(now.timestamp() + 60)
+                    entry["last_error_class"] = type(exc).__name__
+                    self.index.dirty = True
+                    self.index.save()
+                elif source.writeback.tool == "ado_pull_request_create":
                     state = "pr_uncertain" if entry.get("status") == "delivering" else "pr_blocked"
                     entry["retry_after"] = str(now.timestamp() + 60)
                     entry["delivery_state"] = state
