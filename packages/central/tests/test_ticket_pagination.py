@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import sys
 import tempfile
@@ -158,7 +159,16 @@ class TicketPaginationTests(unittest.IsolatedAsyncioTestCase):
         first = (await self.call("ticket_list", limit=1)).structured_content
         cursor = first["next_cursor"]
         self.assertIsInstance(cursor, str)
-        tampered = cursor[:-1] + ("A" if cursor[-1] != "A" else "B")
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        signature_index = alphabet.index(cursor[-1])
+        self.assertEqual(signature_index % 4, 0)
+        tampered = cursor[:-1] + alphabet[signature_index + 1]
+        original_signature = cursor.rsplit(".", 1)[1]
+        tampered_signature = tampered.rsplit(".", 1)[1]
+        self.assertEqual(
+            base64.urlsafe_b64decode(original_signature + "="),
+            base64.urlsafe_b64decode(tampered_signature + "="),
+        )
         with self.assertRaisesRegex(Exception, "integrity check failed"):
             await self.call("ticket_list", limit=1, cursor=tampered)
         with self.assertRaisesRegex(Exception, "filter set"):

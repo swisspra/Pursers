@@ -35,13 +35,16 @@ def _b64decode(value: str) -> bytes:
     if not value or any(character.isspace() for character in value):
         raise ValueError("cursor is invalid; restart the traversal without cursor")
     try:
-        return base64.b64decode(
+        decoded = base64.b64decode(
             value + "=" * (-len(value) % 4), altchars=b"-_", validate=True
         )
     except (ValueError, TypeError) as exc:
         raise ValueError(
             "cursor is invalid; restart the traversal without cursor"
         ) from exc
+    if _b64encode(decoded) != value:
+        raise ValueError("cursor is invalid; restart the traversal without cursor")
+    return decoded
 
 
 def filter_digest(filters: Mapping[str, Any]) -> str:
@@ -91,7 +94,12 @@ class TicketCursorCodec:
             raise ValueError("cursor is invalid; restart the traversal without cursor")
         payload_text, signature_text = cursor.split(".", 1)
         payload = _b64decode(payload_text)
-        signature = _b64decode(signature_text)
+        try:
+            signature = _b64decode(signature_text)
+        except ValueError as exc:
+            raise ValueError(
+                "cursor integrity check failed; restart without cursor"
+            ) from exc
         if not any(
             hmac.compare_digest(
                 hmac.new(key, payload, hashlib.sha256).digest(), signature

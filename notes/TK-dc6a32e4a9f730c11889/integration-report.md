@@ -19,7 +19,53 @@ The website remains in its repository. Its integration branch starts from
 website history through
 `codex/TK-263a6469c16949bdf499-csp-verifier3@771719146ceaeab71b8cdf7cf037327903c984ce`.
 Browser evidence is committed at
-`codex/TK-dc6a32e4a9f730c11889-web-integration-worker12@09253bea1f75d4a51f8b1091312d71372166bdba`.
+`codex/TK-dc6a32e4a9f730c11889-web-evidence-worker3@f64151735fec31c0d4eb789b0f7ccd17cee35f06`.
+
+## Rejection follow-up
+
+The first independent review found that an unpadded base64url signature could
+have a different textual spelling while decoding to the same bytes. Cursor
+verification therefore accepted some modified cursor strings, and the original
+test only exposed the defect when its random signature ended with a favorable
+character.
+
+The follow-up decoder now requires the decoded bytes to re-encode to the exact
+input text. This rejects padding and non-canonical trailing bits while retaining
+the existing unpadded base64url format. Signature decoding errors are reported
+through the cursor integrity error contract. The regression test deterministically
+changes only unused trailing bits, proves that the original and modified text
+decode to the same signature bytes under a permissive decoder, and verifies that
+Central rejects the modified cursor.
+
+The directly affected cross-stream suite passed after the correction:
+
+```text
+TMPDIR=/PATH/TO/USER-CACHE PYTHONPATH=packages/central/src:packages/client/src \
+python3 -m pytest -q \
+  packages/central/tests/test_ticket_pagination.py \
+  packages/central/tests/test_ticket_activity.py \
+  packages/central/tests/test_ticket_progress.py \
+  packages/central/tests/test_response_bounds.py \
+  packages/central/tests/test_agent_display_name.py \
+  packages/client/tests/test_mcp_proxy.py \
+  packages/client/tests/test_per_call_identity.py \
+  tools/fleet-dashboard/tests/test_work_view.py \
+  tools/fleet-dashboard/tests/test_fleet_dashboard.py \
+  tools/fleet-dashboard/tests/test_activity_visibility.py \
+  tools/wait-bridge/tests/test_orchestrator_mode.py \
+  tools/board-butler/tests/test_integration_delivery.py \
+  tools/tests/test_skill_bundle.py
+```
+
+Result: `509 passed, 11 subtests passed in 206.84s (0:03:26)`.
+
+The website follow-up branch reran `npm run check` at exact revision
+`f64151735fec31c0d4eb789b0f7ccd17cee35f06`: Astro reported zero errors,
+warnings, or hints; seven pages built; 14 tests passed across two files; and the
+Wrangler dry-run reported 63.71 KiB / gzip 16.29 KiB. Live Chromium acceptance
+reconfirmed route status, security headers, Docs filtering, copy feedback,
+desktop layout, and 390 by 844 mobile layout. The refreshed evidence is in the
+website artifact set.
 
 Shared-file merge conflicts were limited to additive changelog and documentation
 sections, Central's package bridge module list, and the Work-view tests. The
