@@ -155,3 +155,59 @@ def test_work_progress_styles_are_static_responsive_and_high_contrast_safe() -> 
         "@media (forced-colors: active)",
     ):
         assert contract in css
+
+
+def test_work_view_pages_deduplicated_rows_and_advances_without_reload() -> None:
+    registry = dashboard.UI_ASSETS["/ui/view-registry.js"][1].decode("utf-8")
+    work = dashboard.UI_ASSETS["/ui/views/work.js"][1].decode("utf-8")
+    tickets = [
+        {"id": f"TK-{index:03d}", "title": f"Ticket {index}", "status": "open"}
+        for index in range(120)
+    ]
+    tickets.append(dict(tickets[0]))
+    program = f"""
+const listeners = [];
+const host = {{innerHTML: ''}};
+global.document = {{
+  querySelector: selector => selector === '#central-sections' ? host : selector === '.work-view' ? {{}} : null,
+  createElement: () => ({{dataset: {{}}}}),
+  head: {{append: () => {{}}}},
+  addEventListener: (kind, callback) => listeners.push([kind, callback]),
+}};
+global.matchMedia = () => ({{matches: true}});
+eval({json.dumps(registry)});
+eval({json.dumps(work)});
+const tickets = {json.dumps(tickets)};
+const context = {{
+  esc: value => String(value), fmt: value => value, relativeAge: value => value,
+  ticketHref: () => '#ticket', boardHref: () => '#board', pageHead: () => '',
+  warmTruthStrip: () => '',
+  warmTickets: () => tickets.map(ticket => ({{
+    central: 'private', board: {{board_id: 'board', label: 'Board'}}, ticket,
+  }})),
+}};
+const first = globalThis.FleetViewModules.render('work', context);
+const next = {{disabled: false, textContent: '', dataset: {{}}}};
+for (const [kind, callback] of listeners) {{
+  if (kind === 'click') callback({{target: {{closest: selector => selector === '[data-work-next-page]' ? next : null}}}});
+}}
+console.log(JSON.stringify({{
+  firstCount: (first.match(/work-ledger-row/g) || []).length,
+  firstSummary: first.includes('Showing 50 of 120 matching tickets (120 loaded)'),
+  firstButton: first.includes('Show next 50'),
+  secondCount: (host.innerHTML.match(/work-ledger-row/g) || []).length,
+  secondSummary: host.innerHTML.includes('Showing 100 of 120 matching tickets (120 loaded)'),
+}}));
+"""
+    rendered = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+    assert rendered == {
+        "firstCount": 50,
+        "firstSummary": True,
+        "firstButton": True,
+        "secondCount": 100,
+        "secondSummary": True,
+    }

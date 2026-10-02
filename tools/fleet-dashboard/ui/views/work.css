@@ -88,6 +88,18 @@
   font-variant-numeric: tabular-nums;
 }
 
+.work-page-controls {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 52px;
+  margin-top: 16px;
+}
+
+.work-page-controls .button {
+  min-height: 44px;
+}
+
 .work-ledger {
   min-width: 0;
   border-top: 2px solid var(--work-ink);

@@ -171,6 +171,26 @@ Use `wait_for="submitted"` for reviewers. The host-specific timeout must stay
 below that host's MCP tool deadline; the Fleet dashboard supplies the tested
 profile for managed seats.
 
+### Page explicit ticket reads; never page the idle wait loop
+
+Use `ticket_list` pagination only after a user or workflow explicitly requests
+a list. The first response includes the exact filters and a live-read
+consistency marker. Pass `next_cursor` back with the same filters until it is
+`null`, deduplicating by ticket ID. If the board changes during traversal,
+refresh after the relevant journal event; pages do not promise an atomic
+snapshot.
+
+Older Central versions omit `next_cursor`. A compatible client may display the
+returned rows, but it must label the traversal incomplete whenever
+`total_matching` exceeds the number of unique rows. It must not repeatedly
+rescan the same bounded list. For one ticket's evidence, open the ticket and
+page only the required history with `ticket_history_list`; do not request every
+full ticket body up front.
+
+This pagination contract does not change the push loop above. An idle worker or
+reviewer continues to wait on journal cues and must not scan ticket pages to
+look for work.
+
 ## 5. Submit evidence and review it independently
 
 A worker submission should include:

@@ -452,7 +452,10 @@ async def test_ticket_read_projection_parameters_are_forwarded(monkeypatch) -> N
         "TK-read", view="full", include_dispatch_history=True
     )
     await board.ticket_list(
-        view="summary", include_dispatch_history=True
+        view="summary", include_dispatch_history=True, cursor="opaque-page"
+    )
+    await board.ticket_history_list(
+        "TK-read", "reviews", limit=25, cursor="opaque-history"
     )
 
     assert calls[0] == (
@@ -466,6 +469,66 @@ async def test_ticket_read_projection_parameters_are_forwarded(monkeypatch) -> N
     assert calls[1][0] == "ticket_list"
     assert calls[1][1]["view"] == "summary"
     assert calls[1][1]["include_dispatch_history"] is True
+    assert calls[1][1]["cursor"] == "opaque-page"
+    assert calls[2] == (
+        "ticket_history_list",
+        {
+            "ticket_id": "TK-read",
+            "history": "reviews",
+            "limit": 25,
+            "cursor": "opaque-history",
+        },
+    )
+
+
+@pytest.mark.anyio
+async def test_ticket_list_all_pages_and_deduplicates_live_results(monkeypatch) -> None:
+    board = client()
+    calls: list[dict[str, Any]] = []
+
+    async def call(_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append(arguments)
+        if arguments.get("cursor") == "page-2":
+            return {
+                "tickets": [{"ticket_id": "TK-b"}, {"ticket_id": "TK-c"}],
+                "next_cursor": None,
+                "has_more": False,
+                "total_matching": 3,
+            }
+        return {
+            "tickets": [{"ticket_id": "TK-a"}, {"ticket_id": "TK-b"}],
+            "next_cursor": "page-2",
+            "has_more": True,
+            "total_matching": 3,
+        }
+
+    monkeypatch.setattr(board, "_call", call)
+    result = await board.ticket_list_all(limit=2)
+
+    assert [row["ticket_id"] for row in result["tickets"]] == ["TK-a", "TK-b", "TK-c"]
+    assert result["page_count"] == 2
+    assert result["pagination_supported"] is True
+    assert result["traversal_complete"] is True
+    assert calls[1]["cursor"] == "page-2"
+
+
+@pytest.mark.anyio
+async def test_ticket_list_all_old_server_fallback_is_honest(monkeypatch) -> None:
+    board = client()
+
+    async def call(_name: str, _arguments: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "tickets": [{"ticket_id": "TK-a"}],
+            "count": 1,
+            "total_matching": 3,
+        }
+
+    monkeypatch.setattr(board, "_call", call)
+    result = await board.ticket_list_all(limit=1)
+
+    assert result["pagination_supported"] is False
+    assert result["traversal_complete"] is False
+    assert result["has_more"] is True
 
 
 def test_id_map_is_expanded_for_existing_client_consumers() -> None:
