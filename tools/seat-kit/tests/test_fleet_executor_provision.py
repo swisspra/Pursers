@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -39,10 +40,14 @@ def provision_spec(tmp_path: Path) -> dict[str, object]:
     local_config = tmp_path / "fleet-local.json"
     local_config.write_text('{"providers":{},"templates":{}}\n', encoding="utf-8")
     local_config.chmod(0o600)
+    runtime = tmp_path / "runtime/bin/python"
+    runtime.parent.mkdir(parents=True)
+    shutil.copy2(Path(sys.executable).resolve(), runtime)
+    runtime.chmod(0o700)
     return {
         "schema": provision.PROVISION_SCHEMA,
         "executor": {
-            "python": sys.executable,
+            "python": str(runtime),
             "repository": str(ROOT),
             "config_path": str(state / "executor.json"),
             "state_dir": str(state),
@@ -155,9 +160,37 @@ def test_venv_python_symlink_is_validated_but_preserved_in_staged_plist(
     tmp_path: Path,
 ) -> None:
     specification = provision_spec(tmp_path)
-    venv_python = tmp_path / "executor-venv/bin/python"
-    venv_python.parent.mkdir(parents=True)
-    venv_python.symlink_to(Path(sys.executable))
+    trusted_runtime = Path(specification["executor"]["python"])
+    base_venv = tmp_path / "base-venv"
+    subprocess.run(
+        [trusted_runtime, "-m", "venv", "--without-pip", str(base_venv)],
+        check=True,
+    )
+    base_python = base_venv / "bin/python"
+    missing = subprocess.run(
+        [base_python, "-I", "-c", "import cryptography; import mcp"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    assert missing.returncode != 0
+
+    executor_venv = tmp_path / "executor-venv"
+    subprocess.run(
+        [base_python, "-m", "venv", "--without-pip", str(executor_venv)],
+        check=True,
+    )
+    venv_python = executor_venv / "bin/python"
+    purelib = subprocess.run(
+        [venv_python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    for dependency in ("cryptography", "mcp"):
+        package = Path(purelib) / dependency
+        package.mkdir()
+        (package / "__init__.py").write_text("# offline probe fixture\n", encoding="utf-8")
     specification["executor"]["python"] = str(venv_python)
     spec_path = tmp_path / "spec.json"
     plan_path = tmp_path / "plan.json"
@@ -181,6 +214,17 @@ def test_venv_python_symlink_is_validated_but_preserved_in_staged_plist(
         check=False,
     )
     assert probe.returncode == 0
+
+
+def test_plan_rejects_group_writable_executor_runtime(tmp_path: Path) -> None:
+    specification = provision_spec(tmp_path)
+    runtime = Path(specification["executor"]["python"])
+    runtime.chmod(0o720)
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(specification), encoding="utf-8")
+
+    with pytest.raises(provision.ProvisionError, match="executor_runtime_untrusted"):
+        provision.create_plan(spec_path, tmp_path / "plan.json")
 
 
 def test_plan_accepts_operator_cap_fifteen_and_rejects_above_product_bound(

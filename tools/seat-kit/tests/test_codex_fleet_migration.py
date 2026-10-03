@@ -98,3 +98,28 @@ def test_preview_uses_each_seats_bound_board_and_ignores_non_codex_exec(tmp_path
     plan=migration.preview(spec,tmp_path/'plan.json',process_source=lambda:ps)
     assert plan['destructive_ready'] is True
     assert plan['inventory']['managed_process_count']==1
+
+
+def test_preview_counts_node_and_rust_chains_without_parsing_quoted_prompts(tmp_path):
+    spec,_,_,ps,worker=fixture(tmp_path)
+    reviewer=tmp_path/'seats/reviewer-a'
+    ps=ps.replace(' prompt\n', " worker's prompt\n")
+    ps+=(f'300 100 /PATH/TO/node /PATH/TO/codex.js exec -m model -C {reviewer} '
+        "reviewer's prompt isn't launch flags -C /unrelated\n"
+        f'301 300 /PATH/TO/codex-rust exec -m model -C {reviewer} '
+        "reviewer's prompt isn't launch flags -C /unrelated\n")
+    plan=migration.preview(spec,tmp_path/'plan.json',process_source=lambda:ps)
+    seats={row['seat_id']:row for row in plan['inventory']['seats']}
+    assert plan['inventory']['managed_process_count']==2
+    assert seats['mong1-worker-14']['process_count']==1
+    assert seats['mong1-worker-14']['child_process_count']==1
+    assert seats['mong1-reviewer-14']['process_count']==1
+    assert seats['mong1-reviewer-14']['child_process_count']==1
+
+
+def test_preview_fails_closed_when_codex_prefix_is_ambiguous(tmp_path):
+    spec,_,_,ps,_=fixture(tmp_path)
+    ps+='300 100 /PATH/TO/codex exec -m "unterminated\n'
+    plan=migration.preview(spec,tmp_path/'plan.json',process_source=lambda:ps)
+    assert plan['destructive_ready'] is False
+    assert 'codex_process_inventory_ambiguous' in plan['inventory']['blockers']

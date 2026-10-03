@@ -31,6 +31,15 @@ FIELDS = {
     "schema", "executor_config", "local_config", "lease_snapshot",
     "legacy_supervisor_command", "legacy_supervisor_pid_file", "controller_marker",
 }
+CODEX_VALUE_FLAGS = {
+    "-a", "--ask-for-approval", "-c", "--config", "--color", "-i", "--image",
+    "-m", "--model", "-o", "--output-last-message", "--profile", "-s", "--sandbox",
+    "--add-dir",
+}
+CODEX_SWITCH_FLAGS = {
+    "--dangerously-bypass-approvals-and-sandbox", "--ephemeral", "--json",
+    "--skip-git-repo-check",
+}
 
 
 class MigrationError(ValueError):
@@ -86,6 +95,46 @@ def _spec(path: Path) -> dict[str, Any]:
     return normalized
 
 
+def _process_argv(command: str) -> list[str]:
+    """Parse only the stable Codex option prefix, never free-form prompt text."""
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    argv: list[str] = []
+    codex_exec = False
+    while True:
+        token = lexer.get_token()
+        if token is None:
+            return argv
+        argv.append(token)
+        if not codex_exec:
+            codex_exec = token == "exec" and _is_codex_process(argv)
+            continue
+        flag = token.split("=", 1)[0]
+        if flag in ("-C", "--cd"):
+            if "=" in token:
+                if not token.split("=", 1)[1]:
+                    raise ValueError("missing Codex seat root")
+                return argv
+            root = lexer.get_token()
+            if root is None:
+                raise ValueError("missing Codex seat root")
+            argv.append(root)
+            return argv
+        if flag in CODEX_VALUE_FLAGS:
+            if "=" not in token:
+                value = lexer.get_token()
+                if value is None:
+                    raise ValueError("missing Codex option value")
+                argv.append(value)
+            continue
+        if token in CODEX_SWITCH_FLAGS:
+            continue
+        if token == "--" or not token.startswith("-"):
+            return argv
+        raise ValueError("unknown Codex option before seat root")
+
+
 def _process_rows(output: str) -> list[dict[str, Any]]:
     rows = []
     for raw in output.splitlines():
@@ -93,10 +142,18 @@ def _process_rows(output: str) -> list[dict[str, Any]]:
         if len(fields) != 3 or not all(item.isdigit() for item in fields[:2]):
             continue
         try:
-            argv = shlex.split(fields[2])
+            argv = _process_argv(fields[2])
         except ValueError:
+            if "codex" in fields[2].lower() and re.search(r"\bexec\b", fields[2]):
+                rows.append({
+                    "pid": int(fields[0]), "ppid": int(fields[1]), "argv": [],
+                    "ambiguous_codex": True,
+                })
             continue
-        rows.append({"pid": int(fields[0]), "ppid": int(fields[1]), "argv": argv})
+        rows.append({
+            "pid": int(fields[0]), "ppid": int(fields[1]), "argv": argv,
+            "ambiguous_codex": False,
+        })
     return rows
 
 
@@ -170,6 +227,8 @@ def _inventory(spec: Mapping[str, Any], ps_output: str) -> dict[str, Any]:
     except (OSError, ValueError) as exc:
         raise MigrationError("legacy_supervisor_pid_unavailable") from exc
     blockers: list[str] = []
+    if any(row["ambiguous_codex"] for row in rows):
+        blockers.append("codex_process_inventory_ambiguous")
     if supervisor_pids != [pid_file_value]:
         blockers.append("legacy_controller_identity_unknown_or_duplicate")
     process_by_root: dict[str, list[tuple[int, int]]] = {}
