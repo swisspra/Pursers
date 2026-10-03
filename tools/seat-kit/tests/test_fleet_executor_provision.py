@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
-import shutil
 import stat
 import subprocess
 import sys
@@ -19,6 +18,38 @@ assert SPEC and SPEC.loader
 provision = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = provision
 SPEC.loader.exec_module(provision)
+
+
+def _faithful_runtime_venv(runtime_root: Path) -> Path:
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "venv",
+            "--without-pip",
+            "--copies",
+            str(runtime_root),
+        ],
+        check=True,
+    )
+    runtime = runtime_root / "bin/python"
+    runtime.chmod(0o700)
+    purelib = subprocess.run(
+        [runtime, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    dependency_roots: set[Path] = set()
+    for dependency in ("cryptography", "mcp"):
+        spec = importlib.util.find_spec(dependency)
+        assert spec and spec.origin
+        dependency_roots.add(Path(spec.origin).resolve().parent.parent)
+    (Path(purelib) / "pursers-test-dependencies.pth").write_text(
+        "".join(f"{root}\n" for root in sorted(dependency_roots)),
+        encoding="utf-8",
+    )
+    return runtime
 
 
 def provision_spec(tmp_path: Path) -> dict[str, object]:
@@ -40,10 +71,7 @@ def provision_spec(tmp_path: Path) -> dict[str, object]:
     local_config = tmp_path / "fleet-local.json"
     local_config.write_text('{"providers":{},"templates":{}}\n', encoding="utf-8")
     local_config.chmod(0o600)
-    runtime = tmp_path / "runtime/bin/python"
-    runtime.parent.mkdir(parents=True)
-    shutil.copy2(Path(sys.executable).resolve(), runtime)
-    runtime.chmod(0o700)
+    runtime = _faithful_runtime_venv(tmp_path / "runtime")
     return {
         "schema": provision.PROVISION_SCHEMA,
         "executor": {
