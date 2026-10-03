@@ -39,6 +39,7 @@ PLATFORMS = frozenset(
         "windows-x86_64",
     }
 )
+DISTRIBUTION_KINDS = frozenset({"binary", "npx", "uvx"})
 
 
 class CatalogError(ValueError):
@@ -147,6 +148,32 @@ def platform_target(system: str | None = None, machine: str | None = None) -> st
     if os_name is None or architecture is None:
         raise CatalogError("unsupported_host_platform")
     return f"{os_name}-{architecture}"
+
+
+def validate_catalog_pin(raw: Any) -> dict[str, str]:
+    """Validate the portable subset needed to resolve one catalog runner."""
+    fields = {
+        "agent_id",
+        "agent_version",
+        "platform",
+        "registry_revision",
+        "distribution_kind",
+    }
+    if not isinstance(raw, dict) or set(raw) != fields:
+        raise CatalogError("catalog_pin_invalid")
+    if not isinstance(raw["agent_id"], str) or not SAFE_ID.fullmatch(raw["agent_id"]):
+        raise CatalogError("catalog_pin_agent_id_invalid")
+    if not _is_exact_version(raw["agent_version"]):
+        raise CatalogError("catalog_pin_version_invalid")
+    if raw["platform"] not in PLATFORMS:
+        raise CatalogError("catalog_pin_platform_invalid")
+    if raw["distribution_kind"] not in DISTRIBUTION_KINDS:
+        raise CatalogError("catalog_pin_distribution_invalid")
+    if not isinstance(raw["registry_revision"], str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", raw["registry_revision"]
+    ):
+        raise CatalogError("registry_revision_invalid")
+    return dict(raw)
 
 
 def refresh_catalog(

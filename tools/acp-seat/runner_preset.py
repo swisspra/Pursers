@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping
 from typing import Any
+
+from runner_catalog import CatalogError, validate_catalog_pin
 
 PRESET_SCHEMA = "pursers_runner_preset_v1"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -92,20 +95,10 @@ def _runner(raw: Any) -> dict[str, Any]:
         if set(raw) != fields:
             raise PresetError("acp_runner_invalid")
         _logical_ref(raw["account_ref"], "account_ref")
-        pin = raw["catalog_pin"]
-        expected = {
-            "agent_id",
-            "agent_version",
-            "platform",
-            "registry_revision",
-            "distribution_kind",
-        }
-        if not isinstance(pin, dict) or set(pin) != expected:
-            raise PresetError("catalog_pin_invalid")
-        for field in ("agent_id", "agent_version", "platform", "distribution_kind"):
-            _logical_ref(pin[field], field)
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(pin["registry_revision"])):
-            raise PresetError("registry_revision_invalid")
+        try:
+            pin = validate_catalog_pin(raw["catalog_pin"])
+        except CatalogError as exc:
+            raise PresetError(str(exc)) from exc
         return {
             "kind": "acp",
             "account_ref": raw["account_ref"],
@@ -162,7 +155,11 @@ def _logical_ref(value: Any, field: str) -> str:
 def _public_json(value: Any, field: str, depth: int = 0) -> Any:
     if depth > 8:
         raise PresetError(f"{field}_too_deep")
-    if value is None or isinstance(value, (bool, int, float)):
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise PresetError(f"{field}_non_finite")
+        return value
+    if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, str):
         if len(value) > 4096 or PRIVATE_PATH.match(value) or "\x00" in value:

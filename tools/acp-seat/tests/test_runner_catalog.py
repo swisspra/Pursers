@@ -295,6 +295,69 @@ def test_acp_preset_separates_account_pin_and_session_options() -> None:
         "session_options": {"model": "gemini-pro", "mode": "plan"},
     }
     assert preset.normalize_preset(value) == value
+    assert preset.normalize_preset(json.loads(preset.dumps_preset(value))) == value
+
+
+def acp_preset() -> dict:
+    return {
+        "schema": preset.PRESET_SCHEMA,
+        "seat": {"agent_name": "worker-13", "board_id": "pursers", "role": "worker"},
+        "runner": {
+            "kind": "acp",
+            "account_ref": "gemini:company",
+            "catalog_pin": {
+                "agent_id": "gemini-cli",
+                "agent_version": "1.2.3",
+                "platform": "darwin-aarch64",
+                "registry_revision": "sha256:" + "b" * 64,
+                "distribution_kind": "npx",
+            },
+        },
+        "session_options": {"model": "gemini-pro"},
+    }
+
+
+@pytest.mark.parametrize("version", ["latest", "stable", "preview"])
+def test_acp_preset_rejects_channel_versions_on_create_and_roundtrip(
+    version: str,
+) -> None:
+    value = acp_preset()
+    value["runner"]["catalog_pin"]["agent_version"] = version
+    with pytest.raises(preset.PresetError, match="catalog_pin_version_invalid"):
+        preset.normalize_preset(value)
+    with pytest.raises(preset.PresetError, match="catalog_pin_version_invalid"):
+        preset.dumps_preset(value)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid", "message"),
+    [
+        ("agent_id", "--agent", "catalog_pin_agent_id_invalid"),
+        ("platform", "made-up-os", "catalog_pin_platform_invalid"),
+        ("distribution_kind", "shell", "catalog_pin_distribution_invalid"),
+    ],
+)
+def test_acp_preset_rejects_invalid_catalog_pin_on_create_and_roundtrip(
+    field: str, invalid: str, message: str
+) -> None:
+    value = acp_preset()
+    value["runner"]["catalog_pin"][field] = invalid
+    with pytest.raises(preset.PresetError, match=message):
+        preset.normalize_preset(value)
+    with pytest.raises(preset.PresetError, match=message):
+        preset.dumps_preset(value)
+
+
+@pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+def test_preset_rejects_recursive_non_finite_session_options(
+    non_finite: float,
+) -> None:
+    value = acp_preset()
+    value["session_options"] = {"nested": [{"value": non_finite}]}
+    with pytest.raises(preset.PresetError, match="session_options_non_finite"):
+        preset.normalize_preset(value)
+    with pytest.raises(preset.PresetError, match="session_options_non_finite"):
+        preset.dumps_preset(value)
 
 
 @pytest.mark.parametrize(
