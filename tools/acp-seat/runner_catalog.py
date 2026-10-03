@@ -9,6 +9,7 @@ import platform as host_platform
 import re
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -23,6 +24,11 @@ DEFAULT_TIMEOUT_S = 10.0
 DEFAULT_MAX_AGE_S = 24 * 60 * 60
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.+_-]{0,127}$")
+NPM_PACKAGE = re.compile(
+    r"^(?:@[A-Za-z0-9][A-Za-z0-9._-]{0,127}/)?"
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+)
+PYTHON_PACKAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PLATFORMS = frozenset(
     {
         "darwin-aarch64",
@@ -121,6 +127,11 @@ def canonical_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _registry_revision(document: Mapping[str, Any]) -> str:
+    basis = {"version": document["version"], "agents": document["agents"]}
+    return "sha256:" + hashlib.sha256(canonical_json(basis)).hexdigest()
+
+
 def platform_target(system: str | None = None, machine: str | None = None) -> str:
     system_name = (system or host_platform.system()).lower()
     machine_name = (machine or host_platform.machine()).lower()
@@ -155,7 +166,7 @@ def refresh_catalog(
         raise CatalogError("registry_oversized")
     document = _validate_registry_bytes(payload)
     fetched_at = time.time() if now is None else float(now)
-    revision = "sha256:" + hashlib.sha256(payload).hexdigest()
+    revision = _registry_revision(document)
     cache = {
         "schema": CACHE_SCHEMA,
         "source_url": url,
@@ -284,13 +295,11 @@ def _validate_agent(raw: Any) -> dict[str, Any]:
             raise CatalogError("registry_agent_invalid")
     if not isinstance(raw["id"], str) or not SAFE_ID.fullmatch(raw["id"]):
         raise CatalogError("registry_agent_id_invalid")
-    if not isinstance(raw["version"], str) or not SAFE_VERSION.fullmatch(
-        raw["version"]
-    ):
+    if not _is_exact_version(raw["version"]):
         raise CatalogError("registry_agent_version_invalid")
     if not isinstance(raw["name"], str) or not raw["name"].strip():
         raise CatalogError("registry_agent_name_invalid")
-    distribution = _validate_distribution(raw["distribution"])
+    distribution = _validate_distribution(raw["distribution"], raw["version"])
     return {
         "id": raw["id"],
         "name": raw["name"],
@@ -299,7 +308,7 @@ def _validate_agent(raw: Any) -> dict[str, Any]:
     }
 
 
-def _validate_distribution(raw: Any) -> dict[str, Any]:
+def _validate_distribution(raw: Any, agent_version: str) -> dict[str, Any]:
     if not isinstance(raw, dict) or not raw or not set(raw) <= {"binary", "npx", "uvx"}:
         raise CatalogError("registry_distribution_invalid")
     result: dict[str, Any] = {}
@@ -315,7 +324,7 @@ def _validate_distribution(raw: Any) -> dict[str, Any]:
             if not result[kind]:
                 raise CatalogError("registry_binary_invalid")
         else:
-            result[kind] = _validate_package(kind, value)
+            result[kind] = _validate_package(kind, value, agent_version)
     return result
 
 
@@ -341,12 +350,9 @@ def _args(value: Any) -> list[str]:
 def _validate_binary(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict) or not {"archive", "cmd"} <= set(raw):
         raise CatalogError("registry_binary_invalid")
-    cmd = _safe_string(raw["cmd"], "registry_binary_cmd", maximum=512)
-    path = PurePosixPath(cmd.replace("\\", "/"))
-    if path.is_absolute() or ".." in path.parts or any(char.isspace() for char in cmd):
-        raise CatalogError("registry_binary_cmd_unsafe")
+    cmd = _validate_binary_cmd(raw["cmd"])
     result = {
-        "archive": _safe_string(raw["archive"], "registry_binary_archive"),
+        "archive": _https_url(raw["archive"], "registry_binary_archive"),
         "cmd": cmd,
         "args": _args(raw.get("args")),
     }
@@ -358,13 +364,59 @@ def _validate_binary(raw: Any) -> dict[str, Any]:
     return result
 
 
-def _validate_package(kind: str, raw: Any) -> dict[str, Any]:
+def _validate_package(kind: str, raw: Any, agent_version: str) -> dict[str, Any]:
     if not isinstance(raw, dict) or "package" not in raw:
         raise CatalogError(f"registry_{kind}_invalid")
+    package = _safe_string(raw["package"], f"registry_{kind}_package", maximum=512)
+    if kind == "npx":
+        name, separator, version = package.rpartition("@")
+        valid = bool(separator and NPM_PACKAGE.fullmatch(name))
+    else:
+        if "==" in package:
+            name, separator, version = package.rpartition("==")
+        else:
+            name, separator, version = package.rpartition("@")
+        valid = bool(separator and PYTHON_PACKAGE.fullmatch(name))
+    if not valid or version != agent_version:
+        raise CatalogError(f"registry_{kind}_package_invalid")
     return {
-        "package": _safe_string(raw["package"], f"registry_{kind}_package"),
+        "package": package,
         "args": _args(raw.get("args")),
     }
+
+
+def _is_exact_version(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and SAFE_VERSION.fullmatch(value)
+        and value.lower() not in {"latest", "stable", "preview"}
+    )
+
+
+def _validate_binary_cmd(value: Any) -> str:
+    cmd = _safe_string(value, "registry_binary_cmd", maximum=512)
+    path = PurePosixPath(cmd.replace("\\", "/"))
+    if path.is_absolute() or ".." in path.parts or any(char.isspace() for char in cmd):
+        raise CatalogError("registry_binary_cmd_unsafe")
+    return cmd
+
+
+def _https_url(value: Any, field: str) -> str:
+    url = _safe_string(value, field)
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        valid = (
+            parsed.scheme == "https"
+            and bool(parsed.hostname)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise CatalogError(f"{field}_invalid")
+    return url
 
 
 def _available_kinds(distribution: Mapping[str, Any], target: str) -> list[str]:
@@ -411,14 +463,20 @@ def _validate_cache(cache: Any) -> None:
         raise CatalogError("cache_invalid")
     if not isinstance(cache["fetched_at_epoch"], (int, float)):
         raise CatalogError("cache_invalid")
+    _https_url(cache["source_url"], "cache_source_url")
     if not isinstance(cache["registry_revision"], str) or not re.fullmatch(
         r"sha256:[0-9a-f]{64}", cache["registry_revision"]
     ):
         raise CatalogError("cache_invalid")
-    document = canonical_json(
-        {"version": cache["registry_version"], "agents": cache["agents"]}
-    )
-    _validate_registry_bytes(document)
+    cached_document = {
+        "version": cache["registry_version"],
+        "agents": cache["agents"],
+    }
+    document = _validate_registry_bytes(canonical_json(cached_document))
+    if canonical_json(document) != canonical_json(cached_document):
+        raise CatalogError("cache_invalid")
+    if _registry_revision(document) != cache["registry_revision"]:
+        raise CatalogError("cache_revision_mismatch")
 
 
 def _view(cache: Mapping[str, Any], *, now: float, max_age_s: float) -> CatalogView:
@@ -447,15 +505,22 @@ def _validate_resolution(raw: Any) -> dict[str, Any]:
         raise CatalogError("resolution_invalid")
     if raw["schema"] != "pursers_acp_resolved_runner_v1":
         raise CatalogError("resolution_invalid")
-    if not SAFE_ID.fullmatch(str(raw["agent_id"])) or raw["platform"] not in PLATFORMS:
+    if (
+        not isinstance(raw["agent_id"], str)
+        or not SAFE_ID.fullmatch(raw["agent_id"])
+        or not _is_exact_version(raw["agent_version"])
+        or raw["platform"] not in PLATFORMS
+    ):
         raise CatalogError("resolution_invalid")
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(raw["registry_revision"])):
+    if not isinstance(raw["registry_revision"], str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", raw["registry_revision"]
+    ):
         raise CatalogError("resolution_invalid")
     launch = raw["launch"]
     if not isinstance(launch, dict) or set(launch) != {"argv", "cwd"}:
         raise CatalogError("resolution_invalid")
-    _args(launch["argv"])
-    if launch["cwd"] not in {None, "install_root"}:
+    argv = _args(launch["argv"])
+    if not argv or launch["cwd"] not in {None, "install_root"}:
         raise CatalogError("resolution_invalid")
     distribution = raw["distribution"]
     if not isinstance(distribution, dict) or set(distribution) != {
@@ -464,9 +529,45 @@ def _validate_resolution(raw: Any) -> dict[str, Any]:
         "integrity",
     }:
         raise CatalogError("resolution_invalid")
-    if distribution["kind"] not in {"binary", "npx", "uvx"}:
+    kind = distribution["kind"]
+    source = distribution["source"]
+    integrity = distribution["integrity"]
+    if kind not in {"binary", "npx", "uvx"} or not isinstance(source, dict):
         raise CatalogError("resolution_invalid")
+    if kind == "binary":
+        if set(source) != {"archive"} or launch["cwd"] != "install_root":
+            raise CatalogError("resolution_invalid")
+        _https_url(source["archive"], "resolution_archive")
+        _validate_binary_cmd(argv[0])
+        _validate_integrity(integrity)
+    else:
+        if set(source) != {"package"} or launch["cwd"] is not None:
+            raise CatalogError("resolution_invalid")
+        package = _validate_package(
+            kind,
+            {"package": source["package"]},
+            raw["agent_version"],
+        )["package"]
+        if integrity is not None or len(argv) < 2:
+            raise CatalogError("resolution_invalid")
+        executable = "npx" if kind == "npx" else "uvx"
+        if argv[0] != executable or argv[1] != package:
+            raise CatalogError("resolution_invalid")
     return json.loads(canonical_json(raw))
+
+
+def _validate_integrity(raw: Any) -> dict[str, str] | None:
+    if raw is None:
+        return None
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"algorithm", "digest"}
+        or raw["algorithm"] != "sha256"
+        or not isinstance(raw["digest"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", raw["digest"])
+    ):
+        raise CatalogError("resolution_integrity_invalid")
+    return {"algorithm": "sha256", "digest": raw["digest"]}
 
 
 def _atomic_replace(path: Path, data: bytes, *, mode: int) -> None:

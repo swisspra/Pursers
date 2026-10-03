@@ -23,8 +23,11 @@ last-good cache. A failed, malformed, or oversized refresh leaves that cache
 unchanged. Offline reads report `stale=true` after the configured age but retain
 the validated catalog for an operator-visible offline view.
 
-The cache revision is `sha256:<digest>` over the exact fetched bytes. This is a
-local immutable revision even when the CDN response has no source commit. The
+The cache revision is `sha256:<digest>` over the canonical validated catalog
+projection (`version` plus the exact normalized agent records retained by the
+resolver). Every offline load revalidates that projection and recomputes the
+digest, so cache content cannot change under an old revision. This is a local
+immutable revision even when the CDN response has no source commit. The
 upstream schema commit above records the format used to implement the parser;
 it is not substituted for a fetched feed revision.
 
@@ -34,6 +37,10 @@ Resolution always requires `agent_id`, exact `agent_version`, platform target,
 and optionally an explicit distribution kind. Values such as `latest`,
 `stable`, and `preview` are rejected. Supported targets follow the official v1
 registry names: Darwin, Linux, or Windows crossed with `aarch64` or `x86_64`.
+An `npx` package must be an unscoped or scoped npm name whose final `@version`
+equals the agent version. An `uvx` package must use either the official
+`name==version` or `name@version` form with the same exact version. Unpinned,
+alias, mismatched, and option-like package values fail validation.
 
 The resolver prefers a matching binary, then `npx`, then `uvx`, unless the
 caller selects a kind. A binary unavailable for the current platform is not
@@ -69,6 +76,12 @@ mode-0600 and immutable: writing identical bytes is idempotent, while a version,
 revision, platform, distribution, source, integrity, or argv change is pin
 drift and fails closed. Updating a runner is a deliberate replacement workflow,
 never a background refresh side effect.
+
+Both lock creation and loading validate the complete resolved contract. Binary
+sources require an HTTPS archive, an install-root-relative command, and either
+no integrity value or a SHA-256 object with a 64-hex digest. Package sources
+require the exact package pin, null integrity, the matching `npx` or `uvx`
+executable, and identical package text in argv position one.
 
 ## Portable per-seat preset
 

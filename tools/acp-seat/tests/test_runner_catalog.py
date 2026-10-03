@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -134,10 +135,122 @@ def test_selection_lock_is_immutable_and_idempotent(tmp_path: Path) -> None:
     lock = tmp_path / "selection.json"
     assert catalog.persist_selection_lock(lock, resolved) is True
     assert catalog.persist_selection_lock(lock, resolved) is False
-    changed = dict(resolved, agent_version="2.3.5")
+    changed = deepcopy(resolved)
+    changed["agent_version"] = "2.3.5"
+    changed["distribution"]["source"]["package"] = "demo-agent@2.3.5"
+    changed["launch"]["argv"][1] = "demo-agent@2.3.5"
     with pytest.raises(catalog.CatalogError, match="selection_lock_immutable"):
         catalog.persist_selection_lock(lock, changed)
     assert catalog.load_selection_lock(lock) == resolved
+
+
+@pytest.mark.parametrize(
+    ("kind", "package"),
+    [
+        ("npx", "demo-agent"),
+        ("npx", "demo-agent@latest"),
+        ("npx", "--yes"),
+        ("npx", "@scope/demo-agent@2.3.5"),
+        ("uvx", "demo-agent"),
+        ("uvx", "demo-agent==latest"),
+        ("uvx", "--from"),
+    ],
+)
+def test_registry_rejects_unpinned_mismatched_or_option_like_packages(
+    tmp_path: Path, kind: str, package: str
+) -> None:
+    document = json.loads(registry())
+    document["agents"][0]["distribution"] = {kind: {"package": package}}
+    with pytest.raises(catalog.CatalogError, match=f"registry_{kind}_package_invalid"):
+        catalog.refresh_catalog(
+            tmp_path / f"{kind}-cache", fetch=lambda *_: json.dumps(document).encode()
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "package"),
+    [
+        ("npx", "demo-agent@2.3.4"),
+        ("npx", "@scope/demo-agent@2.3.4"),
+        ("uvx", "demo-agent==2.3.4"),
+        ("uvx", "demo-agent@2.3.4"),
+    ],
+)
+def test_registry_accepts_exact_official_package_pin_forms(
+    tmp_path: Path, kind: str, package: str
+) -> None:
+    document = json.loads(registry())
+    document["agents"][0]["distribution"] = {kind: {"package": package}}
+    view = catalog.refresh_catalog(
+        tmp_path / f"{kind}-cache", fetch=lambda *_: json.dumps(document).encode()
+    )
+    resolved = view.resolve("demo-agent", "2.3.4", "darwin-aarch64", kind)
+    assert resolved["launch"]["argv"] == [kind, package]
+
+
+def test_cached_catalog_rejects_content_tampering_under_old_revision(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "catalog.json"
+    catalog.refresh_catalog(cache, fetch=lambda *_: registry())
+    tampered = json.loads(cache.read_text())
+    tampered["agents"][0]["distribution"]["npx"]["package"] = (
+        "attacker-controlled@2.3.4"
+    )
+    cache.write_text(json.dumps(tampered))
+    with pytest.raises(catalog.CatalogError, match="cache_revision_mismatch"):
+        catalog.load_cached_catalog(cache)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda value: value.__setitem__("agent_version", None),
+        lambda value: value["distribution"].__setitem__("source", {"package": "--yes"}),
+        lambda value: value["distribution"].__setitem__("integrity", "not-valid"),
+        lambda value: value["launch"].__setitem__("argv", ["npx", "different@2.3.4"]),
+    ],
+)
+def test_selection_lock_rejects_invalid_or_inconsistent_resolution_on_create_and_load(
+    tmp_path: Path, mutate
+) -> None:
+    view = catalog.refresh_catalog(tmp_path / "cache", fetch=lambda *_: registry())
+    resolved = view.resolve("demo-agent", "2.3.4", "darwin-aarch64", "npx")
+    invalid = deepcopy(resolved)
+    mutate(invalid)
+
+    with pytest.raises(catalog.CatalogError):
+        catalog.persist_selection_lock(tmp_path / "create-lock.json", invalid)
+
+    load_lock = tmp_path / "load-lock.json"
+    load_lock.write_text(
+        json.dumps({"schema": catalog.LOCK_SCHEMA, "resolved": invalid})
+    )
+    with pytest.raises(catalog.CatalogError):
+        catalog.load_selection_lock(load_lock)
+
+
+def test_binary_selection_lock_validates_source_integrity_and_launch_consistency(
+    tmp_path: Path,
+) -> None:
+    view = catalog.refresh_catalog(tmp_path / "cache", fetch=lambda *_: registry())
+    resolved = view.resolve("demo-agent", "2.3.4", "darwin-aarch64", "binary")
+    assert catalog.persist_selection_lock(tmp_path / "valid.json", resolved) is True
+
+    invalid_source = deepcopy(resolved)
+    invalid_source["distribution"]["source"] = {"package": "demo@2.3.4"}
+    with pytest.raises(catalog.CatalogError):
+        catalog.persist_selection_lock(tmp_path / "source.json", invalid_source)
+
+    invalid_integrity = deepcopy(resolved)
+    invalid_integrity["distribution"]["integrity"]["digest"] = "a" * 63
+    with pytest.raises(catalog.CatalogError):
+        catalog.persist_selection_lock(tmp_path / "integrity.json", invalid_integrity)
+
+    invalid_launch = deepcopy(resolved)
+    invalid_launch["launch"]["cwd"] = None
+    with pytest.raises(catalog.CatalogError):
+        catalog.persist_selection_lock(tmp_path / "launch.json", invalid_launch)
 
 
 def test_legacy_native_preset_roundtrip_preserves_identity_and_profile() -> None:
