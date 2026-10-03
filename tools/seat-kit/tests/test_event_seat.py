@@ -77,6 +77,161 @@ def test_codex_event_uses_model_and_only_runs_after_offer(tmp_path,monkeypatch):
     assert 'board_id home' in command[-1]
 
 
+def test_event_environment_preserves_configured_identity_capabilities(tmp_path,monkeypatch):
+    monkeypatch.setenv('PURSERS_HOST','zed')
+    worker_config=codex_config(tmp_path);worker_config['skills']=['python','docs','python']
+    worker=api()['EventSeatRunner'](worker_config).environment()
+    assert worker['PURSERS_HOST']=='codex'
+    assert worker['PURSERS_CAN_WORK']=='true'
+    assert worker['PURSERS_CAN_REVIEW']=='false'
+    assert worker['PURSERS_TIER_MAX']=='2'
+    assert worker['PURSERS_SKILLS']=='docs,python'
+    reviewer_config=codex_config(tmp_path);reviewer_config['role']='reviewer'
+    reviewer=api()['EventSeatRunner'](reviewer_config).environment()
+    assert reviewer['PURSERS_CAN_WORK']=='false'
+    assert reviewer['PURSERS_CAN_REVIEW']=='true'
+
+
+def test_long_turn_refreshes_three_boards_and_stops_after_clean_exit(tmp_path,monkeypatch):
+    module=api();runner=module['EventSeatRunner'](codex_config(tmp_path))
+    runner.active_boards=['home','project-a','project-b']
+    refreshes=[]
+    async def refresh():refreshes.append(tuple(runner.active_boards))
+    runner.refresh_presence=refresh
+    clock=iter([0,0,120,120,240,240,240,240])
+    runner.monotonic=lambda:next(clock)
+    class Process:
+        def __init__(self):self.waits=0;self.terminated=False
+        def wait(self,timeout=None):
+            self.waits+=1
+            if self.waits<3:raise module['subprocess'].TimeoutExpired(['model'],timeout)
+            return 0
+        def poll(self):return 0
+        def terminate(self):self.terminated=True
+        def kill(self):pytest.fail('clean model exit must not be killed')
+    process=Process()
+    monkeypatch.setattr(module['subprocess'],'Popen',lambda *a,**k:process)
+    runner._run(['model'])
+    assert refreshes==[('home','project-a','project-b')]*3
+    assert process.terminated is False
+
+
+def test_presence_failure_terminates_live_model_and_never_renews_forever(tmp_path,monkeypatch):
+    module=api();cfg=codex_config(tmp_path);cfg['turn_timeout_s']=300
+    runner=module['EventSeatRunner'](cfg);runner.active_boards=['home','project-a','project-b']
+    attempts=0
+    async def refresh():
+        nonlocal attempts
+        attempts+=1
+        if attempts==2:raise RuntimeError('registry readiness failed')
+    runner.refresh_presence=refresh
+    clock=iter([0,0,120])
+    runner.monotonic=lambda:next(clock)
+    class Process:
+        terminated=False
+        def wait(self,timeout=None):
+            if self.terminated:return 0
+            raise module['subprocess'].TimeoutExpired(['model'],timeout)
+        def poll(self):return None if not self.terminated else 0
+        def terminate(self):self.terminated=True
+        def kill(self):pytest.fail('cooperative process should terminate')
+    process=Process()
+    monkeypatch.setattr(module['subprocess'],'Popen',lambda *a,**k:process)
+    with pytest.raises(RuntimeError,match='readiness'):
+        runner._run(['model'])
+    assert attempts==2
+    assert process.terminated is True
+
+
+def test_hung_model_timeout_stops_process_and_presence(tmp_path,monkeypatch):
+    module=api();cfg=codex_config(tmp_path);cfg['turn_timeout_s']=240
+    runner=module['EventSeatRunner'](cfg);runner.active_boards=['home','project-a','project-b']
+    refreshes=[]
+    async def refresh():refreshes.append('refresh')
+    runner.refresh_presence=refresh
+    clock=iter([0,0,120,120,120,240])
+    runner.monotonic=lambda:next(clock)
+    class Process:
+        terminated=False
+        def wait(self,timeout=None):
+            if self.terminated:return 0
+            raise module['subprocess'].TimeoutExpired(['model'],timeout)
+        def poll(self):return None if not self.terminated else 0
+        def terminate(self):self.terminated=True
+        def kill(self):pytest.fail('cooperative process should terminate')
+    process=Process()
+    monkeypatch.setattr(module['subprocess'],'Popen',lambda *a,**k:process)
+    with pytest.raises(module['subprocess'].TimeoutExpired):
+        runner._run(['model'])
+    assert refreshes==['refresh','refresh']
+    assert process.terminated is True
+
+
+def test_model_crash_stops_presence_loop(tmp_path,monkeypatch):
+    module=api();runner=module['EventSeatRunner'](codex_config(tmp_path))
+    runner.active_boards=['home','project-a','project-b'];refreshes=[]
+    async def refresh():refreshes.append('refresh')
+    runner.refresh_presence=refresh
+    runner.monotonic=lambda:0
+    class Process:
+        def wait(self,timeout=None):return 17
+        def poll(self):return 17
+        def terminate(self):pytest.fail('exited process must not be terminated')
+        def kill(self):pytest.fail('exited process must not be killed')
+    monkeypatch.setattr(module['subprocess'],'Popen',lambda *a,**k:Process())
+    with pytest.raises(module['subprocess'].CalledProcessError) as caught:
+        runner._run(['model'])
+    assert caught.value.returncode==17
+    assert refreshes==['refresh']
+
+
+@pytest.mark.parametrize('role',["worker","reviewer"])
+def test_presence_refresh_preserves_role_capabilities_on_every_board(tmp_path,monkeypatch,role):
+    import asyncio
+    import pursers_client
+    from types import SimpleNamespace
+    cfg=codex_config(tmp_path);cfg['role']=role
+    runner=api()['EventSeatRunner'](cfg);runner.active_boards=['home','project-a','project-b']
+    calls=[]
+    class Client:
+        def __init__(self,_url,_token,board,**kwargs):
+            calls.append((board,kwargs));self.board=board
+            self.identity=SimpleNamespace(board_id=board,agent_name='worker-a',role=role,
+                principal_id='PR-exact')
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+    monkeypatch.setattr(pursers_client,'BoardClient',Client)
+    token=tmp_path/'token';token.write_text('fixture');token.chmod(0o600)
+    asyncio.run(runner.refresh_presence())
+    assert [board for board,_ in calls]==runner.active_boards
+    for _,kwargs in calls:
+        assert kwargs['agent_platform']=='codex'
+        assert kwargs['renewal_source']=='keepalive'
+        assert kwargs['capabilities']=={
+            'can_work':role=='worker','can_review':role=='reviewer','tier_max':2,
+            'max_parallel':1,'skills':[],'host':'codex','model':'test-model',
+            'provider':'test-provider'}
+
+
+def test_presence_refresh_rejects_cross_board_principal_mismatch(tmp_path,monkeypatch):
+    import asyncio
+    import pursers_client
+    from types import SimpleNamespace
+    runner=api()['EventSeatRunner'](codex_config(tmp_path))
+    runner.active_boards=['home','project-a','project-b']
+    class Client:
+        def __init__(self,_url,_token,board,**kwargs):
+            principal='PR-other' if board=='project-b' else 'PR-exact'
+            self.identity=SimpleNamespace(board_id=board,agent_name='worker-a',role='worker',
+                principal_id=principal)
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+    monkeypatch.setattr(pursers_client,'BoardClient',Client)
+    token=tmp_path/'token';token.write_text('fixture');token.chmod(0o600)
+    with pytest.raises(ValueError,match='principal mismatch'):
+        asyncio.run(runner.refresh_presence())
+
+
 def test_codex_named_profile_is_only_used_when_explicitly_configured(tmp_path):
     value=codex_config(tmp_path);value['codex_profile']='configured-profile'
     command=api()['EventSeatRunner'](value).model_command('prompt','unused')

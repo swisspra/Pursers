@@ -1,6 +1,6 @@
 # seat-kit
 
-<!-- release-train: product=5.0.9 bridge=0.1.5 client=0.1.7 -->
+<!-- release-train: product=5.1.0 bridge=0.1.6 client=0.1.8 -->
 
 Generate a ready-to-use Pursers worker or reviewer seat in one command:
 
@@ -320,3 +320,9 @@ Event seats reconnect after recognized temporary Central transport failures with
 pending events are retained; reconnecting does not itself invoke a model.
 Authentication/authorization failures, malformed responses and model execution
 failures remain visible failures rather than being blindly retried.
+
+During a managed model turn, the event runner refreshes the same seat presence on
+every active registry board every 120 seconds. These keepalives preserve the
+configured role, capabilities, host and principal; they do not count as model
+progress or invoke another model. A failed presence check stops the child process,
+and the configured turn timeout bounds both the model and its keepalives.

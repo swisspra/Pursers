@@ -30,9 +30,10 @@ and the Personal component lock are consumers. Do not edit those pins by hand.
    python3 -m pytest -q tools/tests tools/wait-bridge/tests packages/personal/tests
    ```
 
-   CI builds all five main wheels and the wait-bridge wheel into one directory
-   before tests. `PIP_FIND_LINKS` and `UV_FIND_LINKS` point installers at those
-   sibling artifacts, so a new client pin is tested before it exists on PyPI.
+   CI builds all seven wheels (the five package distributions, wait bridge,
+   and ACP agent) into one directory before tests. `PIP_FIND_LINKS` and
+   `UV_FIND_LINKS` point installers at those sibling artifacts, so a new client
+   pin is tested before it exists on PyPI.
 
 3. Tag the exact verified commit:
 
@@ -121,7 +122,7 @@ before upload. The release contains these non-wheel assets:
 - `pursers-aionui-0.1.0.zip`
 - `pursers-home-runtime-wheelhouse-<version>-linux-x86_64.tar.gz`
 - `pursers-home-runtime-wheelhouse-<version>-linux-x86_64.json`
-- `SHA256SUMS.txt`, covering the six wheels and every asset above
+- `SHA256SUMS.txt`, covering the seven wheels and every asset above
 
 Download and verify the offline Home bundle from one release:
 
@@ -198,7 +199,7 @@ gh release download "$TAG" --repo swisspra/Pursers --dir dist-release
 (cd dist-release && shasum -a 256 -c SHA256SUMS.txt)
 ```
 
-Expected artifacts are the six manifest-bound wheels, the AionUi ZIP, the Home
+Expected artifacts are the seven manifest-bound wheels, the AionUi ZIP, the Home
 runtime wheelhouse archive and its external manifest, plus `SHA256SUMS.txt`.
 This beta train authorizes no PyPI publication or production cutover. If the
 tag, release state, cohort, or checksum is wrong, stop without installing or

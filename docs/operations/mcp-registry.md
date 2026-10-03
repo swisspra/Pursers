@@ -43,10 +43,10 @@ serves for the package:
 ```
 
 It is in `packages/central/README.md`, `packages/client/README.md`, and
-`packages/pursers/README.md`. The releases already on PyPI were built before
-the marker existed, so **the listing cannot be verified until the next publish
-carries it.** The operator decision is to ship the marker with the next release,
-not as a marker-only patch.
+`packages/pursers/README.md`. Pursers 5.0.9 already carries the marker on PyPI
+and is published in the official MCP Registry. Keep the marker in every later
+release and repeat validation against the exact release candidate before the
+operator publishes an updated Registry version.
 
 ## Keeping it honest
 
@@ -83,9 +83,16 @@ It fails unless all of these hold:
 Do not publish from a tree whose `server.json` versions differ from either PyPI
 package.
 
-## Before listing at all
+## First-run credentials
 
-A listing invites a stranger to install and run this. Today `pursers-central`
-needs a JWT issuer, an audience and a JWKS file before it will start, and no
-newcomer document explains how to produce them. Decide first whether to ship a
-quickstart for that or to state the constraint plainly in the description.
+The Registry entry is an installation description, not a credential issuer.
+For a standalone Central, follow [Getting started](../GETTING-STARTED.md):
+`pursers-central init` creates the private issuer key, JWKS, administrator and
+worker JWT files, and runtime profile required by `pursers-central run`. The
+packaged [Central quickstart](../../packages/central/README.md#quickstart) is the
+canonical command-level version of that flow.
+
+For an existing managed fleet, use its guided coordinator onboarding instead;
+do not initialize a second Central or mint an unrelated local issuer. In either
+flow, clients receive a token-file path and never place bearer values in
+Registry arguments, repositories, tickets, or shared configuration.

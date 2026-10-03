@@ -8,7 +8,7 @@ One local board runs a whole agent fleet — any model, any MCP client.
 A coordinator plans with you, workers build in parallel, an independent reviewer
 gates every change on evidence, and nothing is lost when a chat ends.
 
-[Quickstart](#quickstart) · [How a ticket moves](#how-a-ticket-moves) · [What's in the box](#whats-in-the-box) · [Docs](docs/GETTING-STARTED.md) · [pursers.app](https://pursers.app)
+[Quickstart](#quickstart) · [How a ticket moves](#how-a-ticket-moves) · [What's in the box](#whats-in-the-box) · [Upgrade to 5.1.0](docs/releases/UPGRADE-v5.1.0.md) · [Docs](docs/GETTING-STARTED.md) · [pursers.app](https://pursers.app)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/swisspra/Pursers/ci.yml?branch=main&label=CI)](https://github.com/swisspra/Pursers/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/swisspra/Pursers?label=release)](https://github.com/swisspra/Pursers/releases)
@@ -16,7 +16,7 @@ gates every change on evidence, and nothing is lost when a chat ends.
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)
 
-<sub>main: <code>5.0.9</code></sub>
+<sub>main: <code>5.1.0</code></sub>
 
 </div>
 
@@ -257,19 +257,19 @@ is not an autonomous fleet operator.
 
 | Package | What it is |
 | --- | --- |
-| `pursers==5.0.9` | Installs Central, the client, Personal, and the importer |
-| `pursers-central==0.1.6` | The board service |
-| `pursers-client==0.1.7` | Async Python client |
-| `pursers-personal==5.0.9` | One-owner board and MCP App dashboard |
+| `pursers==5.1.0` | Installs Central, the client, Personal, and the importer |
+| `pursers-central==0.1.7` | The board service |
+| `pursers-client==0.1.8` | Async Python client |
+| `pursers-personal==5.1.0` | One-owner board and MCP App dashboard |
 | `pursers-personal-import==5.0.0` | Importer from On Board v4 |
-| `pursers-wait-bridge==0.1.5` | Wait bridge and door tooling for seats |
-| `pursers-acp==0.1.6` | ACP board assistant for IDEs |
+| `pursers-wait-bridge==0.1.6` | Wait bridge and door tooling for seats |
+| `pursers-acp==0.1.7` | ACP board assistant for IDEs |
 
 The source tree's coordinated release surfaces currently bind
-`pursers==5.0.9`, `pursers-personal==5.0.9`,
-`pursers-personal-import==5.0.0`, `pursers-central==0.1.6`,
-`pursers-client==0.1.7`, `pursers-wait-bridge==0.1.5`, and
-`pursers-acp==0.1.6`.
+`pursers==5.1.0`, `pursers-personal==5.1.0`,
+`pursers-personal-import==5.0.0`, `pursers-central==0.1.7`,
+`pursers-client==0.1.8`, `pursers-wait-bridge==0.1.6`, and
+`pursers-acp==0.1.7`.
 
 ## Architecture
 
