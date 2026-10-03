@@ -19,6 +19,8 @@ import time
 HELPERS = runpy.run_path(str(Path(__file__).resolve().parents[1]/'ado-connector/git_credential.py'))
 PUBLISH = runpy.run_path(str(Path(__file__).resolve().parents[1]/'board-butler/fleet_observation.py'))['publish']
 SAFE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$')
+PRESENCE_INTERVAL_S = 120
+PROCESS_STOP_GRACE_S = 5
 
 
 def validate_config(config):
@@ -68,6 +70,11 @@ def validate_config(config):
         if type(value) is not int or not 1 <= value <= ceiling: raise ValueError('invalid turn limit')
     tier = config.get('tier_max',2)
     if type(tier) is not int or tier not in (1,2,3): raise ValueError('invalid seat tier')
+    skills=config.get('skills',[])
+    if (not isinstance(skills,list) or any(not isinstance(skill,str) or not SAFE_ID.fullmatch(skill)
+                                           for skill in skills)):
+        raise ValueError('invalid seat skills')
+    config['skills']=sorted(set(skills))
     recoveries = config.get('max_owned_recoveries', 1)
     if type(recoveries) is not int or not 0 <= recoveries <= 10:
         raise ValueError('invalid owned recovery limit')
@@ -110,12 +117,19 @@ class EventSeatRunner:
         self.state={'cursor':{},'seen':[],'runs':[],'pending':[], 'owned_recoveries':{}}
         if self.path.exists(): self.state.update(json.loads(HELPERS['private_read'](self.path,1048576)))
         self.run_command=self._run
+        self.monotonic=time.monotonic
 
     def environment(self):
         c=self.config
+        client=c.get('client', 'goose')
+        host='codex' if client == 'codex' else 'goose'
         env={**os.environ,'PURSERS_WAIT_MODE':'push','PURSERS_BOARDS':'registry','PURSERS_PROJECT_BOARD':'',
-             'PURSERS_MODEL':c['model'],'PURSERS_PROVIDER':c['provider']}
-        if c.get('client', 'goose') == 'goose':
+             'PURSERS_MODEL':c['model'],'PURSERS_PROVIDER':c['provider'],'PURSERS_HOST':host,
+             'PURSERS_TIER_MAX':str(c.get('tier_max',2)),
+             'PURSERS_SKILLS':','.join(c['skills']),
+             'PURSERS_CAN_WORK':str(c['role']=='worker').lower(),
+             'PURSERS_CAN_REVIEW':str(c['role']=='reviewer').lower()}
+        if client == 'goose':
             env.update(GOOSE_MODEL=c['model'], GOOSE_PROVIDER=c['provider'], GOOSE_MODE='auto')
             env.pop('GOOSE_THINKING_EFFORT',None)
             if c.get('effort'): env['GOOSE_THINKING_EFFORT']=c['effort']
@@ -127,9 +141,47 @@ class EventSeatRunner:
                 GIT_CONFIG_KEY_2='credential.useHttpPath',GIT_CONFIG_VALUE_2='true',GIT_TERMINAL_PROMPT='0')
         return env
 
+    def _stop_process(self, process):
+        if process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=PROCESS_STOP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
     def _run(self, argv, **kwargs):
-        subprocess.run(argv,env=self.environment(),cwd=self.config['seat_dir'],check=True,
-            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=self.config.get('turn_timeout_s',1800))
+        timeout=self.config.get('turn_timeout_s',1800)
+        # Validate and refresh every selected membership immediately before the
+        # paid turn. This also makes a long turn visible without another model
+        # call and fails closed before launch when registry readiness is broken.
+        asyncio.run(self.refresh_presence())
+        process=subprocess.Popen(argv,env=self.environment(),cwd=self.config['seat_dir'],
+            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        started=self.monotonic()
+        next_presence=started+PRESENCE_INTERVAL_S
+        try:
+            while True:
+                now=self.monotonic()
+                remaining=timeout-(now-started)
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv,timeout)
+                try:
+                    code=process.wait(timeout=min(remaining,max(0,next_presence-now)))
+                except subprocess.TimeoutExpired:
+                    now=self.monotonic()
+                    if now-started >= timeout:
+                        raise subprocess.TimeoutExpired(argv,timeout)
+                    asyncio.run(self.refresh_presence())
+                    next_presence=self.monotonic()+PRESENCE_INTERVAL_S
+                    continue
+                if code:
+                    raise subprocess.CalledProcessError(code,argv)
+                return
+        except BaseException:
+            self._stop_process(process)
+            raise
 
     def model_command(self, prompt, extension):
         """Return one explicit, profile-preserving model invocation."""
@@ -233,10 +285,30 @@ class EventSeatRunner:
         from pursers_client import BoardClient
         c = self.config
         token = HELPERS['private_read'](Path(c['token_file']),16384).strip()
+        client=c.get('client', 'goose')
+        host='codex' if client == 'codex' else 'goose'
         return BoardClient(c['central_url'],token,board,agent_name=c['seat_id'],role=c['role'],
             capabilities={'can_work':c['role']=='worker','can_review':c['role']=='reviewer',
-                          'tier_max':c.get('tier_max',2),'max_parallel':1},
-            allow_takeover=True, renewal_source='keepalive')
+                          'tier_max':c.get('tier_max',2),'max_parallel':1,
+                          'skills':c['skills'],'host':host,'model':c['model'],'provider':c['provider']},
+            allow_takeover=True, renewal_source='keepalive', agent_platform=host)
+
+    async def refresh_presence(self):
+        """Refresh every active board while proving one exact seat principal."""
+        expected_principal=None
+        if not getattr(self,'active_boards',None):
+            raise ValueError('active registry boards unavailable')
+        for board in self.active_boards:
+            async with self.client(board) as client:
+                identity=client.identity
+                if (identity is None or identity.board_id != board
+                        or identity.agent_name != self.config['seat_id']
+                        or identity.role != self.config['role']):
+                    raise ValueError('registry presence identity mismatch')
+                if expected_principal is None:
+                    expected_principal=identity.principal_id
+                elif identity.principal_id != expected_principal:
+                    raise ValueError('registry presence principal mismatch')
 
     def owned_key(self, board, ticket, identity, now):
         if self.config['role'] == 'reviewer':
