@@ -110,7 +110,16 @@ def _seat_root(argv: Sequence[str]) -> str | None:
 
 
 def _is_codex_process(argv: Sequence[str]) -> bool:
-    return bool(argv) and "codex" in Path(argv[0]).name.lower() and "exec" in argv
+    if not argv or "exec" not in argv:
+        return False
+    executable = Path(argv[0]).name.lower()
+    if "codex" in executable:
+        return True
+    # npm/homebrew wrappers are commonly a Node process whose script path names
+    # Codex, followed by the Rust Codex child. Count the parent/child chain once.
+    return executable.startswith("node") and any(
+        "codex" in Path(item).name.lower() for item in argv[1:4]
+    )
 
 
 def _trusted_legacy_file(path: Path, label: str, *, executable: bool = False) -> None:

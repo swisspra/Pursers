@@ -352,7 +352,7 @@ owned lease. A Codex subscription seat can use this private configuration:
   "board_script": "/PATH/TO/seats/worker-example/bin/board.sh",
   "state_file": "/PATH/TO/state/seats/worker-example.json",
   "token_file": "/PATH/TO/auth/worker-example.jwt",
-  "codex": "/PATH/TO/bin/codex", "codex_profile": "mong1",
+  "codex": "/PATH/TO/bin/codex",
   "effort": "high", "service_tier": "fast",
   "codex_sandbox": "workspace-write",
   "last_message_file": "/PATH/TO/logs/worker-example.last",
@@ -364,9 +364,11 @@ owned lease. A Codex subscription seat can use this private configuration:
 ```
 
 The Codex process inherits its owner-only `CODEX_HOME`/subscription environment
-from the executor credential file, loads the named profile and model explicitly,
-and reuses the seat directory, MCP identity, registry mode, worktrees and saved
-cursor. `workspace-write` enables network for the authorized registry workflow;
+from the executor credential file and loads the model explicitly. A fleet whose
+identity is a separate `CODEX_HOME` must not invent `--profile`; add optional
+`codex_profile` only when that home actually defines the named `[profiles]` entry.
+The runner reuses the seat directory, MCP identity, registry mode, worktrees and
+saved cursor. `workspace-write` enables network for the authorized registry workflow;
 use `danger-full-access` only for a seat whose operator policy already grants it.
 The host cap is concurrent seats, not an hourly run throttle. `null` above means no
 invented hourly throttle; operators may set a real policy value when required.

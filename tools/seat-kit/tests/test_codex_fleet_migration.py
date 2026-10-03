@@ -48,8 +48,8 @@ def fixture(tmp_path: Path):
         'legacy_supervisor_pid_file':str(pidfile),'controller_marker':str(marker)}
     spec_path=tmp_path/'migration.json';spec_path.write_text(json.dumps(spec));spec_path.chmod(0o600)
     ps=(f'100 1 /bin/sh {supervisor}\n'
-        f'200 100 /PATH/TO/codex-wrapper exec -m model -C {worker} prompt\n'
-        f'201 200 /PATH/TO/codex exec -m model -C {worker} prompt\n')
+        f'200 100 /PATH/TO/node /PATH/TO/codex.js exec -m model -C {worker} prompt\n'
+        f'201 200 /PATH/TO/codex-rust exec -m model -C {worker} prompt\n')
     return spec_path,lease,marker,ps,worker
 
 

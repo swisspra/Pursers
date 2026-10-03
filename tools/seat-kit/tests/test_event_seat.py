@@ -27,7 +27,7 @@ def codex_config(tmp_path):
     value = config(tmp_path)
     value.pop('goose')
     value.pop('mcp')
-    value.update(client='codex', codex='/example/codex', codex_profile='mong1',
+    value.update(client='codex', codex='/example/codex',
         effort='high', service_tier='fast', codex_sandbox='danger-full-access',
         last_message_file=str(tmp_path/'last.txt'))
     return value
@@ -54,8 +54,10 @@ def test_empty_irrelevant_and_repeated_events_do_not_run_model(tmp_path):
     assert len(resumed.state['pending']) == 1
 
 
-def test_codex_event_uses_profile_model_and_only_runs_after_offer(tmp_path):
+def test_codex_event_uses_model_and_only_runs_after_offer(tmp_path,monkeypatch):
+    monkeypatch.setenv('CODEX_HOME','/example/codex-home')
     runner=api()['EventSeatRunner'](codex_config(tmp_path));calls=[]
+    assert runner.environment()['CODEX_HOME']=='/example/codex-home'
     runner.run_command=lambda argv,**kwargs:calls.append(argv)
     runner.process({'new_seq':{'home':42},'events':[]},100)
     assert calls==[]
@@ -64,7 +66,7 @@ def test_codex_event_uses_profile_model_and_only_runs_after_offer(tmp_path):
     assert len(calls)==1
     command=calls[0]
     assert command[:4]==['/example/codex','exec','-m','test-model']
-    assert command[command.index('--profile')+1]=='mong1'
+    assert '--profile' not in command
     assert '--dangerously-bypass-approvals-and-sandbox' in command
     assert command[command.index('-C')+1]==str(tmp_path)
     assert command[command.index('-o')+1]==str(tmp_path/'last.txt')
@@ -73,6 +75,12 @@ def test_codex_event_uses_profile_model_and_only_runs_after_offer(tmp_path):
     assert 'service_tier="fast"' in command
     assert 'Read AGENTS.md and START.md.' in command[-1]
     assert 'board_id home' in command[-1]
+
+
+def test_codex_named_profile_is_only_used_when_explicitly_configured(tmp_path):
+    value=codex_config(tmp_path);value['codex_profile']='configured-profile'
+    command=api()['EventSeatRunner'](value).model_command('prompt','unused')
+    assert command[command.index('--profile')+1]=='configured-profile'
 
 
 @pytest.mark.parametrize('change,match', [
