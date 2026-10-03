@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run bounded Goose work only after relevant registry events; persist cursors."""
+"""Run bounded agent work only after relevant registry events; persist cursors.
+
+The persistent process only waits on Central.  It starts Goose or Codex CLI for
+an authorized event, so an idle fleet performs no paid model or provider call.
+"""
 import argparse
 import asyncio
 import json
@@ -19,13 +23,43 @@ SAFE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$')
 
 def validate_config(config):
     required = {'seat_id','role','provider','model','seat_dir','board_script','state_file','token_file',
-                'goose','mcp','central_url','home_board','repository_root'}
+                'central_url','home_board','repository_root'}
     if not required <= config.keys() or config['role'] not in ('worker','reviewer'):
         raise ValueError('event seat configuration is incomplete')
+    client = config.get('client', 'goose')
+    if client not in ('goose', 'codex'):
+        raise ValueError('unsupported event seat client')
+    if client == 'goose' and not {'goose', 'mcp'} <= config.keys():
+        raise ValueError('Goose event seat configuration is incomplete')
+    if client == 'codex' and 'codex' not in config:
+        raise ValueError('Codex event seat configuration is incomplete')
     if not SAFE_ID.fullmatch(config['seat_id']) or not SAFE_ID.fullmatch(config['home_board']):
         raise ValueError('invalid seat or board identity')
-    for key in ('seat_dir','board_script','state_file','token_file','goose','mcp','repository_root'):
+    path_keys = {'seat_dir','board_script','state_file','token_file','repository_root'}
+    path_keys.update(('goose', 'mcp') if client == 'goose' else ('codex',))
+    if config.get('last_message_file') is not None:
+        path_keys.add('last_message_file')
+    for key in path_keys:
         if not Path(config[key]).is_absolute(): raise ValueError('runtime paths must be absolute')
+    profile = config.get('codex_profile')
+    if profile is not None and (
+        client != 'codex' or not isinstance(profile, str)
+        or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}', profile)
+    ):
+        raise ValueError('invalid Codex profile')
+    if config.get('codex_sandbox', 'workspace-write') not in (
+        'workspace-write', 'danger-full-access'
+    ):
+        raise ValueError('invalid Codex sandbox')
+    effort = config.get('effort', 'high')
+    if not isinstance(effort, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', effort):
+        raise ValueError('invalid model effort')
+    service_tier = config.get('service_tier')
+    if service_tier is not None and (
+        client != 'codex' or not isinstance(service_tier, str)
+        or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', service_tier)
+    ):
+        raise ValueError('invalid Codex service tier')
     hourly_limit=config.get('max_runs_per_hour',5)
     if hourly_limit is not None and (type(hourly_limit) is not int or not 1 <= hourly_limit <= 100):
         raise ValueError('invalid hourly run limit')
@@ -80,10 +114,11 @@ class EventSeatRunner:
     def environment(self):
         c=self.config
         env={**os.environ,'PURSERS_WAIT_MODE':'push','PURSERS_BOARDS':'registry','PURSERS_PROJECT_BOARD':'',
-             'PURSERS_MODEL':c['model'],'PURSERS_PROVIDER':c['provider'],
-             'GOOSE_MODEL':c['model'],'GOOSE_PROVIDER':c['provider'],'GOOSE_MODE':'auto'}
-        env.pop('GOOSE_THINKING_EFFORT',None)
-        if c.get('effort'): env['GOOSE_THINKING_EFFORT']=c['effort']
+             'PURSERS_MODEL':c['model'],'PURSERS_PROVIDER':c['provider']}
+        if c.get('client', 'goose') == 'goose':
+            env.update(GOOSE_MODEL=c['model'], GOOSE_PROVIDER=c['provider'], GOOSE_MODE='auto')
+            env.pop('GOOSE_THINKING_EFFORT',None)
+            if c.get('effort'): env['GOOSE_THINKING_EFFORT']=c['effort']
         if c.get('git_credentials_config'):
             helper='!'+shlex.join([sys.executable,str(Path(__file__).resolve().parents[1]/'ado-connector/git_credential.py'),
                                    '--config',c['git_credentials_config']])
@@ -95,6 +130,30 @@ class EventSeatRunner:
     def _run(self, argv, **kwargs):
         subprocess.run(argv,env=self.environment(),cwd=self.config['seat_dir'],check=True,
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=self.config.get('turn_timeout_s',1800))
+
+    def model_command(self, prompt, extension):
+        """Return one explicit, profile-preserving model invocation."""
+        c = self.config
+        if c.get('client', 'goose') == 'goose':
+            return [c['goose'],'run','--no-session','--no-profile','--with-builtin','developer',
+                '--with-extension',extension,'--provider',c['provider'],'--model',c['model'],
+                '--max-turns',str(c.get('max_turns',30)),'--text',prompt]
+        command = [c['codex'], 'exec', '-m', c['model'],
+            '-c', f'model_reasoning_effort="{c.get("effort", "high")}"']
+        if c.get('service_tier'):
+            command.extend(('-c', f'service_tier="{c["service_tier"]}"'))
+        if c.get('codex_profile'):
+            command.extend(('--profile', c['codex_profile']))
+        if c.get('codex_sandbox', 'workspace-write') == 'danger-full-access':
+            command.append('--dangerously-bypass-approvals-and-sandbox')
+        else:
+            command.extend(('-s', 'workspace-write', '-c',
+                            'sandbox_workspace_write.network_access=true'))
+        command.extend(('--skip-git-repo-check', '-C', c['seat_dir'], '--json'))
+        if c.get('last_message_file'):
+            command.extend(('-o', c['last_message_file']))
+        command.append(prompt)
+        return command
 
     def process(self,response,now):
         if response.get('skipped_boards'): raise ValueError('registry boards skipped')
@@ -139,11 +198,16 @@ class EventSeatRunner:
             self.state['seen']=(self.state['seen']+[event['marker']])[-200:]
             PUBLISH(self.path,self.state)  # reserve before a potentially uncertain model execution
             c=self.config
-            extension='pursers: '+shlex.join([c['mcp'],'--central-url',c['central_url'],'--board',event['board'],
-                '--token-file',c['token_file'],'--tools',role,'--repository-root',c['repository_root']])
+            extension=(
+                'pursers: '+shlex.join([c['mcp'],'--central-url',c['central_url'],'--board',event['board'],
+                    '--token-file',c['token_file'],'--tools',role,'--repository-root',c['repository_root']])
+                if c.get('client', 'goose') == 'goose'
+                else 'the seat profile configured Pursers MCP tools'
+            )
+            instructions = 'Read AGENTS.md and .goosehints.' if c.get('client', 'goose') == 'goose' else 'Read AGENTS.md and START.md.'
             prompt=('$token-thrift. Process exactly one authorized Pursers event, then exit. '
                     f"Seat {c['seat_id']}; role {role}; board_id {event['board']}; ticket_id {event['ticket']}. "
-                    'Read AGENTS.md and .goosehints. Use this exact board for every operation. '
+                    f'{instructions} Use this exact board for every operation. '
                     'GET the ticket first and verify exact current ownership. If already held by this seat, resume it; '
                     'otherwise claim or review-claim only an authorized offer. Preserve existing worktrees, changes, '
                     'commits and evidence. Follow its scope, perform work or independent verification, '
@@ -155,9 +219,7 @@ class EventSeatRunner:
                 'started_at':now, 'outcome':'started'}
             PUBLISH(self.path,self.state)
             try:
-                self.run_command([c['goose'],'run','--no-session','--no-profile','--with-builtin','developer',
-                    '--with-extension',extension,'--provider',c['provider'],'--model',c['model'],
-                    '--max-turns',str(c.get('max_turns',30)),'--text',prompt])
+                self.run_command(self.model_command(prompt, extension))
             except BaseException as exc:
                 self.state['last_turn'].update(outcome='interrupted', error_class=type(exc).__name__)
                 raise

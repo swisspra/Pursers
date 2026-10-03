@@ -9,6 +9,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Supported macOS Codex CLI autoscaling through the existing signed Fleet
+  Executor and registry reconciler: event-driven subscription seats make no idle
+  model call, local profile/auth readiness remains distinct from unknown remote
+  quota, disabled seats stay inventory-only, host headroom is operator-configured,
+  and a fail-closed preview/confirm handoff audits legacy controller processes,
+  duplicates and live leases without performing the operator's cutover.
+
 - Opaque, integrity-protected, principal- and filter-bound keyset pagination for
   ticket lists, with explicit live-read consistency, response byte bounds,
   lazy archive hydration, retained-history pages, compatible client traversal,

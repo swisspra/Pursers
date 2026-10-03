@@ -238,6 +238,43 @@ def seats_for_board(
     return result
 
 
+def codex_demand(*, work: int = 0, review: int = 0) -> Any:
+    return butler.FleetDemand(
+        board_id="pursers",
+        open_by_tier={2: work},
+        review_backlog=review,
+        acp_backlog=0,
+        oldest_ticket_age_s=0,
+        expiring_offers=0,
+        provider_health={"codex": "unknown"},
+        provider_latency_ms={"codex": 0},
+        provider_kinds={"codex": "codex_cli"},
+        provider_local_readiness={"codex": True},
+        provider_quota_status={"codex": "unknown"},
+    )
+
+
+def test_codex_local_readiness_scales_worker_and_independent_reviewer() -> None:
+    policy=board_policy(provider_maximums={"codex":2})
+    candidates=[seat("worker-codex","worker",provider="codex"),
+                seat("reviewer-codex","reviewer",provider="codex")]
+    plan=reconciler({"pursers":policy},host_cap=2).plan(
+        snapshot({"pursers":codex_demand(work=1,review=1)},candidates),{})
+    assert {(item.action,item.seat_id) for item in plan.operations}=={
+        ("start","worker-codex"),("start","reviewer-codex")}
+    assert plan.desired["pursers"]["worker"]==1
+    assert plan.desired["pursers"]["reviewer"]==1
+
+
+def test_codex_remote_health_cannot_be_fabricated() -> None:
+    with pytest.raises(ValueError,match="quota must remain unknown"):
+        butler.fleet_snapshot_from_products(
+            {"pursers":{"tickets":[],"agents":[]}},[],
+            {"pursers":{"codex":{"kind":"codex_cli","status":"healthy",
+                "local_ready":True,"quota_status":"available","latency_ms":1}}},
+            {"load_ratio":0.1,"capacity_available":True,"executor_status":"healthy"},NOW)
+
+
 def test_burst_scales_workers_and_reviewers_without_creating_review_bottleneck() -> None:
     current = snapshot(
         {"pursers": demand(work=20, review=3, acp=2, age=600, expiring=2)},

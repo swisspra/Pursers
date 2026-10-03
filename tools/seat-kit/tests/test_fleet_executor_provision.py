@@ -35,6 +35,9 @@ def provision_spec(tmp_path: Path) -> dict[str, object]:
         (ROOT / "tools/board-butler/com.pursers.board-butler.plist.template").read_bytes()
     )
     state = tmp_path / "fleet-executor"
+    local_config = tmp_path / "fleet-local.json"
+    local_config.write_text('{"providers":{},"templates":{}}\n', encoding="utf-8")
+    local_config.chmod(0o600)
     return {
         "schema": provision.PROVISION_SCHEMA,
         "executor": {
@@ -80,6 +83,7 @@ def provision_spec(tmp_path: Path) -> dict[str, object]:
             "launch_agent_path": str(butler_plist),
             "observation_file": str(tmp_path / "observation.json"),
             "state_file": str(tmp_path / "fleet-state.json"),
+            "local_config": str(local_config),
         },
     }
 
@@ -134,6 +138,11 @@ def test_plan_confirm_stages_owner_only_runtime_without_launchctl(tmp_path: Path
     assert environment["PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE"] == str(
         state / "supervisor-roster.json"
     )
+    assert environment["PURSERS_BUTLER_FLEET_OBSERVATION_MODE"] == "local"
+    assert environment["PURSERS_BUTLER_FLEET_LOCAL_CONFIG"] == str(
+        specification["board_butler"]["local_config"]
+    )
+    assert environment["PURSERS_BUTLER_FLEET_EXECUTOR_STATE"] == str(state)
     assert json.loads((state / "supervisor-legacy.json").read_text()) == {
         "schema": "pursers_legacy_supervisor_config_v1"
     }
@@ -157,6 +166,19 @@ def test_plan_accepts_operator_cap_fifteen_and_rejects_above_product_bound(
     other_spec.write_text(json.dumps(other), encoding="utf-8")
     with pytest.raises(provision.ProvisionError, match="host_cap_invalid"):
         provision.create_plan(other_spec, tmp_path / "other-plan.json")
+
+
+def test_plan_rejects_public_or_missing_local_observation_config(tmp_path: Path) -> None:
+    specification = provision_spec(tmp_path)
+    local = Path(specification["board_butler"]["local_config"])
+    local.chmod(0o644)
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(specification), encoding="utf-8")
+    with pytest.raises(provision.ProvisionError, match="local_config_untrusted"):
+        provision.create_plan(spec_path, tmp_path / "plan.json")
+    local.unlink()
+    with pytest.raises(provision.ProvisionError, match="local_config_unavailable"):
+        provision.create_plan(spec_path, tmp_path / "plan2.json")
 
 
 def test_confirm_rejects_preexisting_non_private_state_directory(

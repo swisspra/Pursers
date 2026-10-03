@@ -52,6 +52,7 @@ POLICY_FIELDS = frozenset(
 BUTLER_FIELDS = frozenset(
     {"launch_agent_path", "observation_file", "state_file"}
 )
+BUTLER_LOCAL_FIELDS = BUTLER_FIELDS | {"local_config"}
 
 
 class ProvisionError(ValueError):
@@ -95,7 +96,9 @@ def _validate_spec(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ProvisionError("caller_fields_invalid")
     if not isinstance(policy, dict) or set(policy) != POLICY_FIELDS:
         raise ProvisionError("policy_fields_invalid")
-    if not isinstance(butler, dict) or set(butler) != BUTLER_FIELDS:
+    if not isinstance(butler, dict) or set(butler) not in {
+        BUTLER_FIELDS, BUTLER_LOCAL_FIELDS
+    }:
         raise ProvisionError("board_butler_fields_invalid")
 
     python = _absolute(
@@ -113,6 +116,11 @@ def _validate_spec(value: Mapping[str, Any]) -> dict[str, Any]:
     butler_plist = _absolute(butler["launch_agent_path"], "butler_launch_agent_path")
     observation = _absolute(butler["observation_file"], "butler_observation_file")
     state_file = _absolute(butler["state_file"], "butler_state_file")
+    local_config = (
+        _absolute(butler["local_config"], "butler_local_config")
+        if "local_config" in butler
+        else None
+    )
     if not python.is_file() or not repository.is_dir():
         raise ProvisionError("executor_runtime_unavailable")
     source = repository / "tools/seat-kit/fleet_executor.py"
@@ -126,6 +134,19 @@ def _validate_spec(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ProvisionError("board_butler_launch_agent_invalid") from exc
     if not isinstance(plist, dict) or not isinstance(plist.get("EnvironmentVariables"), dict):
         raise ProvisionError("board_butler_launch_agent_invalid")
+    if local_config is not None:
+        try:
+            local_info = local_config.lstat()
+        except OSError as exc:
+            raise ProvisionError("butler_local_config_unavailable") from exc
+        if (
+            local_config.is_symlink()
+            or not stat.S_ISREG(local_info.st_mode)
+            or local_info.st_uid != os.getuid()
+            or local_info.st_nlink != 1
+            or local_info.st_mode & 0o077
+        ):
+            raise ProvisionError("butler_local_config_untrusted")
     host_cap = policy.get("host_cap")
     if not isinstance(host_cap, int) or isinstance(host_cap, bool) or not 1 <= host_cap <= 100:
         raise ProvisionError("host_cap_invalid")
@@ -197,6 +218,7 @@ def _validate_spec(value: Mapping[str, Any]) -> dict[str, Any]:
             "launch_agent_sha256": hashlib.sha256(butler_plist.read_bytes()).hexdigest(),
             "observation_file": str(observation),
             "state_file": str(state_file),
+            **({"local_config": str(local_config)} if local_config is not None else {}),
         },
     }
 
@@ -398,6 +420,14 @@ def confirm_plan(plan_path: Path, confirmation: str) -> dict[str, Any]:
             "PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE": str(roster_path),
         }
     )
+    if butler.get("local_config"):
+        environment.update(
+            {
+                "PURSERS_BUTLER_FLEET_OBSERVATION_MODE": "local",
+                "PURSERS_BUTLER_FLEET_LOCAL_CONFIG": butler["local_config"],
+                "PURSERS_BUTLER_FLEET_EXECUTOR_STATE": str(state_dir),
+            }
+        )
     _atomic_private(
         temporary, plistlib.dumps(document, fmt=plistlib.FMT_XML, sort_keys=True)
     )

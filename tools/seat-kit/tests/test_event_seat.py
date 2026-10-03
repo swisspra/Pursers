@@ -23,6 +23,16 @@ def config(tmp_path):
             'max_runs_per_hour':1,'max_turns':30,'turn_timeout_s':1800}
 
 
+def codex_config(tmp_path):
+    value = config(tmp_path)
+    value.pop('goose')
+    value.pop('mcp')
+    value.update(client='codex', codex='/example/codex', codex_profile='mong1',
+        effort='high', service_tier='fast', codex_sandbox='danger-full-access',
+        last_message_file=str(tmp_path/'last.txt'))
+    return value
+
+
 def test_empty_irrelevant_and_repeated_events_do_not_run_model(tmp_path):
     runner=api()['EventSeatRunner'](config(tmp_path))
     calls=[]
@@ -42,6 +52,39 @@ def test_empty_irrelevant_and_repeated_events_do_not_run_model(tmp_path):
     response['events'][0]['ticket_id']='TK-two'
     assert resumed.process(response,104) == 3598
     assert len(resumed.state['pending']) == 1
+
+
+def test_codex_event_uses_profile_model_and_only_runs_after_offer(tmp_path):
+    runner=api()['EventSeatRunner'](codex_config(tmp_path));calls=[]
+    runner.run_command=lambda argv,**kwargs:calls.append(argv)
+    runner.process({'new_seq':{'home':42},'events':[]},100)
+    assert calls==[]
+    runner.process({'new_seq':{'home':43},'events':[
+        {'kind':'ticket_offered','board_id':'home','ticket_id':'TK-one','id':'offer-one'}]},101)
+    assert len(calls)==1
+    command=calls[0]
+    assert command[:4]==['/example/codex','exec','-m','test-model']
+    assert command[command.index('--profile')+1]=='mong1'
+    assert '--dangerously-bypass-approvals-and-sandbox' in command
+    assert command[command.index('-C')+1]==str(tmp_path)
+    assert command[command.index('-o')+1]==str(tmp_path/'last.txt')
+    assert '--with-extension' not in command
+    assert 'model_reasoning_effort="high"' in command
+    assert 'service_tier="fast"' in command
+    assert 'Read AGENTS.md and START.md.' in command[-1]
+    assert 'board_id home' in command[-1]
+
+
+@pytest.mark.parametrize('change,match', [
+    ({'client':'codex'}, 'Codex'),
+    ({'client':'other'}, 'unsupported'),
+    ({'client':'codex','codex':'/example/codex','codex_profile':'bad profile'}, 'profile'),
+    ({'client':'codex','codex':'/example/codex','codex_sandbox':'read-only'}, 'sandbox'),
+])
+def test_invalid_codex_configuration_fails_closed(tmp_path,change,match):
+    value=config(tmp_path)
+    value.pop('goose',None);value.pop('mcp',None);value.update(change)
+    with pytest.raises(ValueError,match=match):api()['validate_config'](value)
 
 
 def test_cursor_validation_never_accepts_zero(tmp_path):
