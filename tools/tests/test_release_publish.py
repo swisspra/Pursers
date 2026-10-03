@@ -66,6 +66,12 @@ def test_seven_wheel_cohort_matches_manifest_versions() -> None:
     }
 
 
+def test_release_handoff_names_seven_manifest_bound_wheels() -> None:
+    handoff = (ROOT / "docs/release-train.md").read_text(encoding="utf-8")
+    assert "Expected artifacts are the seven manifest-bound wheels" in handoff
+    assert "Expected artifacts are the six manifest-bound wheels" not in handoff
+
+
 @pytest.mark.parametrize("mode", ["create", "edit"])
 def test_release_publish_cli_emits_manifest_flags_for_both_paths(mode: str) -> None:
     result = subprocess.run(

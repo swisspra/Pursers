@@ -199,7 +199,7 @@ gh release download "$TAG" --repo swisspra/Pursers --dir dist-release
 (cd dist-release && shasum -a 256 -c SHA256SUMS.txt)
 ```
 
-Expected artifacts are the six manifest-bound wheels, the AionUi ZIP, the Home
+Expected artifacts are the seven manifest-bound wheels, the AionUi ZIP, the Home
 runtime wheelhouse archive and its external manifest, plus `SHA256SUMS.txt`.
 This beta train authorizes no PyPI publication or production cutover. If the
 tag, release state, cohort, or checksum is wrong, stop without installing or
