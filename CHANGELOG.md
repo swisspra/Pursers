@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-10-03
+
+This release includes `pursers-central==0.1.7`,
+`pursers-client==0.1.8`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.1.0`, `pursers==5.1.0`,
+`pursers-wait-bridge==0.1.6`, and
+`pursers-acp==0.1.7`.
+
+Upgrade Central, clients, the wait bridge, managed runners, and ACP as one
+compatible cohort. A package upgrade does not migrate or restart running
+services. Back up Central and fleet state, preserve cursors and live leases,
+and follow the [5.1.0 upgrade and configuration guide](docs/releases/UPGRADE-v5.1.0.md).
+
 ### Added
 
 - Supported macOS Codex CLI autoscaling through the existing signed Fleet
@@ -90,6 +103,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `Required test_output:` notes. Missing required evidence on verified code
   submissions now preserves the claim and returns a corrective error before
   review dispatch, preventing avoidable rejection loops.
+
+- Correct Codex event-seat provisioning and migration fixtures so the signed
+  Fleet Executor keeps its isolated Python runtime, preserves `CODEX_HOME`,
+  and validates the complete executor dependency set before a controller
+  handoff.
 
 ## [5.0.9] - 2026-10-01
 
