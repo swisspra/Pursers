@@ -1,10 +1,14 @@
 """Local evidence producer for the existing authorized fleet reconciler."""
 import json
 import os
+import re
 import tempfile
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+
+SAFE_SEAT_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$')
 
 
 def timestamp(value):
@@ -65,10 +69,20 @@ class LocalFleetObserver:
         leases = {'boards': {b: {'seats': {}} for b in active_boards}}
         seats, health, limits = [], {b: {} for b in active_boards}, {b: {} for b in active_boards}
         for template_id, template in self.templates.items():
-            seat_id = template.seat_root.name
             binding = self.bindings.get(template_id, {})
-            board_id = binding.get('board_id', next(iter(active_boards), 'unknown'))
-            provider = binding.get('provider', 'unknown')
+            binding_mapping = isinstance(binding, Mapping)
+            seat_id = binding.get('seat_id', template.seat_root.name) if binding_mapping else template.seat_root.name
+            board_id = binding.get('board_id', next(iter(active_boards), 'unknown')) if binding_mapping else 'unknown'
+            provider = binding.get('provider', 'unknown') if binding_mapping else 'unknown'
+            enabled = binding.get('enabled', True) if binding_mapping else False
+            binding_valid = (
+                binding_mapping
+                and {'board_id', 'provider'} <= set(binding)
+                and set(binding) <= {'board_id', 'provider', 'enabled', 'seat_id'}
+                and isinstance(seat_id, str)
+                and SAFE_SEAT_ID.fullmatch(seat_id) is not None
+                and type(enabled) is bool
+            )
             previous = self.stored.get(seat_id, {})
             service = self.services.inspect(seat_id, template)
             known, busy = bool(active_boards), False
@@ -124,16 +138,17 @@ class LocalFleetObserver:
             if service.running and previous.get('lifecycle') == 'draining': lifecycle = 'draining'
             if busy and lifecycle == 'ready': lifecycle = 'busy'
             if ((service.exists and not service.identity_verified) or not known
-                    or not binding or board_id not in active_boards): lifecycle = 'unhealthy'
+                    or not binding or not binding_valid or board_id not in active_boards): lifecycle = 'unhealthy'
             if board_id not in active_boards:
                 raise ValueError('template binding targets an inactive board')
             seats.append({'seat_id': seat_id, 'board_id': board_id, 'role': template.role, 'provider': provider,
                 'template_id': template_id, 'template_digest_sha256': template.digest_sha256,
                 'generation': previous.get('generation', 1), 'lifecycle': lifecycle,
                 'transition_at': datetime.fromtimestamp(previous.get('last_mutation', now.timestamp()), timezone.utc).isoformat(),
-                'managed': True})
+                'managed': enabled if binding_valid else False})
             health[board_id][provider] = providers.get(provider, {'status': 'unknown', 'latency_ms': 0})
-            limits[board_id][provider] = limits[board_id].get(provider, 0) + 1
+            if enabled and binding_valid:
+                limits[board_id][provider] = limits[board_id].get(provider, 0) + 1
         observation = {'schema': 'pursers_fleet_observation_v1', 'schema_version': 1,
             'observed_at': now.isoformat(), 'stale_after': expiry, 'executor_seats': seats,
             'provider_observations': health, 'provider_maximums': limits, 'host_observation': host}

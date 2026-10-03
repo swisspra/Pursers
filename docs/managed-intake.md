@@ -25,10 +25,11 @@ Zed is the primary GUI/IDE workflow for this integration. Use the existing
 [Zed guide](guides/zed.md) and [first-ticket walkthrough](guides/zed-first-ticket.md)
 to connect, inspect work, answer questions and follow delivery evidence.
 
-Goose is the CLI runner used by the event-driven worker/reviewer seats because
-it fits unattended command-line execution. Its selection does not make Goose the
-primary GUI or require operators to use its desktop interface. Zed and the CLI
-fleet share Pursers Central and its authorization, ticket and review contracts;
+Goose and Codex CLI are supported event-driven worker/reviewer runners. The
+persistent service waits on Central and launches a model turn only for an
+authorized event; idle planning and health checks do not call either model.
+Selecting a CLI does not make its desktop interface the primary GUI. Zed and the
+CLI fleet share Pursers Central and its authorization, ticket and review contracts;
 this integration adds no new Zed UI or automatic GUI seat launcher.
 
 ## Ownership and prerequisites
@@ -227,22 +228,47 @@ The private local-fleet configuration binds every approved executor template:
 ```json
 {
   "templates": {
-    "worker-template": {"board_id": "pursers", "provider": "worker-model"}
+    "worker-template": {
+      "board_id": "pursers", "provider": "codex-subscription",
+      "seat_id": "mong1-worker-example", "enabled": true
+    },
+    "reviewer-template": {
+      "board_id": "pursers", "provider": "codex-subscription",
+      "seat_id": "mong1-reviewer-example", "enabled": true
+    },
+    "disabled-template": {
+      "board_id": "pursers", "provider": "codex-subscription",
+      "seat_id": "mong1-worker-disabled", "enabled": false
+    }
   },
   "providers": {
-    "worker-model": {
-      "endpoint": "https://gateway.example/v1",
-      "model": "example-model",
-      "secret_file": "/PATH/TO/auth/worker-model.key"
+    "codex-subscription": {
+      "kind": "codex_cli",
+      "executable": "/PATH/TO/bin/codex",
+      "auth_file": "/PATH/TO/codex-profile/auth.json",
+      "profile_file": "/PATH/TO/codex-profile/mong1.config.toml"
     }
+  },
+  "host_headroom": {
+    "max_load_ratio": 0.8,
+    "min_memory_headroom_ratio": 0.2,
+    "min_disk_headroom_ratio": 0.1
   }
 }
 ```
 
-Provider health checks read `/models`; they never issue chat/completion requests.
-Bind worker/reviewer templates to their actual model, not merely Butler's drafting
-endpoint. Provider budgets preserve each role's target and retain active holders;
-a faster worker model cannot consume a reviewer-only model's allocation. Unknown or unavailable evidence cannot authorize unsafe scale changes.
+For `codex_cli`, collection checks only the local executable plus owned profile and
+auth files. It reports local readiness separately while remote subscription quota
+remains explicitly `unknown`; it never substitutes an API/Goose credential or
+claims provider health. Legacy `remote_api` bindings still read `/models` and never
+issue chat/completion requests. Bind worker/reviewer templates to their actual
+runner. Set `seat_id` to the exact Pursers `agent_name`; it need not match the
+seat-directory basename, while the executor template pins the corresponding
+principal and seat root. Provider budgets preserve each role's target and retain active holders; a
+worker cannot consume reviewer-only allocation. `enabled=false` keeps a seat in
+inventory and host counts but makes it ineligible for start, drain or stop.
+Unknown or unavailable identity, lease, executable, profile or auth evidence cannot
+authorize unsafe scale changes.
 The collector uses platform service adapters and the supported executor store
 interface, then atomically writes fleet, registry-readiness and lease documents.
 A busy seat on any selected board is protected across all boards. Missing, stale,
@@ -314,8 +340,40 @@ operator choices. Cap 15 does not create 15 seat templates. Onboarding's
 ## Event-driven seats
 
 `tools/seat-kit/event_seat.py --config /PATH/TO/config/seat.json` runs a bounded
-Goose turn after a relevant registry event or a verified unfinished owned lease.
-Supply private configuration:
+Goose or Codex CLI turn after a relevant registry event or a verified unfinished
+owned lease. A Codex subscription seat can use this private configuration:
+
+```json
+{
+  "client": "codex",
+  "seat_id": "worker-example", "role": "worker",
+  "provider": "codex-subscription", "model": "configured-model", "tier_max": 2,
+  "seat_dir": "/PATH/TO/seats/worker-example",
+  "board_script": "/PATH/TO/seats/worker-example/bin/board.sh",
+  "state_file": "/PATH/TO/state/seats/worker-example.json",
+  "token_file": "/PATH/TO/auth/worker-example.jwt",
+  "codex": "/PATH/TO/bin/codex",
+  "effort": "high", "service_tier": "fast",
+  "codex_sandbox": "workspace-write",
+  "last_message_file": "/PATH/TO/logs/worker-example.last",
+  "central_url": "https://central.example/mcp", "home_board": "pursers",
+  "repository_root": "/PATH/TO/clones",
+  "max_runs_per_hour": null, "max_turns": 30, "turn_timeout_s": 1800,
+  "max_owned_recoveries": 1
+}
+```
+
+The Codex process inherits its owner-only `CODEX_HOME`/subscription environment
+from the executor credential file and loads the model explicitly. A fleet whose
+identity is a separate `CODEX_HOME` must not invent `--profile`; add optional
+`codex_profile` only when that home actually defines the named `[profiles]` entry.
+The runner reuses the seat directory, MCP identity, registry mode, worktrees and
+saved cursor. `workspace-write` enables network for the authorized registry workflow;
+use `danger-full-access` only for a seat whose operator policy already grants it.
+The host cap is concurrent seats, not an hourly run throttle. `null` above means no
+invented hourly throttle; operators may set a real policy value when required.
+
+The backward-compatible Goose configuration is:
 
 ```json
 {
@@ -348,7 +406,8 @@ to that registry snapshot and refreshes the registry before the next wait. Saved
 cursors and pending events survive restart. The hourly model-run budget stops the
 runner with pending events retained; investigate before restarting. A run reserved
 before an uncertain failure is not automatically replayed. This budget counts
-Goose runs; `max_turns` separately bounds steps within each run.
+model runs for either client; `max_turns` separately bounds Goose steps. Codex is
+bounded by `turn_timeout_s` and its configured agent policy.
 
 The runner checks Central for unfinished leases before waiting again, including
 after startup and after a model turn exits. A successful process exit is not proof
@@ -372,6 +431,85 @@ last turn's ticket, timestamps and exit/interruption status without model output
 credentials. Deploy Central, client and event runner together, and regenerate
 managed seat helpers with `--upgrade` so home-board waits also use passive joins.
 Keep cursors, recovery counters and partial repository work during upgrades.
+
+### Existing macOS Codex fleet cutover
+
+Use the shipped reconciler, signed Fleet Executor and launchd adapter as the one
+controller. Do not run the legacy shell supervisor beside it. A conservative trial
+uses a worker floor of 1, reviewer floor of 1, role maxima of 2 and 2, concurrent
+host/board cap 4, and 300-second idle grace. These are operator settings, not a
+product-wide limit:
+
+```json
+{
+  "host_runtime": {
+    "agent_process_ceiling": 4,
+    "control_plane_processes": 2,
+    "total_process_ceiling": 6
+  },
+  "desired": {
+    "capacity": {
+      "worker": {"min": 1, "target": 1, "max": 2},
+      "reviewer": {"min": 1, "target": 1, "max": 2},
+      "acp_worker": {"min": 0, "target": 0, "max": 0}
+    },
+    "host_concurrency": 4,
+    "board_concurrency": 4,
+    "cooldowns": {"scale_up_s": 0, "scale_down_s": 300, "failure_backoff_s": 30}
+  }
+}
+```
+
+First run `fleet_executor_provision.py plan` and review its owner-only staged-file
+plan. Its `confirm` still performs no `launchctl` action. Include `local_config` in
+the `board_butler` block so the staged plist selects local observation. Then create
+an owner-only migration spec:
+
+```json
+{
+  "schema": "pursers_codex_fleet_migration_v1",
+  "executor_config": "/PATH/TO/config/executor.json",
+  "local_config": "/PATH/TO/config/local-fleet.json",
+  "lease_snapshot": "/PATH/TO/state/executor/leases.json",
+  "legacy_supervisor_command": "/PATH/TO/legacy/supervise.sh",
+  "legacy_supervisor_pid_file": "/PATH/TO/legacy/supervisor.pid",
+  "controller_marker": "/PATH/TO/state/executor/controller.json"
+}
+```
+
+```sh
+python tools/seat-kit/codex_fleet_migration.py preview \
+  --spec /PATH/TO/config/codex-migration.json \
+  --output /PATH/TO/state/codex-migration-plan.json
+
+python tools/seat-kit/codex_fleet_migration.py confirm \
+  --plan /PATH/TO/state/codex-migration-plan.json \
+  --confirm CONFIRM-<DIGEST-FROM-PREVIEW>
+```
+
+Preview reads `/bin/ps`, counts exact `codex exec -C <seat-root>` processes,
+verifies one legacy controller PID, maps each explicit `seat_id` to the executor
+template's pinned principal/root, checks every managed seat's fresh work/review
+lease evidence, detects duplicates, and records disabled seats. Unknown/stale lease
+or identity evidence, a live holder, a duplicate seat process, or controller
+ambiguity blocks confirmation. Confirmation rechecks the same inventory and writes
+only an idempotent owner-only controller marker; it never stops, starts or signals a
+process. `enabled=false` seats remain inventory-only and are recorded in the marker.
+
+After a clean confirmation, the operator—not Butler—stops the legacy supervisor,
+stops only verified idle enabled legacy seats, loads the staged Fleet Executor and
+Butler launch agents, and verifies exactly one controller before enabling active
+reconciliation. Re-run preview if any PID or lease changed. Verify the configured
+worker/reviewer floors, independent reviewer principal, active WORK registry board
+set, process count at or below 4, preserved cursor/worktree paths, and start/drain/
+stop receipts. Local readiness does not prove subscription quota; the first real
+event remains the provider acceptance check.
+
+For rollback, disable active reconciliation, unload the new Butler and executor
+launch agents, restore the provisioner's `.before-fleet` Butler plist, and restart
+the single legacy supervisor with its prior roster. Do not delete executor state,
+seat state, worktrees, credentials or cursor files. Do not restart seats recorded
+disabled, and never stop a live work/review holder merely to complete rollback.
 
 ## Migration, checks and rollback
 

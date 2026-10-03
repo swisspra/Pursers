@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
+import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +19,70 @@ assert SPEC and SPEC.loader
 provision = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = provision
 SPEC.loader.exec_module(provision)
+
+
+def _faithful_runtime_venv(runtime_root: Path) -> Path:
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "venv",
+            "--without-pip",
+            "--copies",
+            str(runtime_root),
+        ],
+        check=True,
+    )
+    runtime = runtime_root / "bin/python"
+    runtime.chmod(0o700)
+    purelib = subprocess.run(
+        [runtime, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    dependency_roots: set[Path] = set()
+    for dependency in ("cryptography", "mcp"):
+        spec = importlib.util.find_spec(dependency)
+        assert spec and spec.origin
+        dependency_roots.add(Path(spec.origin).resolve().parent.parent)
+    (Path(purelib) / "pursers-test-dependencies.pth").write_text(
+        "".join(f"{root}\n" for root in sorted(dependency_roots)),
+        encoding="utf-8",
+    )
+    return runtime
+
+
+def _runtime_paths(runtime: Path) -> dict[str, str]:
+    return json.loads(
+        subprocess.check_output(
+            [
+                runtime,
+                "-I",
+                "-c",
+                "import json, sys, sysconfig; print(json.dumps({"
+                "'base_executable': sys._base_executable, "
+                "'stdlib': sysconfig.get_path('stdlib'), "
+                "'version': f'{sys.version_info.major}.{sys.version_info.minor}'}))",
+            ],
+            text=True,
+        )
+    )
+
+
+def _private_python_install(source_python: Path, runtime_root: Path) -> Path:
+    metadata = _runtime_paths(source_python)
+    binary = runtime_root / "bin" / f"python{metadata['version']}"
+    binary.parent.mkdir(parents=True)
+    shutil.copy2(Path(metadata["base_executable"]).resolve(), binary)
+    binary.chmod(0o700)
+    (runtime_root / "lib").symlink_to(
+        Path(metadata["stdlib"]).parent,
+        target_is_directory=True,
+    )
+    runtime = binary.with_name("python")
+    runtime.symlink_to(binary.name)
+    return runtime
 
 
 def provision_spec(tmp_path: Path) -> dict[str, object]:
@@ -35,10 +101,14 @@ def provision_spec(tmp_path: Path) -> dict[str, object]:
         (ROOT / "tools/board-butler/com.pursers.board-butler.plist.template").read_bytes()
     )
     state = tmp_path / "fleet-executor"
+    local_config = tmp_path / "fleet-local.json"
+    local_config.write_text('{"providers":{},"templates":{}}\n', encoding="utf-8")
+    local_config.chmod(0o600)
+    runtime = _faithful_runtime_venv(tmp_path / "runtime")
     return {
         "schema": provision.PROVISION_SCHEMA,
         "executor": {
-            "python": sys.executable,
+            "python": str(runtime),
             "repository": str(ROOT),
             "config_path": str(state / "executor.json"),
             "state_dir": str(state),
@@ -80,6 +150,7 @@ def provision_spec(tmp_path: Path) -> dict[str, object]:
             "launch_agent_path": str(butler_plist),
             "observation_file": str(tmp_path / "observation.json"),
             "state_file": str(tmp_path / "fleet-state.json"),
+            "local_config": str(local_config),
         },
     }
 
@@ -134,11 +205,100 @@ def test_plan_confirm_stages_owner_only_runtime_without_launchctl(tmp_path: Path
     assert environment["PURSERS_BUTLER_SUPERVISOR_ROSTER_FILE"] == str(
         state / "supervisor-roster.json"
     )
+    assert environment["PURSERS_BUTLER_FLEET_OBSERVATION_MODE"] == "local"
+    assert environment["PURSERS_BUTLER_FLEET_LOCAL_CONFIG"] == str(
+        specification["board_butler"]["local_config"]
+    )
+    assert environment["PURSERS_BUTLER_FLEET_EXECUTOR_STATE"] == str(state)
     assert json.loads((state / "supervisor-legacy.json").read_text()) == {
         "schema": "pursers_legacy_supervisor_config_v1"
     }
     assert "synthetic" not in json.dumps(environment)
     assert (butler_plist.with_suffix(".plist.before-fleet")).exists()
+
+
+def test_venv_python_symlink_is_validated_but_preserved_in_staged_plist(
+    tmp_path: Path,
+) -> None:
+    specification = provision_spec(tmp_path)
+    trusted_runtime = Path(specification["executor"]["python"])
+    base_python = _private_python_install(
+        trusted_runtime,
+        tmp_path / "private-python",
+    )
+    assert base_python.resolve().is_relative_to(tmp_path)
+    assert not base_python.resolve().stat().st_mode & 0o022
+
+    executor_venv = tmp_path / "executor-venv"
+    subprocess.run(
+        [
+            base_python,
+            "-m",
+            "venv",
+            "--without-pip",
+            str(executor_venv),
+        ],
+        check=True,
+    )
+    venv_python = executor_venv / "bin/python"
+    venv_python.unlink()
+    venv_python.symlink_to(base_python)
+    assert venv_python.is_symlink()
+    assert venv_python.resolve() == base_python.resolve()
+    missing = subprocess.run(
+        [venv_python, "-I", "-c", "import cryptography; import mcp"],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    assert missing.returncode != 0
+    purelib = Path(
+        subprocess.check_output(
+            [venv_python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            text=True,
+        ).strip()
+    )
+    assert purelib.is_relative_to(executor_venv)
+    for dependency in ("cryptography", "mcp"):
+        package = purelib / dependency
+        package.mkdir()
+        (package / "__init__.py").write_text("# offline probe fixture\n", encoding="utf-8")
+    specification["executor"]["python"] = str(venv_python)
+    spec_path = tmp_path / "spec.json"
+    plan_path = tmp_path / "plan.json"
+    spec_path.write_text(json.dumps(specification), encoding="utf-8")
+
+    plan = provision.create_plan(spec_path, plan_path)
+    assert plan["spec"]["executor"]["python"] == str(venv_python)
+    provision.confirm_plan(plan_path, plan["confirmation"])
+
+    staged = plistlib.loads(
+        Path(specification["executor"]["launch_agent_path"]).read_bytes()
+    )
+    assert staged["ProgramArguments"][0] == str(venv_python)
+    probe = subprocess.run(
+        [
+            staged["ProgramArguments"][0],
+            "-I",
+            "-c",
+            "import cryptography; import mcp",
+        ],
+        check=False,
+    )
+    assert probe.returncode == 0
+
+
+def test_plan_rejects_group_writable_executor_runtime(tmp_path: Path) -> None:
+    specification = provision_spec(tmp_path)
+    runtime = Path(specification["executor"]["python"])
+    assert runtime.resolve().is_relative_to(tmp_path)
+    runtime.chmod(0o720)
+    assert runtime.stat().st_mode & stat.S_IWGRP
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(specification), encoding="utf-8")
+
+    with pytest.raises(provision.ProvisionError, match="executor_runtime_untrusted"):
+        provision.create_plan(spec_path, tmp_path / "plan.json")
 
 
 def test_plan_accepts_operator_cap_fifteen_and_rejects_above_product_bound(
@@ -157,6 +317,19 @@ def test_plan_accepts_operator_cap_fifteen_and_rejects_above_product_bound(
     other_spec.write_text(json.dumps(other), encoding="utf-8")
     with pytest.raises(provision.ProvisionError, match="host_cap_invalid"):
         provision.create_plan(other_spec, tmp_path / "other-plan.json")
+
+
+def test_plan_rejects_public_or_missing_local_observation_config(tmp_path: Path) -> None:
+    specification = provision_spec(tmp_path)
+    local = Path(specification["board_butler"]["local_config"])
+    local.chmod(0o644)
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(specification), encoding="utf-8")
+    with pytest.raises(provision.ProvisionError, match="local_config_untrusted"):
+        provision.create_plan(spec_path, tmp_path / "plan.json")
+    local.unlink()
+    with pytest.raises(provision.ProvisionError, match="local_config_unavailable"):
+        provision.create_plan(spec_path, tmp_path / "plan2.json")
 
 
 def test_confirm_rejects_preexisting_non_private_state_directory(

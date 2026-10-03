@@ -668,6 +668,9 @@ class FleetDemand:
     expiring_offers: int
     provider_health: Mapping[str, str]
     provider_latency_ms: Mapping[str, int]
+    provider_kinds: Mapping[str, str] = field(default_factory=dict)
+    provider_local_readiness: Mapping[str, bool] = field(default_factory=dict)
+    provider_quota_status: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if any(
@@ -689,6 +692,16 @@ class FleetDemand:
             for status in self.provider_health.values()
         ):
             raise ValueError("provider health is invalid")
+        if any(
+            kind not in {"remote_api", "codex_cli"}
+            for kind in self.provider_kinds.values()
+        ) or any(type(value) is not bool for value in self.provider_local_readiness.values()):
+            raise ValueError("provider local readiness is invalid")
+        if any(
+            status not in {"available", "unavailable", "unknown"}
+            for status in self.provider_quota_status.values()
+        ):
+            raise ValueError("provider quota status is invalid")
 
     @property
     def work_pressure(self) -> int:
@@ -1509,6 +1522,15 @@ def _fleet_operation_id(
 def _healthy_provider(
     demand: FleetDemand, policy: FleetBoardPolicy, provider: str
 ) -> bool:
+    if demand.provider_kinds.get(provider) == "codex_cli":
+        # Subscription quota has no safe offline probe. Eligibility is based on
+        # local CLI/profile/auth readiness while quota remains explicitly unknown.
+        return (
+            demand.provider_local_readiness.get(provider) is True
+            and demand.provider_quota_status.get(provider) == "unknown"
+            and demand.provider_health.get(provider) == "unknown"
+            and policy.provider_maximums.get(provider, 0) > 0
+        )
     return (
         demand.provider_health.get(provider) == "healthy"
         and demand.provider_latency_ms.get(provider, policy.provider_latency_limit_ms + 1)
@@ -1770,6 +1792,9 @@ def fleet_snapshot_from_products(
             raise ValueError(f"{board_id}: provider observations are missing")
         health: dict[str, str] = {}
         latency: dict[str, int] = {}
+        kinds: dict[str, str] = {}
+        local_readiness: dict[str, bool] = {}
+        quota_status: dict[str, str] = {}
         for provider, observation in providers.items():
             if not isinstance(observation, Mapping):
                 raise ValueError(f"{board_id}: provider observation is invalid")
@@ -1778,6 +1803,26 @@ def fleet_snapshot_from_products(
             if not isinstance(raw_latency, int) or isinstance(raw_latency, bool):
                 raise ValueError(f"{board_id}: provider latency is invalid")
             latency[str(provider)] = raw_latency
+            kind = observation.get("kind", "remote_api")
+            if kind not in {"remote_api", "codex_cli"}:
+                raise ValueError(f"{board_id}: provider kind is invalid")
+            ready = observation.get("local_ready", kind == "remote_api")
+            quota = observation.get(
+                "quota_status",
+                "available" if observation.get("status") == "healthy" else "unknown",
+            )
+            if type(ready) is not bool or quota not in {
+                "available", "unavailable", "unknown"
+            }:
+                raise ValueError(f"{board_id}: provider readiness is invalid")
+            if kind == "codex_cli" and (
+                observation.get("status", "unknown") != "unknown"
+                or quota != "unknown"
+            ):
+                raise ValueError(f"{board_id}: Codex remote quota must remain unknown")
+            kinds[str(provider)] = str(kind)
+            local_readiness[str(provider)] = ready
+            quota_status[str(provider)] = str(quota)
         demands[board_id] = FleetDemand(
             board_id=board_id,
             open_by_tier=open_by_tier,
@@ -1787,6 +1832,9 @@ def fleet_snapshot_from_products(
             expiring_offers=expiring,
             provider_health=health,
             provider_latency_ms=latency,
+            provider_kinds=kinds,
+            provider_local_readiness=local_readiness,
+            provider_quota_status=quota_status,
         )
     seats: list[FleetSeat] = []
     required = {
@@ -5255,6 +5303,102 @@ def _read_connector_private_file(path: Path, label: str, limit: int) -> bytes:
     if len(value) > limit:
         raise ConnectorConfigError(f"{label} exceeded the byte limit")
     return value
+
+
+def observe_local_provider(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Probe a provider boundary without spending a model call.
+
+    ``codex_cli`` deliberately checks only local executable/profile/auth
+    readiness. Subscription quota is not inferable offline and remains unknown.
+    """
+    started = time.monotonic()
+    kind = record.get("kind", "remote_api") if isinstance(record, Mapping) else None
+    if kind == "codex_cli":
+        ready = False
+        reason = "codex_local_config_invalid"
+        try:
+            if set(record) != {"kind", "executable", "auth_file", "profile_file"}:
+                raise ValueError("Codex local provider fields are invalid")
+            executable = Path(record["executable"])
+            auth = Path(record["auth_file"])
+            profile = Path(record["profile_file"])
+            if not all(path.is_absolute() for path in (executable, auth, profile)):
+                raise ValueError("Codex local provider paths must be absolute")
+            executable_info = executable.stat()
+            if (
+                not stat.S_ISREG(executable_info.st_mode)
+                or not os.access(executable, os.X_OK)
+                or executable_info.st_mode & 0o022
+            ):
+                raise ValueError("Codex executable is untrusted")
+            for path, private in ((auth, True), (profile, False)):
+                info = path.lstat()
+                if (
+                    path.is_symlink()
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.getuid()
+                    or info.st_nlink != 1
+                    or not 0 < info.st_size <= 1024 * 1024
+                    or info.st_mode & (0o077 if private else 0o022)
+                ):
+                    raise ValueError("Codex profile or auth file is untrusted")
+            ready = True
+            reason = "codex_local_ready_remote_quota_unknown"
+        except (KeyError, OSError, TypeError, ValueError):
+            pass
+        return {
+            "kind": "codex_cli",
+            "status": "unknown",
+            "local_ready": ready,
+            "quota_status": "unknown",
+            "reason_code": reason,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+        }
+    healthy = False
+    try:
+        if kind != "remote_api" or set(record) not in (
+            {"endpoint", "model", "secret_file"},
+            {"kind", "endpoint", "model", "secret_file"},
+        ):
+            raise ValueError("remote provider fields are invalid")
+        endpoint, model = record["endpoint"], record["model"]
+        parsed = urllib.parse.urlsplit(endpoint)
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("provider endpoint must be plain HTTPS")
+        credential = _read_connector_private_file(
+            Path(record["secret_file"]), "provider credential", 8192
+        ).decode().strip()
+        runtime = ProviderRuntime(endpoint, model, credential)
+        url = endpoint.rstrip("/") + "/models"
+        request = urllib.request.Request(url, headers=runtime.request_headers())
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _ProviderRedirectHandler(url)
+        )
+        with opener.open(request, timeout=10) as response:
+            raw = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
+        if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
+            raise ValueError("provider response too large")
+        payload = json.loads(raw)
+        healthy = model in {
+            row.get("id")
+            for row in payload.get("data", [])
+            if isinstance(row, Mapping)
+        }
+    except Exception:
+        pass
+    return {
+        "kind": "remote_api",
+        "status": "healthy" if healthy else "unavailable",
+        "local_ready": True,
+        "quota_status": "available" if healthy else "unknown",
+        "latency_ms": int((time.monotonic() - started) * 1000),
+    }
 
 
 def _connector_secret_file(path: Path) -> str:
@@ -10253,6 +10397,24 @@ def read_host_headroom(repo: Path) -> dict[str, Any]:
     }
 
 
+def host_meets_headroom(
+    observation: Mapping[str, Any], thresholds: Mapping[str, float]
+) -> bool:
+    """Apply operator-owned load, memory and disk bounds fail-closed."""
+    return (
+        observation.get("complete") is True
+        and isinstance(observation.get("load_ratio"), (int, float))
+        and not isinstance(observation.get("load_ratio"), bool)
+        and isinstance(observation.get("memory_headroom_ratio"), (int, float))
+        and not isinstance(observation.get("memory_headroom_ratio"), bool)
+        and isinstance(observation.get("disk_headroom_ratio"), (int, float))
+        and not isinstance(observation.get("disk_headroom_ratio"), bool)
+        and observation["load_ratio"] <= thresholds["max_load_ratio"]
+        and observation["memory_headroom_ratio"] >= thresholds["min_memory_headroom_ratio"]
+        and observation["disk_headroom_ratio"] >= thresholds["min_disk_headroom_ratio"]
+    )
+
+
 _STRANDED_APPROVALS_API: dict[str, Any] | None = None
 
 
@@ -13453,8 +13615,35 @@ class CentralBackend:
         if not all(paths):
             raise ButlerConfigError("local fleet observation configuration is incomplete")
         document = json.loads(_read_connector_private_file(paths[0], "local fleet config", 1048576))
-        if not isinstance(document, Mapping) or set(document) != {"templates", "providers"}:
-            raise ButlerConfigError("local fleet config requires templates and providers")
+        if (
+            not isinstance(document, Mapping)
+            or set(document) not in (
+                {"templates", "providers"},
+                {"templates", "providers", "host_headroom"},
+            )
+        ):
+            raise ButlerConfigError(
+                "local fleet config requires templates and providers"
+            )
+        thresholds = document.get("host_headroom", {
+            "max_load_ratio": .95,
+            "min_memory_headroom_ratio": .1,
+            "min_disk_headroom_ratio": .1,
+        })
+        if (
+            not isinstance(thresholds, Mapping)
+            or set(thresholds) != {
+                "max_load_ratio", "min_memory_headroom_ratio",
+                "min_disk_headroom_ratio",
+            }
+            or any(
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not 0 <= value <= 1
+                for value in thresholds.values()
+            )
+        ):
+            raise ButlerConfigError("local fleet host headroom is invalid")
         executor = runpy.run_path(str(Path(__file__).resolve().parents[1] / "seat-kit" / "fleet_executor.py"))
         observer_api = runpy.run_path(str(Path(__file__).with_name("fleet_observation.py")))
         policy = executor["load_policy"](paths[1])
@@ -13476,33 +13665,13 @@ class CentralBackend:
             finally:
                 store.connection.close()
             services = executor["service_adapter"](policy, state)
-            providers = {}
-            for name, record in document["providers"].items():
-                started = time.monotonic()
-                healthy = False
-                try:
-                    endpoint, model = record["endpoint"], record["model"]
-                    parsed = urllib.parse.urlsplit(endpoint)
-                    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.query or parsed.fragment:
-                        raise ValueError("provider endpoint must be plain HTTPS")
-                    credential = _read_connector_private_file(Path(record["secret_file"]), "provider credential", 8192).decode().strip()
-                    runtime = ProviderRuntime(endpoint, model, credential)
-                    url = endpoint.rstrip("/") + "/models"
-                    request = urllib.request.Request(url, headers=runtime.request_headers())
-                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _ProviderRedirectHandler(url))
-                    with opener.open(request, timeout=10) as response:
-                        raw = response.read(MAX_PROVIDER_RESPONSE_BYTES + 1)
-                    if len(raw) > MAX_PROVIDER_RESPONSE_BYTES:
-                        raise ValueError("provider response too large")
-                    payload = json.loads(raw)
-                    healthy = model in {row.get("id") for row in payload.get("data", []) if isinstance(row, Mapping)}
-                except Exception:
-                    pass
-                providers[name] = {"status": "healthy" if healthy else "unavailable",
-                                   "latency_ms": int((time.monotonic()-started)*1000)}
+            providers = {
+                name: observe_local_provider(record)
+                for name, record in document["providers"].items()
+            }
             headroom = read_host_headroom(self.args.repo)
             host = {"load_ratio": headroom.get("load_ratio", 1),
-                    "capacity_available": bool(headroom.get("complete")) and headroom.get("memory_headroom_ratio", 0) > .1 and headroom.get("disk_headroom_ratio", 0) > .1,
+                    "capacity_available": host_meets_headroom(headroom, thresholds),
                     "executor_status": "healthy" if self.args.fleet_executor_socket.is_socket() else "unavailable"}
             observer = observer_api["LocalFleetObserver"](policy.templates, services, stored, document["templates"])
             # Use the beginning of collection as the freshness origin: slow probes
@@ -15323,9 +15492,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="local service mode; active additionally requires an authorization file",
     )
     parser.add_argument("--active-authorization-file", type=Path)
-    parser.add_argument("--fleet-observation-mode", choices=("file", "local"), default="file")
-    parser.add_argument("--fleet-local-config", type=Path)
-    parser.add_argument("--fleet-executor-state", type=Path)
+    parser.add_argument(
+        "--fleet-observation-mode",
+        choices=("file", "local"),
+        default=os.environ.get("PURSERS_BUTLER_FLEET_OBSERVATION_MODE", "file"),
+    )
+    parser.add_argument(
+        "--fleet-local-config",
+        type=Path,
+        default=(
+            Path(os.environ["PURSERS_BUTLER_FLEET_LOCAL_CONFIG"]).expanduser()
+            if os.environ.get("PURSERS_BUTLER_FLEET_LOCAL_CONFIG")
+            else None
+        ),
+    )
+    parser.add_argument(
+        "--fleet-executor-state",
+        type=Path,
+        default=(
+            Path(os.environ["PURSERS_BUTLER_FLEET_EXECUTOR_STATE"]).expanduser()
+            if os.environ.get("PURSERS_BUTLER_FLEET_EXECUTOR_STATE")
+            else None
+        ),
+    )
     parser.add_argument(
         "--fleet-observation-file",
         type=Path,

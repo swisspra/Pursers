@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_fleet_reconciler import NOW, fleet_executor
+from test_fleet_reconciler import NOW, butler, fleet_executor
 
 
 def observer_api():
@@ -58,6 +58,51 @@ def test_unbound_provider_unknown_and_private_publication(tmp_path):
     path = tmp_path/'observation.json'
     api['publish'](path, observation)
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_codex_provider_checks_local_files_without_claiming_remote_quota(tmp_path):
+    executable=tmp_path/'codex';executable.write_text('#!/bin/sh\nexit 0\n');executable.chmod(0o700)
+    auth=tmp_path/'auth.json';auth.write_text('{"fixture":true}\n');auth.chmod(0o600)
+    profile=tmp_path/'mong1.config.toml';profile.write_text('model="fixture"\n');profile.chmod(0o600)
+    result=butler.observe_local_provider({'kind':'codex_cli','executable':str(executable),
+        'auth_file':str(auth),'profile_file':str(profile)})
+    assert result['kind']=='codex_cli'
+    assert result['local_ready'] is True
+    assert result['status']=='unknown'
+    assert result['quota_status']=='unknown'
+    assert result['reason_code']=='codex_local_ready_remote_quota_unknown'
+    auth.chmod(0o644)
+    failed=butler.observe_local_provider({'kind':'codex_cli','executable':str(executable),
+        'auth_file':str(auth),'profile_file':str(profile)})
+    assert failed['local_ready'] is False
+    assert failed['status']=='unknown' and failed['quota_status']=='unknown'
+
+
+def test_disabled_binding_is_inventory_only_and_has_zero_provider_capacity():
+    template,boards,members,services=fixture()
+    for board in boards.values(): board['agents'][0]['agent_name']='worker-explicit'
+    observer=observer_api()['LocalFleetObserver']({'t':template},services,{},
+        {'t':{'board_id':'a','provider':'codex','seat_id':'worker-explicit','enabled':False}})
+    observation,_,_=observer.collect(['a','b'],boards,members,NOW,
+        {'codex':{'kind':'codex_cli','status':'unknown','local_ready':True,
+                  'quota_status':'unknown','latency_ms':0}}, {})
+    assert observation['executor_seats'][0]['managed'] is False
+    assert observation['executor_seats'][0]['seat_id']=='worker-explicit'
+    assert observation['provider_maximums']['a']=={}
+
+
+@pytest.mark.parametrize('change', [
+    {'load_ratio':.81}, {'memory_headroom_ratio':.19},
+    {'disk_headroom_ratio':.09}, {'complete':False},
+])
+def test_operator_host_headroom_thresholds_fail_closed(change):
+    observation={'complete':True,'load_ratio':.5,'memory_headroom_ratio':.5,
+                 'disk_headroom_ratio':.5}
+    thresholds={'max_load_ratio':.8,'min_memory_headroom_ratio':.2,
+                'min_disk_headroom_ratio':.1}
+    assert butler.host_meets_headroom(observation,thresholds) is True
+    observation.update(change)
+    assert butler.host_meets_headroom(observation,thresholds) is False
 
 
 def test_executor_snapshot_returns_copies(tmp_path):
