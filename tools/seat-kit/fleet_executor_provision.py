@@ -90,7 +90,7 @@ def _validate_executor_python(path: Path) -> None:
         raise ProvisionError("executor_runtime_untrusted")
     try:
         probe = subprocess.run(
-            [str(path), "-I", "-c", "import cryptography"],
+            [str(path), "-I", "-c", "import cryptography; import mcp"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

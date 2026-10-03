@@ -172,7 +172,12 @@ def test_venv_python_symlink_is_validated_but_preserved_in_staged_plist(
     )
     assert staged["ProgramArguments"][0] == str(venv_python)
     probe = subprocess.run(
-        [staged["ProgramArguments"][0], "-I", "-c", "import cryptography"],
+        [
+            staged["ProgramArguments"][0],
+            "-I",
+            "-c",
+            "import cryptography; import mcp",
+        ],
         check=False,
     )
     assert probe.returncode == 0
