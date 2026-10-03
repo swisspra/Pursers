@@ -4,6 +4,7 @@ import importlib.util
 import json
 import plistlib
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -148,6 +149,33 @@ def test_plan_confirm_stages_owner_only_runtime_without_launchctl(tmp_path: Path
     }
     assert "synthetic" not in json.dumps(environment)
     assert (butler_plist.with_suffix(".plist.before-fleet")).exists()
+
+
+def test_venv_python_symlink_is_validated_but_preserved_in_staged_plist(
+    tmp_path: Path,
+) -> None:
+    specification = provision_spec(tmp_path)
+    venv_python = tmp_path / "executor-venv/bin/python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(Path(sys.executable))
+    specification["executor"]["python"] = str(venv_python)
+    spec_path = tmp_path / "spec.json"
+    plan_path = tmp_path / "plan.json"
+    spec_path.write_text(json.dumps(specification), encoding="utf-8")
+
+    plan = provision.create_plan(spec_path, plan_path)
+    assert plan["spec"]["executor"]["python"] == str(venv_python)
+    provision.confirm_plan(plan_path, plan["confirmation"])
+
+    staged = plistlib.loads(
+        Path(specification["executor"]["launch_agent_path"]).read_bytes()
+    )
+    assert staged["ProgramArguments"][0] == str(venv_python)
+    probe = subprocess.run(
+        [staged["ProgramArguments"][0], "-I", "-c", "import cryptography"],
+        check=False,
+    )
+    assert probe.returncode == 0
 
 
 def test_plan_accepts_operator_cap_fifteen_and_rejects_above_product_bound(

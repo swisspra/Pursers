@@ -15,6 +15,7 @@ import json
 import os
 import plistlib
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -65,11 +66,41 @@ def _absolute(value: Any, field: str, *, allow_symlink: bool = False) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         raise ProvisionError(f"{field}_invalid")
-    if not allow_symlink and any(
-        candidate.is_symlink() for candidate in (path, *path.parents)
-    ):
+    if allow_symlink:
+        # Preserve the lexical invocation path (for example venv/bin/python or
+        # a package-manager prefix) while callers separately validate its
+        # resolved executable target.
+        return Path(os.path.abspath(path))
+    if any(candidate.is_symlink() for candidate in (path, *path.parents)):
         raise ProvisionError(f"{field}_invalid")
     return path.resolve(strict=False)
+
+
+def _validate_executor_python(path: Path) -> None:
+    try:
+        target = path.resolve(strict=True)
+        info = target.stat()
+    except OSError as exc:
+        raise ProvisionError("executor_runtime_unavailable") from exc
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_mode & 0o022
+        or not os.access(path, os.X_OK)
+    ):
+        raise ProvisionError("executor_runtime_untrusted")
+    try:
+        probe = subprocess.run(
+            [str(path), "-I", "-c", "import cryptography"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProvisionError("executor_runtime_unavailable") from exc
+    if probe.returncode != 0:
+        raise ProvisionError("executor_runtime_dependencies_unavailable")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -121,7 +152,8 @@ def _validate_spec(value: Mapping[str, Any]) -> dict[str, Any]:
         if "local_config" in butler
         else None
     )
-    if not python.is_file() or not repository.is_dir():
+    _validate_executor_python(python)
+    if not repository.is_dir():
         raise ProvisionError("executor_runtime_unavailable")
     source = repository / "tools/seat-kit/fleet_executor.py"
     if not source.is_file() or source.resolve() != MODULE_PATH.resolve():
