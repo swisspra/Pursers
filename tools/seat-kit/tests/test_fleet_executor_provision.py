@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -49,6 +50,38 @@ def _faithful_runtime_venv(runtime_root: Path) -> Path:
         "".join(f"{root}\n" for root in sorted(dependency_roots)),
         encoding="utf-8",
     )
+    return runtime
+
+
+def _runtime_paths(runtime: Path) -> dict[str, str]:
+    return json.loads(
+        subprocess.check_output(
+            [
+                runtime,
+                "-I",
+                "-c",
+                "import json, sys, sysconfig; print(json.dumps({"
+                "'base_executable': sys._base_executable, "
+                "'stdlib': sysconfig.get_path('stdlib'), "
+                "'version': f'{sys.version_info.major}.{sys.version_info.minor}'}))",
+            ],
+            text=True,
+        )
+    )
+
+
+def _private_python_install(source_python: Path, runtime_root: Path) -> Path:
+    metadata = _runtime_paths(source_python)
+    binary = runtime_root / "bin" / f"python{metadata['version']}"
+    binary.parent.mkdir(parents=True)
+    shutil.copy2(Path(metadata["base_executable"]).resolve(), binary)
+    binary.chmod(0o700)
+    (runtime_root / "lib").symlink_to(
+        Path(metadata["stdlib"]).parent,
+        target_is_directory=True,
+    )
+    runtime = binary.with_name("python")
+    runtime.symlink_to(binary.name)
     return runtime
 
 
@@ -189,34 +222,45 @@ def test_venv_python_symlink_is_validated_but_preserved_in_staged_plist(
 ) -> None:
     specification = provision_spec(tmp_path)
     trusted_runtime = Path(specification["executor"]["python"])
-    base_venv = tmp_path / "base-venv"
+    base_python = _private_python_install(
+        trusted_runtime,
+        tmp_path / "private-python",
+    )
+    assert base_python.resolve().is_relative_to(tmp_path)
+    assert not base_python.resolve().stat().st_mode & 0o022
+
+    executor_venv = tmp_path / "executor-venv"
     subprocess.run(
-        [trusted_runtime, "-m", "venv", "--without-pip", str(base_venv)],
+        [
+            base_python,
+            "-m",
+            "venv",
+            "--without-pip",
+            str(executor_venv),
+        ],
         check=True,
     )
-    base_python = base_venv / "bin/python"
+    venv_python = executor_venv / "bin/python"
+    venv_python.unlink()
+    venv_python.symlink_to(base_python)
+    assert venv_python.is_symlink()
+    assert venv_python.resolve() == base_python.resolve()
     missing = subprocess.run(
-        [base_python, "-I", "-c", "import cryptography; import mcp"],
+        [venv_python, "-I", "-c", "import cryptography; import mcp"],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     assert missing.returncode != 0
-
-    executor_venv = tmp_path / "executor-venv"
-    subprocess.run(
-        [base_python, "-m", "venv", "--without-pip", str(executor_venv)],
-        check=True,
+    purelib = Path(
+        subprocess.check_output(
+            [venv_python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            text=True,
+        ).strip()
     )
-    venv_python = executor_venv / "bin/python"
-    purelib = subprocess.run(
-        [venv_python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    assert purelib.is_relative_to(executor_venv)
     for dependency in ("cryptography", "mcp"):
-        package = Path(purelib) / dependency
+        package = purelib / dependency
         package.mkdir()
         (package / "__init__.py").write_text("# offline probe fixture\n", encoding="utf-8")
     specification["executor"]["python"] = str(venv_python)
@@ -247,7 +291,9 @@ def test_venv_python_symlink_is_validated_but_preserved_in_staged_plist(
 def test_plan_rejects_group_writable_executor_runtime(tmp_path: Path) -> None:
     specification = provision_spec(tmp_path)
     runtime = Path(specification["executor"]["python"])
+    assert runtime.resolve().is_relative_to(tmp_path)
     runtime.chmod(0o720)
+    assert runtime.stat().st_mode & stat.S_IWGRP
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(specification), encoding="utf-8")
 
