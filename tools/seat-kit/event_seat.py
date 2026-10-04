@@ -16,11 +16,20 @@ import subprocess
 import sys
 import time
 
+import anyio
+import httpx2
+
 HELPERS = runpy.run_path(str(Path(__file__).resolve().parents[1]/'ado-connector/git_credential.py'))
 PUBLISH = runpy.run_path(str(Path(__file__).resolve().parents[1]/'board-butler/fleet_observation.py'))['publish']
 SAFE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$')
 PRESENCE_INTERVAL_S = 120
 PROCESS_STOP_GRACE_S = 5
+TRANSPORT_RECOVERY_ATTEMPTS = 4
+TRANSPORT_RECOVERY_BASE_DELAY_S = 5
+
+
+class TransportRecoveryExhausted(RuntimeError):
+    """A bounded transport recovery window ended without reconnecting."""
 
 
 def validate_config(config):
@@ -92,22 +101,55 @@ def validate_registry_roots(registry, repository_root):
             raise ValueError('repository_root excludes an active registry project clone')
 
 
-def transient_wait_failure(exc):
-    """Only retry transport failures; never repeat a model execution here."""
-    if isinstance(exc, (ConnectionError, TimeoutError, subprocess.TimeoutExpired)):
-        return True
-    message = str(exc).lower()
-    if isinstance(exc, subprocess.CalledProcessError):
-        message = str(exc.stderr or "").lower() + " " + str(exc.stdout or "").lower()
+def exception_leaves(exc):
+    """Flatten groups and wrapper causes so mixed failures cannot look transient."""
+    pending=[exc]
+    leaves=[]
+    seen=set()
+    while pending:
+        current=pending.pop()
+        if id(current) in seen: continue
+        seen.add(id(current))
+        nested=[]
+        if isinstance(current,BaseExceptionGroup): nested.extend(current.exceptions)
+        # Follow only explicit chaining. Implicit ``__context__`` can be the
+        # model wait timeout whose handler happened to call a failing refresh;
+        # treating that unrelated context as the refresh cause retries invalid
+        # data and authorization failures.
+        if current.__cause__ is not None: nested.append(current.__cause__)
+        if nested: pending.extend(nested)
+        else: leaves.append(current)
+    return leaves
+
+
+def exception_classes(exc):
+    return sorted({type(item).__name__ for item in exception_leaves(exc)})
+
+
+def _subprocess_transport_failure(exc):
+    """Classify the board CLI boundary without treating arbitrary stderr as retryable."""
+    message=(str(exc.stderr or "")+" "+str(exc.stdout or "")).casefold()
     if any(text in message for text in (
         "unauthorized", "forbidden", "authentication", "permission denied", "401", "403",
-    )):
-        return False
+    )): return False
     return any(text in message for text in (
         "connection refused", "all connection attempts failed", "connection reset",
         "server disconnected", "connection closed", "stream closed", "read timed out",
         "connect timeout", "502 bad gateway", "503 service unavailable", "504 gateway timeout",
     ))
+
+
+def transient_wait_failure(exc):
+    """Retry only when every nested leaf is a recognized transport failure."""
+    leaves=exception_leaves(exc)
+    retryable=(ConnectionError,TimeoutError,subprocess.TimeoutExpired,httpx2.TransportError,
+               anyio.BrokenResourceError,anyio.ClosedResourceError,anyio.EndOfStream)
+    return bool(leaves) and all(
+        isinstance(item,retryable)
+        or (isinstance(item,subprocess.CalledProcessError)
+            and _subprocess_transport_failure(item))
+        for item in leaves
+    )
 
 
 class EventSeatRunner:
@@ -119,6 +161,39 @@ class EventSeatRunner:
         self.run_command=self._run
         self.monotonic=time.monotonic
         self.preflight_enabled=False
+
+    def record_transport_recovery(self, phase, status, attempts, exc, action):
+        self.state['last_transport_failure']={
+            'phase':phase,'status':status,'attempts':attempts,
+            'reason_code':('transport_recovered' if status=='recovered'
+                           else 'transport_recovery_exhausted' if status=='exhausted'
+                           else 'transient_transport_failure'),
+            'error_classes':exception_classes(exc),'action':action,'at':time.time(),
+        }
+        PUBLISH(self.path,self.state)
+
+    async def recover_transport(self, phase, operation, exhausted_action):
+        last=None
+        for attempt in range(1,TRANSPORT_RECOVERY_ATTEMPTS+1):
+            try:
+                result=await operation()
+            except Exception as exc:
+                if not transient_wait_failure(exc): raise
+                last=exc
+                if attempt==TRANSPORT_RECOVERY_ATTEMPTS:
+                    self.record_transport_recovery(
+                        phase,'exhausted',attempt,exc,exhausted_action)
+                    raise TransportRecoveryExhausted(
+                        f'{phase} transport recovery exhausted after {attempt} attempts') from exc
+                self.record_transport_recovery(
+                    phase,'retrying',attempt,exc,'retry_with_preserved_state')
+                await asyncio.sleep(TRANSPORT_RECOVERY_BASE_DELAY_S*2**(attempt-1))
+                continue
+            if last is not None:
+                self.record_transport_recovery(
+                    phase,'recovered',attempt-1,last,'resume_with_preserved_state')
+            return result
+        raise AssertionError('unreachable transport recovery')
 
     async def event_authorized(self, event, now):
         """Refetch one event target and reject stale/foreign work before model launch."""
@@ -185,7 +260,9 @@ class EventSeatRunner:
         # Validate and refresh every selected membership immediately before the
         # paid turn. This also makes a long turn visible without another model
         # call and fails closed before launch when registry readiness is broken.
-        asyncio.run(self.refresh_presence())
+        asyncio.run(self.recover_transport(
+            'presence_prelaunch',self.refresh_presence,
+            'model_not_started; retry the preserved event after transport recovery'))
         process=subprocess.Popen(argv,env=self.environment(),cwd=self.config['seat_dir'],
             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         started=self.monotonic()
@@ -202,7 +279,9 @@ class EventSeatRunner:
                     now=self.monotonic()
                     if now-started >= timeout:
                         raise subprocess.TimeoutExpired(argv,timeout)
-                    asyncio.run(self.refresh_presence())
+                    asyncio.run(self.recover_transport(
+                        'presence_active_model',self.refresh_presence,
+                        'stop_model_after_grace; preserve ticket lease and partial work'))
                     next_presence=self.monotonic()+PRESENCE_INTERVAL_S
                     continue
                 if code:
@@ -265,7 +344,9 @@ class EventSeatRunner:
         while pending:
             event=pending[0]
             if self.preflight_enabled and not event.get('recovery_key'):
-                authorized, reason = asyncio.run(self.event_authorized(event, time.time()))
+                authorized, reason = asyncio.run(self.recover_transport(
+                    'event_preflight',lambda:self.event_authorized(event,time.time()),
+                    'keep_event_pending; do_not_launch_model'))
                 if not authorized:
                     pending.pop(0)
                     self.state['seen']=(self.state['seen']+[event['marker']])[-200:]
@@ -425,18 +506,13 @@ class EventSeatRunner:
         PUBLISH(self.path,self.state)
 
     def run(self):
-        failures=0
         while True:
-            try:
-                asyncio.run(self.bootstrap())
-                asyncio.run(self.reconcile_owned())
-            except Exception as exc:
-                if not transient_wait_failure(exc): raise
-                failures+=1
-                delay=min(60,5*2**min(failures-1,4))
-                print(f"event-seat: transport unavailable; reconnect in {delay}s",file=sys.stderr)
-                time.sleep(delay)
-                continue
+            asyncio.run(self.recover_transport(
+                'bootstrap',self.bootstrap,
+                'exit_with_saved_positive_cursors; operator checks Central transport'))
+            asyncio.run(self.recover_transport(
+                'owned_reconcile',self.reconcile_owned,
+                'exit_with_owned_lease_state preserved; operator checks Central transport'))
             if self.state['pending']:
                 delay=self.process({'new_seq':self.state['cursor'],'events':[]},time.time())
                 if delay is not None and delay>0:
@@ -445,17 +521,30 @@ class EventSeatRunner:
             command=[self.config['board_script'],'wait','--since',json.dumps(self.state['cursor']),
                      '--timeout','270','--boards',','.join(self.active_boards)]
             if self.config['role']=='reviewer':command.insert(2,'--submitted')
-            try:
-                result=subprocess.run(command,env=self.environment(),cwd=self.config['seat_dir'],
-                                      capture_output=True,text=True,check=True,timeout=300)
-            except (subprocess.CalledProcessError,subprocess.TimeoutExpired) as exc:
-                if not transient_wait_failure(exc): raise
-                failures+=1
-                delay=min(60,5*2**min(failures-1,4))
-                print(f"event-seat: transport unavailable; reconnect in {delay}s",file=sys.stderr)
-                time.sleep(delay)
-                continue
-            failures=0
+            last=None
+            for attempt in range(1,TRANSPORT_RECOVERY_ATTEMPTS+1):
+                try:
+                    result=subprocess.run(command,env=self.environment(),cwd=self.config['seat_dir'],
+                                          capture_output=True,text=True,check=True,timeout=300)
+                except (subprocess.CalledProcessError,subprocess.TimeoutExpired) as exc:
+                    if not transient_wait_failure(exc): raise
+                    last=exc
+                    if attempt==TRANSPORT_RECOVERY_ATTEMPTS:
+                        self.record_transport_recovery(
+                            'wait','exhausted',attempt,exc,
+                            'exit_with_saved_positive_cursors; do_not_reset_or_replay_model')
+                        raise TransportRecoveryExhausted(
+                            f'wait transport recovery exhausted after {attempt} attempts') from exc
+                    delay=TRANSPORT_RECOVERY_BASE_DELAY_S*2**(attempt-1)
+                    self.record_transport_recovery(
+                        'wait','retrying',attempt,exc,'retry_from_saved_positive_cursors')
+                    print(f"event-seat: transport unavailable; reconnect in {delay}s",file=sys.stderr)
+                    time.sleep(delay)
+                    continue
+                break
+            if last is not None:
+                self.record_transport_recovery(
+                    'wait','recovered',attempt-1,last,'resume_from_returned_cursor')
             self.process(json.loads(result.stdout),time.time())
 
 
