@@ -25,3 +25,9 @@ module must not delegate to a route renderer on `globalThis` or in `app.js`.
 
 Assets use fixed same-origin URLs with strong ETags and mandatory revalidation, so
 source checkouts cannot serve stale UI bytes after an update.
+
+The compact navigation uses the supplied horizontal Pursers wordmark at
+`assets/brand/pursers-wordmark.png`. It is an opaque-white PNG, so the shell keeps
+an explicit white frame in both themes instead of recoloring the artwork. See the
+[brand asset record](../../../docs/media/brand/README.md) for provenance, intended
+placements, and the byte-preserving update procedure.

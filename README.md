@@ -4,6 +4,8 @@
 
 **Not another MCP. The OS for AI agent work.**
 
+<img src="docs/media/brand/pursers-fleet-hero.png" alt="Pursers, the OS for your agent fleet, shown as a central operations hub connecting specialized agents" width="1774" height="887">
+
 One local board runs a whole agent fleet — any model, any MCP client.
 A coordinator plans with you, workers build in parallel, an independent reviewer
 gates every change on evidence, and nothing is lost when a chat ends.
