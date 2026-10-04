@@ -7994,6 +7994,62 @@ class SeatConfigManager:
         return DesiredSeat.from_dict(value)
 
     @staticmethod
+    def _seat_revision(value: Mapping[str, Any]) -> str:
+        fields = DesiredSeat.__dataclass_fields__
+        selected = {key: value.get(key) for key in fields if key in value}
+        return hashlib.sha256(
+            json.dumps(selected, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _desired_plan_request(
+        self, value: Any
+    ) -> tuple[DesiredSeat, str | None, dict[str, str]]:
+        if not isinstance(value, dict):
+            raise ValueError("seat must be an object")
+        allowed = set(DesiredSeat.__dataclass_fields__) | {"expected_revision"}
+        unknown = set(value) - allowed
+        if unknown:
+            raise ValueError(f"unknown seat fields: {', '.join(sorted(unknown))}")
+        name = value.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("seat name is required")
+        current = next(
+            (
+                row
+                for row in self.inventory.load()["seats"]
+                if row.get("name") == name
+            ),
+            None,
+        )
+        request = {
+            key: item for key, item in value.items() if key != "expected_revision"
+        }
+        if current is None:
+            if value.get("expected_revision") not in (None, ""):
+                raise RuntimeError("seat revision conflict; refresh before planning")
+            return self._desired(request), None, {
+                key: "request" for key in request
+            }
+        current_revision = self._seat_revision(current)
+        expected_revision = value.get("expected_revision")
+        if expected_revision is not None and (
+            not isinstance(expected_revision, str)
+            or not hmac.compare_digest(expected_revision, current_revision)
+        ):
+            raise RuntimeError("seat revision conflict; refresh before planning")
+        merged = {
+            key: current[key]
+            for key in DesiredSeat.__dataclass_fields__
+            if key in current
+        }
+        merged.update(request)
+        provenance = {
+            key: "request" if key in request else "preserved"
+            for key in merged
+        }
+        return self._desired(merged), current_revision, provenance
+
+    @staticmethod
     def _report(rows: list[Any]) -> dict[str, Any]:
         order = {"PASS": 0, "WARN": 1, "FAIL": 2}
         checks = [
@@ -8386,6 +8442,7 @@ class SeatConfigManager:
                     .is_file(),
                     "ca_file_exists": Path(desired.ca_file).expanduser().is_file(),
                     "doctor_summary": self._doctor_summary(checks),
+                    "config_revision": self._seat_revision(record),
                 }
             )
         discovered = []
@@ -8394,6 +8451,33 @@ class SeatConfigManager:
                 discovered.append({"host": host, "config_path": str(path)})
         return {
             "schema_version": 1,
+            "revision": hashlib.sha256(
+                json.dumps(
+                    [
+                        {"name": row.get("name"), "revision": self._seat_revision(row)}
+                        for row in sorted(
+                            document["seats"],
+                            key=lambda item: str(item.get("name", "")),
+                        )
+                    ],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "contract": {
+                "schema_version": 1,
+                "apply_mode": "restart-required",
+                "partial_update": "merge-authoritative",
+                "cas_field": "expected_revision",
+                "advanced_fields": [
+                    "registry_board",
+                    "token_env_var",
+                    "personal_command",
+                    "bridge_name",
+                    "board_connector_name",
+                ],
+                "secret_values_returned": False,
+            },
             "seats": rows,
             "discovered_configs": discovered,
             "import_review": self.import_review(),
@@ -8626,7 +8710,7 @@ class SeatConfigManager:
                 )
 
     def plan(self, payload: Any) -> dict[str, Any]:
-        desired = self._desired(payload)
+        desired, source_revision, provenance = self._desired_plan_request(payload)
         changes = list(adapter_for(desired).plan(desired))
         plan_id = uuid.uuid4().hex
         digest, observed_digest = self._seat_plan_digests(desired, changes)
@@ -8649,6 +8733,7 @@ class SeatConfigManager:
                 "changes": changes,
                 "digest": digest,
                 "expires_at": time.monotonic() + CONFIG_SEAT_PLAN_TTL_SECONDS,
+                "source_revision": source_revision,
             }
         self._journal("plan", seat=desired.name, changes=len(changes))
         return {
@@ -8660,6 +8745,10 @@ class SeatConfigManager:
             "expires_at": expires_at.isoformat(),
             "expires_in_s": CONFIG_SEAT_PLAN_TTL_SECONDS,
             "seat": desired.name,
+            "source_revision": source_revision,
+            "effective_config": asdict(desired),
+            "provenance": provenance,
+            "apply_mode": "restart-required",
             "token_file_exists": Path(desired.token_file).expanduser().is_file(),
             "ca_file_exists": Path(desired.ca_file).expanduser().is_file(),
             "bundle": bundle,
@@ -8697,9 +8786,20 @@ class SeatConfigManager:
             raise ValueError("seat plan digest mismatch")
         if pending["expires_at"] <= time.monotonic():
             raise RuntimeError("seat plan expired; generate a new plan")
+        current = next(
+            (
+                row
+                for row in self.inventory.load()["seats"]
+                if row.get("name") == desired.name
+            ),
+            None,
+        )
+        current_revision = self._seat_revision(current) if current is not None else None
+        if current_revision != pending["source_revision"]:
+            raise RuntimeError("seat revision conflict; generate a new plan")
         self._assert_seat_plan_state(changes)
         result = adapter_for(desired).apply(changes)
-        self.inventory.upsert(
+        record = self.inventory.upsert(
             desired, bridge_version=self.bridge_installer.version, doctor=None
         )
         backups = list(result.backups)
@@ -8718,6 +8818,12 @@ class SeatConfigManager:
                 "required": True,
                 "seat": desired.name,
                 "checks": seat_setup_bundle(desired, [])["doctor_checks"],
+            },
+            "readback": {
+                "config_revision": self._seat_revision(record),
+                "effective_config": asdict(desired),
+                "host_restarted": False,
+                "central_observed": False,
             },
         }
 

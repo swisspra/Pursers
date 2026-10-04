@@ -15,6 +15,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Preserve advanced managed-seat scope, credential-reference, Personal command,
+  and connector names during partial dashboard edits. Seat plans now expose a
+  stable typed contract, revision-bound provenance, restart semantics, and
+  effective-state read-back while rejecting stale or unknown fields.
 - Recover a verified crashed managed seat as a new executor incarnation without
   replaying an old successful start. Duplicate observations use a generation and
   process-reference CAS; live leases and unverified identities fail closed. A
