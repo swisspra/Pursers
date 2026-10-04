@@ -58,8 +58,9 @@ def ticket_holds_seat(ticket, agent):
 
 
 class LocalFleetObserver:
-    def __init__(self, templates, services, stored, bindings):
+    def __init__(self, templates, services, stored, bindings, recover=None):
         self.templates, self.services, self.stored, self.bindings = templates, services, stored, bindings
+        self.recover = recover
 
     def collect(self, active_boards, snapshots, memberships, now, providers, host):
         expiry = (now + timedelta(seconds=120)).isoformat()
@@ -134,18 +135,48 @@ class LocalFleetObserver:
             if known:
                 for board in active_boards:
                     leases['boards'][board]['seats'][seat_id] = {'stale_after': expiry, 'work': busy, 'review': busy}
+            reason_code = None
+            prior_active = previous.get('lifecycle') in {'starting', 'ready', 'busy', 'draining', 'unhealthy'}
+            if (
+                self.recover is not None
+                and known
+                and not busy
+                and not service.running
+                and service.identity_verified
+                and prior_active
+                and isinstance(previous.get('generation'), int)
+                and isinstance(previous.get('process_ref'), str)
+                and previous.get('process_ref')
+            ):
+                recovered = self.recover(
+                    seat_id,
+                    expected_generation=previous['generation'],
+                    expected_process_ref=previous['process_ref'],
+                    now=now.timestamp(),
+                )
+                if recovered is not None:
+                    previous = recovered
+                    reason_code = 'unexpected_process_loss_reconciled'
             lifecycle = ('ready' if service.ready else 'starting') if service.running else 'stopped'
             if service.running and previous.get('lifecycle') == 'draining': lifecycle = 'draining'
             if busy and lifecycle == 'ready': lifecycle = 'busy'
-            if ((service.exists and not service.identity_verified) or not known
+            if not service.running and prior_active and busy:
+                lifecycle = 'unhealthy'
+                reason_code = 'unexpected_process_loss_live_lease'
+            if ((prior_active and not service.identity_verified) or not known
                     or not binding or not binding_valid or board_id not in active_boards): lifecycle = 'unhealthy'
+            if prior_active and not service.identity_verified:
+                reason_code = 'service_identity_unverified'
             if board_id not in active_boards:
                 raise ValueError('template binding targets an inactive board')
-            seats.append({'seat_id': seat_id, 'board_id': board_id, 'role': template.role, 'provider': provider,
+            row = {'seat_id': seat_id, 'board_id': board_id, 'role': template.role, 'provider': provider,
                 'template_id': template_id, 'template_digest_sha256': template.digest_sha256,
                 'generation': previous.get('generation', 1), 'lifecycle': lifecycle,
                 'transition_at': datetime.fromtimestamp(previous.get('last_mutation', now.timestamp()), timezone.utc).isoformat(),
-                'managed': enabled if binding_valid else False})
+                'managed': enabled if binding_valid else False}
+            if reason_code is not None:
+                row['reason_code'] = reason_code
+            seats.append(row)
             health[board_id][provider] = providers.get(provider, {'status': 'unknown', 'latency_ms': 0})
             if enabled and binding_valid:
                 limits[board_id][provider] = limits[board_id].get(provider, 0) + 1

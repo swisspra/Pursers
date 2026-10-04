@@ -311,6 +311,42 @@ def test_start_creates_ready_seat_and_publishes_bounded_receipt(runtime: dict[st
     ).validate(result)
 
 
+def test_explicit_adoption_of_verified_external_restart_is_lease_safe(runtime: dict[str, Any]) -> None:
+    runtime["service"].handle(signed_request(runtime, "start", "op-start-before-adopt"))
+    runtime["adapter"].observations["worker-a"] = executor.ServiceObservation(
+        True, True, True, True, "fake:worker-a:external")
+
+    adopted = runtime["service"].handle(
+        signed_request(runtime, "adopt", "op-adopt", generation=1))
+
+    assert adopted["outcome"] == "succeeded"
+    assert adopted["committed"] is True
+    assert runtime["service"].store.seat("worker-a")["generation"] == 2
+    assert runtime["service"].store.seat("worker-a")["process_ref"] == "fake:worker-a:external"
+    replay = runtime["service"].handle(
+        signed_request(runtime, "adopt", "op-adopt", generation=1))
+    assert replay["replayed"] is True
+
+
+@pytest.mark.parametrize("verified,live,reason", [
+    (False, False, "process_adoption_unverified"),
+    (True, True, "live_lease"),
+])
+def test_external_restart_adoption_fails_closed(runtime: dict[str, Any], verified: bool,
+                                                live: bool, reason: str) -> None:
+    runtime["service"].handle(signed_request(runtime, "start", "op-start-adopt-guard"))
+    runtime["adapter"].observations["worker-a"] = executor.ServiceObservation(
+        True, True, True, verified, "fake:worker-a:external")
+    runtime["leases"].observation = executor.LeaseObservation(True, live_work=live)
+
+    result = runtime["service"].handle(
+        signed_request(runtime, "adopt", f"op-adopt-{reason}", generation=1))
+
+    assert result["outcome"] == "rejected"
+    assert result["reason_code"] == reason
+    assert runtime["service"].store.seat("worker-a")["generation"] == 1
+
+
 def test_canonical_supervisor_roster_authorizes_only_matching_mutation(
     runtime: dict[str, Any],
 ) -> None:

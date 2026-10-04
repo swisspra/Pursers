@@ -185,6 +185,38 @@ def test_model_crash_stops_presence_loop(tmp_path,monkeypatch):
     assert refreshes==['refresh']
 
 
+def test_model_timeout_is_durable_and_driver_can_continue(tmp_path):
+    module=api();cfg=config(tmp_path);cfg['max_runs_per_hour']=None
+    runner=module['EventSeatRunner'](cfg)
+    runner.run_command=lambda *_a,**_k: (_ for _ in ()).throw(
+        module['subprocess'].TimeoutExpired(['model'],240))
+    runner.process({'new_seq':{'home':42},'events':[{
+        'kind':'ticket_offered','board_id':'home','ticket_id':'TK-one','id':'one'}]},100)
+    assert runner.state['pending']==[]
+    assert runner.state['last_turn']['outcome']=='interrupted'
+    assert runner.state['last_turn']['exit_cause']=='model_timeout'
+    resumed=module['EventSeatRunner'](cfg)
+    calls=[];resumed.run_command=lambda *args,**kwargs:calls.append(args)
+    resumed.process({'new_seq':{'home':43},'events':[{
+        'kind':'ticket_offered','board_id':'home','ticket_id':'TK-two','id':'two'}]},101)
+    assert len(calls)==1
+
+
+def test_stale_event_preflight_skips_model_and_preserves_cursor(tmp_path):
+    import asyncio
+    cfg=config(tmp_path);cfg['max_runs_per_hour']=None
+    runner=api()['EventSeatRunner'](cfg);runner.active_boards=['home']
+    runner.preflight_enabled=True
+    async def stale(event, now): return False, 'stale_or_foreign_event'
+    runner.event_authorized=stale
+    runner.run_command=lambda *_a,**_k:pytest.fail('stale event must not launch model')
+    runner.process({'new_seq':{'home':42},'events':[{
+        'kind':'ticket_offered','board_id':'home','ticket_id':'TK-closed','id':'old'}]},100)
+    assert runner.state['cursor']=={'home':42}
+    assert runner.state['pending']==[]
+    assert runner.state['last_skip']['reason']=='stale_or_foreign_event'
+
+
 @pytest.mark.parametrize('role',["worker","reviewer"])
 def test_presence_refresh_preserves_role_capabilities_on_every_board(tmp_path,monkeypatch,role):
     import asyncio

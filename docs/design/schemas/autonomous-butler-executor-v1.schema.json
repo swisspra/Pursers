@@ -32,7 +32,7 @@
         "message_type": {"const": "request"},
         "operation_id": {"$ref": "#/$defs/id"},
         "board_id": {"$ref": "#/$defs/id"},
-        "action": {"enum": ["inspect", "start", "drain", "stop", "re_role"]},
+        "action": {"enum": ["inspect", "start", "drain", "stop", "re_role", "adopt"]},
         "seat_id": {"$ref": "#/$defs/id"},
         "template_id": {"$ref": "#/$defs/id"},
         "template_digest_sha256": {"$ref": "#/$defs/sha256"},
