@@ -92,6 +92,38 @@ def test_event_environment_preserves_configured_identity_capabilities(tmp_path,m
     assert reviewer['PURSERS_CAN_REVIEW']=='true'
 
 
+def test_drain_marker_disables_admission_but_preserves_owned_lease(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    cfg=codex_config(tmp_path)
+    cfg['state_file']=str(tmp_path/'runtime'/'seats'/'worker-a.json')
+    runner=api()['EventSeatRunner'](cfg)
+    marker=runner.drain_path();marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({'schema':'pursers_seat_drain_v1','seat_id':'worker-a'}))
+    marker.chmod(0o600)
+    assert runner.environment()['PURSERS_CAN_WORK']=='false'
+    identity=SimpleNamespace(agent_name='worker-a',role='worker',agent_id='AI-exact',
+        principal_id='PR-exact')
+
+    class Client:
+        def __init__(self,ticket):self.identity=identity;self.ticket=ticket
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+        async def ticket_get(self,*args,**kwargs):return {'ticket':self.ticket}
+
+    owned={'ticket_id':'TK-owned','status':'claimed','claimed_by_agent_id':'AI-exact',
+        'claimed_by_principal_id':'PR-exact','lease_expires_at_epoch':200,
+        'claimed_at':'2030-01-01T00:00:00+00:00'}
+    runner.client=lambda _board:Client(owned)
+    assert asyncio.run(runner.event_authorized({'board':'home','ticket':'TK-owned'},100)) == (
+        True,'owned_lease')
+    offered={'ticket_id':'TK-new','status':'open','work_offer':{'kind':'work',
+        'agent_id':'AI-exact','agent_name':'worker-a','expires_at_epoch':200}}
+    runner.client=lambda _board:Client(offered)
+    assert asyncio.run(runner.event_authorized({'board':'home','ticket':'TK-new'},100)) == (
+        False,'seat_draining')
+
+
 def test_long_turn_refreshes_three_boards_and_stops_after_clean_exit(tmp_path,monkeypatch):
     module=api();runner=module['EventSeatRunner'](codex_config(tmp_path))
     runner.active_boards=['home','project-a','project-b']

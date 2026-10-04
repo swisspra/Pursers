@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import runpy
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -41,6 +42,8 @@ def validate_config(config):
     path_keys.update(('goose', 'mcp') if client == 'goose' else ('codex',))
     if config.get('last_message_file') is not None:
         path_keys.add('last_message_file')
+    if config.get('drain_file') is not None:
+        path_keys.add('drain_file')
     for key in path_keys:
         if not Path(config[key]).is_absolute(): raise ValueError('runtime paths must be absolute')
     profile = config.get('codex_profile')
@@ -120,6 +123,26 @@ class EventSeatRunner:
         self.monotonic=time.monotonic
         self.preflight_enabled=False
 
+    def drain_path(self):
+        configured=self.config.get('drain_file')
+        if configured is not None:return Path(configured)
+        return Path(self.config['state_file']).parent.parent/'drain'/f"{self.config['seat_id']}.json"
+
+    def drain_requested(self):
+        """Read the executor's owner-only cooperative drain marker."""
+        path=self.drain_path()
+        try:info=path.lstat()
+        except FileNotFoundError:return False
+        if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid()
+                or info.st_nlink!=1 or stat.S_IMODE(info.st_mode)!=0o600 or info.st_size>4096):
+            raise ValueError('event seat drain marker is untrusted')
+        try:document=json.loads(HELPERS['private_read'](path,4096))
+        except (OSError,UnicodeError,json.JSONDecodeError) as exc:
+            raise ValueError('event seat drain marker is invalid') from exc
+        if document!={'schema':'pursers_seat_drain_v1','seat_id':self.config['seat_id']}:
+            raise ValueError('event seat drain marker is invalid')
+        return True
+
     async def event_authorized(self, event, now):
         """Refetch one event target and reject stale/foreign work before model launch."""
         async with self.client(event['board']) as client:
@@ -130,6 +153,8 @@ class EventSeatRunner:
             ticket = (await client.ticket_get(event['ticket'], view='full'))['ticket']
             if self.owned_key(event['board'], ticket, identity, now) is not None:
                 return True, 'owned_lease'
+            if self.drain_requested():
+                return False, 'seat_draining'
             expected_kind = 'review' if self.config['role'] == 'reviewer' else 'work'
             eligible_status = ticket.get('status') in (
                 {'submitted'} if expected_kind == 'review' else {'open'})
@@ -152,12 +177,13 @@ class EventSeatRunner:
         c=self.config
         client=c.get('client', 'goose')
         host='codex' if client == 'codex' else 'goose'
+        draining=self.drain_requested()
         env={**os.environ,'PURSERS_WAIT_MODE':'push','PURSERS_BOARDS':'registry','PURSERS_PROJECT_BOARD':'',
              'PURSERS_MODEL':c['model'],'PURSERS_PROVIDER':c['provider'],'PURSERS_HOST':host,
              'PURSERS_TIER_MAX':str(c.get('tier_max',2)),
              'PURSERS_SKILLS':','.join(c['skills']),
-             'PURSERS_CAN_WORK':str(c['role']=='worker').lower(),
-             'PURSERS_CAN_REVIEW':str(c['role']=='reviewer').lower()}
+             'PURSERS_CAN_WORK':str(c['role']=='worker' and not draining).lower(),
+             'PURSERS_CAN_REVIEW':str(c['role']=='reviewer' and not draining).lower()}
         if client == 'goose':
             env.update(GOOSE_MODEL=c['model'], GOOSE_PROVIDER=c['provider'], GOOSE_MODE='auto')
             env.pop('GOOSE_THINKING_EFFORT',None)
@@ -332,8 +358,10 @@ class EventSeatRunner:
         token = HELPERS['private_read'](Path(c['token_file']),16384).strip()
         client=c.get('client', 'goose')
         host='codex' if client == 'codex' else 'goose'
+        draining=self.drain_requested()
         return BoardClient(c['central_url'],token,board,agent_name=c['seat_id'],role=c['role'],
-            capabilities={'can_work':c['role']=='worker','can_review':c['role']=='reviewer',
+            capabilities={'can_work':c['role']=='worker' and not draining,
+                          'can_review':c['role']=='reviewer' and not draining,
                           'tier_max':c.get('tier_max',2),'max_parallel':1,
                           'skills':c['skills'],'host':host,'model':c['model'],'provider':c['provider']},
             allow_takeover=True, renewal_source='keepalive', agent_platform=host)
@@ -441,6 +469,12 @@ class EventSeatRunner:
                 delay=self.process({'new_seq':self.state['cursor'],'events':[]},time.time())
                 if delay is not None and delay>0:
                     time.sleep(min(60,delay))
+                continue
+            if self.drain_requested():
+                # Keep memberships visibly non-admitting while an already-held
+                # lease finishes and the executor waits to perform the stop.
+                asyncio.run(self.refresh_presence())
+                time.sleep(30)
                 continue
             command=[self.config['board_script'],'wait','--since',json.dumps(self.state['cursor']),
                      '--timeout','270','--boards',','.join(self.active_boards)]

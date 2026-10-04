@@ -570,6 +570,7 @@ FLEET_LIFECYCLES = (
 )
 MAX_FLEET_OPERATION_HISTORY = 512
 MAX_FLEET_EXPLANATIONS = 300
+MAX_LEASE_RELEASE_RECOVERY_ATTEMPTS = 1
 
 
 @dataclass(frozen=True)
@@ -2556,7 +2557,18 @@ class FleetReconciler:
                 ).total_seconds()
                 < self.board_policies[operation.board_id].failure_backoff_s
             )
-            if attempts < self.max_operation_attempts and not backoff_active:
+            lease_release_recovery = (
+                operation.action == "stop"
+                and isinstance(prior_row, Mapping)
+                and prior_row.get("status") == "terminal"
+                and prior_row.get("outcome") == "rejected"
+                and prior_row.get("committed") is False
+                and prior_row.get("reason_code") == "live_lease"
+                and attempts >= self.max_operation_attempts
+                and int(prior_row.get("lease_release_retries", 0) or 0)
+                < MAX_LEASE_RELEASE_RECOVERY_ATTEMPTS
+            )
+            if (attempts < self.max_operation_attempts or lease_release_recovery) and not backoff_active:
                 filtered.append(operation)
         return tuple(filtered)
 
@@ -2646,6 +2658,19 @@ class FleetReconciler:
         operations = copy.deepcopy(dict(prior.get("operations", {})))
         for operation in plan.operations:
             row = dict(operations.get(operation.operation_id, {}))
+            attempts = int(row.get("attempts", 0) or 0)
+            lease_release_recovery = (
+                operation.action == "stop"
+                and row.get("status") == "terminal"
+                and row.get("outcome") == "rejected"
+                and row.get("committed") is False
+                and row.get("reason_code") == "live_lease"
+                and attempts >= self.max_operation_attempts
+            )
+            if lease_release_recovery:
+                row["lease_release_retries"] = (
+                    int(row.get("lease_release_retries", 0) or 0) + 1
+                )
             row.update(
                 {
                     "operation_id": operation.operation_id,
@@ -2670,7 +2695,7 @@ class FleetReconciler:
                         operation.target_template_digest_sha256
                     ),
                     "status": "pending",
-                    "attempts": int(row.get("attempts", 0) or 0),
+                    "attempts": attempts,
                 }
             )
             operations[operation.operation_id] = row
