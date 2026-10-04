@@ -58,7 +58,7 @@ class CatalogView:
 
     def list_agents(self, target: str) -> list[dict[str, Any]]:
         """Return metadata and availability only; never install or launch."""
-        if target not in PLATFORMS:
+        if not isinstance(target, str) or target not in PLATFORMS:
             raise CatalogError("platform_invalid")
         rows: list[dict[str, Any]] = []
         for agent in self.agents:
@@ -85,9 +85,9 @@ class CatalogView:
         distribution_kind: str | None = None,
     ) -> dict[str, Any]:
         """Resolve an exact pin to an argv preview. Nothing is executed."""
-        if not version or version in {"latest", "stable", "preview"}:
+        if not _is_exact_version(version):
             raise CatalogError("exact_version_required")
-        if target not in PLATFORMS:
+        if not isinstance(target, str) or target not in PLATFORMS:
             raise CatalogError("platform_invalid")
         matches = [agent for agent in self.agents if agent["id"] == agent_id]
         if not matches:
@@ -98,8 +98,8 @@ class CatalogView:
         available = _available_kinds(agent["distribution"], target)
         if not available:
             raise CatalogError("unsupported_platform_or_distribution")
-        kind = distribution_kind or available[0]
-        if kind not in available:
+        kind = available[0] if distribution_kind is None else distribution_kind
+        if not isinstance(kind, str) or kind not in available:
             raise CatalogError("distribution_unavailable")
         launch, source, integrity = _distribution_contract(
             kind, agent["distribution"][kind], target
@@ -135,6 +135,10 @@ def _registry_revision(document: Mapping[str, Any]) -> str:
 
 
 def platform_target(system: str | None = None, machine: str | None = None) -> str:
+    if system is not None and (not isinstance(system, str) or not system):
+        raise CatalogError("unsupported_host_platform")
+    if machine is not None and (not isinstance(machine, str) or not machine):
+        raise CatalogError("unsupported_host_platform")
     system_name = (system or host_platform.system()).lower()
     machine_name = (machine or host_platform.machine()).lower()
     os_name = {"darwin": "darwin", "linux": "linux", "windows": "windows"}.get(
@@ -190,9 +194,14 @@ def refresh_catalog(
     now: float | None = None,
 ) -> CatalogView:
     """Explicitly fetch, validate, then atomically replace the last-good cache."""
-    if timeout_s <= 0 or max_bytes <= 0 or max_bytes > MAX_REGISTRY_BYTES:
+    if not _positive_finite_number(timeout_s) or not _valid_max_bytes(max_bytes):
         raise CatalogError("refresh_limits_invalid")
+    if now is not None and not _finite_number(now):
+        raise CatalogError("refresh_time_invalid")
+    _https_url(url, "registry_url")
     payload = (fetch or _fetch)(url, timeout_s, max_bytes)
+    if not isinstance(payload, bytes):
+        raise CatalogError("registry_malformed")
     if len(payload) > max_bytes:
         raise CatalogError("registry_oversized")
     document = _validate_registry_bytes(payload)
@@ -217,7 +226,11 @@ def load_cached_catalog(
     now: float | None = None,
     max_bytes: int = MAX_REGISTRY_BYTES,
 ) -> CatalogView:
-    if max_age_s < 0 or max_bytes <= 0 or max_bytes > MAX_REGISTRY_BYTES:
+    if (
+        not _nonnegative_finite_number(max_age_s)
+        or not _valid_max_bytes(max_bytes)
+        or (now is not None and not _finite_number(now))
+    ):
         raise CatalogError("cache_limits_invalid")
     try:
         info = cache_path.lstat()
@@ -235,6 +248,8 @@ def load_cached_catalog(
 
 def persist_selection_lock(path: Path, resolved: Mapping[str, Any]) -> bool:
     """Create an immutable exact selection; identical retries are idempotent."""
+    if not isinstance(resolved, Mapping):
+        raise CatalogError("resolution_invalid")
     normalized = _validate_resolution(dict(resolved))
     lock = {"schema": LOCK_SCHEMA, "resolved": normalized}
     encoded = canonical_json(lock) + b"\n"
@@ -260,7 +275,9 @@ def persist_selection_lock(path: Path, resolved: Mapping[str, Any]) -> bool:
 
 def load_selection_lock(path: Path) -> dict[str, Any]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(
+            path.read_text(encoding="utf-8"), parse_constant=_reject_lock_constant
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise CatalogError("selection_lock_unavailable") from exc
     if not isinstance(raw, dict) or set(raw) != {"schema", "resolved"}:
@@ -290,7 +307,7 @@ def _fetch(url: str, timeout_s: float, max_bytes: int) -> bytes:
 
 def _validate_registry_bytes(payload: bytes) -> dict[str, Any]:
     try:
-        document = json.loads(payload)
+        document = json.loads(payload, parse_constant=_reject_registry_constant)
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise CatalogError("registry_malformed") from exc
     if (
@@ -493,11 +510,7 @@ def _validate_cache(cache: Any) -> None:
     ):
         raise CatalogError("cache_invalid")
     fetched_at = cache["fetched_at_epoch"]
-    if (
-        isinstance(fetched_at, bool)
-        or not isinstance(fetched_at, (int, float))
-        or not math.isfinite(fetched_at)
-    ):
+    if not _finite_number(fetched_at):
         raise CatalogError("cache_invalid")
     _https_url(cache["source_url"], "cache_source_url")
     if not isinstance(cache["registry_revision"], str) or not re.fullmatch(
@@ -517,6 +530,39 @@ def _validate_cache(cache: Any) -> None:
 
 def _reject_json_constant(_value: str) -> None:
     raise CatalogError("cache_invalid")
+
+
+def _reject_registry_constant(_value: str) -> None:
+    raise CatalogError("registry_malformed")
+
+
+def _reject_lock_constant(_value: str) -> None:
+    raise CatalogError("selection_lock_invalid")
+
+
+def _finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
+
+def _positive_finite_number(value: Any) -> bool:
+    return _finite_number(value) and value > 0
+
+
+def _nonnegative_finite_number(value: Any) -> bool:
+    return _finite_number(value) and value >= 0
+
+
+def _valid_max_bytes(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and 0 < value <= MAX_REGISTRY_BYTES
+    )
 
 
 def _view(cache: Mapping[str, Any], *, now: float, max_age_s: float) -> CatalogView:
@@ -549,6 +595,7 @@ def _validate_resolution(raw: Any) -> dict[str, Any]:
         not isinstance(raw["agent_id"], str)
         or not SAFE_ID.fullmatch(raw["agent_id"])
         or not _is_exact_version(raw["agent_version"])
+        or not isinstance(raw["platform"], str)
         or raw["platform"] not in PLATFORMS
     ):
         raise CatalogError("resolution_invalid")
@@ -560,7 +607,8 @@ def _validate_resolution(raw: Any) -> dict[str, Any]:
     if not isinstance(launch, dict) or set(launch) != {"argv", "cwd"}:
         raise CatalogError("resolution_invalid")
     argv = _args(launch["argv"])
-    if not argv or launch["cwd"] not in {None, "install_root"}:
+    cwd = launch["cwd"]
+    if not argv or (cwd is not None and cwd != "install_root"):
         raise CatalogError("resolution_invalid")
     distribution = raw["distribution"]
     if not isinstance(distribution, dict) or set(distribution) != {
@@ -572,7 +620,11 @@ def _validate_resolution(raw: Any) -> dict[str, Any]:
     kind = distribution["kind"]
     source = distribution["source"]
     integrity = distribution["integrity"]
-    if kind not in {"binary", "npx", "uvx"} or not isinstance(source, dict):
+    if (
+        not isinstance(kind, str)
+        or kind not in DISTRIBUTION_KINDS
+        or not isinstance(source, dict)
+    ):
         raise CatalogError("resolution_invalid")
     if kind == "binary":
         if set(source) != {"archive"} or launch["cwd"] != "install_root":

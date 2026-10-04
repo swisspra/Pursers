@@ -80,7 +80,10 @@ def _runner(raw: Any) -> dict[str, Any]:
             "codex_profile",
         }:
             raise PresetError("native_runner_invalid")
-        if raw["provider"] not in {"codex", "goose"}:
+        if not isinstance(raw["provider"], str) or raw["provider"] not in {
+            "codex",
+            "goose",
+        }:
             raise PresetError("native_provider_invalid")
         for field in ("account_ref", "config_ref"):
             _logical_ref(raw[field], field)
@@ -119,10 +122,18 @@ def _migrate_legacy(value: dict[str, Any]) -> dict[str, Any]:
         "config_ref",
         "session_options",
     }
-    if not set(value) <= allowed or value.get("schema_version") not in {None, 1}:
+    schema_version = value.get("schema_version")
+    if not set(value) <= allowed or (
+        schema_version is not None
+        and (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != 1
+        )
+    ):
         raise PresetError("legacy_preset_invalid")
     provider = value.get("provider")
-    if provider not in {"codex", "goose"}:
+    if not isinstance(provider, str) or provider not in {"codex", "goose"}:
         raise PresetError("legacy_provider_invalid")
     profile = value.get("codex_profile")
     if provider == "codex" and not profile:

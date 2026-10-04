@@ -96,6 +96,22 @@ def test_refresh_rejects_oversized_registry(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("payload", [None, "not-bytes", bytearray(b"{}")])
+def test_refresh_rejects_non_bytes_fetch_result(
+    tmp_path: Path, payload: object
+) -> None:
+    with pytest.raises(catalog.CatalogError, match="registry_malformed"):
+        catalog.refresh_catalog(tmp_path / "cache", fetch=lambda *_: payload)
+
+
+def test_refresh_rejects_nonfinite_json_constants_even_in_extensions(
+    tmp_path: Path,
+) -> None:
+    payload = b'{"version":"1.0.0","agents":[],"extensions":[NaN]}'
+    with pytest.raises(catalog.CatalogError, match="registry_malformed"):
+        catalog.refresh_catalog(tmp_path / "cache", fetch=lambda *_: payload)
+
+
 def test_platform_resolution_pin_drift_and_disabled_reason(tmp_path: Path) -> None:
     view = catalog.refresh_catalog(tmp_path / "cache", fetch=lambda *_: registry())
     linux = view.list_agents("linux-aarch64")[0]
@@ -260,6 +276,111 @@ def test_selection_lock_rejects_invalid_or_inconsistent_resolution_on_create_and
         catalog.load_selection_lock(load_lock)
 
 
+@pytest.mark.parametrize("entrypoint", ["persist", "load"])
+@pytest.mark.parametrize(
+    ("path", "invalid"),
+    [
+        (("platform",), []),
+        (("platform",), {}),
+        (("distribution", "kind"), []),
+        (("distribution", "kind"), {}),
+        (("launch", "cwd"), []),
+        (("launch", "cwd"), {}),
+    ],
+)
+def test_selection_lock_public_entrypoints_reject_unhashable_field_types(
+    tmp_path: Path, entrypoint: str, path: tuple[str, ...], invalid: object
+) -> None:
+    view = catalog.refresh_catalog(tmp_path / "cache", fetch=lambda *_: registry())
+    resolved = view.resolve("demo-agent", "2.3.4", "darwin-aarch64", "npx")
+    malformed = deepcopy(resolved)
+    target = malformed
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = invalid
+
+    with pytest.raises(catalog.CatalogError, match="resolution_invalid"):
+        if entrypoint == "persist":
+            catalog.persist_selection_lock(tmp_path / "create-lock.json", malformed)
+        else:
+            lock = tmp_path / "load-lock.json"
+            lock.write_text(
+                json.dumps({"schema": catalog.LOCK_SCHEMA, "resolved": malformed})
+            )
+            catalog.load_selection_lock(lock)
+
+
+def test_selection_lock_load_rejects_nonfinite_json_constants(tmp_path: Path) -> None:
+    lock = tmp_path / "load-lock.json"
+    lock.write_text('{"schema":"pursers_acp_runner_lock_v1","resolved":NaN}')
+    with pytest.raises(catalog.CatalogError, match="selection_lock_invalid"):
+        catalog.load_selection_lock(lock)
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "invalid", "message"),
+    [
+        ("list_agents", [], "platform_invalid"),
+        ("resolve_version", {}, "exact_version_required"),
+        ("resolve_platform", [], "platform_invalid"),
+        ("resolve_distribution", {}, "distribution_unavailable"),
+        ("platform_system", [], "unsupported_host_platform"),
+        ("platform_system", "", "unsupported_host_platform"),
+        ("platform_machine", {}, "unsupported_host_platform"),
+    ],
+)
+def test_public_catalog_selectors_reject_malformed_types(
+    tmp_path: Path, entrypoint: str, invalid: object, message: str
+) -> None:
+    view = catalog.refresh_catalog(tmp_path / "cache", fetch=lambda *_: registry())
+    with pytest.raises(catalog.CatalogError, match=message):
+        if entrypoint == "list_agents":
+            view.list_agents(invalid)
+        elif entrypoint == "resolve_version":
+            view.resolve("demo-agent", invalid, "darwin-aarch64")
+        elif entrypoint == "resolve_platform":
+            view.resolve("demo-agent", "2.3.4", invalid)
+        elif entrypoint == "resolve_distribution":
+            view.resolve("demo-agent", "2.3.4", "darwin-aarch64", invalid)
+        elif entrypoint == "platform_system":
+            catalog.platform_target(system=invalid)
+        else:
+            catalog.platform_target(machine=invalid)
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "field", "invalid", "message"),
+    [
+        ("refresh", "timeout_s", True, "refresh_limits_invalid"),
+        ("refresh", "timeout_s", float("nan"), "refresh_limits_invalid"),
+        ("refresh", "max_bytes", 1.5, "refresh_limits_invalid"),
+        ("refresh", "now", float("inf"), "refresh_time_invalid"),
+        ("refresh", "now", 10**1000, "refresh_time_invalid"),
+        ("load", "max_age_s", [], "cache_limits_invalid"),
+        ("load", "max_age_s", float("nan"), "cache_limits_invalid"),
+        ("load", "max_bytes", True, "cache_limits_invalid"),
+        ("load", "now", float("-inf"), "cache_limits_invalid"),
+    ],
+)
+def test_public_catalog_limits_reject_malformed_or_nonfinite_values(
+    tmp_path: Path,
+    entrypoint: str,
+    field: str,
+    invalid: object,
+    message: str,
+) -> None:
+    cache = tmp_path / "cache"
+    if entrypoint == "load":
+        catalog.refresh_catalog(cache, fetch=lambda *_: registry())
+    with pytest.raises(catalog.CatalogError, match=message):
+        if entrypoint == "refresh":
+            catalog.refresh_catalog(
+                cache, fetch=lambda *_: registry(), **{field: invalid}
+            )
+        else:
+            catalog.load_cached_catalog(cache, **{field: invalid})
+
+
 def test_binary_selection_lock_validates_source_integrity_and_launch_consistency(
     tmp_path: Path,
 ) -> None:
@@ -408,6 +529,49 @@ def test_preset_rejects_recursive_non_finite_session_options(
         preset.normalize_preset(value)
     with pytest.raises(preset.PresetError, match="session_options_non_finite"):
         preset.dumps_preset(value)
+
+
+@pytest.mark.parametrize(
+    ("shape", "field", "invalid", "message"),
+    [
+        ("v1", "provider", [], "native_provider_invalid"),
+        ("v1", "provider", {}, "native_provider_invalid"),
+        ("legacy", "provider", [], "legacy_provider_invalid"),
+        ("legacy", "schema_version", [], "legacy_preset_invalid"),
+        ("legacy", "schema_version", True, "legacy_preset_invalid"),
+    ],
+)
+def test_public_preset_validators_reject_unhashable_field_types(
+    shape: str, field: str, invalid: object, message: str
+) -> None:
+    if shape == "v1":
+        value = {
+            "schema": preset.PRESET_SCHEMA,
+            "seat": {
+                "agent_name": "worker-13",
+                "board_id": "pursers",
+                "role": "worker",
+            },
+            "runner": {
+                "kind": "native",
+                "provider": "codex",
+                "account_ref": "codex:company",
+                "config_ref": "codex:work",
+                "codex_profile": "work",
+            },
+            "session_options": {},
+        }
+        value["runner"][field] = invalid
+    else:
+        value = {
+            "provider": "goose",
+            "role": "worker",
+            "board_id": "pursers",
+            "agent_name": "worker-13",
+        }
+        value[field] = invalid
+    with pytest.raises(preset.PresetError, match=message):
+        preset.normalize_preset(value)
 
 
 @pytest.mark.parametrize(
