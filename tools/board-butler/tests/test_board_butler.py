@@ -2228,6 +2228,128 @@ def test_central_wait_persistent_invalid_membership_fails_closed(
     assert client.credential not in (client.health_value or "")
 
 
+def test_central_wait_recovers_nested_typed_transport_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx2
+
+    options = args(tmp_path)
+    backend = butler.CentralBackend(options, "opaque")
+    backend.identity = SimpleNamespace(agent_id="AI-butler", principal_id="PR-butler")
+
+    class Client:
+        calls = 0
+        health_value: str | None = None
+
+        def events(self, **arguments: Any) -> Any:
+            self.calls += 1
+            call = self.calls
+            async def stream() -> Any:
+                if call <= 2:
+                    raise ExceptionGroup("transport", [
+                        ExceptionGroup("nested", [
+                            httpx2.RemoteProtocolError("server disconnected")
+                        ])
+                    ])
+                arguments["subscription_callback"]()
+                yield {"seq": 11, "kind": butler.QUESTION_EVENT,
+                       "ticket_id": "TK-source", "question_id": "CQ-source"}
+            return stream()
+
+        async def board_question_inbox(self, **_arguments: Any) -> Mapping[str, Any]:
+            return {"questions": [question("What is the status of TK-source?")]}
+
+        async def board_state_get(self, _key: str) -> Mapping[str, Any]:
+            if self.health_value is None: raise RuntimeError("state key not found")
+            return {"state": {"value": self.health_value}}
+
+        async def board_state_update(self, _key: str, value: str, **_arguments: Any) -> Mapping[str, Any]:
+            self.health_value = value
+            return {"ok": True}
+
+    async def no_delay(_seconds: float) -> None: pass
+    monkeypatch.setattr(butler.asyncio, "sleep", no_delay)
+    client = Client(); backend.client = client
+    cursor, received = asyncio.run(backend.wait_for_question(10, 2.0))
+    assert cursor == 11
+    assert received is not None and received["question_id"] == "CQ-source"
+    assert client.calls == 3
+    assert backend.subscription_healthy is True
+    health = json.loads(client.health_value or "{}")
+    assert health["status"] == "healthy"
+    assert health["last_failure"]["reason_code"] == "transient_transport_failure"
+    assert health["last_failure"]["error_classes"] == ["RemoteProtocolError"]
+
+
+def test_central_wait_mixed_transport_group_fails_closed_without_retry(
+    tmp_path: Path,
+) -> None:
+    import httpx2
+
+    options = args(tmp_path)
+    backend = butler.CentralBackend(options, "opaque")
+    backend.identity = SimpleNamespace(agent_id="AI-butler", principal_id="PR-butler")
+
+    class Client:
+        calls = 0
+        def events(self, **_arguments: Any) -> Any:
+            self.calls += 1
+            async def stream() -> Any:
+                raise ExceptionGroup("mixed", [
+                    httpx2.RemoteProtocolError("server disconnected"),
+                    ValueError("invalid event payload"),
+                ])
+                yield {}
+            return stream()
+
+    client = Client(); backend.client = client
+    with pytest.raises(ExceptionGroup, match="mixed"):
+        asyncio.run(backend.wait_for_question(10, 2.0))
+    assert client.calls == 1
+    assert backend.subscription_healthy is True
+
+
+def test_central_wait_persistent_transport_failure_is_bounded_and_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx2
+
+    options = args(tmp_path)
+    backend = butler.CentralBackend(options, "opaque")
+    backend.identity = SimpleNamespace(agent_id="AI-butler", principal_id="PR-butler")
+
+    class Client:
+        calls = 0
+        health_value: str | None = None
+        def events(self, **_arguments: Any) -> Any:
+            self.calls += 1
+            async def stream() -> Any:
+                raise ExceptionGroup("transport", [
+                    httpx2.RemoteProtocolError("server disconnected")
+                ])
+                yield {}
+            return stream()
+        async def board_state_get(self, _key: str) -> Mapping[str, Any]:
+            if self.health_value is None: raise RuntimeError("state key not found")
+            return {"state": {"value": self.health_value}}
+        async def board_state_update(self, _key: str, value: str, **_arguments: Any) -> Mapping[str, Any]:
+            self.health_value = value
+            return {"ok": True}
+
+    async def no_delay(_seconds: float) -> None: pass
+    monkeypatch.setattr(butler.asyncio, "sleep", no_delay)
+    client = Client(); backend.client = client
+    cursor, received = asyncio.run(backend.wait_for_question(10, None))
+    assert (cursor, received) == (10, None)
+    assert client.calls == butler.SUBSCRIPTION_RECONNECT_ATTEMPTS
+    assert backend.subscription_healthy is False
+    health = json.loads(client.health_value or "{}")
+    assert health["status"] == "failed_closed"
+    assert health["last_failure"]["attempts"] == butler.SUBSCRIPTION_RECONNECT_ATTEMPTS
+    assert health["last_failure"]["membership_current"] is None
+    assert health["last_failure"]["reason_code"] == "transient_transport_failure"
+
+
 def test_resident_survives_failed_wait_then_processes_one_later_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -362,6 +362,169 @@ def test_transport_reconnect_preserves_cursor_and_only_runs_after_an_offer(tmp_p
     assert runner.state['cursor']=={'home':43}
 
 
+def test_wait_transport_exhaustion_is_bounded_and_preserves_cursor(tmp_path,monkeypatch):
+    module=api();runner=module['EventSeatRunner'](config(tmp_path))
+    runner.state['cursor']={'home':42};calls=[];delays=[]
+    async def bootstrap():runner.active_boards=['home']
+    runner.bootstrap=bootstrap
+    runner.reconcile_owned=no_owned_tickets
+    def wait(command,**kwargs):
+        calls.append(json.loads(command[command.index('--since')+1]))
+        raise module['subprocess'].CalledProcessError(
+            1,command,stderr='RemoteProtocolError: server disconnected')
+    monkeypatch.setattr(module['subprocess'],'run',wait)
+    monkeypatch.setattr(module['time'],'sleep',delays.append)
+    with pytest.raises(module['TransportRecoveryExhausted'],match='wait'):
+        runner.run()
+    assert calls==[{'home':42}]*module['TRANSPORT_RECOVERY_ATTEMPTS']
+    assert delays==[5,10,20]
+    assert runner.state['cursor']=={'home':42}
+    failure=runner.state['last_transport_failure']
+    assert failure['phase']=='wait'
+    assert failure['status']=='exhausted'
+    assert failure['action']=='exit_with_saved_positive_cursors; do_not_reset_or_replay_model'
+
+
+def test_bootstrap_nested_transport_recovers_without_cursor_reset(tmp_path,monkeypatch):
+    import httpx2
+
+    module=api();runner=module['EventSeatRunner'](config(tmp_path))
+    runner.state['cursor']={'home':42};attempts=0
+    async def bootstrap():
+        nonlocal attempts
+        attempts+=1
+        if attempts<3:
+            raise ExceptionGroup('transport',[httpx2.RemoteProtocolError('closed')])
+        runner.active_boards=['home']
+    async def no_delay(_seconds):pass
+    runner.bootstrap=bootstrap
+    runner.reconcile_owned=no_owned_tickets
+    monkeypatch.setattr(module['asyncio'],'sleep',no_delay)
+    monkeypatch.setattr(module['subprocess'],'run',
+        lambda *args,**kwargs: (_ for _ in ()).throw(KeyboardInterrupt))
+    with pytest.raises(KeyboardInterrupt):runner.run()
+    assert attempts==3
+    assert runner.state['cursor']=={'home':42}
+    assert runner.state['last_transport_failure']['phase']=='bootstrap'
+    assert runner.state['last_transport_failure']['status']=='recovered'
+
+
+def test_typed_nested_transport_groups_retry_but_mixed_groups_fail_closed():
+    import httpx2
+
+    classify=api()['transient_wait_failure']
+    transport=ExceptionGroup('outer',[ExceptionGroup(
+        'inner',[httpx2.RemoteProtocolError('server disconnected')])])
+    assert classify(transport) is True
+    assert classify(ExceptionGroup('mixed',[
+        httpx2.RemoteProtocolError('server disconnected'),
+        ValueError('invalid response'),
+    ])) is False
+    assert classify(ExceptionGroup('auth mixed',[
+        httpx2.RemoteProtocolError('server disconnected'),
+        RuntimeError('HTTP 401 Unauthorized'),
+    ])) is False
+
+
+def test_preflight_transport_recovery_preserves_cursor_and_launches_once(tmp_path,monkeypatch):
+    import httpx2
+
+    module=api();cfg=config(tmp_path);cfg['max_runs_per_hour']=None
+    runner=module['EventSeatRunner'](cfg);runner.active_boards=['home']
+    runner.preflight_enabled=True;runner.state['cursor']={'home':41}
+    attempts=0
+    async def authorize(_event,_now):
+        nonlocal attempts
+        attempts+=1
+        if attempts<3:
+            raise ExceptionGroup('transport',[httpx2.RemoteProtocolError('closed')])
+        return True,'owned_lease'
+    async def no_delay(_seconds):pass
+    calls=[]
+    runner.event_authorized=authorize
+    runner.run_command=lambda *args,**kwargs:calls.append(args)
+    monkeypatch.setattr(module['asyncio'],'sleep',no_delay)
+    runner.process({'new_seq':{'home':42},'events':[{
+        'kind':'ticket_offered','board_id':'home','ticket_id':'TK-one','id':'one'}]},100)
+    assert attempts==3
+    assert len(calls)==1
+    assert runner.state['cursor']=={'home':42}
+    assert runner.state['pending']==[]
+    assert runner.state['last_transport_failure']['status']=='recovered'
+    assert runner.state['last_transport_failure']['phase']=='event_preflight'
+
+
+def test_active_model_survives_nested_transport_recovery_without_relaunch(tmp_path,monkeypatch):
+    import httpx2
+
+    module=api();runner=module['EventSeatRunner'](codex_config(tmp_path))
+    runner.active_boards=['home'];refreshes=0
+    async def refresh():
+        nonlocal refreshes
+        refreshes+=1
+        if refreshes in {2,3}:
+            raise ExceptionGroup('transport',[httpx2.RemoteProtocolError('closed')])
+    async def no_delay(_seconds):pass
+    runner.refresh_presence=refresh
+    runner.monotonic=lambda:next(iter_clock)
+    iter_clock=iter([0,0,120,120,120])
+    class Process:
+        waits=0;terminated=False
+        def wait(self,timeout=None):
+            self.waits+=1
+            if self.waits==1:raise module['subprocess'].TimeoutExpired(['model'],timeout)
+            return 0
+        def poll(self):return 0 if self.waits>1 else None
+        def terminate(self):self.terminated=True
+        def kill(self):pytest.fail('recovered model must not be killed')
+    process=Process();launches=[]
+    def launch(*args,**kwargs):launches.append((args,kwargs));return process
+    monkeypatch.setattr(module['subprocess'],'Popen',launch)
+    monkeypatch.setattr(module['asyncio'],'sleep',no_delay)
+    runner._run(['model'])
+    assert len(launches)==1
+    assert refreshes==4
+    assert process.terminated is False
+    assert runner.state['last_transport_failure']['status']=='recovered'
+    assert runner.state['last_transport_failure']['attempts']==2
+
+
+def test_active_model_stops_after_bounded_transport_exhaustion(tmp_path,monkeypatch):
+    import httpx2
+
+    module=api();runner=module['EventSeatRunner'](codex_config(tmp_path))
+    runner.active_boards=['home'];refreshes=0
+    async def refresh():
+        nonlocal refreshes
+        refreshes+=1
+        if refreshes>1:
+            raise ExceptionGroup('transport',[httpx2.RemoteProtocolError('closed')])
+    async def no_delay(_seconds):pass
+    runner.refresh_presence=refresh
+    clock=iter([0,0,120]);runner.monotonic=lambda:next(clock)
+    class Process:
+        terminated=False
+        def wait(self,timeout=None):
+            if self.terminated:return 0
+            raise module['subprocess'].TimeoutExpired(['model'],timeout)
+        def poll(self):return None if not self.terminated else 0
+        def terminate(self):self.terminated=True
+        def kill(self):pytest.fail('cooperative model should terminate')
+    process=Process();launches=[]
+    def launch(*args,**kwargs):launches.append((args,kwargs));return process
+    monkeypatch.setattr(module['subprocess'],'Popen',launch)
+    monkeypatch.setattr(module['asyncio'],'sleep',no_delay)
+    with pytest.raises(module['TransportRecoveryExhausted'],match='presence_active_model'):
+        runner._run(['model'])
+    assert len(launches)==1
+    assert refreshes==1+module['TRANSPORT_RECOVERY_ATTEMPTS']
+    assert process.terminated is True
+    failure=runner.state['last_transport_failure']
+    assert failure['status']=='exhausted'
+    assert failure['reason_code']=='transport_recovery_exhausted'
+    assert failure['action']=='stop_model_after_grace; preserve ticket lease and partial work'
+
+
 def test_wait_authentication_failure_stops_without_retry(tmp_path, monkeypatch):
     import subprocess
     module=api();runner=module['EventSeatRunner'](config(tmp_path))

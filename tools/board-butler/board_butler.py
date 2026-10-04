@@ -71,6 +71,8 @@ from typing import (
 )
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import anyio
+import httpx2
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
@@ -158,6 +160,43 @@ OBSERVATION_HISTORY_DAYS = 7
 OBSERVATION_FINDING_KIND = "butler_observation"
 GATE_QUEUE_NAG_DEPTH = 3
 GATE_QUEUE_ESCALATE_DEPTH = 8
+
+
+def _transport_exception_leaves(exc: BaseException) -> list[BaseException]:
+    pending = [exc]
+    leaves = []
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        nested = []
+        if isinstance(current, BaseExceptionGroup):
+            nested.extend(current.exceptions)
+        if current.__cause__ is not None:
+            nested.append(current.__cause__)
+        if nested:
+            pending.extend(nested)
+        else:
+            leaves.append(current)
+    return leaves
+
+
+def _transient_transport_failure(exc: BaseException) -> bool:
+    """Retry only pure typed transport groups; mixed/auth groups fail closed."""
+    leaves = _transport_exception_leaves(exc)
+    retryable = (
+        ConnectionError,
+        TimeoutError,
+        httpx2.TransportError,
+        anyio.BrokenResourceError,
+        anyio.ClosedResourceError,
+        anyio.EndOfStream,
+    )
+    return bool(leaves) and all(isinstance(item, retryable) for item in leaves)
+
+
 GATE_QUEUE_NAG_AGE_S = 15 * 60
 GATE_QUEUE_ESCALATE_AGE_S = 60 * 60
 QUESTION_NAG_COUNT = 5
@@ -14039,6 +14078,8 @@ class CentralBackend:
         membership_current: bool | None = None,
         resource_uris: Sequence[str] = (),
         denied_resource_uri: str | None = None,
+        reason_code: str = "subscription_authorization_denied",
+        error_classes: Sequence[str] = (),
     ) -> None:
         """Persist one bounded, credential-free wait diagnostic."""
         try:
@@ -14074,11 +14115,16 @@ class CentralBackend:
             document["recovered_at"] = now
         else:
             document["last_failure"] = {
-                "reason_code": "subscription_authorization_denied",
+                "reason_code": reason_code,
                 "attempts": int(attempts or 1),
-                "membership_current": bool(membership_current),
+                "membership_current": (
+                    membership_current
+                    if isinstance(membership_current, bool)
+                    else None
+                ),
                 "denied_resource_uri": denied_resource_uri,
                 "resource_uris": [str(uri)[:256] for uri in resource_uris[:8]],
+                "error_classes": sorted({str(item)[:120] for item in error_classes})[:8],
                 "observed_at": now,
             }
         encoded = json.dumps(document, sort_keys=True, separators=(",", ":"))
@@ -14205,7 +14251,61 @@ class CentralBackend:
                 quiet_for = (
                     max(0.0, deadline - asyncio.get_running_loop().time())
                     if deadline is not None
-                    else max(0.1, float(self.args.refresh_seconds))
+                    else max(
+                        0.1,
+                        float(
+                            getattr(
+                                self.args,
+                                "refresh_seconds",
+                                DEFAULT_REFRESH_SECONDS,
+                            )
+                        ),
+                    )
+                )
+                if quiet_for > 0:
+                    await asyncio.sleep(quiet_for)
+                return current[0], None
+            except Exception as exc:
+                if not _transient_transport_failure(exc):
+                    raise
+                attempts += 1
+                retrying = attempts < SUBSCRIPTION_RECONNECT_ATTEMPTS
+                self.subscription_healthy = False
+                self._subscription_failure_active = True
+                await self._write_subscription_health(
+                    status="retrying" if retrying else "failed_closed",
+                    attempts=attempts,
+                    membership_current=None,
+                    resource_uris=resources,
+                    reason_code="transient_transport_failure",
+                    error_classes=[
+                        type(item).__name__
+                        for item in _transport_exception_leaves(exc)
+                    ],
+                )
+                if retrying:
+                    delay = SUBSCRIPTION_RECONNECT_BASE_DELAY_S * (2 ** (attempts - 1))
+                    if deadline is not None:
+                        delay = min(
+                            delay,
+                            max(0.0, deadline - asyncio.get_running_loop().time()),
+                        )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+                quiet_for = (
+                    max(0.0, deadline - asyncio.get_running_loop().time())
+                    if deadline is not None
+                    else max(
+                        0.1,
+                        float(
+                            getattr(
+                                self.args,
+                                "refresh_seconds",
+                                DEFAULT_REFRESH_SECONDS,
+                            )
+                        ),
+                    )
                 )
                 if quiet_for > 0:
                     await asyncio.sleep(quiet_for)
