@@ -49,10 +49,18 @@ def installation_preview(
             "limitation": "package download bounds are delegated to the installed launcher",
         }
     integrity = distribution["integrity"]
-    ready = _installed(install_root, digest)
+    command = _safe_member(value["launch"]["argv"][0])
+    ready = _installed(install_root, digest, command)
+    invalid_cache = not ready and _path_present(install_root)
     return {
         "schema": "pursers_acp_install_preview_v1",
-        "action": "reuse_verified_cache" if ready else "download_verify_extract",
+        "action": (
+            "reuse_verified_cache"
+            if ready
+            else "repair_invalid_cache"
+            if invalid_cache
+            else "download_verify_extract"
+        ),
         "distribution_kind": kind,
         "source": dict(distribution["source"]),
         "integrity": integrity,
@@ -60,9 +68,13 @@ def installation_preview(
         "max_download_bytes": MAX_ARCHIVE_BYTES,
         "max_extracted_bytes": MAX_EXTRACTED_BYTES,
         "ready": ready,
-        "blocked_reason": None
-        if integrity is not None
-        else "binary_integrity_required",
+        "blocked_reason": (
+            "cached_install_invalid"
+            if invalid_cache
+            else None
+            if integrity is not None
+            else "binary_integrity_required"
+        ),
     }
 
 
@@ -82,8 +94,11 @@ def install_binary(
         raise InstallError("binary_integrity_required")
     selection_digest = hashlib.sha256(canonical_json(value)).hexdigest()
     destination = _destination(cache_root, value, selection_digest)
-    if _installed(destination, selection_digest):
+    command = _safe_member(value["launch"]["argv"][0])
+    if _installed(destination, selection_digest, command):
         return _receipt(value, destination, selection_digest, cached=True)
+    if _path_present(destination):
+        raise InstallError("cached_install_invalid")
     payload = (fetch or _fetch)(distribution["source"]["archive"], MAX_ARCHIVE_BYTES)
     if not isinstance(payload, bytes) or len(payload) > MAX_ARCHIVE_BYTES:
         raise InstallError("archive_oversized")
@@ -94,7 +109,6 @@ def install_binary(
     stage = Path(tempfile.mkdtemp(prefix=".acp-install-", dir=cache_root))
     try:
         _extract_archive(payload, stage)
-        command = _safe_member(value["launch"]["argv"][0])
         executable = (stage / command).resolve()
         if not executable.is_relative_to(stage.resolve()):
             raise InstallError("runner_command_escape")
@@ -105,10 +119,12 @@ def install_binary(
         if not stat.S_ISREG(info.st_mode) or executable.is_symlink():
             raise InstallError("runner_command_invalid")
         executable.chmod(info.st_mode | stat.S_IXUSR)
+        tree_digest = _tree_digest(stage)
         manifest = {
             "schema": "pursers_acp_install_receipt_v1",
             "selection_sha256": selection_digest,
             "archive_sha256": integrity["digest"],
+            "install_tree_sha256": tree_digest,
             "resolved": value,
         }
         _write_private(stage / "manifest.json", canonical_json(manifest) + b"\n")
@@ -116,9 +132,9 @@ def install_binary(
         try:
             os.rename(stage, destination)
         except FileExistsError:
-            if not _installed(destination, selection_digest):
+            if not _installed(destination, selection_digest, command):
                 raise InstallError("install_destination_conflict")
-        if not _installed(destination, selection_digest):
+        if not _installed(destination, selection_digest, command):
             raise InstallError("install_verification_failed")
         return _receipt(value, destination, selection_digest, cached=False)
     finally:
@@ -160,7 +176,15 @@ def _destination(root: Path, value: Mapping[str, Any], digest: str) -> Path:
     return root.expanduser().resolve().joinpath(*parts)
 
 
-def _installed(path: Path, digest: str) -> bool:
+def _path_present(path: Path) -> bool:
+    try:
+        path.lstat()
+        return True
+    except OSError:
+        return False
+
+
+def _installed(path: Path, digest: str, command: Path) -> bool:
     try:
         info = path.lstat()
         if not stat.S_ISDIR(info.st_mode) or path.is_symlink():
@@ -170,9 +194,94 @@ def _installed(path: Path, digest: str) -> bool:
         if not stat.S_ISREG(manifest_info.st_mode) or manifest_path.is_symlink():
             return False
         document = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return document.get("selection_sha256") == digest
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        executable = path / command
+        executable_info = executable.lstat()
+        if (
+            not stat.S_ISREG(executable_info.st_mode)
+            or executable.is_symlink()
+            or not executable_info.st_mode & 0o111
+        ):
+            return False
+        expected_tree = document.get("install_tree_sha256")
+        return (
+            document.get("selection_sha256") == digest
+            and isinstance(expected_tree, str)
+            and len(expected_tree) == 64
+            and _tree_digest(path, exclude={"manifest.json"}) == expected_tree
+        )
+    except (InstallError, OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return False
+
+
+def _tree_digest(root: Path, *, exclude: set[str] | None = None) -> str:
+    """Hash the complete extracted tree without following links."""
+    entries: list[dict[str, Any]] = []
+    file_count = 0
+    total_bytes = 0
+
+    def visit(directory: Path, prefix: PurePosixPath) -> None:
+        nonlocal file_count, total_bytes
+        try:
+            with os.scandir(directory) as iterator:
+                children = sorted(iterator, key=lambda entry: entry.name)
+        except OSError as exc:
+            raise InstallError("install_tree_unreadable") from exc
+        for child in children:
+            relative = prefix / child.name
+            relative_text = relative.as_posix()
+            if exclude and relative_text in exclude:
+                continue
+            try:
+                info = child.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise InstallError("install_tree_unreadable") from exc
+            mode = stat.S_IMODE(info.st_mode)
+            if stat.S_ISDIR(info.st_mode):
+                entries.append({"path": relative_text, "type": "directory", "mode": mode})
+                visit(Path(child.path), relative)
+                continue
+            if not stat.S_ISREG(info.st_mode) or child.is_symlink():
+                raise InstallError("install_tree_invalid")
+            file_count += 1
+            if file_count > MAX_ARCHIVE_FILES:
+                raise InstallError("install_tree_file_count_exceeded")
+            digest = hashlib.sha256()
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(child.path, flags)
+                with os.fdopen(descriptor, "rb") as source:
+                    opened = os.fstat(source.fileno())
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                    ):
+                        raise InstallError("install_tree_invalid")
+                    total_bytes += opened.st_size
+                    if total_bytes > MAX_EXTRACTED_BYTES:
+                        raise InstallError("install_tree_oversized")
+                    bytes_read = 0
+                    while chunk := source.read(1024 * 1024):
+                        bytes_read += len(chunk)
+                        if bytes_read > opened.st_size:
+                            raise InstallError("install_tree_changed")
+                        digest.update(chunk)
+                    if bytes_read != opened.st_size:
+                        raise InstallError("install_tree_changed")
+            except OSError as exc:
+                raise InstallError("install_tree_unreadable") from exc
+            entries.append(
+                {
+                    "path": relative_text,
+                    "type": "file",
+                    "mode": stat.S_IMODE(opened.st_mode),
+                    "size": opened.st_size,
+                    "sha256": digest.hexdigest(),
+                }
+            )
+
+    visit(root, PurePosixPath())
+    document = {"schema": "pursers_acp_install_tree_v1", "entries": entries}
+    return hashlib.sha256(canonical_json(document)).hexdigest()
 
 
 def _receipt(

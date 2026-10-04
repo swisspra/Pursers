@@ -76,6 +76,75 @@ def test_binary_install_is_verified_atomic_and_idempotent(tmp_path: Path) -> Non
     assert installer.installation_preview(selection, tmp_path / "cache")["ready"]
 
 
+def install_for_cache_test(tmp_path: Path) -> tuple[dict[str, object], bytes, Path]:
+    payload = archive(
+        {"bin/agent": b"#!/bin/sh\nexit 0\n", "share/data": b"verified\n"}
+    )
+    selection = resolved(payload)
+    receipt = installer.install_binary(
+        selection, tmp_path / "cache", fetch=lambda _url, _maximum: payload
+    )
+    return selection, payload, Path(receipt["install_root"])
+
+
+def assert_invalid_cache(
+    tmp_path: Path, selection: dict[str, object]
+) -> None:
+    preview = installer.installation_preview(selection, tmp_path / "cache")
+    assert preview["ready"] is False
+    assert preview["action"] == "repair_invalid_cache"
+    assert preview["blocked_reason"] == "cached_install_invalid"
+    with pytest.raises(installer.InstallError, match="cached_install_invalid"):
+        installer.install_binary(
+            selection,
+            tmp_path / "cache",
+            fetch=lambda _url, _maximum: pytest.fail(
+                "invalid cache must fail before downloading"
+            ),
+        )
+
+
+def test_cached_install_rejects_deleted_command(tmp_path: Path) -> None:
+    selection, _payload, root = install_for_cache_test(tmp_path)
+    (root / "bin/agent").unlink()
+
+    assert_invalid_cache(tmp_path, selection)
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_cached_install_rejects_non_regular_command(
+    tmp_path: Path, replacement: str
+) -> None:
+    selection, _payload, root = install_for_cache_test(tmp_path)
+    command = root / "bin/agent"
+    command.unlink()
+    if replacement == "symlink":
+        command.symlink_to(root / "share/data")
+    else:
+        command.mkdir()
+
+    assert_invalid_cache(tmp_path, selection)
+
+
+def test_cached_install_rejects_non_executable_command(tmp_path: Path) -> None:
+    selection, _payload, root = install_for_cache_test(tmp_path)
+    command = root / "bin/agent"
+    command.chmod(command.stat().st_mode & ~0o111)
+
+    assert_invalid_cache(tmp_path, selection)
+
+
+@pytest.mark.parametrize("relative", ["bin/agent", "share/data"])
+def test_cached_install_rejects_content_tampering(
+    tmp_path: Path, relative: str
+) -> None:
+    selection, _payload, root = install_for_cache_test(tmp_path)
+    target = root / relative
+    target.write_bytes(b"tampered\n")
+
+    assert_invalid_cache(tmp_path, selection)
+
+
 @pytest.mark.parametrize(
     ("payload", "error"),
     [
