@@ -42,7 +42,11 @@ class ACPTimeoutError(ACPError):
     """An ACP request exceeded its configured timeout."""
 
 
-class ACPConfigMismatch(ACPError):
+class ACPConfigError(ACPError):
+    """A session configuration selection could not be applied."""
+
+
+class ACPConfigMismatch(ACPConfigError):
     """A saved session selection is incompatible with the agent's current state."""
 
     def __init__(
@@ -241,18 +245,20 @@ class ACPClient:
         """Return the current preferred configuration surface without agent calls."""
         self._ensure_known_session(session_id)
         config_options = self._session_config_options.get(session_id)
+        modes = copy.deepcopy(self._session_modes.get(session_id))
         if config_options is not None:
             return {
                 "source": "configOptions",
                 "configOptions": copy.deepcopy(config_options),
+                "modes": modes,
             }
-        modes = self._session_modes.get(session_id)
         if modes is not None:
             return {
                 "source": "modes",
                 "configOptions": [self._legacy_mode_option(modes)],
+                "modes": modes,
             }
-        return {"source": "none", "configOptions": []}
+        return {"source": "none", "configOptions": [], "modes": None}
 
     async def set_config_option(
         self,

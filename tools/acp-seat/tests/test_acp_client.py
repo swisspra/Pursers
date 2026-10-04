@@ -295,7 +295,8 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
 
         discovered = client.discover_session_config(session_id)
         self.assertEqual(
-            discovered, {"source": "configOptions", "configOptions": options}
+            discovered,
+            {"source": "configOptions", "configOptions": options, "modes": None},
         )
         discovered["configOptions"][0]["name"] = "mutated"
         self.assertEqual(
@@ -320,7 +321,7 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             client.discover_session_config("saved-session"),
-            {"source": "configOptions", "configOptions": options},
+            {"source": "configOptions", "configOptions": options, "modes": None},
         )
 
     async def test_set_config_option_validates_grouped_select_and_boolean(self) -> None:
@@ -380,7 +381,7 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
         result = await client.set_config_option(session_id, "brave", True)
         self.assertEqual(result, final)
         with self.assertRaisesRegex(
-            acp_client.ACPConfigMismatch, "not currently advertised"
+            acp_client.ACPConfigError, "not currently advertised"
         ):
             await client.set_config_option(session_id, "model", "missing")
 
@@ -435,7 +436,10 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
         result = await client.apply_config_preset(
             session_id, {"thought": "high", "model": "large"}
         )
-        self.assertEqual(result["configOptions"], dependent)
+        self.assertEqual(
+            result,
+            {"source": "configOptions", "configOptions": dependent, "modes": None},
+        )
 
     async def test_preset_mismatch_is_actionable_for_missing_and_unknown_types(
         self,
@@ -453,11 +457,11 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
         session_id = await client.new_session(self.root)
 
         with self.assertRaisesRegex(
-            acp_client.ACPConfigMismatch, "option ID is not advertised"
+            acp_client.ACPConfigError, "option ID is not advertised"
         ):
             await client.apply_config_preset(session_id, {"missing": "value"})
         with self.assertRaisesRegex(
-            acp_client.ACPConfigMismatch, "unsupported option type 'range'"
+            acp_client.ACPConfigError, "unsupported option type 'range'"
         ):
             await client.apply_config_preset(session_id, {"future": "2"})
 
@@ -545,16 +549,32 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
         session_id = await client.new_session(self.root)
 
         discovered = client.discover_session_config(session_id)
-        self.assertEqual(discovered["source"], "modes")
+        self.assertEqual(
+            discovered,
+            {
+                "source": "modes",
+                "configOptions": [client._legacy_mode_option(modes)],
+                "modes": modes,
+            },
+        )
         result = await client.apply_config_preset(session_id, {"mode": "code"})
-        self.assertEqual(result["configOptions"][0]["currentValue"], "code")
+        updated_modes = json.loads(json.dumps(modes))
+        updated_modes["currentModeId"] = "code"
+        self.assertEqual(
+            result,
+            {
+                "source": "modes",
+                "configOptions": [client._legacy_mode_option(updated_modes)],
+                "modes": updated_modes,
+            },
+        )
 
         preferred = self.client({"modes": modes, "configOptions": []})
         await self.initialized(preferred)
         preferred_id = await preferred.new_session(self.root)
         self.assertEqual(
-            preferred.discover_session_config(preferred_id)["source"],
-            "configOptions",
+            preferred.discover_session_config(preferred_id),
+            {"source": "configOptions", "configOptions": [], "modes": modes},
         )
 
     async def test_no_options_agent_accepts_empty_preset_and_rejects_saved_value(
@@ -566,10 +586,10 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await client.apply_config_preset(session_id, {}),
-            {"source": "none", "configOptions": []},
+            {"source": "none", "configOptions": [], "modes": None},
         )
         with self.assertRaisesRegex(
-            acp_client.ACPConfigMismatch, "no session configuration"
+            acp_client.ACPConfigError, "no session configuration"
         ):
             await client.apply_config_preset(session_id, {"model": "saved"})
 

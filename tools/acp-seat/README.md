@@ -40,10 +40,12 @@ subprocess exits or violates framing.
 After `new_session()` or `load_session()`, call
 `discover_session_config(session_id)` to read the agent-produced configuration
 without an LLM call. It returns the complete ordered `configOptions` state and
-preserves grouped selects and unknown categories/types. If `configOptions` is
-absent, it exposes the documented legacy `modes` state as a single `mode`
-selector; an explicitly present empty `configOptions` list still wins over
-legacy modes.
+the stable shape `{source, configOptions, modes}`. The `modes` field preserves
+the complete legacy modes object when advertised and is otherwise `null`.
+Grouped selects and unknown categories/types are preserved. If `configOptions`
+is absent, the client exposes the documented legacy `modes` state as a single
+`mode` selector; an explicitly present empty `configOptions` list still wins
+over legacy modes.
 
 Use `set_config_option()` for one selection or `apply_config_preset()` for a
 saved `session_options` mapping before the first prompt. Select and boolean
@@ -57,6 +59,11 @@ not report the requested current value raise `ACPConfigMismatch` instead of
 silently pretending a saved selection was applied. Boolean support is
 implemented and advertised as `session.configOptions.boolean: {}` unless the
 caller explicitly supplies `null`.
+
+Callers may catch `ACPConfigError` for any saved selection that cannot be
+applied. `ACPConfigMismatch` is its actionable subclass for missing IDs,
+invalid values, unsupported types, dependent-option changes, and stale agent
+responses.
 
 The permission callback receives the complete `session/request_permission`
 params object. It may return an offered option ID, an ACP outcome object, or
