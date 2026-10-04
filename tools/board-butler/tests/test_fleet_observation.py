@@ -47,6 +47,9 @@ def test_cross_board_busy_or_unknown_never_becomes_idle(fault):
         assert all(leases['boards'][b]['seats']['seat']['work'] for b in ('a', 'b'))
     else:
         assert all('seat' not in leases['boards'][b]['seats'] for b in ('a', 'b'))
+        assert observation['executor_seats'][0]['reason_code'] == (
+            'registry_authorization_unverified'
+        )
 
 
 def test_unbound_provider_unknown_and_private_publication(tmp_path):
@@ -89,6 +92,28 @@ def test_disabled_binding_is_inventory_only_and_has_zero_provider_capacity():
     assert observation['executor_seats'][0]['managed'] is False
     assert observation['executor_seats'][0]['seat_id']=='worker-explicit'
     assert observation['provider_maximums']['a']=={}
+
+
+def test_duplicate_template_principal_never_double_counts_capacity():
+    template,boards,members,services=fixture()
+    second=SimpleNamespace(**{**template.__dict__, 'seat_root':Path('/example/worker-two'),
+                              'template_id':'t2', 'digest_sha256':'b'*64})
+    for board in boards.values():
+        other=copy.deepcopy(board['agents'][0]);other['agent_name']='worker-two';other['agent_id']='agent-two'
+        board['agents'].append(other)
+    observer=observer_api()['LocalFleetObserver'](
+        {'t1':template,'t2':second},services,{},
+        {'t1':{'board_id':'a','provider':'worker'},
+         't2':{'board_id':'a','provider':'worker'}},
+    )
+    observation,readiness,leases=observer.collect(['a','b'],boards,members,NOW,
+        {'worker':{'status':'healthy','latency_ms':1}}, {})
+    assert observation['provider_maximums']['a']=={}
+    assert all(row['managed'] is False for row in observation['executor_seats'])
+    assert {row['reason_code'] for row in observation['executor_seats']}=={
+        'duplicate_template_principal'}
+    assert all(not board['seats'] for board in readiness['boards'].values())
+    assert all(not board['seats'] for board in leases['boards'].values())
 
 
 @pytest.mark.parametrize('change', [

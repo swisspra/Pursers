@@ -343,6 +343,9 @@ verifies `/bin/ps` identifies a live, non-zombie `board_butler.py` process
 before reporting a running state or sending `SIGTERM`. A stale runtime file is
 therefore shown as **Configured · not running**, never as running.
 
+For a single authorized host pool serving several WORK boards, follow the
+[shared registry fleet migration, acceptance, and rollback runbook](../../docs/operations/shared-registry-fleet.md).
+
 The Settings page distinguishes **Not configured**, **Configured · not
 running**, **Running · shadow**, and **Running · active**, and shows the last
 observed activity. **Stop butler now** creates the private local `KILLED`

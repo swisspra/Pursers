@@ -121,7 +121,7 @@ class EventSeatRunner:
         self.preflight_enabled=False
 
     async def event_authorized(self, event, now):
-        """Refetch one event target and reject stale/foreign work before model launch."""
+        """Atomically acquire current work before spending a model turn."""
         async with self.client(event['board']) as client:
             identity = client.identity
             if (identity is None or identity.agent_name != self.config['seat_id']
@@ -131,22 +131,51 @@ class EventSeatRunner:
             if self.owned_key(event['board'], ticket, identity, now) is not None:
                 return True, 'owned_lease'
             expected_kind = 'review' if self.config['role'] == 'reviewer' else 'work'
-            eligible_status = ticket.get('status') in (
-                {'submitted'} if expected_kind == 'review' else {'open'})
-            offer = ticket.get('review_offer' if expected_kind == 'review' else 'work_offer') or {}
-            expiry = offer.get('expires_at_epoch')
-            exact_offer = (
-                offer.get('kind') == expected_kind
-                and offer.get('agent_id') == identity.agent_id
-                and offer.get('agent_name') == identity.agent_name
-                and isinstance(expiry, (int, float))
-                and not isinstance(expiry, bool)
-                and expiry > now
-            )
-            dispatch = ticket.get('dispatch_state') or {}
-            broadcast = dispatch.get('state') == 'broadcast' and dispatch.get('kind') == expected_kind
-            offered = eligible_status and (exact_offer or broadcast)
-            return offered, 'current_offer' if offered else 'stale_or_foreign_event'
+
+            def offered(current):
+                eligible_status = current.get('status') in (
+                    {'submitted'} if expected_kind == 'review' else {'open'})
+                offer = current.get(
+                    'review_offer' if expected_kind == 'review' else 'work_offer'
+                ) or {}
+                expiry = offer.get('expires_at_epoch')
+                exact_offer = (
+                    offer.get('kind') == expected_kind
+                    and offer.get('agent_id') == identity.agent_id
+                    and offer.get('agent_name') == identity.agent_name
+                    and isinstance(expiry, (int, float))
+                    and not isinstance(expiry, bool)
+                    and expiry > now
+                )
+                dispatch = current.get('dispatch_state') or {}
+                broadcast = (
+                    dispatch.get('state') == 'broadcast'
+                    and dispatch.get('kind') == expected_kind
+                )
+                return eligible_status and (exact_offer or broadcast)
+
+            if not offered(ticket):
+                return False, 'stale_or_foreign_event'
+            try:
+                if expected_kind == 'review':
+                    await client.ticket_review_claim(event['ticket'])
+                else:
+                    await client.ticket_claim(event['ticket'])
+            except Exception:
+                # A simultaneous broadcast contender is expected to lose the
+                # server-side admission race. Refetch once: only a changed
+                # ownership/offer is a safe skip; persistent eligibility means
+                # the original error (including authorization) must stop us.
+                current = (await client.ticket_get(event['ticket'], view='full'))['ticket']
+                if self.owned_key(event['board'], current, identity, time.time()) is not None:
+                    return True, 'owned_lease'
+                if not offered(current):
+                    return False, 'claim_race_lost'
+                raise
+            current = (await client.ticket_get(event['ticket'], view='full'))['ticket']
+            if self.owned_key(event['board'], current, identity, time.time()) is None:
+                raise ValueError('event preflight claim was not retained')
+            return True, 'claim_acquired'
 
     def environment(self):
         c=self.config
@@ -264,6 +293,14 @@ class EventSeatRunner:
         PUBLISH(self.path,self.state)
         while pending:
             event=pending[0]
+            runs=[r for r in self.state['runs'] if now-r<3600]
+            limit=self.config.get('max_runs_per_hour')
+            if limit is not None and len(runs)>=limit:
+                self.state['runs']=runs
+                self.state['rate_limited_until']=min(runs)+3600
+                PUBLISH(self.path,self.state)
+                return max(0,self.state['rate_limited_until']-now)
+            self.state.pop('rate_limited_until',None)
             if self.preflight_enabled and not event.get('recovery_key'):
                 authorized, reason = asyncio.run(self.event_authorized(event, time.time()))
                 if not authorized:
@@ -273,14 +310,6 @@ class EventSeatRunner:
                         'reason':reason,'at':time.time()}
                     PUBLISH(self.path,self.state)
                     continue
-            runs=[r for r in self.state['runs'] if now-r<3600]
-            limit=self.config.get('max_runs_per_hour')
-            if limit is not None and len(runs)>=limit:
-                self.state['runs']=runs
-                self.state['rate_limited_until']=min(runs)+3600
-                PUBLISH(self.path,self.state)
-                return max(0,self.state['rate_limited_until']-now)
-            self.state.pop('rate_limited_until',None)
             event=pending.pop(0)
             if event.get('recovery_key'):
                 key = event['recovery_key']

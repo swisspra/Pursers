@@ -113,6 +113,7 @@ def seat(
     template_id: str | None = None,
     template_digest: str = DIGEST,
     managed: bool = True,
+    reason_code: str | None = None,
 ) -> Any:
     return butler.FleetSeat(
         seat_id=seat_id,
@@ -129,6 +130,7 @@ def seat(
         transition_at=transition_at or NOW - timedelta(minutes=10),
         managed=managed,
         last_failure_at=last_failure_at,
+        reason_code=reason_code,
     )
 
 
@@ -494,7 +496,8 @@ def test_product_snapshot_selector_consumes_real_board_shaped_state() -> None:
         NOW,
     )
 
-    assert selected.demands["pursers"].work_pressure == 6
+    assert selected.demands["pursers"].work_pressure == 5
+    assert selected.demands["pursers"].expiring_offers == 1
     assert selected.demands["pursers"].review_backlog == 1
     assert selected.seats[0].live_lease is True
     assert selected.seats[0].ready is True
@@ -2287,6 +2290,88 @@ def test_registry_fleet_demand_includes_projects_without_double_counting():
     snapshots['project']['coordination_tickets_complete'] = False
     with pytest.raises(ValueError, match='incomplete'):
         butler.registry_fleet_snapshots(snapshots, ['home', 'separate'], 'home')
+
+
+def test_shared_registry_pool_counts_only_runnable_unique_work_across_three_boards():
+    snapshots = {
+        'home': {'agents': [], 'tickets': [
+            {'ticket_id': 'TK-home', 'status': 'open', 'tier': 1, 'tags': []},
+        ]},
+        'project-a': {'agents': [], 'tickets': [
+            {'ticket_id': 'TK-parked', 'status': 'open', 'tier': 3, 'tags': [], 'parked': True},
+            {'ticket_id': 'TK-a', 'status': 'open', 'tier': 2, 'tags': []},
+            {'ticket_id': 'TK-a', 'status': 'open', 'tier': 2, 'tags': []},
+        ]},
+        'project-b': {'agents': [], 'tickets': [
+            {'ticket_id': 'TK-b', 'status': 'submitted', 'tier': 1, 'tags': []},
+            {'ticket_id': 'TK-blocked', 'status': 'needs_human', 'tier': 3, 'tags': []},
+            {'ticket_id': 'TK-resolved', 'status': 'open', 'tier': 1, 'tags': [],
+             'human_request': {'resolution': {'action': 'accept'}}},
+        ]},
+    }
+    selected = butler.registry_fleet_snapshots(snapshots, ['home'], 'home')
+    product = butler.fleet_snapshot_from_products(
+        selected,
+        [],
+        {'home': {'direct': {'status': 'healthy', 'latency_ms': 1}}},
+        {'load_ratio': 0.1, 'capacity_available': True, 'executor_status': 'healthy'},
+        NOW,
+    )
+    demand = product.demands['home']
+    assert demand.source_board_ids == ('home', 'project-a', 'project-b')
+    assert demand.open_by_tier == {1: 2, 2: 1, 3: 0}
+    assert demand.review_backlog == 1
+    assert demand.excluded_parked == 1
+    assert demand.excluded_blocked == 1
+    assert demand.duplicate_rows == 1
+    engine = reconciler({'home': board_policy('home')})
+    plan = engine.plan(
+        snapshot(product.demands, [seat('worker-a', 'worker', board_id='home')]),
+        {},
+    )
+    assert [(item.action, item.seat_id) for item in plan.operations] == [
+        ('start', 'worker-a')
+    ]
+
+
+def test_state_exposes_effective_limits_and_capacity_reason():
+    policy = board_policy(maximum=3)
+    policy = replace(policy, roles={
+        **policy.roles,
+        'worker': butler.FleetRolePolicy(0, 1, 1, 1),
+    })
+    engine = reconciler({'pursers': policy}, host_cap=3)
+    current = snapshot(
+        {'pursers': replace(demand(work=4), source_board_ids=('pursers', 'project-a'))},
+        [seat('worker-a', 'worker'), seat('reviewer-a', 'reviewer')],
+    )
+    plan = engine.plan(current, {})
+    state = engine.desired_state_document('pursers', current, plan)
+    coverage = state['coverage']
+    assert coverage['source_board_ids'] == ['pursers', 'project-a']
+    assert coverage['effective_limits']['role_maximums']['worker'] == 1
+    assert coverage['effective_limits']['template_pool']['worker'] == 1
+    assert coverage['role_limiting_reasons']['worker'] == 'role_cap'
+    assert coverage['limiting_reason'] == 'role_cap'
+
+
+def test_state_reports_unverified_registry_authorization_instead_of_provider():
+    engine = reconciler()
+    current = snapshot(
+        {'pursers': demand(work=1)},
+        [seat(
+            'worker-a',
+            'worker',
+            lifecycle='unhealthy',
+            reason_code='registry_authorization_unverified',
+        )],
+    )
+    plan = engine.plan(current, {})
+    coverage = engine.desired_state_document('pursers', current, plan)['coverage']
+    assert plan.operations == ()
+    assert coverage['authorized'] is False
+    assert coverage['role_limiting_reasons']['worker'] == 'authorization'
+    assert coverage['limiting_reason'] == 'authorization'
 
 
 @pytest.mark.parametrize('available', [700, 50])
