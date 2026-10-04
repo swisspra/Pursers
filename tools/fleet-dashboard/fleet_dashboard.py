@@ -79,6 +79,7 @@ from runner_setup import (
     CatalogError,
     RunnerSetupError,
     RunnerSetupManager,
+    RuntimePathBindings,
     compatibility_matrix,
 )
 from release_ops import ReleaseOpsManager
@@ -7999,6 +8000,80 @@ class SeatConfigManager:
             raise ValueError("seat must be an object")  # noqa: TRY004 - API contract.
         return DesiredSeat.from_dict(value)
 
+    def runner_setup_bindings(
+        self,
+        registry_payload: Any,
+        *,
+        agent_name: Any,
+        role: Any,
+        board_id: Any,
+    ) -> RuntimePathBindings:
+        """Bind ACP request paths to configured seat and Fleet-owned clones."""
+        if not isinstance(agent_name, str):
+            raise TypeError("runner seat name is invalid")
+        record = next(
+            (
+                row
+                for row in self.inventory.load()["seats"]
+                if row.get("name") == agent_name
+            ),
+            None,
+        )
+        if record is None:
+            raise ValueError("configured runner seat not found")
+        desired = self._desired(record)
+        if role != desired.role or board_id != desired.anchor_board:
+            raise PermissionError("runner seat identity differs from configured inventory")
+        if not desired.seat_dir:
+            raise ValueError("configured runner seat has no private seat directory")
+        registry = (
+            registry_payload.get("registry")
+            if isinstance(registry_payload, dict)
+            else None
+        )
+        projects = registry.get("projects") if isinstance(registry, dict) else None
+        if not isinstance(projects, dict):
+            raise TypeError("project_registry is unavailable")
+        if desired.boards == "registry":
+            allowed_boards: set[str] | None = None
+        elif desired.boards == "home":
+            allowed_boards = {desired.home_board}
+        else:
+            allowed_boards = set((desired.boards or "").split(","))
+        repositories: list[Path] = []
+        for entry in projects.values():
+            if (
+                not isinstance(entry, dict)
+                or entry.get("status") != "active"
+                or entry.get("fleet", True) is False
+            ):
+                continue
+            project_board = entry.get("board_id")
+            clone = entry.get("fleet_clone_dir")
+            if (
+                allowed_boards is not None
+                and project_board not in allowed_boards
+            ) or not isinstance(clone, str) or not clone:
+                continue
+            repositories.append(Path(clone).expanduser())
+        if not repositories:
+            raise ValueError("no authorized Fleet clone is configured for this seat")
+        seat_root = Path(desired.seat_dir).expanduser()
+        policy_file = seat_root / "acp-policy.json"
+        try:
+            policy_file.lstat()
+        except FileNotFoundError:
+            policy_file = None
+        return RuntimePathBindings(
+            repository_root=self.state_dir.expanduser().resolve() / "clones",
+            private_root=self.state_dir.expanduser().resolve(),
+            repositories=tuple(repositories),
+            token_file=Path(desired.token_file).expanduser(),
+            work_root=seat_root / "work",
+            seat_root=seat_root,
+            policy_file=policy_file,
+        )
+
     @staticmethod
     def _report(rows: list[Any]) -> dict[str, Any]:
         order = {"PASS": 0, "WARN": 1, "FAIL": 2}
@@ -10811,7 +10886,35 @@ def make_handler(
                         raise ValueError("request must contain only target")
                     body = _json_bytes(runners.refresh(target=request["target"]))
                 elif route == "/api/config/runners/plan":
-                    body = _json_bytes(runners.plan(request))
+                    if getattr(runners, "uses_runtime_path_bindings", False):
+                        preset = (
+                            request.get("preset")
+                            if isinstance(request, dict)
+                            else None
+                        )
+                        seat = preset.get("seat") if isinstance(preset, dict) else None
+                        runner = (
+                            preset.get("runner")
+                            if isinstance(preset, dict)
+                            else None
+                        )
+                        bindings = (
+                            seats.runner_setup_bindings(
+                                cache_call("get_project_registry", central=central),
+                                agent_name=seat.get("agent_name"),
+                                role=seat.get("role"),
+                                board_id=seat.get("board_id"),
+                            )
+                            if isinstance(seat, dict)
+                            and isinstance(runner, dict)
+                            and runner.get("kind") == "acp"
+                            else None
+                        )
+                        body = _json_bytes(
+                            runners.plan(request, runtime_bindings=bindings)
+                        )
+                    else:
+                        body = _json_bytes(runners.plan(request))
                 elif route == "/api/config/runners/apply":
                     if not isinstance(request, dict) or set(request) != {"plan_id", "digest"}:
                         raise ValueError("request must contain only plan_id and digest")

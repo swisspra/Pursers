@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,92 @@ MAX_PLANS = 50
 
 class RunnerSetupError(RuntimeError):
     """A runner plan or activation violated the setup contract."""
+
+
+def _resolved_server_path(raw: Path, root: Path, field: str) -> Path:
+    """Validate a server-owned path without accepting a request-derived variant."""
+    if not raw.is_absolute():
+        raise RunnerSetupError(f"{field}_binding_not_absolute")
+    try:
+        relative = raw.relative_to(root)
+    except ValueError as exc:
+        raise RunnerSetupError(f"{field}_binding_outside_approved_root") from exc
+    current = root
+    for component in relative.parts:
+        current = current / component
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(info.st_mode):
+            raise RunnerSetupError(f"{field}_binding_symlink")
+    resolved = raw.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise RunnerSetupError(f"{field}_binding_outside_approved_root") from exc
+    return resolved
+
+
+@dataclass(frozen=True)
+class RuntimePathBindings:
+    """Server-owned ACP paths that a browser request may select by exact value."""
+
+    repository_root: Path
+    private_root: Path
+    repositories: tuple[Path, ...]
+    token_file: Path
+    work_root: Path
+    seat_root: Path
+    policy_file: Path | None = None
+
+    def __post_init__(self) -> None:
+        repository_root = self.repository_root.expanduser().resolve()
+        private_root = self.private_root.expanduser().resolve()
+        repositories = tuple(
+            _resolved_server_path(path, repository_root, "repository")
+            for path in self.repositories
+        )
+        token_file = _resolved_server_path(self.token_file, private_root, "token_file")
+        seat_root = _resolved_server_path(self.seat_root, private_root, "seat_root")
+        work_root = _resolved_server_path(self.work_root, seat_root, "work_root")
+        policy_file = (
+            _resolved_server_path(self.policy_file, seat_root, "policy_file")
+            if self.policy_file is not None
+            else None
+        )
+        object.__setattr__(self, "repository_root", repository_root)
+        object.__setattr__(self, "private_root", private_root)
+        object.__setattr__(self, "repositories", repositories)
+        object.__setattr__(self, "token_file", token_file)
+        object.__setattr__(self, "work_root", work_root)
+        object.__setattr__(self, "seat_root", seat_root)
+        object.__setattr__(self, "policy_file", policy_file)
+
+    def select(self, field: str, raw: Any) -> Path | None:
+        if field == "policy_file" and raw is None:
+            return None
+        if not isinstance(raw, str) or not raw or len(raw) > 4096 or "\x00" in raw:
+            raise ValueError(f"runtime.{field} is invalid")
+        candidates = (
+            self.repositories if field == "repository" else (getattr(self, field),)
+        )
+        for candidate in candidates:
+            if candidate is not None and hmac.compare_digest(raw, str(candidate)):
+                return candidate
+        raise ValueError(f"runtime.{field} is not authorized")
+
+    def revalidated(self) -> RuntimePathBindings:
+        """Recheck roots and symlink components immediately before use."""
+        return RuntimePathBindings(
+            repository_root=self.repository_root,
+            private_root=self.private_root,
+            repositories=self.repositories,
+            token_file=self.token_file,
+            work_root=self.work_root,
+            seat_root=self.seat_root,
+            policy_file=self.policy_file,
+        )
 
 
 def compatibility_matrix() -> list[dict[str, Any]]:
@@ -85,6 +172,8 @@ def compatibility_matrix() -> list[dict[str, Any]]:
 class RunnerSetupManager:
     """Keep catalog reads side-effect free and mutations behind expiring plans."""
 
+    uses_runtime_path_bindings = True
+
     def __init__(
         self,
         state_root: Path,
@@ -129,11 +218,16 @@ class RunnerSetupManager:
             "compatibility": compatibility_matrix(),
         }
 
-    def plan(self, request: Mapping[str, Any]) -> dict[str, Any]:
+    def plan(
+        self,
+        request: Mapping[str, Any],
+        *,
+        runtime_bindings: RuntimePathBindings | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(request, Mapping) or set(request) != {"preset", "runtime"}:
             raise ValueError("request must contain only preset and runtime")
         preset = normalize_preset(request["preset"])
-        runtime = self._runtime(request["runtime"], preset)
+        runtime = self._runtime(request["runtime"], preset, runtime_bindings)
         runner = preset["runner"]
         resolved: dict[str, Any] | None = None
         install: dict[str, Any] | None = None
@@ -177,6 +271,8 @@ class RunnerSetupManager:
                 "digest": digest,
                 "expires_at": self.clock() + PLAN_TTL_S,
                 "basis": basis,
+                "runtime_request": request["runtime"],
+                "runtime_bindings": runtime_bindings,
             }
         return {
             "schema": "pursers_runner_setup_plan_v1",
@@ -199,6 +295,12 @@ class RunnerSetupManager:
             raise RunnerSetupError("runner_setup_plan_digest_mismatch")
         basis = plan["basis"]
         preset = basis["preset"]
+        if preset["runner"]["kind"] == "acp":
+            current_runtime = self._runtime(
+                plan["runtime_request"], preset, plan["runtime_bindings"]
+            )
+            if current_runtime != basis["runtime"]:
+                raise RunnerSetupError("runtime_path_binding_changed_replan")
         agent_name = preset["seat"]["agent_name"]
         if dict(self.seat_probe(agent_name) or {}) != basis["seat_state"]:
             raise RunnerSetupError("seat_state_changed_replan")
@@ -280,7 +382,12 @@ class RunnerSetupManager:
             "rollback": "stop the managed seat and restore the prior preset/template backup",
         }
 
-    def _runtime(self, raw: Any, preset: Mapping[str, Any]) -> dict[str, Any]:
+    def _runtime(
+        self,
+        raw: Any,
+        preset: Mapping[str, Any],
+        bindings: RuntimePathBindings | None,
+    ) -> dict[str, Any]:
         if preset["runner"]["kind"] == "native":
             if raw != {}:
                 raise ValueError(
@@ -331,21 +438,42 @@ class RunnerSetupManager:
         result["git_user_name"] = raw.get("git_user_name", "Pursers ACP Seat")
         result["git_user_email"] = raw.get("git_user_email", "acp-seat@pursers.invalid")
         if preset["runner"]["kind"] == "acp":
-            self._private_reference(result["token_file"], "token_file")
-            if result["policy_file"] is not None:
-                self._private_reference(result["policy_file"], "policy_file")
-            if not Path(result["repository"]).expanduser().resolve().is_dir():
+            if bindings is None:
+                raise RunnerSetupError("runtime_path_bindings_unavailable")
+            bindings = bindings.revalidated()
+            selected = {
+                field: bindings.select(field, result[field])
+                for field in (
+                    "token_file",
+                    "repository",
+                    "work_root",
+                    "seat_root",
+                    "policy_file",
+                )
+            }
+            self._private_reference(selected["token_file"], "token_file")
+            if selected["policy_file"] is not None:
+                self._private_reference(selected["policy_file"], "policy_file")
+            repository = selected["repository"]
+            if repository is None or not repository.is_dir():
                 raise ValueError("runtime.repository is unavailable")
+            for field, path in selected.items():
+                result[field] = str(path) if path is not None else None
         return result
 
     @staticmethod
-    def _private_reference(raw: str, field: str) -> None:
-        path = Path(raw).expanduser().resolve()
+    def _private_reference(path: Path | None, field: str) -> None:
+        if path is None:
+            raise ValueError(f"runtime.{field} is unavailable")
         try:
-            info = path.stat()
+            info = path.lstat()
         except OSError as exc:
             raise ValueError(f"runtime.{field} is unavailable") from exc
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
             raise ValueError(f"runtime.{field} must reference a mode-0600 regular file")
 
     def _template(
@@ -518,5 +646,6 @@ __all__ = [
     "PresetError",
     "RunnerSetupError",
     "RunnerSetupManager",
+    "RuntimePathBindings",
     "compatibility_matrix",
 ]

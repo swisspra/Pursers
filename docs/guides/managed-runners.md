@@ -45,6 +45,18 @@ missing launcher, unavailable account, or unsupported option fails closed.
 Generating a candidate does not authorize a template, sign an executor request,
 start a service, or change an executor policy.
 
+ACP filesystem references are selectors, not new path grants. The server binds
+the seat name, role, anchor board, token file, and private seat directory to the
+existing seat inventory. `work_root` is the configured seat directory's `work/`
+child. A repository must be an active project's Fleet-owned clone under the
+dashboard state `clones/` root; an operator checkout is never eligible. The
+optional permission policy is the mode-`0600` `acp-policy.json` in that seat
+directory. Traversal, symlinked components, paths outside either configured
+root, and browser values that do not exactly match a server binding fail before
+the setup service reads the selected target. A registry-routed seat may select
+any active Fleet clone covered by that seat, preserving multi-project routing
+without widening filesystem access.
+
 An ACP plan request has this secret-free shape. Paths point to private local
 files or directories; the token value is never included:
 
