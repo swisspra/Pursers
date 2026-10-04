@@ -28,7 +28,7 @@ Generic JSON editors, arbitrary shell execution, copying secrets through the bro
 | P0 | Project onboarding completeness | Lifecycle plan/apply exists but legacy add and separate clone/Doors/dispatch steps create ambiguous success | Name/board/source/branch/tier → read source → plan registry/board/clone/Doors/default policies → confirm → step receipts → registry, board and Door read-back | Backend orchestration verification in managed-config ticket; guided UI in Settings ticket |
 | P0 | Secret-safe prerequisite states | Provider, Door and seat flows each handle secrets differently | Explicit “not configured/configured/invalid/unavailable”; write-only input; private-file target; one-time reveal; no secret echo in errors/history | Cross-cutting tests in backend and Settings tickets |
 | P1 | Delivery advanced/runtime distinction | Parser accepts schedules, custom gates, multiple reviewers and repair policy that resident runtime may block | Show inherited/effective value and runtime blocker separately; activation disabled until prerequisites pass; never label saved draft active | Existing readiness model; UI in Settings; backend contract tests in managed-config ticket |
-| P1 | Seat/host capability completeness | Most `DesiredSeat` fields are editable, but advanced paths, connector IDs, registry scope, host mode and restart semantics are not coherently grouped | Simple identity/role/model page plus Advanced host/path/scope page → plan/diff → apply → Doctor → explicit restart instruction → readiness read-back | Settings ticket; no arbitrary host-file editing |
+| P0 | Seat omitted-field reset risk | `seatForm`/`seatPayload` omit `registry_board`, `token_env_var`, `personal_command`, `bridge_name` and `board_connector_name`; `/api/config/plan` therefore constructs defaults and can overwrite stored custom values while editing another field | Complete read → typed Advanced host/path/scope/connector controls → merge-preserving validation → plan/diff → apply → explicit restart → Doctor/inventory/live-identity read-back; incomplete updates fail closed | Preservation/API contract in `TK-09b833b7aa9cca640ac6`; controls in `TK-da4fa65758fe7e6e8f1e`; regression acceptance in `TK-30865a02f25342f46209` |
 | P1 | ACP runner selection | PR 70 adds catalog/preset/install but is outside baseline | Until landed: “pending/unavailable”; after integration: catalog read → compatibility check → preset/session options → install plan → Doctor/read-back | Do not copy PR 70 into this ticket. Reconcile after merge in integration ticket `TK-30865a02f25342f46209` |
 | P1 | Doors/membership lifecycle | Doors issue/rotate/revoke is guarded; invite/membership/role/scope flows lack a complete guided surface | Board/role/principal selection → current membership/scopes → plan → confirm → one-time credential delivery if needed → Central read-back | New bounded membership/role API under managed-config ticket; UI in Settings |
 | P1 | Agent capabilities/readiness | Team shows identity and readiness; fixed-seat capabilities are host-config fields while transient readiness is Central-owned | Clearly separate “seat template” from “live identity”; template plan/apply/restart versus current readiness read-only; no cross-principal impersonation | Settings/Team UI; backend only if admin-managed readiness is explicitly authorized |
@@ -77,6 +77,11 @@ Generic JSON editors, arbitrary shell execution, copying secrets through the bro
 
 | Field(s) | Gap | Required flow |
 | --- | --- | --- |
+| `registry_board` | `DesiredSeat` (`tools/fleet-dashboard/seat_config.py:636,656-657`) stores it in schema-1 `SeatInventory`; default `pursers`, `SAFE_NAME` validated. `seatForm`/`seatPayload` (`tools/fleet-dashboard/ui/assets/app.js:282-286`) expose neither a control nor payload key, so `/api/config/plan` can reset a customized registry anchor to the default | `TK-09b833b7aa9cca640ac6` must preserve the current inventory value on omission (or reject an incomplete existing-seat request) and return revision/conflict evidence. `TK-da4fa65758fe7e6e8f1e` adds an Advanced registry-anchor field. Preview the membership/anchor diff; apply only the exact digest; require restart/reconnect, Doctor membership verification and inventory/live read-back. Failure or stale state leaves the customized value unchanged |
+| `token_env_var` | `DesiredSeat` (`tools/fleet-dashboard/seat_config.py:626,658-659`) defaults to `ONBOARD_CENTRAL_TOKEN` and validates `ENV_NAME`; inventory stores the variable name, not its secret value. The form/payload omit it and can restore the default during an unrelated edit | Same API/UI owners as above. Read the variable name only; never return its value. Typed identifier validation → redacted preview → exact apply → explicit restart/reconnect → Doctor token-source read-back. Missing/invalid values, permission failure or stale plans preserve the old reference and expose no credential |
+| `personal_command` | `DesiredSeat` (`tools/fleet-dashboard/seat_config.py:625`) defaults to `pursers-personal`; `ClaudeDesktopAdapter` consumes it at `tools/fleet-dashboard/seat_config.py:1695-1714`. There is no uniform field validator before adapter planning, and the form/payload omit it, so a customized command can be reset | `TK-09b833b7aa9cca640ac6` defines one bounded command/path validator and merge-preserving update contract; `TK-da4fa65758fe7e6e8f1e` supplies a typed Advanced control, not a shell textbox. Preview exact managed-file change; apply digest; deliberate restart; Doctor executable/version plus inventory read-back. Unsupported host/command or failed validation makes no write |
+| `bridge_name` | `DesiredSeat` (`tools/fleet-dashboard/seat_config.py:627,720-721`) defaults to `null` and derives `pursers-wait-{name}`; only the Codex adapter uniformly-visible path rejects unsafe resolved names (`tools/fleet-dashboard/seat_config.py:1356-1360`). The UI omits the field and can replace a custom wait-connector name with the derived name | API owner adds uniform safe-ID and collision validation and preserves omissions; Settings owner adds Advanced connector naming. Preview both removed/added connector entries; exact apply; deliberate restart/reconnect; Doctor connector plus identity read-back. Collision, invalid ID, stale source or failed Doctor never reports success and never silently rewrites the inventory |
+| `board_connector_name` | `DesiredSeat` (`tools/fleet-dashboard/seat_config.py:628,679-681,724-728`) defaults to `null`, resolving to `pursers-review` or `pursers-dev`; explicit values use `SAFE_NAME`, and Codex rejects collision with the wait connector. The form/payload omit it and can restore the role-derived connector | API owner preserves omission and validates both connector names together; Settings owner adds an Advanced board-connector control. Preview → exact apply → deliberate restart/reconnect → Doctor must confirm the expected authenticated principal/role and inventory value. Any auth mismatch, collision, validation error or stale plan preserves the existing connector |
 | Fixed role/capabilities | Editor exists but live identity can be mistaken for template | Present template source path, reconnect requirement and current advertised values side by side |
 | Host/global/board caps | Autonomous Butler has host/board concurrency and per-role capacities; managed seat count has no unified ceiling view | Read immutable envelope and host runtime ceiling; enforce min ≤ target ≤ max and summed targets; show headroom before save |
 | Drain/start/stop/backoff | Runtime start/stop exists; autonomous cooldowns exist; explicit seat drain lifecycle is not a complete baseline editor | Add typed drain state only after backend guarantees lease/offer behavior; stop must not masquerade as drain |
@@ -135,6 +140,11 @@ Acceptance:
 - Secrets are write-only or server-side references; leak scan passes.
 - Delivery `action=delivery` through lifecycle plan/apply has request/response contract tests.
 - Board policy, Butler effective preview and connector APIs return explicit dynamic/restart-required semantics.
+- Existing-seat updates either require a complete `DesiredSeat` record with a matching
+  revision or merge omitted allowlisted fields from the authoritative inventory.
+  Regression tests customize `registry_board`, `token_env_var`, `personal_command`,
+  `bridge_name` and `board_connector_name`, update an unrelated field, and prove the
+  preview, applied host config and inventory preserve all five byte-for-byte.
 
 ### Package B — Settings and onboarding (`TK-da4fa65758fe7e6e8f1e`)
 
@@ -150,6 +160,10 @@ Acceptance:
 
 - Every main-supported operator field in the capability matrix is discoverable from Settings.
 - Simple/advanced grouping retains all fields; exclusions have visible rationale.
+- Advanced seat controls include `registry_board`, `token_env_var`,
+  `personal_command`, `bridge_name` and `board_connector_name`; loading and saving an
+  existing seat sends or server-merges every stored value rather than recreating
+  dataclass defaults.
 - Forms preserve unsaved input, focus and server error state across refresh.
 - Each save path validates, previews when required, confirms, applies and reads back.
 - Dynamic versus restart/reconnect-required is visible before submit.
@@ -177,6 +191,11 @@ Acceptance:
 - Rebase/reconcile exact approved checkpoints and report both working and approved bases.
 - Re-run endpoint/field enumeration and fail if a supported field has no matrix row or discoverable surface.
 - Exercise isolated product-generated responses for each data-consuming selector and save/read-back path.
+- With independently seeded custom values for all five advanced seat fields, edit
+  only `model`; assert the plan, applied host config, inventory read-back and Doctor
+  observation preserve every omitted advanced value. Repeat stale-revision,
+  permission-denied, invalid-ID, connector-collision and failed-Doctor paths and
+  assert fail-closed state with no false success.
 - Run route aliases, mobile/desktop accessibility, secret redaction, CAS conflict, stale-plan, permission-denied and restart-state acceptance.
 - Reconcile PR 70 only if it has landed; otherwise ACP runner selection remains pending and excluded from shipped claims.
 - Full CI and rollout are operator-owned; dashboard rollout uses an immutable revision and rollback pointer.

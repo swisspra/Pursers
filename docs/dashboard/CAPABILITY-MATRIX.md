@@ -136,12 +136,38 @@ Source: `DesiredSeat`, `tools/fleet-dashboard/seat_config.py:612-758`.
 
 | Fields | Defaults / validation | Authority, secret and apply behavior | Coverage |
 | --- | --- | --- | --- |
-| `host`, `role`, `name`, `central_url`, `home_board`, `registry_board`, `boards` | Hosts: `codex`, `codex-cli`, `zed`, `goose`, `claude-code`, `claude-desktop`, `headless`; roles: worker/reviewer/orchestrator/coordinator; safe IDs; `boards=registry|home|comma-list` | Managed local host config; plan/diff/apply; host restart is prompted, not implied | main editor |
-| `token_file`, `ca_file`, `bridge_command`, `config_path`, `seat_dir`, `repository`, `personal_command`, `token_env_var` | Safe path/command checks in planner; examples must use `/PATH/TO/...` | Private paths remain server-side; token content/fingerprint never enters UI | main editor, advanced grouping needed |
+| `host`, `role`, `name`, `central_url`, `home_board`, `boards` | Hosts: `codex`, `codex-cli`, `zed`, `goose`, `claude-code`, `claude-desktop`, `headless`; roles: worker/reviewer/orchestrator/coordinator; safe IDs; `boards=registry|home|comma-list` | Managed local host config; plan/diff/apply; host restart is prompted, not implied | main editor; `registry_board` is a separate missing field below |
+| `token_file`, `ca_file`, `bridge_command`, `config_path`, `seat_dir`, `repository` | Safe path/command checks in planner; examples must use `/PATH/TO/...` | Private paths remain server-side; token content/fingerprint never enters UI | main editor; `personal_command` and `token_env_var` are missing below |
 | `tier_max`, `skills`, `can_review`, `can_work`, `model`, `provider` | Tier `1..3`; safe unique skill IDs; role/capability combinations fail closed; model/provider ≤200 chars | Written to host connector environment and advertised at onboarding; restart/reconnect required | main editor |
-| `bridge_name`, `board_connector_name`, `host_mode` | Safe connector IDs; `host_mode=acp|persistent` | Host configuration; restart required | `host_mode` is main schema but full ACP runner selection is pending PR 70 |
+| `host_mode` | `host_mode=acp|persistent` | Host configuration; restart required | main schema; full ACP runner selection is pending PR 70 |
 | Persistent runtime | `name`, `provider`, `base_url`, `model`, write-only `api_key`; providers include DeepSeek, Qwen, OpenRouter, Azure, Ollama, custom | Local runtime file plus OS keychain; test/start/stop/restart are explicit | main editor |
 | ACP runner catalog/preset/install | runner ID, binary/source, session options, provider/model/mode selection | PR 70 introduces bounded catalog/installer; not in baseline | pending; never label shipped |
+
+The current seat form is not field-complete. `seatForm` and `seatPayload` in
+`tools/fleet-dashboard/ui/assets/app.js:282-286` omit the five fields below. The
+`POST /api/config/plan` path calls `FleetConfigService._desired`, which constructs a
+new `DesiredSeat` from that incomplete object (`fleet_dashboard.py:7990-7994,
+8628-8632`). Consequently, editing an otherwise unrelated seat field can replace a
+stored customization with the dataclass default. This is a write-path defect, not
+read-only coverage: `GET /api/config/seats` returns the inventory record, but the UI
+has no control or payload key that preserves these values.
+
+| Field | Exact source, stored authority and default/validation | Current view/action and read/write state | Apply/restart, secret handling and target |
+| --- | --- | --- | --- |
+| `registry_board` | `DesiredSeat.registry_board`, `tools/fleet-dashboard/seat_config.py:636,656-657`; schema-1 `SeatInventory` record; default `pursers`; must match `SAFE_NAME` | Returned by `/api/config/seats`; absent from `seatForm`/`seatPayload`; a form update writes the default through `/api/config/plan` → `/api/config/apply` | Changes the bridge anchor when `home_board` is blank and therefore requires host restart/reconnect plus Doctor membership read-back; non-secret. P0 Advanced seat scope control in Settings, with omitted-value preservation in the managed-config API package |
+| `token_env_var` | `DesiredSeat.token_env_var`, `tools/fleet-dashboard/seat_config.py:626,658-659`; inventory record; default `ONBOARD_CENTRAL_TOKEN`; must match `ENV_NAME` | Returned by `/api/config/seats`; no form control/payload key; an unrelated form update can silently restore the default | Changes which host environment variable supplies a bearer reference, so restart/reconnect and Doctor token-source read-back are required; the variable name is readable but its value remains private. P0 Advanced credential-source control; never return the token |
+| `personal_command` | `DesiredSeat.personal_command`, `tools/fleet-dashboard/seat_config.py:625`; inventory record; default `pursers-personal`; used by `ClaudeDesktopAdapter` at `tools/fleet-dashboard/seat_config.py:1695-1714`; no uniform field validator exists before adapter planning | Returned by `/api/config/seats`; no form control/payload key; an update can replace a custom command with the default | Host-file change requires restart and Doctor executable/version result; command is not a secret, but the UI must accept only the bounded command/path contract—never arbitrary shell text. P0 Advanced host control plus uniform server validation |
+| `bridge_name` | `DesiredSeat.bridge_name`, `tools/fleet-dashboard/seat_config.py:627,720-721`; inventory record; default `null`, resolved as `pursers-wait-{name}`; `CodexAdapter._render` rejects an unsafe resolved name at `tools/fleet-dashboard/seat_config.py:1356-1360`, but validation is not uniform at object construction | Returned by `/api/config/seats`; no form control/payload key; an update can replace a custom connector name with the derived default | Renames the wait connector, requiring host restart/reconnect and Doctor connector/identity read-back; non-secret. P0 Advanced connector control plus uniform safe-ID validation |
+| `board_connector_name` | `DesiredSeat.board_connector_name`, `tools/fleet-dashboard/seat_config.py:628,679-681,724-728`; inventory record; default `null`, resolved to `pursers-review` for reviewers or `pursers-dev` otherwise; explicit values match `SAFE_NAME` and Codex rejects equality with the wait connector | Returned by `/api/config/seats`; no form control/payload key; an update can replace a custom connector name with the role-derived default | Renames the direct board connector, requiring restart/reconnect and Doctor authenticated-principal read-back; non-secret. P0 Advanced connector control with collision validation |
+
+For all five fields, the safe redesign flow is: read the complete authoritative seat
+record and revision; render a typed Advanced control; merge the edited allowlisted
+field into the complete record; validate and preview an exact host-file diff; apply an
+unexpired digest; restart only after deliberate confirmation; then run Doctor and
+read back both inventory and observed connector state. Until that flow exists, the
+server must reject an incomplete update to an existing seat or merge omitted fields
+from the current inventory. It must never synthesize defaults over customized stored
+values.
 
 ### Dispatch, board policy and Central retention
 
