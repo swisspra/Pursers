@@ -409,7 +409,10 @@ before an uncertain failure is not automatically replayed. This budget counts
 model runs for either client; `max_turns` separately bounds Goose steps. Codex is
 bounded by `turn_timeout_s` and its configured agent policy.
 
-The runner checks Central for unfinished leases before waiting again, including
+Before launching a model, the runner refetches the exact event ticket and requires
+a current offer to this identity (or a current broadcast) or an exact live owned
+lease. Closed, expired, foreign-owner and replayed events advance the saved cursor
+without spending a model turn. The runner checks Central for unfinished leases before waiting again, including
 after startup and after a model turn exits. A successful process exit is not proof
 of ticket completion: only the authoritative submit/review/human-input state is.
 An exact live holder can receive a separate continuation that preserves the ticket,
@@ -431,6 +434,20 @@ last turn's ticket, timestamps and exit/interruption status without model output
 credentials. Deploy Central, client and event runner together, and regenerate
 managed seat helpers with `--upgrade` so home-board waits also use passive joins.
 Keep cursors, recovery counters and partial repository work during upgrades.
+
+A model timeout or non-zero model exit is recorded as a bounded diagnostic cause;
+the persistent driver stays available. It never records prompts, tokens or model
+output. If the turn acquired a lease, the normal one-shot continuation runs and
+then requests human input if still incomplete. `max_runs_per_hour` is optional and
+defaults to no additional throttle; configure it only as an explicit operator policy.
+
+The local fleet observer reconciles a trusted service adapter's verified process
+loss into executor state before planning. It atomically advances the stored
+generation, clears the old process reference and marks the seat stopped only when
+the exact previous generation/process pair still matches. This gives the next start
+a new operation ID while making repeated snapshots and controller restarts no-ops.
+An active lease or unverified service identity remains unhealthy and visible rather
+than being restarted.
 
 ### Existing macOS Codex fleet cutover
 

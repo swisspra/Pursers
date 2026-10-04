@@ -9,6 +9,7 @@ import socket
 import sys
 import threading
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -850,6 +851,22 @@ def test_crash_recovery_reuses_operation_key_and_executor_replay_boundary() -> N
     assert first.calls[0].operation_id == second.calls[0].operation_id
     _, durable = store.load()
     assert durable["operations"][second.calls[0].operation_id]["attempts"] == 2
+
+
+def test_new_crash_incarnation_does_not_replay_completed_start() -> None:
+    engine = reconciler()
+    old = seat("worker-a", "worker")
+    old_operation = engine.plan(
+        snapshot({"pursers": demand(work=1)}, [old]), {}
+    ).operations[0]
+    prior = {"operations": {old_operation.operation_id: {"outcome": "succeeded"}}}
+    crashed = replace(old, generation=2)
+
+    plan = engine.plan(snapshot({"pursers": demand(work=1)}, [crashed]), prior)
+
+    assert len(plan.operations) == 1
+    assert plan.operations[0].expected_seat_generation == 2
+    assert plan.operations[0].operation_id != old_operation.operation_id
 
 
 class ContendedStore(butler.MemoryFleetStateStore):

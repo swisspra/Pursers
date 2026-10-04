@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Recover a verified crashed managed seat as a new executor incarnation without
+  replaying an old successful start. Duplicate observations use a generation and
+  process-reference CAS; live leases and unverified identities fail closed.
+- Keep event-seat drivers alive after bounded model timeout/failure, skip stale or
+  foreign journal work before model launch, and retain the existing one-shot owned
+  continuation and human-escalation contract.
+
 ## [5.1.0] - 2026-10-03
 
 This release includes `pursers-central==0.1.7`,

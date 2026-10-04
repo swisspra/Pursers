@@ -62,7 +62,7 @@ def validate_config(config):
         or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', service_tier)
     ):
         raise ValueError('invalid Codex service tier')
-    hourly_limit=config.get('max_runs_per_hour',5)
+    hourly_limit=config.get('max_runs_per_hour')
     if hourly_limit is not None and (type(hourly_limit) is not int or not 1 <= hourly_limit <= 100):
         raise ValueError('invalid hourly run limit')
     for key, default, ceiling in (('max_turns',30,100),('turn_timeout_s',1800,3600)):
@@ -118,6 +118,35 @@ class EventSeatRunner:
         if self.path.exists(): self.state.update(json.loads(HELPERS['private_read'](self.path,1048576)))
         self.run_command=self._run
         self.monotonic=time.monotonic
+        self.preflight_enabled=False
+
+    async def event_authorized(self, event, now):
+        """Refetch one event target and reject stale/foreign work before model launch."""
+        async with self.client(event['board']) as client:
+            identity = client.identity
+            if (identity is None or identity.agent_name != self.config['seat_id']
+                    or identity.role != self.config['role']):
+                raise ValueError('event preflight identity mismatch')
+            ticket = (await client.ticket_get(event['ticket'], view='full'))['ticket']
+            if self.owned_key(event['board'], ticket, identity, now) is not None:
+                return True, 'owned_lease'
+            expected_kind = 'review' if self.config['role'] == 'reviewer' else 'work'
+            eligible_status = ticket.get('status') in (
+                {'submitted'} if expected_kind == 'review' else {'open'})
+            offer = ticket.get('review_offer' if expected_kind == 'review' else 'work_offer') or {}
+            expiry = offer.get('expires_at_epoch')
+            exact_offer = (
+                offer.get('kind') == expected_kind
+                and offer.get('agent_id') == identity.agent_id
+                and offer.get('agent_name') == identity.agent_name
+                and isinstance(expiry, (int, float))
+                and not isinstance(expiry, bool)
+                and expiry > now
+            )
+            dispatch = ticket.get('dispatch_state') or {}
+            broadcast = dispatch.get('state') == 'broadcast' and dispatch.get('kind') == expected_kind
+            offered = eligible_status and (exact_offer or broadcast)
+            return offered, 'current_offer' if offered else 'stale_or_foreign_event'
 
     def environment(self):
         c=self.config
@@ -234,8 +263,18 @@ class EventSeatRunner:
         self.state['cursor']=cursor
         PUBLISH(self.path,self.state)
         while pending:
+            event=pending[0]
+            if self.preflight_enabled and not event.get('recovery_key'):
+                authorized, reason = asyncio.run(self.event_authorized(event, time.time()))
+                if not authorized:
+                    pending.pop(0)
+                    self.state['seen']=(self.state['seen']+[event['marker']])[-200:]
+                    self.state['last_skip']={'board':event['board'],'ticket':event['ticket'],
+                        'reason':reason,'at':time.time()}
+                    PUBLISH(self.path,self.state)
+                    continue
             runs=[r for r in self.state['runs'] if now-r<3600]
-            limit=self.config.get('max_runs_per_hour',5)
+            limit=self.config.get('max_runs_per_hour')
             if limit is not None and len(runs)>=limit:
                 self.state['runs']=runs
                 self.state['rate_limited_until']=min(runs)+3600
@@ -272,6 +311,12 @@ class EventSeatRunner:
             PUBLISH(self.path,self.state)
             try:
                 self.run_command(self.model_command(prompt, extension))
+            except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as exc:
+                self.state['last_turn'].update(outcome='interrupted', error_class=type(exc).__name__)
+                self.state['last_turn']['exit_cause'] = (
+                    'model_timeout' if isinstance(exc, subprocess.TimeoutExpired)
+                    else 'model_process_failed'
+                )
             except BaseException as exc:
                 self.state['last_turn'].update(outcome='interrupted', error_class=type(exc).__name__)
                 raise
@@ -367,6 +412,7 @@ class EventSeatRunner:
         validate_registry_roots(registry,c['repository_root'])
         boards=active_registry_boards(registry,c['home_board'])
         self.active_boards=boards
+        self.preflight_enabled=True
         if any(type(v) is not int or v<1 for v in self.state['cursor'].values()):
             raise ValueError('invalid saved positive cursor')
         for board in boards:

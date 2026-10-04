@@ -700,6 +700,34 @@ class ExecutorStore:
                 ),
             )
 
+    def reconcile_unexpected_stop(
+        self,
+        seat_id: str,
+        *,
+        expected_generation: int,
+        expected_process_ref: str,
+        now: float,
+    ) -> dict[str, Any] | None:
+        """CAS a verified lost process into one new stopped incarnation.
+
+        The caller must prove process absence with the configured service adapter.
+        Matching both generation and process reference prevents a stale observer or
+        controller restart from retiring a newer process.
+        """
+        if expected_generation < 1 or not expected_process_ref:
+            raise ValueError("unexpected stop evidence is incomplete")
+        active = ("starting", "ready", "busy", "draining", "unhealthy")
+        marks = ",".join("?" for _ in active)
+        with self.connection:
+            changed = self.connection.execute(
+                "UPDATE seats SET generation = generation + 1, lifecycle = 'stopped', "
+                "process_ref = NULL, last_mutation = ?, last_failure = ? "
+                f"WHERE seat_id = ? AND generation = ? AND process_ref = ? "
+                f"AND lifecycle IN ({marks})",
+                (now, now, seat_id, expected_generation, expected_process_ref, *active),
+            ).rowcount
+        return self.seat(seat_id) if changed == 1 else None
+
 
 class SystemdUserAdapter:
     """Narrow ``systemctl --user`` adapter with injected runner for tests."""
