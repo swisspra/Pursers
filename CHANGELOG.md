@@ -15,6 +15,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Classify coordinator/orchestrator `a2a_wait(wait_for="auto")` failures as
+  pre-subscription configuration errors instead of transport outages, preserve
+  the caller cursor for an explicit re-arm, and keep them out of reconnect and
+  push-failure accounting. Orchestrator digests now mark disconnected or
+  cursor-behind cached views as stale with exact per-board cursor gaps.
 - Keep event seats and the resident Butler alive through bounded, typed recovery
   of nested transient transport groups. Recovery preserves positive cursors,
   pending events, leases and active model processes; mixed/authentication groups

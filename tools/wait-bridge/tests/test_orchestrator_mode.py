@@ -1187,3 +1187,50 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
                     "kind": "work",
                 }],
             )
+
+    async def test_disconnected_digest_reports_cursor_staleness(self) -> None:
+        meter = wait_server.BridgeStats(wait_server.bridge_stats_path())
+        engine = wait_server.OrchestratorEngine(
+            None, meter, wait_server.bridge_state_path()
+        )
+        engine.cursor_map[wait_server.BOARD_ID] = 47_377
+        engine.subscription_health.update(
+            {
+                "connected": False,
+                "last_event_at": "2026-10-03T16:39:31.560059+00:00",
+                "reconnects": 8_332,
+            }
+        )
+
+        stale = await engine.build_digest(
+            since={wait_server.BOARD_ID: 48_283},
+            boards=[wait_server.BOARD_ID],
+        )
+
+        self.assertEqual(stale["cursor_map"], {wait_server.BOARD_ID: 47_377})
+        self.assertEqual(stale["data_status"], "stale")
+        self.assertTrue(stale["stale"])
+        self.assertEqual(
+            stale["stale_reasons"],
+            ["subscription_disconnected", "cursor_behind_request"],
+        )
+        self.assertEqual(
+            stale["lagging_boards"],
+            {
+                wait_server.BOARD_ID: {
+                    "requested_cursor": 48_283,
+                    "available_cursor": 47_377,
+                }
+            },
+        )
+        self.assertEqual(stale["subscription"]["status"], "stale")
+
+        engine.cursor_map[wait_server.BOARD_ID] = 48_283
+        engine.subscription_health["connected"] = True
+        current = await engine.build_digest(
+            since={wait_server.BOARD_ID: 48_283},
+            boards=[wait_server.BOARD_ID],
+        )
+        self.assertEqual(current["data_status"], "current")
+        self.assertFalse(current["stale"])
+        self.assertEqual(current["lagging_boards"], {})
