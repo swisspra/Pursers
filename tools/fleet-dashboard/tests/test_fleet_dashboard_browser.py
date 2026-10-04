@@ -630,13 +630,24 @@ await page.cdp("Emulation.setDeviceMetricsOverride", {{
   width: 320, height: 900, deviceScaleFactor: 1, mobile: false,
 }});
 await page.goto({json.dumps(url)});
+await page.waitForSelector(".autonomous-config-form", {{state: "attached", timeout: 10000}});
+await page.waitForSelector('[data-settings-bound="true"]', {{state: "attached", timeout: 10000}});
+const advanced = '[data-settings-mode="advanced"]';
+await page.waitForSelector(advanced, {{state: "visible", timeout: 10000}});
+await page.evaluate(() => document.querySelector('[data-settings-mode="advanced"]').click());
+await page.waitForFunction(
+  () => document.querySelector('[data-settings-mode="advanced"]')?.getAttribute("aria-pressed") === "true"
+    && document.querySelector('[data-settings-mode="simple"]')?.getAttribute("aria-pressed") === "false",
+  undefined,
+  {{timeout: 10000}},
+);
 await page.waitForSelector(".autonomous-config-form", {{state: "visible", timeout: 10000}});
-const save = ".autonomous-config-form button[type=submit]";
-await page.evaluate(() => document.activeElement?.blur());
-for (let index = 0; index < 80; index += 1) {{
+await page.focus('.autonomous-config-form select[name="mode"]');
+for (let index = 0; index < 32; index += 1) {{
   await page.keyboard.press("Tab");
   if (await page.evaluate(() => document.activeElement?.matches(".autonomous-config-form button[type=submit]"))) break;
 }}
+if (!await page.evaluate(() => document.activeElement?.matches(".autonomous-config-form button[type=submit]"))) throw new Error("Autonomous save button was not keyboard reachable");
 const before = await page.evaluate(() => {{
   const form = document.querySelector(".autonomous-config-form");
   const rgb = value => value.match(/[\\d.]+/g).slice(0, 3).map(Number);
@@ -656,6 +667,8 @@ const before = await page.evaluate(() => {{
   const danger = form.querySelector(".danger-action");
   const focused = form.querySelector(":focus");
   return {{
+    advancedPressed: document.querySelector('[data-settings-mode="advanced"]').getAttribute("aria-pressed"),
+    simplePressed: document.querySelector('[data-settings-mode="simple"]').getAttribute("aria-pressed"),
     state: form.closest("[data-pursers-autonomous-board]").dataset.pursersState,
     observation: form.closest("[data-pursers-autonomous-board]").querySelector("[data-autonomous-observation]").textContent,
     fieldCount: fields.length,
@@ -670,7 +683,12 @@ const before = await page.evaluate(() => {{
     leakedSecret: document.body.textContent.includes("browser-secret-sentinel"),
   }};
 }});
-await page.press(save, "Enter");
+await page.evaluate(() => {{
+  const button = document.querySelector(".autonomous-config-form button[type=submit]");
+  const invalid = [...button.form.elements].filter(element => element.willValidate && !element.checkValidity()).map(element => ({{name: element.name, value: element.value, message: element.validationMessage}}));
+  if (invalid.length) throw new Error(`Autonomous form invalid: ${{JSON.stringify(invalid)}}`);
+  button.form.requestSubmit(button);
+}});
 await page.waitForFunction(
   () => document.querySelector(".autonomous-result")?.textContent.includes("reload before saving"),
   undefined,
@@ -692,7 +710,7 @@ console.log(JSON.stringify({{before, after, team}}));
 """
         completed = subprocess.run(
             [ego_browser, "nodejs", "-e", script],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             timeout=30,
@@ -702,9 +720,12 @@ console.log(JSON.stringify({{before, after, team}}));
         server.server_close()
         thread.join()
 
+    assert completed.returncode == 0, completed.stderr
     evidence = json.loads(completed.stderr.strip().splitlines()[-1])
     print(json.dumps(evidence, sort_keys=True))
     assert evidence["before"]["state"] == "shadow"
+    assert evidence["before"]["advancedPressed"] == "true"
+    assert evidence["before"]["simplePressed"] == "false"
     assert evidence["before"]["observation"] == (
         "Actual observation revision mismatch (observed 3, config 4)"
     )
