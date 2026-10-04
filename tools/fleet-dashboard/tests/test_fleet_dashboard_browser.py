@@ -630,13 +630,31 @@ await page.cdp("Emulation.setDeviceMetricsOverride", {{
   width: 320, height: 900, deviceScaleFactor: 1, mobile: false,
 }});
 await page.goto({json.dumps(url)});
+await page.waitForSelector('[data-settings-bound="true"]', {{state: "attached", timeout: 20000}});
+await page.waitForSelector(".autonomous-config-form", {{state: "attached", timeout: 10000}});
+await page.evaluate(() => {{
+  const form = document.querySelector(".autonomous-config-form");
+  if (!form?.isConnected) throw new Error("Settled Settings form is not connected");
+  globalThis.__coldSettingsForm = form;
+}});
+const advanced = '[data-settings-mode="advanced"]';
+await page.waitForSelector(advanced, {{state: "visible", timeout: 10000}});
+await page.evaluate(() => document.querySelector('[data-settings-mode="advanced"]').click());
+await page.waitForFunction(
+  () => document.querySelector('[data-settings-mode="advanced"]')?.getAttribute("aria-pressed") === "true"
+    && document.querySelector('[data-settings-mode="simple"]')?.getAttribute("aria-pressed") === "false"
+    && globalThis.__coldSettingsForm?.isConnected
+    && globalThis.__coldSettingsForm === document.querySelector(".autonomous-config-form"),
+  undefined,
+  {{timeout: 10000}},
+);
 await page.waitForSelector(".autonomous-config-form", {{state: "visible", timeout: 10000}});
-const save = ".autonomous-config-form button[type=submit]";
-await page.evaluate(() => document.activeElement?.blur());
-for (let index = 0; index < 80; index += 1) {{
+await page.focus('.autonomous-config-form select[name="mode"]');
+for (let index = 0; index < 32; index += 1) {{
   await page.keyboard.press("Tab");
   if (await page.evaluate(() => document.activeElement?.matches(".autonomous-config-form button[type=submit]"))) break;
 }}
+if (!await page.evaluate(() => document.activeElement?.matches(".autonomous-config-form button[type=submit]"))) throw new Error("Autonomous save button was not keyboard reachable");
 const before = await page.evaluate(() => {{
   const form = document.querySelector(".autonomous-config-form");
   const rgb = value => value.match(/[\\d.]+/g).slice(0, 3).map(Number);
@@ -656,6 +674,8 @@ const before = await page.evaluate(() => {{
   const danger = form.querySelector(".danger-action");
   const focused = form.querySelector(":focus");
   return {{
+    advancedPressed: document.querySelector('[data-settings-mode="advanced"]').getAttribute("aria-pressed"),
+    simplePressed: document.querySelector('[data-settings-mode="simple"]').getAttribute("aria-pressed"),
     state: form.closest("[data-pursers-autonomous-board]").dataset.pursersState,
     observation: form.closest("[data-pursers-autonomous-board]").querySelector("[data-autonomous-observation]").textContent,
     fieldCount: fields.length,
@@ -670,7 +690,15 @@ const before = await page.evaluate(() => {{
     leakedSecret: document.body.textContent.includes("browser-secret-sentinel"),
   }};
 }});
-await page.press(save, "Enter");
+await page.evaluate(() => {{
+  const button = document.querySelector(".autonomous-config-form button[type=submit]");
+  if (!globalThis.__coldSettingsForm?.isConnected || button.form !== globalThis.__coldSettingsForm) {{
+    throw new Error("Cold Settings form was replaced before submission");
+  }}
+  const invalid = [...button.form.elements].filter(element => element.willValidate && !element.checkValidity()).map(element => ({{name: element.name, value: element.value, message: element.validationMessage}}));
+  if (invalid.length) throw new Error(`Autonomous form invalid: ${{JSON.stringify(invalid)}}`);
+  button.form.requestSubmit(button);
+}});
 await page.waitForFunction(
   () => document.querySelector(".autonomous-result")?.textContent.includes("reload before saving"),
   undefined,
@@ -692,19 +720,22 @@ console.log(JSON.stringify({{before, after, team}}));
 """
         completed = subprocess.run(
             [ego_browser, "nodejs", "-e", script],
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=45,
         )
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
 
+    assert completed.returncode == 0, completed.stderr
     evidence = json.loads(completed.stderr.strip().splitlines()[-1])
     print(json.dumps(evidence, sort_keys=True))
     assert evidence["before"]["state"] == "shadow"
+    assert evidence["before"]["advancedPressed"] == "true"
+    assert evidence["before"]["simplePressed"] == "false"
     assert evidence["before"]["observation"] == (
         "Actual observation revision mismatch (observed 3, config 4)"
     )
@@ -932,6 +963,32 @@ for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
   home.screenshot = await page.screenshot({{
     path: {json.dumps(str(evidence_dir))} + `/fleet-home-${{viewport.width}}x${{viewport.height}}.png`
   }});
+  const workflowRoutes = [];
+  for (const theme of ["light", "dark"]) {{
+    await page.evaluate(value => {{ document.documentElement.dataset.theme=value; }}, theme);
+    await page.evaluate(() => {{ location.hash="#/work"; }});
+    await page.waitForSelector("#central-sections [data-work-layout]", {{state:"attached",timeout:10000}});
+    const work = await page.evaluate(() => ({{
+      route: location.hash,
+      kanban: getComputedStyle(document.querySelector('[data-work-layout="kanban"]')).display,
+      list: getComputedStyle(document.querySelector('[data-work-layout="list"]')).display,
+      lanes: document.querySelectorAll('[data-work-lane]').length,
+      tickets: document.querySelectorAll('[data-pursers-ticket="TK-live"]').length,
+    }}));
+    work.screenshot = await page.screenshot({{path:{json.dumps(str(evidence_dir))}+`/fleet-work-${{theme}}-${{viewport.width}}x${{viewport.height}}.png`}});
+    await page.evaluate(() => {{ location.hash="#/inbox"; }});
+    await page.waitForSelector("#central-sections .inbox-master-detail", {{state:"visible",timeout:10000}});
+    const inbox = await page.evaluate(() => {{
+      const root=document.querySelector('.inbox-master-detail'), first=document.querySelector('[data-inbox-select]');
+      const before=root.dataset.inboxMobileView;
+      if (innerWidth<=800 && first) first.click();
+      const selected=document.querySelector('.inbox-master-detail').dataset.inboxMobileView;
+      if (innerWidth<=800) document.querySelector('[data-inbox-back]')?.click();
+      return {{route:location.hash,before,selected,after:document.querySelector('.inbox-master-detail').dataset.inboxMobileView,source:first?.dataset.inboxSource||null}};
+    }});
+    inbox.screenshot = await page.screenshot({{path:{json.dumps(str(evidence_dir))}+`/fleet-inbox-${{theme}}-${{viewport.width}}x${{viewport.height}}.png`}});
+    workflowRoutes.push({{theme,work,inbox}});
+  }}
   await page.evaluate(() => {{ location.hash="#/team"; }});
   await page.waitForFunction(() => document.querySelectorAll(".agent-card").length===35, undefined, {{timeout:10000}});
   const team = await page.evaluate(async () => {{
@@ -971,14 +1028,14 @@ for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
     ticket.open = true;
     ticket.querySelector("summary").focus();
     let overflowStyle = document.querySelector("#refresh-overflow-fixture");
-    if (!overflowStyle) {{ overflowStyle=document.createElement("style");overflowStyle.id="refresh-overflow-fixture";overflowStyle.textContent="#detail-view .table-scroll table{{min-width:1800px}}";document.head.appendChild(overflowStyle); }}
-    const scroller = document.querySelector("#detail-view .table-scroll");
+    if (!overflowStyle) {{ overflowStyle=document.createElement("style");overflowStyle.id="refresh-overflow-fixture";overflowStyle.textContent="#detail-view .ticket-focus{{overflow-x:auto}}#detail-view .ticket-focus-head{{min-width:1800px}}";document.head.appendChild(overflowStyle); }}
+    const scroller = document.querySelector("#detail-view .ticket-focus");
     if (scroller) scroller.scrollLeft = 35;
     window.scrollTo(0, Math.min(420, document.documentElement.scrollHeight-innerHeight));
     const beforeY = window.scrollY, beforeX = scroller?.scrollLeft||0;
     for (let index=0;index<3;index+=1) await refreshDetail();
     ticket = document.querySelector('[data-ticket="TK-live"]');
-    const reading = {{route:location.hash,open:ticket.open,focused:document.activeElement===ticket.querySelector("summary"),beforeY,afterY:window.scrollY,beforeX,afterX:document.querySelector("#detail-view .table-scroll")?.scrollLeft||0,revision:detailData.generated_at}};
+    const reading = {{route:location.hash,open:ticket.open,focused:document.activeElement===ticket.querySelector("summary"),beforeY,afterY:window.scrollY,beforeX,afterX:document.querySelector("#detail-view .ticket-focus")?.scrollLeft||0,revision:detailData.generated_at}};
     const draft = document.querySelector("#intake-form textarea");
     draft.value = "unsaved form survives three refreshes";
     draft.dispatchEvent(new Event("input",{{bubbles:true}}));
@@ -988,7 +1045,7 @@ for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
     const restored = document.querySelector("#intake-form textarea");
     return {{...reading,draft:restored.value,draftFocused:document.activeElement===restored,dirty:restored.form.dataset.dirty||null,networkAdvanced:detailData.generated_at!==revisionBefore}};
   }});
-  results.push({{viewport,home,team,settings,detail}});
+  results.push({{viewport,home,workflowRoutes,team,settings,detail}});
 }}
 console.log(JSON.stringify(results));
 """
@@ -1018,6 +1075,25 @@ console.log(JSON.stringify(results));
         screenshot = Path(row["home"]["screenshot"])
         assert screenshot.parent == evidence_dir
         assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        for workflow in row["workflowRoutes"]:
+            assert workflow["theme"] in {"light", "dark"}
+            assert workflow["work"]["route"] == "#/work"
+            assert workflow["work"]["lanes"] >= 1
+            assert workflow["work"]["tickets"] >= 1
+            if row["viewport"]["width"] <= 800:
+                assert workflow["work"]["kanban"] == "none"
+                assert workflow["work"]["list"] == "block"
+                assert workflow["inbox"]["before"] == "list"
+                assert workflow["inbox"]["selected"] == "detail"
+                assert workflow["inbox"]["after"] == "list"
+            else:
+                assert workflow["work"]["kanban"] == "grid"
+                assert workflow["work"]["list"] == "none"
+                assert workflow["inbox"]["before"] == "detail"
+            for surface in (workflow["work"], workflow["inbox"]):
+                image = Path(surface["screenshot"])
+                assert image.parent == evidence_dir
+                assert image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         assert row["team"]["route"] == "#/team"
         assert row["team"]["count"] == 35
         assert row["team"]["open"] is True

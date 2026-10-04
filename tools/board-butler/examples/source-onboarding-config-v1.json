@@ -1,0 +1,24 @@
+{
+  "sources": {
+    "issues": {
+      "domain": "work",
+      "projects_root": "/PATH/TO/fleet-projects",
+      "auto_onboard": false,
+      "per_cycle_cap": 2,
+      "retry_limit": 3,
+      "retry_backoff_s": 60,
+      "repositories": {
+        "example-service": {
+          "repository_url": "https://example.invalid/org/example-service.git",
+          "integration_ref": "main"
+        }
+      },
+      "member_roles": {},
+      "discovery": {
+        "kind": "sonar_ado",
+        "refresh_seconds": 900
+      },
+      "activate_delivery_policy": false
+    }
+  }
+}

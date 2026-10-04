@@ -40,6 +40,7 @@ WAIT_BRIDGE = REPOSITORY / "tools/wait-bridge"
 SEAT_KIT = REPOSITORY / "tools/seat-kit/seat_new.py"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+EXECUTABLE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 MANAGED_COMMENT = "# pursers-managed; edit through the fleet dashboard"
 DEFAULT_REGISTRY_BOARD = "pursers"
 HOST_MODES = {"acp", "persistent"}
@@ -657,6 +658,27 @@ class DesiredSeat:
             raise ValueError("registry board must be a safe 1-80 character identifier")
         if not ENV_NAME.fullmatch(self.token_env_var):
             raise ValueError("token env var must be a safe identifier")
+        if not isinstance(self.personal_command, str) or not self.personal_command:
+            raise ValueError(
+                "personal command must be an executable name or absolute path"
+            )
+        personal_path = Path(self.personal_command).expanduser()
+        if personal_path.is_absolute():
+            if (
+                self.personal_command != self.personal_command.strip()
+                or any(
+                    ord(character) < 0x20 or ord(character) == 0x7F
+                    for character in self.personal_command
+                )
+                or ".." in personal_path.parts
+            ):
+                raise ValueError(
+                    "personal command must be a safe absolute executable path"
+                )
+        elif not EXECUTABLE_NAME.fullmatch(self.personal_command):
+            raise ValueError(
+                "personal command must be an executable name or absolute path"
+            )
         if self.boards is None:
             object.__setattr__(self, "boards", "home" if home_board else "registry")
         if not isinstance(self.boards, str):
@@ -680,6 +702,10 @@ class DesiredSeat:
             self.board_connector_name
         ):
             raise ValueError("board connector name must be a safe identifier")
+        if self.bridge_name is not None and not SAFE_NAME.fullmatch(self.bridge_name):
+            raise ValueError("bridge connector name must be a safe identifier")
+        if self.connector_name == self.http_connector_name:
+            raise ValueError("bridge and board connector names must differ")
         if isinstance(self.tier_max, bool) or self.tier_max not in {1, 2, 3}:
             raise ValueError("tier_max must be 1, 2, or 3")
         normalized_skills = tuple(

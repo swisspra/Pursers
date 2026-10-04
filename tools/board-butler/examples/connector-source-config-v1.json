@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "approved_connector_ids": ["connector:issues"],
+  "connectors": [
+    {
+      "connector_id": "connector:issues",
+      "transport": "streamable_http",
+      "protocol_revision": "2026-07-28",
+      "endpoint_ref": "endpoint:issues",
+      "secret_ref": null,
+      "tools": [
+        {
+          "name": "issues_list",
+          "effect": "read_only",
+          "replay": "never",
+          "stable_call_id_field": null
+        }
+      ],
+      "resources": [],
+      "risky_tools": [],
+      "denied_tools": ["issues_admin"],
+      "limits": {
+        "timeout_ms": 30000,
+        "max_input_bytes": 65536,
+        "max_output_bytes": 1000000,
+        "max_concurrency": 2,
+        "calls_per_minute": 60
+      }
+    }
+  ],
+  "endpoints": {
+    "endpoint:issues": {
+      "transport": "streamable_http",
+      "url": "https://mcp.example.invalid/mcp",
+      "secret_headers": {
+        "Authorization": {
+          "file": "/PATH/TO/issues.secret",
+          "prefix": "Bearer"
+        }
+      }
+    }
+  },
+  "sources": [
+    {
+      "source_id": "issues",
+      "connector_id": "connector:issues",
+      "enabled": false,
+      "list_tool": "issues_list",
+      "fixed_args": {"status": "open"},
+      "items_path": "issues",
+      "field_map": {
+        "external_id": "id",
+        "revision": "revision",
+        "title": "title",
+        "body": "body",
+        "link": "url",
+        "project_hint": "project"
+      },
+      "routing": {"project_hint_is_registry_key": true},
+      "mode": "ask",
+      "content_type": "structured"
+    }
+  ]
+}

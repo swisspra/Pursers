@@ -100,6 +100,63 @@
   min-height: 44px;
 }
 
+.work-kanban {
+  display: grid;
+  grid-auto-columns: minmax(250px, 1fr);
+  grid-auto-flow: column;
+  gap: 14px;
+  min-width: 0;
+  padding-bottom: 10px;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.work-kanban-lane {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--work-rule);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel2) 72%, transparent);
+}
+
+.work-kanban-lane > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 2px 10px;
+}
+
+.work-kanban-lane > header h4 { font-size: 15px; }
+.work-kanban-lane > header span {
+  min-width: 1.7rem;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--panel);
+  text-align: center;
+}
+.work-kanban-lane > div { display: grid; gap: 10px; }
+.work-kanban-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--work-rule);
+  border-radius: 10px;
+  background: var(--work-paper);
+}
+.work-kanban-card-head { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+.work-kanban-card-head .work-state-mark { margin: 0; }
+.work-kanban-card code,.work-kanban-card p,.work-kanban-card footer { overflow-wrap: anywhere; }
+.work-kanban-card p { color: var(--muted); font-size: 13px; }
+.work-kanban-card dl { display: grid; gap: 7px; margin: 0; }
+.work-kanban-card dl div { display: grid; grid-template-columns: 3.5rem minmax(0,1fr); gap: 8px; }
+.work-kanban-card dt { color: var(--muted); font-size: 12px; }
+.work-kanban-card dd { margin: 0; overflow-wrap: anywhere; font-size: 13px; }
+.work-kanban-card footer { display: flex; align-items: end; justify-content: space-between; gap: 8px; padding-top: 9px; border-top: 1px solid var(--work-rule); font-size: 12px; }
+.work-kanban-card footer span { color: var(--muted); }
+.work-mobile-list { display: none; }
+
 .work-ledger {
   min-width: 0;
   border-top: 2px solid var(--work-ink);
@@ -497,9 +554,9 @@
     flex: 0 0 auto;
   }
 
-  .work-ledger-head {
-    display: none;
-  }
+  .work-kanban { display: none; }
+  .work-mobile-list { display: block; border-block: 1px solid var(--work-rule); }
+  .work-ledger-head { display: none; }
 
   .work-ledger {
     border-top-width: 1px;

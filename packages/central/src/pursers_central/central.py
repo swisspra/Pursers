@@ -203,6 +203,28 @@ MODEL_USAGE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 DEFAULT_INVITE_PRUNE_AFTER_DAYS = 7
 MIN_RETENTION_DAYS = 0
 MAX_RETENTION_DAYS = 365
+RETENTION_SETTINGS_SCHEMA_VERSION = 1
+RETENTION_SETTINGS_FIELDS = (
+    "archive_after_days",
+    "inline_history_limit",
+    "invite_prune_after_days",
+    "journal_retention_days",
+    "journal_row_cap",
+)
+RETENTION_SETTINGS_RANGES = {
+    "archive_after_days": (MIN_ARCHIVE_AFTER_DAYS, MAX_ARCHIVE_AFTER_DAYS),
+    "inline_history_limit": (MIN_INLINE_HISTORY_LIMIT, MAX_INLINE_HISTORY_LIMIT),
+    "invite_prune_after_days": (MIN_RETENTION_DAYS, MAX_RETENTION_DAYS),
+    "journal_retention_days": (MIN_RETENTION_DAYS, MAX_RETENTION_DAYS),
+    "journal_row_cap": (MIN_JOURNAL_ROW_CAP, MAX_JOURNAL_ROW_CAP),
+}
+RETENTION_SETTINGS_DEFAULTS = {
+    "archive_after_days": DEFAULT_ARCHIVE_AFTER_DAYS,
+    "inline_history_limit": DEFAULT_INLINE_HISTORY_LIMIT,
+    "invite_prune_after_days": DEFAULT_INVITE_PRUNE_AFTER_DAYS,
+    "journal_retention_days": DEFAULT_JOURNAL_RETENTION_DAYS,
+    "journal_row_cap": DEFAULT_JOURNAL_ROW_CAP,
+}
 BOARD_JOIN_AUTH_LOG_WINDOW_S = 600.0
 BOUNDED_HISTORY_FIELDS = (
     "dispatch_history",
@@ -1795,6 +1817,8 @@ class CentralBoard:
             "butler_config_mutations": {},
             "agent_profile_audit": [],
             "next_agent_profile_audit_seq": 1,
+            "retention_settings_audit": [],
+            "next_retention_settings_audit_seq": 1,
         }
 
     def ensure_schema(self, document: dict[str, Any]) -> None:
@@ -2007,6 +2031,20 @@ class CentralBoard:
             or next_agent_profile_audit_seq < 1
         ):
             raise ValueError("agent profile audit sequence is invalid")
+        retention_settings_audit = document.setdefault(
+            "retention_settings_audit", []
+        )
+        if not isinstance(retention_settings_audit, list):
+            raise ValueError("retention settings audit is invalid")
+        next_retention_settings_audit_seq = document.setdefault(
+            "next_retention_settings_audit_seq", 1
+        )
+        if (
+            isinstance(next_retention_settings_audit_seq, bool)
+            or not isinstance(next_retention_settings_audit_seq, int)
+            or next_retention_settings_audit_seq < 1
+        ):
+            raise ValueError("retention settings audit sequence is invalid")
         board_id = document.get("board_id")
         if not isinstance(board_id, str) or not board_id:
             raise ValueError("board document is missing board_id")
@@ -8516,6 +8554,250 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "events": events,
         }
 
+    def require_retention_settings_admin_actor(
+        document: dict[str, Any], principal: Principal, agent_name: str
+    ) -> dict[str, Any]:
+        actor = service.member(document, principal, agent_name)
+        membership = service.resolve_board_context(document, principal.principal_id)
+        if membership.get("role") != "admin":
+            raise PermissionError("retention settings require board admin")
+        return actor
+
+    def retention_settings_projection(document: Mapping[str, Any]) -> dict[str, Any]:
+        config = document.get("config", {})
+        if not isinstance(config, Mapping):
+            raise ValueError("board config is invalid")
+        revision = config.get("retention_settings_revision", 0)
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ValueError("board retention settings revision is invalid")
+        settings = {
+            field: int(config.get(field, RETENTION_SETTINGS_DEFAULTS[field]))
+            for field in RETENTION_SETTINGS_FIELDS
+        }
+        return {
+            "schema_version": RETENTION_SETTINGS_SCHEMA_VERSION,
+            "revision": revision,
+            "settings": settings,
+            "defaults": copy.deepcopy(RETENTION_SETTINGS_DEFAULTS),
+            "ranges": {
+                field: {"minimum": bounds[0], "maximum": bounds[1]}
+                for field, bounds in RETENTION_SETTINGS_RANGES.items()
+            },
+            "operational_fields": list(RETENTION_SETTINGS_FIELDS),
+            "unsupported_fields": [],
+            "apply_runs_maintenance": False,
+            "migration": {
+                "board_schema_version": int(document.get("schema_version", 0)),
+                "settings_schema_version": RETENTION_SETTINGS_SCHEMA_VERSION,
+                "legacy_documents_use_defaults": True,
+            },
+        }
+
+    def validate_retention_settings_changes(
+        changes: Mapping[str, Any], current: Mapping[str, int]
+    ) -> tuple[dict[str, int], list[str]]:
+        if not isinstance(changes, Mapping):
+            raise ValueError("changes must be an object")
+        unknown = sorted(set(changes) - set(RETENTION_SETTINGS_FIELDS))
+        if unknown:
+            raise ValueError(
+                "unsupported retention settings: " + ", ".join(unknown)
+            )
+        candidate = dict(current)
+        changed_fields: list[str] = []
+        for field, value in changes.items():
+            lower, upper = RETENTION_SETTINGS_RANGES[field]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not lower <= value <= upper
+            ):
+                raise ValueError(
+                    f"{field} must be an integer between {lower} and {upper}"
+                )
+            candidate[field] = value
+            if value != current[field]:
+                changed_fields.append(field)
+        return candidate, sorted(changed_fields)
+
+    @tool()
+    async def board_retention_settings_get(
+        board_id: str,
+        agent_name: str,
+    ) -> dict[str, Any]:
+        """Read the guarded retention settings contract for one board."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        principal = current_principal()
+        require_scope(principal, "board:read")
+        document = service.load(board_id)
+        require_retention_settings_admin_actor(document, principal, agent_name)
+        return {
+            "ok": True,
+            "board_id": board_id,
+            **retention_settings_projection(document),
+        }
+
+    @tool()
+    async def board_retention_settings_validate(
+        board_id: str,
+        agent_name: str,
+        changes: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate and normalize retention changes without writing board state."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        principal = current_principal()
+        require_scope(principal, "board:read")
+        document = service.load(board_id)
+        require_retention_settings_admin_actor(document, principal, agent_name)
+        projection = retention_settings_projection(document)
+        candidate, changed_fields = validate_retention_settings_changes(
+            changes, projection["settings"]
+        )
+        return {
+            "ok": True,
+            "valid": True,
+            "board_id": board_id,
+            "schema_version": RETENTION_SETTINGS_SCHEMA_VERSION,
+            "revision": projection["revision"],
+            "current": projection["settings"],
+            "candidate": candidate,
+            "changed": bool(changed_fields),
+            "changed_fields": changed_fields,
+            "ranges": projection["ranges"],
+            "unsupported_fields": projection["unsupported_fields"],
+        }
+
+    @tool()
+    async def board_retention_settings_preview(
+        board_id: str,
+        agent_name: str,
+        changes: dict[str, Any],
+        expected_revision: StrictInt,
+    ) -> dict[str, Any]:
+        """Validate a retention settings CAS update without persisting or sweeping."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise ValueError("expected_revision must be a non-negative integer")
+        principal = current_principal()
+        require_scope(principal, "board:read")
+        document = service.load(board_id)
+        require_retention_settings_admin_actor(document, principal, agent_name)
+        projection = retention_settings_projection(document)
+        if projection["revision"] != expected_revision:
+            raise ValueError(
+                "retention settings revision conflict: "
+                f"expected {expected_revision}, current {projection['revision']}"
+            )
+        candidate, changed_fields = validate_retention_settings_changes(
+            changes, projection["settings"]
+        )
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "schema_version": RETENTION_SETTINGS_SCHEMA_VERSION,
+            "revision": projection["revision"],
+            "candidate_revision": projection["revision"] + bool(changed_fields),
+            "current": projection["settings"],
+            "candidate": candidate,
+            "changed": bool(changed_fields),
+            "changed_fields": changed_fields,
+            "apply_runs_maintenance": False,
+            "requires_separate_maintenance_confirmation": True,
+        }
+
+    @tool()
+    async def board_retention_settings_apply(
+        board_id: str,
+        agent_name: str,
+        changes: dict[str, Any],
+        expected_revision: StrictInt,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """CAS-apply validated retention settings without running maintenance."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise ValueError("expected_revision must be a non-negative integer")
+        principal = current_principal()
+        require_scope(principal, "board:write")
+        now = time.time()
+
+        def apply_settings(document: dict[str, Any]) -> dict[str, Any]:
+            actor = require_retention_settings_admin_actor(
+                document, principal, agent_name
+            )
+            projection = retention_settings_projection(document)
+            current_revision = projection["revision"]
+            if current_revision != expected_revision:
+                raise ValueError(
+                    "retention settings revision conflict: "
+                    f"expected {expected_revision}, current {current_revision}"
+                )
+            candidate, changed_fields = validate_retention_settings_changes(
+                changes, projection["settings"]
+            )
+            audit = None
+            if changed_fields:
+                config = document["config"]
+                for field in RETENTION_SETTINGS_FIELDS:
+                    config[field] = candidate[field]
+                revision = current_revision + 1
+                config["retention_settings_revision"] = revision
+                config["retention_settings_updated_at"] = iso_at(now)
+                config["retention_settings_updated_by_agent_id"] = actor["agent_id"]
+                sequence = int(document["next_retention_settings_audit_seq"])
+                document["next_retention_settings_audit_seq"] = sequence + 1
+                audit = {
+                    "audit_id": f"RS-{sequence:012d}",
+                    "schema_version": RETENTION_SETTINGS_SCHEMA_VERSION,
+                    "revision_from": current_revision,
+                    "revision_to": revision,
+                    "changed_fields": changed_fields,
+                    "previous": {
+                        field: projection["settings"][field]
+                        for field in changed_fields
+                    },
+                    "current": {field: candidate[field] for field in changed_fields},
+                    "actor_agent_id": actor["agent_id"],
+                    "actor_principal_id": principal.principal_id,
+                    "at": iso_at(now),
+                    "maintenance_run": False,
+                }
+                document["retention_settings_audit"].append(audit)
+            return {
+                "changed_fields": changed_fields,
+                "audit": copy.deepcopy(audit),
+                "projection": retention_settings_projection(document),
+            }
+
+        result = service.mutate(board_id, apply_settings)
+        if result["changed_fields"]:
+            await ctx.notify_resource_updated(
+                resource_uri(board_id, "config", "retention-settings")
+            )
+        return {
+            "ok": True,
+            "board_id": board_id,
+            **result["projection"],
+            "changed": bool(result["changed_fields"]),
+            "changed_fields": result["changed_fields"],
+            "audit": result["audit"],
+            "maintenance_run": False,
+            "requires_separate_maintenance_confirmation": True,
+        }
+
     @tool()
     async def board_journal_retention_set(
         board_id: str,
@@ -8569,22 +8851,58 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 raise PermissionError(
                     "changing journal retention requires board admin or coordinator"
                 )
+            projection = retention_settings_projection(document)
+            current_revision = projection["revision"]
             config = document["config"]
-            previous_days = int(
-                config.get(
-                    "journal_retention_days", DEFAULT_JOURNAL_RETENTION_DAYS
+            previous_days = projection["settings"]["journal_retention_days"]
+            previous_cap = projection["settings"]["journal_row_cap"]
+            changed_fields = sorted(
+                field
+                for field, value in (
+                    ("journal_retention_days", journal_retention_days),
+                    ("journal_row_cap", journal_row_cap),
                 )
-            )
-            previous_cap = int(
-                config.get("journal_row_cap", DEFAULT_JOURNAL_ROW_CAP)
+                if projection["settings"][field] != value
             )
             config["journal_retention_days"] = journal_retention_days
             config["journal_row_cap"] = journal_row_cap
             config["journal_retention_updated_at"] = iso_at(now)
             config["journal_retention_updated_by_agent_id"] = actor["agent_id"]
+            audit = None
+            revision = current_revision
+            if changed_fields:
+                revision += 1
+                config["retention_settings_revision"] = revision
+                config["retention_settings_updated_at"] = iso_at(now)
+                config["retention_settings_updated_by_agent_id"] = actor["agent_id"]
+                sequence = int(document["next_retention_settings_audit_seq"])
+                document["next_retention_settings_audit_seq"] = sequence + 1
+                current = {
+                    "journal_retention_days": journal_retention_days,
+                    "journal_row_cap": journal_row_cap,
+                }
+                audit = {
+                    "audit_id": f"RS-{sequence:012d}",
+                    "schema_version": RETENTION_SETTINGS_SCHEMA_VERSION,
+                    "revision_from": current_revision,
+                    "revision_to": revision,
+                    "changed_fields": changed_fields,
+                    "previous": {
+                        field: projection["settings"][field]
+                        for field in changed_fields
+                    },
+                    "current": {field: current[field] for field in changed_fields},
+                    "actor_agent_id": actor["agent_id"],
+                    "actor_principal_id": principal.principal_id,
+                    "at": iso_at(now),
+                    "maintenance_run": True,
+                }
+                document["retention_settings_audit"].append(audit)
             return {
                 "previous_days": previous_days,
                 "previous_cap": previous_cap,
+                "revision": revision,
+                "audit": copy.deepcopy(audit),
                 "released": released,
                 "renewed": renewed,
             }
@@ -8605,6 +8923,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "previous_journal_retention_days": result["previous_days"],
             "journal_row_cap": journal_row_cap,
             "previous_journal_row_cap": result["previous_cap"],
+            "revision": result["revision"],
+            "audit": result["audit"],
             "changed": (
                 result["previous_days"] != journal_retention_days
                 or result["previous_cap"] != journal_row_cap
