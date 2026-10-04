@@ -586,10 +586,10 @@ async function autonomousCommand(button){const key=autonomousKey(button.dataset.
 async function refreshButler(){if(navKind()!=='settings')return;const central=defaultCentral||centralLabels[0];if(!central)return;try{butlerData=await fetchJson(`/api/butler?${apiCentral(central)}`);butlerError=''}catch(error){butlerError=`Butler settings unavailable: ${error.message}`}}
 async function killButler(){const button=document.querySelector('[data-pursers-action="kill-butler"]'),central=butlerData?.central||defaultCentral;if(!button||!central)return;button.disabled=true;try{const response=await fetch(`/api/butler/kill?${apiCentral(central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});let body={};try{body=await response.json()}catch(_error){}if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);await refreshButler();renderHub()}catch(error){butlerError=`Butler stop failed: ${error.message}`;renderHub()}}
 async function saveButlerSettings(event){event.preventDefault();const form=event.currentTarget,status=form.querySelector('.butler-result'),button=form.querySelector('[data-pursers-action="save-butler"]');let extraHeaders;try{extraHeaders=JSON.parse(form.elements.extra_headers.value.trim()||'{}');if(!extraHeaders||Array.isArray(extraHeaders)||typeof extraHeaders!=='object')throw new Error('must be an object')}catch(_error){status.dataset.pursersValidation='invalid';status.className='butler-span butler-result error';status.textContent='Extra headers must be a JSON object.';return}const payload={endpoint:form.elements.endpoint.value.trim(),model:form.elements.model.value.trim(),api_key:form.elements.api_key.value,extra_headers:extraHeaders,key_header:form.elements.key_header.value.trim(),key_prefix:form.elements.key_prefix.value.trim(),validation_path:form.elements.validation_path.value.trim(),draft_path:form.elements.draft_path.value.trim(),draft_protocol:form.elements.draft_protocol.value,expected_sha256:butlerData?.expected_sha256??null},central=butlerData?.central||defaultCentral,requestBody=JSON.stringify(payload);payload.api_key='';form.elements.api_key.value='';button.disabled=true;status.className='butler-span butler-result muted';status.textContent='Validating one bounded provider request…';try{const response=await fetch(`/api/butler?${apiCentral(central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:requestBody});let body={};try{body=await response.json()}catch(_error){}if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);butlerData=body.saved===false?{...body,endpoint:payload.endpoint,model:payload.model,extra_headers:payload.extra_headers,key_header:payload.key_header,key_prefix:payload.key_prefix,validation_path:payload.validation_path,draft_path:payload.draft_path,draft_protocol:payload.draft_protocol}:body;butlerError='';renderHub()}catch(error){status.dataset.pursersValidation='unreachable';status.className='butler-span butler-result error';status.textContent=`Save failed: ${error.message}`}finally{button.disabled=false}}
-function fleetViewContext(){return Object.freeze({esc,fmt,centralHref,boardHref,ticketHref,pageHead,numberCount,warmBoards,warmTickets,warmTruthStrip,warmNextAction,reconcileAttention,renderWaitingForYou,centralLabels,fleetData,hubWorkers,hubSeatInventory,agentIdentity,agentPresentation,agentMatchesFilters,agentDisplayState,workerForAgent,liveAgentCard,renderGuide,agentCountStrip,agentFilterBar,agentPoolScope,inactiveAgentDrawer,autonomousRows,autonomousStateLabel,autonomousObservationLabel,relativeAge,butlerError,butlerData,defaultCentral,refreshCentral,renderHub})}
-const renderWarmHubBefore=renderHub;renderHub=function(){const host=document.querySelector('#central-sections'),kind=navKind();if(!globalThis.FleetViewModules?.has(kind))return renderWarmHubBefore();syncBoardSelection();host.innerHTML=globalThis.FleetViewModules.render(kind,fleetViewContext());const newest=Object.values(fleetData).map(data=>data.generated_at).filter(Boolean).sort().at(-1);document.querySelector('#state').textContent=newest?`Updated ${fmt(newest)} · bounded view`:'Connecting to centrals…';bindInteractive(host);bindHub();renderSearchResults();syncNav();if(kind==='projects')globalThis.FleetViewModules.bind(kind,fleetViewContext(),host)};renderFleet=renderHub;
+function fleetViewContext(){return Object.freeze({esc,fmt,centralHref,boardHref,ticketHref,pageHead,numberCount,warmBoards,warmTickets,warmTruthStrip,warmNextAction,reconcileAttention,renderWaitingForYou,centralLabels,fleetData,fleetErrors,hubWorkers,hubSeatInventory,agentIdentity,agentPresentation,agentMatchesFilters,agentDisplayState,workerForAgent,liveAgentCard,renderGuide,agentCountStrip,agentFilterBar,agentPoolScope,inactiveAgentDrawer,autonomousRows,autonomousStateLabel,autonomousObservationLabel,relativeAge,butlerError,butlerData,defaultCentral,refreshCentral,renderHub})}
+const renderWarmHubBefore=renderHub;renderHub=function(){const host=document.querySelector('#central-sections'),kind=navKind();if(!globalThis.FleetViewModules?.has(kind))return renderWarmHubBefore();syncBoardSelection();host.innerHTML=globalThis.FleetViewModules.render(kind,fleetViewContext());const newest=Object.values(fleetData).map(data=>data.generated_at).filter(Boolean).sort().at(-1),failed=centralLabels.filter(label=>!fleetData[label]&&fleetErrors[label]);document.querySelector('#state').textContent=newest?`Updated ${fmt(newest)} · bounded view`:failed.length?`Source unavailable · ${failed.length} Central${failed.length===1?'':'s'}`:'Connecting to centrals…';bindInteractive(host);bindHub();renderSearchResults();syncNav();if(kind==='projects')globalThis.FleetViewModules.bind(kind,fleetViewContext(),host)};renderFleet=renderHub;
 const warmBindHubBefore=bindHub;bindHub=function(){warmBindHubBefore();document.querySelector('#butler-settings-form')?.addEventListener('submit',saveButlerSettings);document.querySelector('[data-pursers-action="kill-butler"]')?.addEventListener('click',killButler);for(const form of document.querySelectorAll('.autonomous-config-form'))form.addEventListener('submit',saveAutonomousButler);for(const button of document.querySelectorAll('[data-autonomous-command]'))button.addEventListener('click',()=>autonomousCommand(button))};
-const warmSyncHubBefore=syncHub;syncHub=function(){const current=route();if(!current||warmHubKinds.has(current.kind)||['boards','agents','operations'].includes(current.kind)){document.querySelector('#home-view').hidden=false;document.querySelector('#detail-view').hidden=true;document.querySelector('#config-view').hidden=true;document.querySelector('#workers-view').hidden=true;renderHub();refreshHubExtras();return}warmSyncHubBefore()};const warmRefreshHubExtrasBefore=refreshHubExtras;refreshHubExtras=async function(){await warmRefreshHubExtrasBefore();if(navKind()==='settings')await refreshButler();await refreshAutonomousButler();if(warmHubKinds.has(navKind())&&!refreshPaused())renderHub()};for(const [current,stable] of Object.entries({home:'overview',projects:'boards',settings:'seats'}))document.querySelector(`[data-nav="${current}"]`)?.setAttribute('data-nav',stable);theme='light';applyPreferences();syncNav();syncHub();
+const warmSyncHubBefore=syncHub;syncHub=function(){const current=route();if(!current||warmHubKinds.has(current.kind)||['boards','agents','operations'].includes(current.kind)){document.querySelector('#home-view').hidden=false;document.querySelector('#detail-view').hidden=true;document.querySelector('#config-view').hidden=true;document.querySelector('#workers-view').hidden=true;renderHub();refreshHubExtras();return}warmSyncHubBefore()};const warmRefreshHubExtrasBefore=refreshHubExtras;refreshHubExtras=async function(){await warmRefreshHubExtrasBefore();if(navKind()==='settings')await refreshButler();await refreshAutonomousButler();if(warmHubKinds.has(navKind())&&!refreshPaused())renderHub()};const warmRefreshCentralBefore=refreshCentral;refreshCentral=async function(...args){await warmRefreshCentralBefore(...args);if(warmHubKinds.has(navKind())&&!refreshPaused())renderHub()};for(const [current,stable] of Object.entries({home:'overview',projects:'boards',settings:'seats'}))document.querySelector(`[data-nav="${current}"]`)?.setAttribute('data-nav',stable);theme='light';applyPreferences();syncNav();syncHub();
 
 /*__FLEET_SCRIPT_BOUNDARY__*/
 
@@ -681,3 +681,75 @@ seatForm = function seatFormWithHostMode(record = {}) {
     .replace(/(<option [^>]*>goose<\/option>)/, `${zed}$1`)
     .replace(marker, `</select></label>${lifecycle}<label>Role`);
 };
+
+/* Nocturne phase 1: compact mobile drawer without changing route ownership. */
+const mobileNavigationQuery = window.matchMedia('(max-width: 800px)');
+const mobileNavigation = document.querySelector('#fleet-sidebar');
+const mobileNavigationToggle = document.querySelector('#nav-toggle');
+const mobileNavigationScrim = document.querySelector('#nav-scrim');
+let mobileNavigationOpen = false;
+
+function mobileNavigationLabel() {
+  const active = document.querySelector('.primary-nav a.active');
+  const icon = active?.querySelector('.nav-icon')?.textContent || '';
+  const label = String(active?.textContent || 'Home').replace(icon, '').trim() || 'Home';
+  document.querySelector('#mobile-route-label').textContent = label;
+}
+
+function setMobileNavigation(open, returnFocus = false) {
+  mobileNavigationOpen = Boolean(open && mobileNavigationQuery.matches);
+  document.body.dataset.navOpen = String(mobileNavigationOpen);
+  mobileNavigationToggle.setAttribute('aria-expanded', String(mobileNavigationOpen));
+  mobileNavigationToggle.setAttribute('aria-label', mobileNavigationOpen ? 'Close navigation' : 'Open navigation');
+  mobileNavigationScrim.hidden = !mobileNavigationOpen;
+  if (mobileNavigationQuery.matches && !mobileNavigationOpen) {
+    mobileNavigation.setAttribute('inert', '');
+    mobileNavigation.setAttribute('aria-hidden', 'true');
+  } else {
+    mobileNavigation.removeAttribute('inert');
+    mobileNavigation.removeAttribute('aria-hidden');
+  }
+  if (mobileNavigationOpen) {
+    (mobileNavigation.querySelector('a.active') || mobileNavigation.querySelector('a')).focus();
+  } else if (returnFocus) {
+    mobileNavigationToggle.focus();
+  }
+}
+
+mobileNavigationToggle.addEventListener('click', () => setMobileNavigation(!mobileNavigationOpen, mobileNavigationOpen));
+mobileNavigationScrim.addEventListener('click', () => setMobileNavigation(false, true));
+mobileNavigation.addEventListener('click', event => {
+  if (event.target.closest('a[href]')) setMobileNavigation(false);
+});
+document.addEventListener('keydown', event => {
+  if (!mobileNavigationOpen) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    setMobileNavigation(false, true);
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = [...mobileNavigation.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')];
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}, true);
+mobileNavigationQuery.addEventListener('change', () => setMobileNavigation(false));
+window.addEventListener('hashchange', () => {
+  setMobileNavigation(false);
+  queueMicrotask(mobileNavigationLabel);
+});
+const nocturneSyncNav = syncNav;
+syncNav = function syncNocturneNavigation() {
+  nocturneSyncNav();
+  mobileNavigationLabel();
+};
+setMobileNavigation(false);
+mobileNavigationLabel();

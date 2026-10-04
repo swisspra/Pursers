@@ -31,3 +31,22 @@ The compact navigation uses the supplied horizontal Pursers wordmark at
 an explicit white frame in both themes instead of recoloring the artwork. See the
 [brand asset record](../../../docs/media/brand/README.md) for provenance, intended
 placements, and the byte-preserving update procedure.
+
+## Nocturne phase 1
+
+The shared shell defines the Nocturne light/dark tokens and keeps the existing
+route modules, same-origin assets, search, shortcuts, density control, Central
+context, and selector contracts. At 800 CSS pixels and below, navigation becomes
+an off-canvas drawer with a visible current-route label, focus containment,
+Escape dismissal, and focus restoration. The Personal context remains visibly
+unavailable instead of acting like a workspace switch.
+
+Home renders bounded in-progress, review-ready, blocked, and open-queue totals;
+source status; operational attention; human decisions; and observed seats. Counts
+remain marked partial while optional sources enrich. A new intent opens the only
+project directly or asks the operator to choose a project before entering the
+existing scoped intake flow.
+
+This slice does not redesign Work, Team, Projects, Activity, Approvals/Inbox, or
+Settings/onboarding content. Those routes stay usable in the new shell and retain
+their existing owners and guarded handlers until their planned migration phases.
