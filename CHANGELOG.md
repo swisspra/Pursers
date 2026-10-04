@@ -20,12 +20,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   seat summaries, and project-scoped intent entry without changing dashboard
   authorization or runtime behavior. Settings/onboarding remains staged
   follow-up work.
+- Add a versioned, secret-safe managed configuration contract for Fleet
+  Settings, with immutable board-policy and membership plans, admin and stale
+  state checks, exact read-back, and rollback evidence. Connector and Central
+  retention families remain explicitly unavailable behind their tracked
+  prerequisite contracts rather than accepting guessed fields.
 - Apply the supplied Pursers artwork to the repository README and Fleet
   Dashboard navigation, with normalized tracked assets, byte-fidelity records,
   responsive intrinsic sizing, and an explicit safe binary PNG route.
 
 ### Fixed
 
+- Preserve advanced managed-seat scope, credential-reference, Personal command,
+  and connector names during partial dashboard edits. Seat plans now expose a
+  stable typed contract, revision-bound provenance, restart semantics, and
+  effective-state read-back while rejecting stale or unknown fields.
 - Recover a verified crashed managed seat as a new executor incarnation without
   replaying an old successful start. Duplicate observations use a generation and
   process-reference CAS; live leases and unverified identities fail closed. A

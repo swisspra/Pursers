@@ -13738,3 +13738,105 @@ def test_seat_bundle_http_apply_requires_digest_before_mutation(
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+def test_existing_seat_partial_plan_preserves_advanced_fields_and_reads_back(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text("# operator config\n")
+    target = dashboard.DesiredSeat(
+        host="codex",
+        role="worker",
+        name="worker-one",
+        central_url="https://central.example.invalid/mcp",
+        home_board="",
+        boards="registry",
+        registry_board="registry-custom",
+        token_file=str(tmp_path / "seat.jwt"),
+        token_env_var="CUSTOM_TOKEN_REFERENCE",
+        ca_file="",
+        bridge_command="pursers-wait-bridge",
+        personal_command="pursers-personal-custom",
+        bridge_name="wait-custom",
+        board_connector_name="board-custom",
+        config_path=str(config),
+        model="old-model",
+    )
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "state",
+        bridge_installer=SimpleNamespace(version="5.0.6"),
+        latest_version=lambda: None,
+    )
+    manager.inventory.upsert(target, bridge_version="5.0.6")
+    revision = manager.seats()["seats"][0]["config_revision"]
+
+    plan = manager.plan(
+        {"name": target.name, "model": "new-model", "expected_revision": revision}
+    )
+    for field in (
+        "registry_board",
+        "token_env_var",
+        "personal_command",
+        "bridge_name",
+        "board_connector_name",
+    ):
+        assert plan["effective_config"][field] == getattr(target, field)
+        assert plan["provenance"][field] == "preserved"
+    assert plan["apply_mode"] == "restart-required"
+
+    result = manager.apply(plan["plan_id"], plan["digest"])
+    assert result["readback"]["effective_config"]["model"] == "new-model"
+    assert result["readback"]["host_restarted"] is False
+    stored = manager.inventory.load()["seats"][0]
+    for field in (
+        "registry_board",
+        "token_env_var",
+        "personal_command",
+        "bridge_name",
+        "board_connector_name",
+    ):
+        assert stored[field] == getattr(target, field)
+
+
+def test_existing_seat_plan_rejects_unknown_and_stale_revision_without_writing(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text("# operator config\n")
+    target = dashboard.DesiredSeat(
+        host="codex",
+        role="worker",
+        name="worker-one",
+        central_url="https://central.example.invalid/mcp",
+        home_board="pursers",
+        token_file=str(tmp_path / "seat.jwt"),
+        ca_file="",
+        bridge_command="pursers-wait-bridge",
+        config_path=str(config),
+    )
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "state",
+        bridge_installer=SimpleNamespace(version="5.0.6"),
+        latest_version=lambda: None,
+    )
+    manager.inventory.upsert(target, bridge_version="5.0.6")
+    revision = manager.seats()["seats"][0]["config_revision"]
+    with pytest.raises(ValueError, match="unknown seat fields"):
+        manager.plan({"name": target.name, "arbitrary_json": {}})
+    with pytest.raises(RuntimeError, match="revision conflict"):
+        manager.plan(
+            {"name": target.name, "model": "new", "expected_revision": "0" * 64}
+        )
+
+    plan = manager.plan(
+        {"name": target.name, "model": "new", "expected_revision": revision}
+    )
+    manager.inventory.upsert(
+        dashboard.DesiredSeat(**{**dashboard.asdict(target), "provider": "changed"}),
+        bridge_version="5.0.6",
+    )
+    before = config.read_text()
+    with pytest.raises(RuntimeError, match="revision conflict"):
+        manager.apply(plan["plan_id"], plan["digest"])
+    assert config.read_text() == before

@@ -1959,6 +1959,43 @@ class BoardClient:
             },
         )
 
+    async def board_members(self) -> dict[str, Any]:
+        """List principal-level memberships without canonical identities."""
+        return await self._call("board_members", {})
+
+    async def board_member_add(
+        self, principal_id: str, role: str = "member"
+    ) -> dict[str, Any]:
+        """Provision one exact principal through Central's admin guard."""
+        return await self._call(
+            "board_member_add",
+            {
+                "agent_name": self.agent_name,
+                "principal_id": principal_id,
+                "role": role,
+            },
+        )
+
+    async def board_member_remove(self, principal_id: str) -> dict[str, Any]:
+        """Remove one exact principal through Central's admin guard."""
+        return await self._call(
+            "board_member_remove",
+            {"agent_name": self.agent_name, "principal_id": principal_id},
+        )
+
+    async def board_member_set_role(
+        self, principal_id: str, role: str
+    ) -> dict[str, Any]:
+        """Change one exact principal's board role through Central."""
+        return await self._call(
+            "board_member_set_role",
+            {
+                "agent_name": self.agent_name,
+                "principal_id": principal_id,
+                "role": role,
+            },
+        )
+
     async def board_state_update(
         self, key: str, value: str, *, expected_sha256: str | None = None
     ) -> dict[str, Any]:

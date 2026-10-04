@@ -71,6 +71,25 @@ def desired(tmp_path: Path, host: str, **overrides):
     return target
 
 
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"personal_command": "pursers-personal --unsafe"}, "personal command"),
+        ({"personal_command": "../pursers-personal"}, "personal command"),
+        ({"bridge_name": "unsafe connector"}, "bridge connector name"),
+        (
+            {"bridge_name": "same-connector", "board_connector_name": "same-connector"},
+            "must differ",
+        ),
+    ],
+)
+def test_advanced_connector_fields_fail_closed(
+    tmp_path: Path, overrides: dict[str, str], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        desired(tmp_path, "codex", **overrides)
+
+
 def test_setup_bundle_supports_explicit_multiboard_coordinator_without_secrets(
     tmp_path: Path,
 ) -> None:
