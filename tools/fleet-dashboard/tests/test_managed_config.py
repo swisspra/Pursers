@@ -31,6 +31,14 @@ class ManagedClient:
         self.members = {PRINCIPAL_A: "admin"}
         self.fail_stale = False
         self.membership_behavior = "normal"
+        self.retention_revision = 0
+        self.retention = {
+            "archive_after_days": 2,
+            "inline_history_limit": 50,
+            "invite_prune_after_days": 7,
+            "journal_retention_days": 7,
+            "journal_row_cap": 50_000,
+        }
 
     async def __aenter__(self) -> Self:
         return self
@@ -132,6 +140,48 @@ class ManagedClient:
                 self.membership_behavior = "normal"
         return {"ok": True}
 
+    async def board_retention_settings_get(self) -> dict:
+        return {
+            "ok": True,
+            "revision": self.retention_revision,
+            "settings": dict(self.retention),
+            "defaults": {
+                "archive_after_days": 2,
+                "inline_history_limit": 50,
+                "invite_prune_after_days": 7,
+                "journal_retention_days": 7,
+                "journal_row_cap": 50_000,
+            },
+            "ranges": {
+                "archive_after_days": {"minimum": 0, "maximum": 365},
+                "inline_history_limit": {"minimum": 1, "maximum": 500},
+                "invite_prune_after_days": {"minimum": 0, "maximum": 365},
+                "journal_retention_days": {"minimum": 0, "maximum": 365},
+                "journal_row_cap": {"minimum": 501, "maximum": 1_000_000},
+            },
+        }
+
+    async def board_retention_settings_preview(
+        self, changes: dict, expected_revision: int
+    ) -> dict:
+        assert expected_revision == self.retention_revision
+        return {
+            "ok": True,
+            "revision": expected_revision,
+            "candidate": {**self.retention, **changes},
+            "changed_fields": sorted(changes),
+            "apply_runs_maintenance": False,
+        }
+
+    async def board_retention_settings_apply(
+        self, changes: dict, expected_revision: int
+    ) -> dict:
+        assert expected_revision == self.retention_revision
+        if any(self.retention.get(key) != value for key, value in changes.items()):
+            self.retention.update(changes)
+            self.retention_revision += 1
+        return await self.board_retention_settings_get()
+
 
 def make_fetcher(client: ManagedClient) -> dashboard.FleetFetcher:
     config = dashboard.Config(
@@ -173,6 +223,8 @@ def test_managed_contract_is_typed_and_redacts_references() -> None:
     assert result["families"]["central_retention"]["dependency_ticket"] == (
         "TK-eebab5f77b7a6b63eb37"
     )
+    assert result["families"]["central_retention"]["status"] == "configurable"
+    assert result["families"]["central_retention"]["maintenance_runs_on_apply"] is False
 
 
 def test_board_policy_plan_apply_reads_back_and_rejects_stale_source() -> None:
@@ -229,6 +281,35 @@ def test_board_policy_failed_apply_rolls_back_prior_field() -> None:
             await fetcher.apply_managed_configuration(plan["plan_id"], plan["digest"])
         assert client.review_policy == "strict"
         assert client.stale_after_days == 3
+
+    asyncio.run(scenario())
+
+
+def test_retention_plan_apply_uses_cas_and_does_not_run_maintenance() -> None:
+    client = ManagedClient()
+    fetcher = make_fetcher(client)
+
+    async def scenario() -> None:
+        initial = await fetcher.fetch_managed_configuration("pursers")
+        retention = initial["families"]["central_retention"]
+        plan = await fetcher.prepare_managed_configuration(
+            {
+                "board_id": "pursers",
+                "family": "central_retention",
+                "expected_sha256": retention["expected_sha256"],
+                "changes": {
+                    "archive_after_days": 9,
+                    "journal_row_cap": 75_000,
+                },
+            }
+        )
+        assert plan["preview"]["apply_runs_maintenance"] is False
+        receipt = await fetcher.apply_managed_configuration(
+            plan["plan_id"], plan["digest"]
+        )
+        assert receipt["restart_performed"] is False
+        assert receipt["readback"]["values"]["archive_after_days"] == 9
+        assert receipt["readback"]["values"]["journal_row_cap"] == 75_000
 
     asyncio.run(scenario())
 

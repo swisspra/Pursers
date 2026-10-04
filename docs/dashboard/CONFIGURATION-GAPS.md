@@ -158,10 +158,10 @@ Stable backend contract:
 - `POST /api/config/managed/apply` consumes that exact plan once, rechecks
   authority and source state, reads Central back, never restarts a process, and
   reports bounded rollback evidence for a partial board-policy failure.
-- Source connectors remain unavailable pending `TK-dcc6d183eb1e15126e1f` and
-  Central retention remains unavailable pending `TK-eebab5f77b7a6b63eb37`.
-  Their absence is part of the contract; callers must not infer saved or active
-  state.
+- Source connector/onboarding contracts from `TK-dcc6d183eb1e15126e1f` and
+  Central retention contracts from `TK-eebab5f77b7a6b63eb37` are consumed by
+  Settings through typed, revision-bound preview/apply/read-back flows. Source
+  file changes remain restart-required and never restart a process implicitly.
 
 ### Package B — Settings and onboarding (`TK-da4fa65758fe7e6e8f1e`)
 
@@ -171,7 +171,8 @@ Depends on Package A contracts and the shell from `TK-97b702c2b8d66dcac7fb`. Own
 - `tools/fleet-dashboard/ui/views/settings.css`
 - route-local Settings tests and guided onboarding browser fixtures
 
-It must not take ownership of shared shell/CSS/context until the foundation checkpoint is integrated.
+The foundation checkpoint is integrated; this package owns only route-local
+Settings behavior and styles while reusing the shared shell and context.
 
 Acceptance:
 
@@ -185,7 +186,9 @@ Acceptance:
 - Each save path validates, previews when required, confirms, applies and reads back.
 - Dynamic versus restart/reconnect-required is visible before submit.
 - Import/export/reset is offered only per typed domain; no arbitrary config JSON download/upload.
-- Pending ACP controls are labeled pending/unavailable until their exact source lands.
+- Unsupported ACP controls remain labeled pending/unavailable; the landed
+  connector, onboarding and retention contracts are exposed without guessed
+  fields.
 
 ### Package C — routes and typed Inbox (`TK-925e8c4b9657ebc5f5e5`)
 

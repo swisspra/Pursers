@@ -101,9 +101,12 @@ from managed_config import (
     contract as managed_configuration_contract,
     membership_projection,
     plan_digest as managed_plan_digest,
+    retention_projection,
     validate_board_policy_changes,
     validate_membership_change,
+    validate_retention_changes,
 )
+from source_config import SourceConfigurationStore
 from public_projection import (
     load_or_create_alias_key,
     make_public_handler,
@@ -164,6 +167,7 @@ COORDINATOR_FINDINGS_STALE_MINUTES = 15
 CONTEXT_STATS_ANOMALY_TOKENS = 1_000_000
 WORKER_API_MAX_BYTES = 20_000
 CONFIG_API_MAX_BYTES = 40_000
+SOURCE_CONFIG_API_MAX_BYTES = 1_100_000
 CONFIG_JOB_LIMIT = 100
 CONFIG_OPS_PLAN_TTL_SECONDS = 120
 CONFIG_SEAT_PLAN_TTL_SECONDS = 600
@@ -1135,6 +1139,8 @@ class Config:
     doors_keys_dir: Path | None = None
     jwks_path: Path | None = None
     case_study_manifests: tuple[dict[str, Any], ...] = ()
+    connector_config_path: Path | None = None
+    source_onboarding_config_path: Path | None = None
 
 
 def _worker_text(value: Any, label: str, *, limit: int = 500) -> str:
@@ -5058,6 +5064,12 @@ class FleetFetcher:
         self._door_audit_lock = threading.Lock()
         self._managed_plans: dict[str, dict[str, Any]] = {}
         self._managed_plan_lock = threading.Lock()
+        self._source_config = SourceConfigurationStore(
+            config.connector_config_path,
+            config.source_onboarding_config_path,
+            board_id=config.home_board,
+            actor_id=config.agent_name,
+        )
         self._client_pool = _FleetClientPool(config, client_factory)
         self._summary_snapshots: dict[str, dict[str, Any]] = {}
 
@@ -5859,6 +5871,14 @@ class FleetFetcher:
     async def fetch_managed_configuration(self, board_id: str) -> dict[str, Any]:
         """Return one stable, secret-safe Settings backend contract."""
         board_policy, memberships = await self._managed_board_state(board_id)
+        central_retention = None
+        try:
+            async with self._client(board_id) as client:
+                central_retention = retention_projection(
+                    await client.board_retention_settings_get()
+                )
+        except (AttributeError, BoardClientError, PermissionError, ValueError):
+            central_retention = None
         coordinator = await self.fetch_config()
         stored = coordinator.get("config")
         board_butler = None
@@ -5911,6 +5931,9 @@ class FleetFetcher:
             board_butler=board_butler,
             board_butler_project=project_name,
             board_butler_default_per_hour=default_per_hour,
+            central_retention=central_retention,
+            source_connectors=self._source_config.snapshot("source_connectors"),
+            source_onboarding=self._source_config.snapshot("source_onboarding"),
         )
 
     async def prepare_managed_configuration(self, request: Any) -> dict[str, Any]:
@@ -5918,9 +5941,32 @@ class FleetFetcher:
         if not isinstance(request, dict):
             raise ValueError("managed configuration request must be an object")
         family = request.get("family")
+        if family in {"source_connectors", "source_onboarding"}:
+            if set(request) != {
+                "board_id",
+                "family",
+                "expected_sha256",
+                "document",
+            }:
+                raise ValueError("source configuration request fields are invalid")
+            board_id = request.get("board_id")
+            if not isinstance(board_id, str) or not BOARD_ID_RE.fullmatch(board_id):
+                raise ValueError("board_id is required")
+            if board_id != self.config.home_board:
+                raise ValueError("source configuration is scoped to the registry board")
+            await self._require_board_admin(board_id)
+            return self._source_config.plan(
+                {
+                    "family": family,
+                    "expected_sha256": request.get("expected_sha256"),
+                    "document": request.get("document"),
+                }
+            )
         expected_fields = (
             {"board_id", "family", "expected_sha256", "changes"}
             if family == "board_policy"
+            else {"board_id", "family", "expected_sha256", "changes"}
+            if family == "central_retention"
             else {"board_id", "family", "expected_sha256", "change"}
             if family == "membership"
             else set()
@@ -5935,7 +5981,20 @@ class FleetFetcher:
             raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
         await self._require_board_admin(board_id)
         board_policy, memberships = await self._managed_board_state(board_id)
-        current = board_policy if family == "board_policy" else memberships
+        retention = None
+        if family == "central_retention":
+            async with self._client(board_id) as client:
+                retention = retention_projection(
+                    await client.board_retention_settings_get()
+                )
+        current = (
+            board_policy
+            if family == "board_policy"
+            else retention
+            if family == "central_retention"
+            else memberships
+        )
+        assert current is not None
         if current["expected_sha256"] != expected:
             raise ConfigConflictError(
                 "Managed configuration changed; reload before planning"
@@ -5947,6 +6006,21 @@ class FleetFetcher:
                 "changes": change,
                 "before": board_policy["values"],
                 "after": after,
+            }
+        elif family == "central_retention":
+            assert retention is not None
+            change = validate_retention_changes(request["changes"], retention["ranges"])
+            async with self._client(board_id) as client:
+                preview = await client.board_retention_settings_preview(
+                    change, retention["revision"]
+                )
+            after = {**retention["values"], **change}
+            details = {
+                "changes": change,
+                "before": retention["values"],
+                "after": after,
+                "expected_revision": retention["revision"],
+                "preview": preview,
             }
         else:
             change = validate_membership_change(request["change"])
@@ -6006,6 +6080,12 @@ class FleetFetcher:
         with self._managed_plan_lock:
             plan = self._managed_plans.pop(plan_id, None)
         if plan is None:
+            try:
+                await self._require_board_admin(self.config.home_board)
+                return self._source_config.apply(plan_id, digest)
+            except KeyError:
+                pass
+        if plan is None:
             raise KeyError(plan_id)
         if not hmac.compare_digest(plan["digest"], digest):
             raise ValueError("managed configuration plan digest mismatch")
@@ -6017,7 +6097,20 @@ class FleetFetcher:
         board_id = plan["board_id"]
         await self._require_board_admin(board_id)
         board_policy, memberships = await self._managed_board_state(board_id)
-        current = board_policy if plan["family"] == "board_policy" else memberships
+        retention = None
+        if plan["family"] == "central_retention":
+            async with self._client(board_id) as client:
+                retention = retention_projection(
+                    await client.board_retention_settings_get()
+                )
+        current = (
+            board_policy
+            if plan["family"] == "board_policy"
+            else retention
+            if plan["family"] == "central_retention"
+            else memberships
+        )
+        assert current is not None
         if current["expected_sha256"] != plan["expected_sha256"]:
             raise ConfigConflictError(
                 "Managed configuration changed; prepare a new plan"
@@ -6052,6 +6145,10 @@ class FleetFetcher:
                         "Managed board policy apply failed; rollback "
                         + ("succeeded" if rollback["succeeded"] else "failed")
                     )
+            elif plan["family"] == "central_retention":
+                await client.board_retention_settings_apply(
+                    plan["changes"], plan["expected_revision"]
+                )
             else:
                 change = plan["change"]
                 if change["operation"] == "add":
@@ -6065,12 +6162,27 @@ class FleetFetcher:
                         change["principal_id"], change["role"]
                     )
         read_policy, read_memberships = await self._managed_board_state(board_id)
-        readback = read_policy if plan["family"] == "board_policy" else read_memberships
+        if plan["family"] == "central_retention":
+            async with self._client(board_id) as client:
+                readback = retention_projection(
+                    await client.board_retention_settings_get()
+                )
+        else:
+            readback = (
+                read_policy
+                if plan["family"] == "board_policy"
+                else read_memberships
+            )
         if plan["family"] == "board_policy" and any(
             readback["values"].get(field) != value
             for field, value in plan["after"].items()
         ):
             raise RuntimeError("Managed board policy read-back did not match the plan")
+        if plan["family"] == "central_retention" and any(
+            readback["values"].get(field) != value
+            for field, value in plan["after"].items()
+        ):
+            raise RuntimeError("Central retention read-back did not match the plan")
         if plan["family"] == "membership":
             readback_roles = {
                 row["principal_id"]: row["role"]
@@ -11270,7 +11382,11 @@ def make_handler(
             except ValueError:
                 length = -1
             body_limit = (
-                CONFIG_API_MAX_BYTES if route in config_routes else WORKER_API_MAX_BYTES
+                SOURCE_CONFIG_API_MAX_BYTES
+                if route == "/api/config/managed/plan"
+                else CONFIG_API_MAX_BYTES
+                if route in config_routes
+                else WORKER_API_MAX_BYTES
             )
             if not 1 <= length <= body_limit:
                 self._evidence_context = None
@@ -11885,6 +12001,16 @@ def _load_case_study_manifests(paths: list[str] | None) -> tuple[dict[str, Any],
 
 def load_central_configs(args: argparse.Namespace) -> list[Config]:
     """Load ordered multi-central config without exposing token material."""
+    connector_config_path = (
+        Path(args.connector_config).expanduser().resolve()
+        if getattr(args, "connector_config", None)
+        else None
+    )
+    source_onboarding_config_path = (
+        Path(args.source_onboarding_config).expanduser().resolve()
+        if getattr(args, "source_onboarding_config", None)
+        else None
+    )
     cli_keys_dir = (
         Path(args.doors_keys_dir).expanduser().resolve()
         if getattr(args, "doors_keys_dir", None)
@@ -11910,6 +12036,8 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
                 doors_keys_dir=cli_keys_dir,
                 jwks_path=cli_jwks,
                 case_study_manifests=case_study_manifests,
+                connector_config_path=connector_config_path,
+                source_onboarding_config_path=source_onboarding_config_path,
             )
         ]
     source = Path(args.centrals).expanduser().resolve()
@@ -11999,6 +12127,8 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
                 doors_keys_dir=keys_dir,
                 jwks_path=jwks_path,
                 case_study_manifests=case_study_manifests,
+                connector_config_path=connector_config_path,
+                source_onboarding_config_path=source_onboarding_config_path,
             )
         )
         seen.add(label)
@@ -12064,6 +12194,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--butler-entrypoint",
         default=os.environ.get("PURSERS_BUTLER_ENTRYPOINT"),
         help="Exact board_butler.py path expected for the resident process",
+    )
+    parser.add_argument(
+        "--connector-config",
+        default=os.environ.get("PURSERS_BUTLER_CONNECTOR_CONFIG"),
+        help="Private mode-0600 Board Butler connector/source configuration",
+    )
+    parser.add_argument(
+        "--source-onboarding-config",
+        default=os.environ.get("PURSERS_BUTLER_INTAKE_ONBOARDING_CONFIG"),
+        help="Private mode-0600 source onboarding configuration",
     )
     parser.add_argument(
         "--seat-state-dir",

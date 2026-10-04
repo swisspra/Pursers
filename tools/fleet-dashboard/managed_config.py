@@ -16,6 +16,13 @@ BOARD_POLICIES = frozenset({"strict", "workflow"})
 MEMBERSHIP_ROLES = frozenset({"admin", "member", "reviewer"})
 MIN_STALE_AFTER_DAYS = 1
 MAX_STALE_AFTER_DAYS = 3_650
+RETENTION_FIELDS = (
+    "archive_after_days",
+    "inline_history_limit",
+    "invite_prune_after_days",
+    "journal_retention_days",
+    "journal_row_cap",
+)
 PRINCIPAL_ID = re.compile(r"^PR-[a-f0-9]{64}$")
 BOARD_BUTLER_PRECEDENCE = ("safe_defaults", "global", "project", "board")
 BOARD_BUTLER_DEFAULTS: dict[str, Any] = {
@@ -181,6 +188,80 @@ def validate_membership_change(value: Any) -> dict[str, str]:
     return result
 
 
+def retention_projection(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and digest Central's complete non-destructive retention view."""
+    settings = value.get("settings")
+    ranges = value.get("ranges")
+    revision = value.get("revision")
+    if (
+        not isinstance(settings, Mapping)
+        or not isinstance(ranges, Mapping)
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 0
+    ):
+        raise ValueError("Central returned malformed retention settings")
+    clean_settings: dict[str, int] = {}
+    clean_ranges: dict[str, dict[str, int]] = {}
+    for field in RETENTION_FIELDS:
+        current = settings.get(field)
+        bounds = ranges.get(field)
+        if (
+            isinstance(current, bool)
+            or not isinstance(current, int)
+            or not isinstance(bounds, Mapping)
+            or isinstance(bounds.get("minimum"), bool)
+            or not isinstance(bounds.get("minimum"), int)
+            or isinstance(bounds.get("maximum"), bool)
+            or not isinstance(bounds.get("maximum"), int)
+            or not bounds["minimum"] <= current <= bounds["maximum"]
+        ):
+            raise ValueError("Central returned malformed retention settings")
+        clean_settings[field] = current
+        clean_ranges[field] = {
+            "minimum": bounds["minimum"],
+            "maximum": bounds["maximum"],
+        }
+    source = {"revision": revision, "settings": clean_settings}
+    return {
+        "status": "configurable",
+        "apply_mode": "hot-apply",
+        "revision": revision,
+        "values": clean_settings,
+        "defaults": {
+            key: default
+            for key, default in value.get("defaults", {}).items()
+            if key in RETENTION_FIELDS
+            and not isinstance(default, bool)
+            and isinstance(default, int)
+        },
+        "ranges": clean_ranges,
+        "expected_sha256": _digest(source),
+        "maintenance_runs_on_apply": False,
+        "requires_separate_maintenance_confirmation": True,
+    }
+
+
+def validate_retention_changes(
+    value: Any, ranges: Mapping[str, Mapping[str, int]]
+) -> dict[str, int]:
+    if not isinstance(value, Mapping) or not value or not set(value) <= set(RETENTION_FIELDS):
+        raise ValueError("changes must contain only supported retention fields")
+    clean: dict[str, int] = {}
+    for field, candidate in value.items():
+        bounds = ranges[field]
+        if (
+            isinstance(candidate, bool)
+            or not isinstance(candidate, int)
+            or not bounds["minimum"] <= candidate <= bounds["maximum"]
+        ):
+            raise ValueError(
+                f"{field} must be between {bounds['minimum']} and {bounds['maximum']}"
+            )
+        clean[field] = candidate
+    return clean
+
+
 def _provenance(value: Any, source: str) -> Any:
     if isinstance(value, Mapping):
         return {key: _provenance(item, source) for key, item in value.items()}
@@ -281,6 +362,9 @@ def contract(
     board_butler: Any,
     board_butler_project: str | None = None,
     board_butler_default_per_hour: int = 5,
+    central_retention: Mapping[str, Any] | None = None,
+    source_connectors: Mapping[str, Any] | None = None,
+    source_onboarding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the stable backend contract consumed by Settings."""
     return {
@@ -328,14 +412,31 @@ def contract(
                 "secret_values_readable": False,
             },
             "source_connectors": {
-                "status": "unavailable",
-                "reason": "Authoritative connector/source schema is pending TK-dcc6d183eb1e15126e1f.",
                 "dependency_ticket": "TK-dcc6d183eb1e15126e1f",
+                **dict(
+                    source_connectors
+                    or {
+                        "status": "unavailable",
+                        "reason": "Connector/source private file is not configured for Fleet.",
+                        "apply_mode": "restart-required",
+                    }
+                ),
             },
-            "central_retention": {
+            "source_onboarding": dict(source_onboarding or {
                 "status": "unavailable",
-                "reason": "Central retention setter contract is pending TK-eebab5f77b7a6b63eb37.",
+                "reason": "Source onboarding private file is not configured for Fleet.",
+                "apply_mode": "restart-required",
+            }),
+            "central_retention": {
                 "dependency_ticket": "TK-eebab5f77b7a6b63eb37",
+                **dict(
+                    central_retention
+                    or {
+                        "status": "unavailable",
+                        "reason": "Central retention contract is unavailable from this server.",
+                        "apply_mode": "hot-apply",
+                    }
+                ),
             },
             "acp_runners": {
                 "status": "unavailable",

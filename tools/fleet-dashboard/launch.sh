@@ -56,6 +56,8 @@ fi
 [ -z "${PURSERS_FLEET_DOORS_KEYS_DIR:-}" ] || set -- "$@" --doors-keys-dir "$PURSERS_FLEET_DOORS_KEYS_DIR"
 [ -z "${PURSERS_FLEET_JWKS_PATH:-}" ] || set -- "$@" --jwks-path "$PURSERS_FLEET_JWKS_PATH"
 [ -z "${PURSERS_FLEET_EVIDENCE_TRACE_CONFIG:-}" ] || set -- "$@" --evidence-trace-config "$PURSERS_FLEET_EVIDENCE_TRACE_CONFIG"
+[ -z "${PURSERS_BUTLER_CONNECTOR_CONFIG:-}" ] || set -- "$@" --connector-config "$PURSERS_BUTLER_CONNECTOR_CONFIG"
+[ -z "${PURSERS_BUTLER_INTAKE_ONBOARDING_CONFIG:-}" ] || set -- "$@" --source-onboarding-config "$PURSERS_BUTLER_INTAKE_ONBOARDING_CONFIG"
 
 cd "$repo"
 exec "$PURSERS_FLEET_PYTHON" "$repo/tools/fleet-dashboard/fleet_dashboard.py" "$@"

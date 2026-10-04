@@ -30,6 +30,15 @@ async def test_managed_board_methods_forward_exact_typed_arguments(monkeypatch) 
     await board.board_member_add(principal_id, "reviewer")
     await board.board_member_set_role(principal_id, "member")
     await board.board_member_remove(principal_id)
+    await board.board_retention_settings_get()
+    await board.board_retention_settings_preview(
+        {"journal_retention_days": 30}, 7
+    )
+    await board.board_retention_settings_apply(
+        {"journal_retention_days": 30},
+        7,
+        expected_generation="generation-7",
+    )
 
     assert calls == [
         ("board_members", {}),
@@ -52,5 +61,23 @@ async def test_managed_board_methods_forward_exact_typed_arguments(monkeypatch) 
         (
             "board_member_remove",
             {"agent_name": "dashboard-a", "principal_id": principal_id},
+        ),
+        ("board_retention_settings_get", {"agent_name": "dashboard-a"}),
+        (
+            "board_retention_settings_preview",
+            {
+                "agent_name": "dashboard-a",
+                "changes": {"journal_retention_days": 30},
+                "expected_revision": 7,
+            },
+        ),
+        (
+            "board_retention_settings_apply",
+            {
+                "agent_name": "dashboard-a",
+                "changes": {"journal_retention_days": 30},
+                "expected_revision": 7,
+                "expected_generation": "generation-7",
+            },
         ),
     ]

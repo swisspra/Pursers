@@ -1945,6 +1945,42 @@ class BoardClient:
             },
         )
 
+    async def board_retention_settings_get(self) -> dict[str, Any]:
+        """Read the admin-gated, non-destructive retention settings contract."""
+        return await self._call(
+            "board_retention_settings_get", {"agent_name": self.agent_name}
+        )
+
+    async def board_retention_settings_preview(
+        self, changes: dict[str, Any], expected_revision: int
+    ) -> dict[str, Any]:
+        """Preview one retention CAS update without running maintenance."""
+        return await self._call(
+            "board_retention_settings_preview",
+            {
+                "agent_name": self.agent_name,
+                "changes": changes,
+                "expected_revision": expected_revision,
+            },
+        )
+
+    async def board_retention_settings_apply(
+        self,
+        changes: dict[str, Any],
+        expected_revision: int,
+        *,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """CAS-apply retention values; destructive maintenance stays separate."""
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "changes": changes,
+            "expected_revision": expected_revision,
+        }
+        if expected_generation is not None:
+            arguments["expected_generation"] = expected_generation
+        return await self._call("board_retention_settings_apply", arguments)
+
     async def board_dispatch_events(self, *, limit: int = 25) -> dict[str, Any]:
         """Read Central's member-authorized cross-seat dispatch projection."""
         return await self._call("board_dispatch_events", {"limit": limit})
