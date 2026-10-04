@@ -115,6 +115,10 @@ def test_primary_route_modules_own_renderers_and_receive_shared_context() -> Non
     assert "FleetViewModules.render(kind,context)" in app
     assert "FleetViewModules.bind(kind,context,host)" in app
 
+    settings = dashboard.UI_ASSETS["/ui/views/settings.js"][1].decode("utf-8")
+    assert '<div class="settings-groups">' in settings
+    assert '<a href="#/seats"><b>Managed runners, Doctor, bridge and release</b>' in settings
+
 
 def test_home_pending_coverage_never_renders_false_zero_totals() -> None:
     source = dashboard.UI_ASSETS["/ui/views/home.js"][1].decode("utf-8")

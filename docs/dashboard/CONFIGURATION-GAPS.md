@@ -15,6 +15,20 @@ A configuration is covered only when the dashboard provides this full flow:
 
 Generic JSON editors, arbitrary shell execution, copying secrets through the browser, optimistic success without read-back, and links to external documentation do not satisfy this rule.
 
+## Integration outcome
+
+The gap tables below preserve the original audit and ownership trail. In the
+`TK-30865a02f25342f46209` integration candidate, the approved foundation,
+routes/Inbox, managed-config, connector/onboarding, retention and Settings
+checkpoints are combined with reviewed ACP runner source
+`3b9983629500177ea430b3c94ba104d61c60e6c0`. The candidate exposes the five
+previously omitted seat fields, typed source/onboarding and retention editors,
+delivery and policy readback, and discoverable native/ACP runner setup. The
+browser refresh contract preserves clean server updates plus dirty form input,
+focus and reader state across desktop and mobile refreshes. These are candidate
+claims only; full CI, generated locks, merge, deployment and `/api/version`
+equality remain operator-owned.
+
 ## Prioritized gaps
 
 | Priority | Domain / missing surface | Current state | Required typed flow | Backend work / owner |
@@ -29,7 +43,7 @@ Generic JSON editors, arbitrary shell execution, copying secrets through the bro
 | P0 | Secret-safe prerequisite states | Provider, Door and seat flows each handle secrets differently | Explicit “not configured/configured/invalid/unavailable”; write-only input; private-file target; one-time reveal; no secret echo in errors/history | Cross-cutting tests in backend and Settings tickets |
 | P1 | Delivery advanced/runtime distinction | Parser accepts schedules, custom gates, multiple reviewers and repair policy that resident runtime may block | Show inherited/effective value and runtime blocker separately; activation disabled until prerequisites pass; never label saved draft active | Existing readiness model; UI in Settings; backend contract tests in managed-config ticket |
 | P0 | Seat omitted-field reset risk | `seatForm`/`seatPayload` omit `registry_board`, `token_env_var`, `personal_command`, `bridge_name` and `board_connector_name`; `/api/config/plan` therefore constructs defaults and can overwrite stored custom values while editing another field | Complete read → typed Advanced host/path/scope/connector controls → merge-preserving validation → plan/diff → apply → explicit restart → Doctor/inventory/live-identity read-back; incomplete updates fail closed | Preservation/API contract in `TK-09b833b7aa9cca640ac6`; controls in `TK-da4fa65758fe7e6e8f1e`; regression acceptance in `TK-30865a02f25342f46209` |
-| P1 | ACP runner selection | PR 70 adds catalog/preset/install but is outside baseline | Until landed: “pending/unavailable”; after integration: catalog read → compatibility check → preset/session options → install plan → Doctor/read-back | Do not copy PR 70 into this ticket. Reconcile after merge in integration ticket `TK-30865a02f25342f46209` |
+| P1 | ACP runner selection | Reviewed source `3b9983629500177ea430b3c94ba104d61c60e6c0` is integrated in the candidate | Catalog read → compatibility check → exact preset/session options → immutable install plan/apply → Doctor/read-back; activation defers while a lease is live | Reconciled by `TK-30865a02f25342f46209`; candidate only until independent approval and operator merge |
 | P1 | Doors/membership lifecycle | Doors issue/rotate/revoke is guarded; invite/membership/role/scope flows lack a complete guided surface | Board/role/principal selection → current membership/scopes → plan → confirm → one-time credential delivery if needed → Central read-back | New bounded membership/role API under managed-config ticket; UI in Settings |
 | P1 | Agent capabilities/readiness | Team shows identity and readiness; fixed-seat capabilities are host-config fields while transient readiness is Central-owned | Clearly separate “seat template” from “live identity”; template plan/apply/restart versus current readiness read-only; no cross-principal impersonation | Settings/Team UI; backend only if admin-managed readiness is explicitly authorized |
 | P1 | Resources, prompts and skills | Seat skill suggestions exist; no discoverable catalog or onboarding state | Catalog/read permission → select allowed resource/prompt/skill → preview host/seat change → plan/apply → reconnect → capability read-back | Determine mutation authority in managed-config ticket; UI in Settings |
@@ -86,7 +100,7 @@ Generic JSON editors, arbitrary shell execution, copying secrets through the bro
 | Host/global/board caps | Autonomous Butler has host/board concurrency and per-role capacities; managed seat count has no unified ceiling view | Read immutable envelope and host runtime ceiling; enforce min ≤ target ≤ max and summed targets; show headroom before save |
 | Drain/start/stop/backoff | Runtime start/stop exists; autonomous cooldowns exist; explicit seat drain lifecycle is not a complete baseline editor | Add typed drain state only after backend guarantees lease/offer behavior; stop must not masquerade as drain |
 | Model/provider/profile | Managed seat and persistent worker editors exist separately | Clearly label board-seat model provenance versus local provider runtime; preserve write-only key and restart semantics |
-| IDE/ACP | `host_mode` is main; full runner catalog is pending PR 70 | Main shows only supported host mode. Pending controls remain unavailable until exact source is integrated and reviewed |
+| IDE/ACP | `host_mode` remains the host lifecycle field; reviewed runner catalog/preset/install source is integrated in this candidate | Keep native Codex/Goose profiles distinct from exact ACP catalog pins; preserve cache integrity, server-owned path authorization, session options and lease-aware activation |
 
 ## Read/save/validate/preview/apply/read-back acceptance patterns
 
@@ -102,7 +116,7 @@ Use for coordinator thresholds, intake, dispatch, display names and policy field
 
 ### Host-file and connector configuration
 
-Use for managed seats, bridge installs, runtime providers and future ACP runners.
+Use for managed seats, bridge installs, runtime providers and ACP runners.
 
 - Read reports source file/config identity without exposing private path values unnecessarily.
 - Preview returns a bounded diff, digest, expiry, backup plan, restart requirement and preserved sections.
@@ -186,9 +200,10 @@ Acceptance:
 - Each save path validates, previews when required, confirms, applies and reads back.
 - Dynamic versus restart/reconnect-required is visible before submit.
 - Import/export/reset is offered only per typed domain; no arbitrary config JSON download/upload.
-- Unsupported ACP controls remain labeled pending/unavailable; the landed
-  connector, onboarding and retention contracts are exposed without guessed
-  fields.
+- Native and ACP runner controls use the reviewed catalog/preset/install
+  contract. Unsupported platforms or provider-authenticated activation remain
+  unavailable with an explicit reason; connector, onboarding and retention
+  editors use their reviewed contracts without guessed fields.
 
 ### Package C — routes and typed Inbox (`TK-925e8c4b9657ebc5f5e5`)
 
@@ -217,7 +232,9 @@ Acceptance:
   permission-denied, invalid-ID, connector-collision and failed-Doctor paths and
   assert fail-closed state with no false success.
 - Run route aliases, mobile/desktop accessibility, secret redaction, CAS conflict, stale-plan, permission-denied and restart-state acceptance.
-- Reconcile PR 70 only if it has landed; otherwise ACP runner selection remains pending and excluded from shipped claims.
+- Verify the integrated ACP runner catalog, exact pin, plan/apply, cache/path
+  guards and lease-aware activation against product-produced responses. Keep it
+  labeled candidate until independent approval and operator merge.
 - Full CI and rollout are operator-owned; dashboard rollout uses an immutable revision and rollback pointer.
 
 ### Additional bounded package — connector product model
@@ -250,5 +267,7 @@ These are not silently omitted:
 - The exact Central ranges and compatibility policy for archive/history fields need a bounded setter contract before UI work.
 - Sonar/UnifiedMCP may exist in an external deployment integration not present in this repository baseline. Treat it as unavailable until an authoritative schema and product-produced observation are supplied.
 - Running deployment equality was not checked against a live instance; `/api/version` must be captured by the integration worker.
-- PR 70 is only a fetched pending source snapshot. Its runner APIs must not be merged, copied or advertised by these docs.
+- ACP runner source `3b9983629500177ea430b3c94ba104d61c60e6c0` is integrated in this
+  candidate. It must not be described as released or deployed until the
+  operator-owned merge and rollout read-back complete.
 - Personal lifecycle ownership needs a coordinator decision before it can be counted in dashboard completeness.

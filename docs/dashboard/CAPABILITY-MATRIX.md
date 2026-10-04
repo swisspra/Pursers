@@ -1,12 +1,21 @@
 # Fleet Dashboard capability matrix
 
-This inventory is the source contract for the Nocturne dashboard redesign. It was generated against `origin/main` at `e3958382a484afc471d8790c6ad73ba05fe022d2`. It does not assert that a running dashboard is at that revision: `/api/version` is the read-back source for the deployed SHA and dirty state. PR 70 was inspected separately at `ca1be1763b1d8fa8074805492081cec9093df954`; its runner catalog and ACP setup APIs are **pending, not released or deployed**.
+This inventory is the source contract for the Nocturne dashboard redesign. The
+original field audit was generated against `origin/main` at
+`e3958382a484afc471d8790c6ad73ba05fe022d2`. The integration candidate is based
+on `origin/main` at `71d74965084b36d8457e9d2f295a054c96117c85`, adds the approved Settings
+candidate `5202b4dc1602a4bbf901c6d2e58dcf60ccd9fd2c`, and includes the reviewed ACP
+runner integration `3b9983629500177ea430b3c94ba104d61c60e6c0`. This does not assert that a
+running dashboard is at that revision: `/api/version` is the read-back source
+for the deployed SHA and dirty state.
 
 The status vocabulary is deliberately strict:
 
 - **main**: present in the baseline source.
 - **deployed**: only when `/api/version.running_sha` equals the source being assessed.
-- **pending**: approved or proposed source outside this baseline, including PR 70.
+- **pending**: approved or proposed source outside this integrated candidate.
+- **candidate**: present in this integrated branch but not yet merged, released,
+  or deployed.
 - **CLI/file-only**: supported product configuration without a dashboard writer.
 - **read-only**: the dashboard projects state but cannot change it.
 - **missing backend**: the requested operator flow lacks a bounded writer or product-owned state.
@@ -20,11 +29,11 @@ The status vocabulary is deliberately strict:
 | `#/projects` | Registry projects, lifecycle plan/apply, delivery policy plan/apply | Read/write | Projects, Settings > Projects | main |
 | `#/work` | Cross-board ticket lanes, filters and ticket entry points | Read | Work | main; ticket mutations remain tool-driven |
 | `#/team` | Managed seats plus live identities; display-name CAS edit | Read/write for display name and retirement | Team | main |
-| `#/approvals` | Human requests, intake decisions and Butler draft marks | Read/write by typed source | Inbox, with `#/approvals` alias | main; Inbox route itself is missing |
+| `#/approvals`, `#/inbox` | Typed Human, Intake and Butler sources with source-specific actions; `#/approvals` remains an alias | Read/write by typed source | Inbox | candidate; desktop and mobile list/detail behavior covered |
 | `#/activity` | Bounded journal-derived activity and relationships | Read | Activity | main; truncation/window must stay visible |
-| `#/settings` | Guided links plus Butler/provider and autonomous settings | Mixed | Settings | main but incomplete editor coverage |
+| `#/settings` | Typed source/onboarding, delivery, seats/dispatch, membership, policy/retention, Butler/autonomy and diagnostics editors | Mixed guarded read/write | Settings | candidate; Simple/Advanced controls and readback states covered |
 | `#/config` | Coordinator thresholds, intake classification and token-file reference | Read/write with CAS | Settings > Coordinator | main legacy deep link |
-| `#/seats` | Seat planning, Doctor/import/bridge, dispatch, release operations | Read/write with plan/apply or job receipts | Settings > Seats & diagnostics | main legacy deep link |
+| `#/seats` | Seat and managed-runner planning, Doctor/import/bridge, dispatch and release operations | Read/write with plan/apply or job receipts | Settings > Seats, runners & diagnostics | candidate legacy deep link retained and linked from Advanced Settings |
 | `#/central/{central}/overhead` | Wait/context pressure diagnostics | Read | Diagnostics | main advanced route |
 | `#/central/{central}/config` | Central-specific coordinator config | Read/write with CAS | Settings > Coordinator | main advanced route |
 | `#/central/{central}/workers` | Provider-backed persistent worker runtime | Read/write; secret goes to keychain | Settings > Runtimes | main advanced route |
@@ -139,12 +148,15 @@ Source: `DesiredSeat`, `tools/fleet-dashboard/seat_config.py:612-758`.
 | `host`, `role`, `name`, `central_url`, `home_board`, `boards` | Hosts: `codex`, `codex-cli`, `zed`, `goose`, `claude-code`, `claude-desktop`, `headless`; roles: worker/reviewer/orchestrator/coordinator; safe IDs; `boards=registry|home|comma-list` | Managed local host config; plan/diff/apply; host restart is prompted, not implied | main editor; `registry_board` is a separate missing field below |
 | `token_file`, `ca_file`, `bridge_command`, `config_path`, `seat_dir`, `repository` | Safe path/command checks in planner; examples must use `/PATH/TO/...` | Private paths remain server-side; token content/fingerprint never enters UI | main editor; `personal_command` and `token_env_var` are missing below |
 | `tier_max`, `skills`, `can_review`, `can_work`, `model`, `provider` | Tier `1..3`; safe unique skill IDs; role/capability combinations fail closed; model/provider ≤200 chars | Written to host connector environment and advertised at onboarding; restart/reconnect required | main editor |
-| `host_mode` | `host_mode=acp|persistent` | Host configuration; restart required | main schema; full ACP runner selection is pending PR 70 |
+| `host_mode` | `host_mode=acp|persistent` | Host configuration; restart required | candidate editor; native and ACP choices remain distinct |
 | Persistent runtime | `name`, `provider`, `base_url`, `model`, write-only `api_key`; providers include DeepSeek, Qwen, OpenRouter, Azure, Ollama, custom | Local runtime file plus OS keychain; test/start/stop/restart are explicit | main editor |
-| ACP runner catalog/preset/install | runner ID, binary/source, session options, provider/model/mode selection | PR 70 introduces bounded catalog/installer; not in baseline | pending; never label shipped |
+| ACP runner catalog/preset/install | runner ID, binary/source, session options, provider/model/mode selection | Bounded catalog refresh, exact pin, immutable plan/apply, cache integrity and lease-aware activation | candidate at `3b9983629500177ea430b3c94ba104d61c60e6c0`; not released or deployed |
 
-The current seat form is not field-complete. `seatForm` and `seatPayload` in
-`tools/fleet-dashboard/ui/assets/app.js:282-286` omit the five fields below. The
+The original baseline seat form was not field-complete. `seatForm` and
+`seatPayload` in `tools/fleet-dashboard/ui/assets/app.js:282-286` omitted the five
+fields below. The integrated managed-config and Settings candidates preserve and
+edit these values through the typed source-backed contract; the analysis below
+records the defect that the candidate fixes. The
 `POST /api/config/plan` path calls `FleetConfigService._desired`, which constructs a
 new `DesiredSeat` from that incomplete object (`fleet_dashboard.py:7990-7994,
 8628-8632`). Consequently, editing an otherwise unrelated seat field can replace a
