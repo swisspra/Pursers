@@ -12,6 +12,16 @@ defines portable, secret-free native Codex/Goose and ACP runner presets. Their
 architecture, migration, rollback, and downstream integration boundary are in
 [`docs/design/acp-runner-selection.md`](../../docs/design/acp-runner-selection.md).
 Catalog listing and resolution never install or launch an agent.
+`runner_installer.py` is the explicit downstream binary installer: it requires
+SHA-256, bounds the download and expansion, rejects traversal, links and special
+files, and atomically publishes a verified content-addressed cache. Pinned
+`npx`/`uvx` distributions use the installed package launcher and are labelled as
+network-at-launch instead of pretending that Pursers bounded their download.
+
+The Fleet Config page and `/api/config/runners/*` expose the guarded setup flow.
+See [Managed runner setup](../../docs/guides/managed-runners.md) for the exact
+preview/apply contract, compatibility matrix, rollback, and real-provider
+acceptance handoff.
 
 ## Protocol baseline
 

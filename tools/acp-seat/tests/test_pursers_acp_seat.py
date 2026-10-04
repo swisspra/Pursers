@@ -342,6 +342,25 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
     script = write_script(
         tmp_path,
         {
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "type": "select",
+                    "currentValue": "fast",
+                    "options": [
+                        {"value": "fast", "name": "Fast"},
+                        {"value": "strong", "name": "Strong"},
+                    ],
+                }
+            ],
+            "expectedSetConfigRequests": [
+                {
+                    "sessionId": "fake-session-1",
+                    "configId": "model",
+                    "value": "strong",
+                }
+            ],
             "promptMustContain": ["ACP end to end", "decision-marker"],
             "promptMustNotContain": ["PR-seat-private"],
             "promptActions": [
@@ -593,6 +612,7 @@ async def fake_agent_submits_through_in_process_central(tmp_path: Path) -> None:
                     [sys.executable, str(FAKE), "--script", str(script)],
                     work_root,
                     lease_interval_s=0.01,
+                    session_options={"model": "strong"},
                 )
                 outcome = await runtime.run_ticket("TK-acp-e2e")
                 assert outcome == "submitted", {

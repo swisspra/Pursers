@@ -70,6 +70,18 @@ Automatic legacy recovery requires the missing Git index left by the former
 `--no-checkout` flow. Unstaged or staged deletions in an initialized clone stay
 classified as local changes and are never restored automatically.
 
+### Choose a managed runner
+
+The Config page also has a **Managed runners** panel for preserving native
+Codex/Goose presets or selecting an exact ACP Registry runner. Catalog refresh
+is explicit and side-effect free. The second confirmation shows the immutable
+pin, install/cache action, account-isolation status, session options, generated
+template, and lease-aware activation result. A running seat or active lease
+defers activation. Provider-authenticated ACP remains `needs_human` until a
+dedicated narrow auth/egress adapter is configured; the dashboard never grants
+the agent the operator home or disables its sandbox. See
+[Managed native and ACP runners](../../docs/guides/managed-runners.md).
+
 ## Doors
 
 The Config page includes a **Doors** panel managing secret-safe door credentials

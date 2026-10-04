@@ -75,6 +75,12 @@ from seat_config import (  # noqa: I001
     discover_managed_seats,
     seat_setup_bundle,
 )
+from runner_setup import (
+    CatalogError,
+    RunnerSetupError,
+    RunnerSetupManager,
+    compatibility_matrix,
+)
 from release_ops import ReleaseOpsManager
 import runtime_environment
 from warm_home import apply_warm_guided_home
@@ -9905,6 +9911,7 @@ def make_handler(
     seat_manager: SeatConfigManager | None = None,
     evidence_trace: EvidenceTrace | None = None,
     butler_manager: ButlerSettingsManager | None = None,
+    runner_manager: RunnerSetupManager | None = None,
     deployment: dict[str, Any] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     selected_stats_path = (
@@ -9913,6 +9920,9 @@ def make_handler(
     workers = worker_manager or WorkerManager()
     seats = seat_manager or SeatConfigManager()
     butlers = butler_manager or ButlerSettingsManager(_default_butler_secrets_dir())
+    runners = runner_manager or RunnerSetupManager(
+        _default_config_state_dir() / "runner-setup"
+    )
     project_operation_lock = threading.RLock()
     deployed_revision = deployment_metadata() if deployment is None else dict(deployment)
 
@@ -10333,6 +10343,27 @@ def make_handler(
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            if route == "/api/config/runners":
+                values = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                target = values.get("target")
+                if target is None:
+                    self._send(
+                        200,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"compatibility": compatibility_matrix()}),
+                    )
+                    return
+                if len(target) != 1:
+                    self._send(400, "application/json; charset=utf-8", b'{"error":"one target required"}')
+                    return
+                try:
+                    body = _json_bytes(runners.catalog(target=target[0]))
+                except (CatalogError, OSError, ValueError) as exc:
+                    body = _json_bytes({"error": str(exc), "compatibility": compatibility_matrix()})
+                    self._send(503, "application/json; charset=utf-8", body)
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
             if route == "/api/doors":
                 try:
                     is_loopback = ipaddress.ip_address(
@@ -10621,6 +10652,9 @@ def make_handler(
                 "/api/config/ops/plan",
                 "/api/config/ops",
                 "/api/config/registry/clone",
+                "/api/config/runners/refresh",
+                "/api/config/runners/plan",
+                "/api/config/runners/apply",
                 "/api/butler",
                 "/api/butler/autonomous",
                 "/api/butler/autonomous/command",
@@ -10772,6 +10806,16 @@ def make_handler(
                             "central": label,
                         }
                     )
+                elif route == "/api/config/runners/refresh":
+                    if not isinstance(request, dict) or set(request) != {"target"}:
+                        raise ValueError("request must contain only target")
+                    body = _json_bytes(runners.refresh(target=request["target"]))
+                elif route == "/api/config/runners/plan":
+                    body = _json_bytes(runners.plan(request))
+                elif route == "/api/config/runners/apply":
+                    if not isinstance(request, dict) or set(request) != {"plan_id", "digest"}:
+                        raise ValueError("request must contain only plan_id and digest")
+                    body = _json_bytes(runners.apply(**request))
                 elif route == "/api/butler":
                     current = cache_call("get_config", central=central)
                     body = _json_bytes(
@@ -11212,6 +11256,13 @@ def make_handler(
                     _json_bytes({"error": str(exc), "central": label}),
                 )
                 return
+            except RunnerSetupError as exc:
+                self._send(
+                    409,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"error": str(exc), "central": label}),
+                )
+                return
             except RuntimeError as exc:
                 if route in {"/api/config", "/api/intake"}:
                     self._send(
@@ -11604,6 +11655,7 @@ def main(argv: list[str] | None = None) -> None:
         state_dir=seat_state_dir,
         central_url=primary_config.url,
     )
+    runner_manager = RunnerSetupManager(seat_state_dir / "runner-setup")
     try:
         trace = (
             EvidenceTrace.from_config(args.evidence_trace_config, Path(__file__))
@@ -11621,6 +11673,7 @@ def main(argv: list[str] | None = None) -> None:
             seat_manager,
             evidence_trace=trace,
             butler_manager=butler_manager,
+            runner_manager=runner_manager,
         ),
     )
     print(f"Fleet Dashboard: http://{args.host}:{args.port}", flush=True)

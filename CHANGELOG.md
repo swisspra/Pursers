@@ -7,7 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Add a guarded Fleet setup flow for native Codex/Goose and exact-version ACP
+  Registry runners. Catalog refresh is read-only; plan/apply shows the pinned
+  distribution, bounded install, account isolation, session options, managed
+  template, and lease-aware activation before changing state. Binary archives
+  require SHA-256 and reject traversal, links, special files, and oversized
+  extraction. Existing native presets remain valid and are never migrated
+  automatically. Provider-authenticated ACP activation stays fail-closed until
+  a dedicated auth/egress boundary is configured; Zed remains an optional GUI
+  client rather than a dependency of headless seats.
+
 ### Fixed
+
+- Apply saved ACP `configOptions` selections after session creation and before
+  the first prompt, failing closed when a model, mode, or reasoning choice is no
+  longer advertised.
 
 - Recover a verified crashed managed seat as a new executor incarnation without
   replaying an old successful start. Duplicate observations use a generation and
