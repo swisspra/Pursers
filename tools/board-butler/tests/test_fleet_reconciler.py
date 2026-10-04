@@ -158,12 +158,14 @@ def reconciler(
     host_cap: int = 8,
     config_revision: int = 7,
     fingerprint: str = FINGERPRINT,
+    max_operation_attempts: int = 3,
 ) -> Any:
     return butler.FleetReconciler(
         butler.FleetHostPolicy(host_cap, 2, host_cap + 2),
         dict(policies or {"pursers": board_policy()}),
         config_revision=config_revision,
         authorization_fingerprint_sha256=fingerprint,
+        max_operation_attempts=max_operation_attempts,
     )
 
 
@@ -692,6 +694,26 @@ def test_live_lease_is_never_drained_or_stopped_when_demand_drops_to_zero() -> N
     plan = reconciler().plan(snapshot({"pursers": demand()}, [holder]), {})
 
     assert plan.desired["pursers"]["worker"] == 1
+    assert plan.operations == ()
+
+
+def test_exhausted_live_lease_stop_gets_only_one_release_recovery() -> None:
+    engine = reconciler(max_operation_attempts=1)
+    draining = seat("worker-a", "worker", lifecycle="draining")
+    operation = engine._operation(draining, "stop")
+    prior = {
+        "boards": {"pursers": {"desired": {
+            "worker": 0, "reviewer": 0, "acp_worker": 0},
+            "role_idle_since": {role: (NOW - timedelta(minutes=5)).isoformat()
+                for role in butler.FLEET_ROLES}}},
+        "operations": {operation.operation_id: {
+            "operation_id": operation.operation_id, "board_id": "pursers",
+            "action": "stop", "seat_id": "worker-a", "status": "terminal",
+            "attempts": 2, "outcome": "rejected", "committed": False,
+            "reason_code": "live_lease", "lease_release_retries": 1,
+            "last_attempt_at": (NOW - timedelta(minutes=1)).isoformat()}},
+    }
+    plan = engine.plan(snapshot({"pursers": demand()}, [draining]), prior)
     assert plan.operations == ()
 
 
@@ -1293,6 +1315,7 @@ class FakeServiceAdapter:
     def __init__(self) -> None:
         self.observation = fleet_executor.ServiceObservation(False, False, False, True)
         self.start_calls = 0
+        self.stop_calls = 0
 
     def inspect(self, seat_id: str, template: Any) -> Any:
         return self.observation
@@ -1310,6 +1333,7 @@ class FakeServiceAdapter:
         pass
 
     def stop(self, seat_id: str, template: Any) -> None:
+        self.stop_calls += 1
         self.observation = fleet_executor.ServiceObservation(True, False, False, True)
 
 
@@ -1780,6 +1804,79 @@ def test_real_transport_retries_terminal_backoff_rejection_after_30_seconds(
     assert first["request_digest_sha256"] == retry["request_digest_sha256"]
     assert retry["outcome"] == "succeeded"
     assert runtime.adapter.start_calls == 1
+
+
+def test_signed_drain_recovers_once_after_live_lease_releases(tmp_path: Path) -> None:
+    now = [NOW]
+    runtime = _transport_fixture(tmp_path, now, failure_backoff_s=0)
+    runtime.adapter.observation = fleet_executor.ServiceObservation(
+        True, True, True, True, "fake:worker-a:1"
+    )
+    runtime.store.save_seat(
+        seat_id="worker-a", board_id="pursers", template=runtime.template,
+        identity_id=None, state_id=None, state_dir_id=None, generation=1,
+        lifecycle="ready", process_ref="fake:worker-a:1", now=NOW.timestamp(),
+    )
+    runtime.store.connection.close()
+
+    class ToggleLease:
+        live = True
+        def observe(self, _board_id: str, _seat_id: str) -> Any:
+            return fleet_executor.LeaseObservation(True, live_work=self.live)
+
+    leases = ToggleLease()
+    socket_path = _short_socket_path(tmp_path)
+    ready = threading.Event()
+    server = threading.Thread(
+        target=_serve_executor,
+        args=(socket_path, lambda: fleet_executor.FleetExecutor(
+            runtime.policy, fleet_executor.ExecutorStore(runtime.store_path),
+            runtime.adapter, leases, ReadyRegistry(), ReceiptSink(),
+            clock=lambda: now[0].timestamp()), ready),
+        kwargs={"connections": 3}, daemon=True,
+    )
+    server.start();assert ready.wait(timeout=5)
+    state = butler.FileFleetStateStore((tmp_path / "fleet-state.json").resolve())
+    engine = reconciler(max_operation_attempts=1)
+    client = butler.UnixFleetExecutorClient(
+        socket_path, "butler-local", runtime.private_path, clock=lambda: now[0]
+    )
+    ready_seat = seat("worker-a", "worker", lifecycle="ready",
+        template_id=runtime.template.template_id,
+        template_digest=runtime.template.digest_sha256)
+    engine.reconcile(snapshot({"pursers": demand()}, [ready_seat]), state, client)
+
+    now[0] += timedelta(seconds=61)
+    drained = engine.reconcile(
+        snapshot({"pursers": demand()}, [ready_seat], now=now[0]), state, client)
+    assert drained["receipts"][0]["outcome"] == "succeeded"
+    draining_seat = seat("worker-a", "worker", lifecycle="draining",
+        template_id=runtime.template.template_id,
+        template_digest=runtime.template.digest_sha256)
+
+    now[0] += timedelta(seconds=6)
+    rejected = engine.reconcile(
+        snapshot({"pursers": demand()}, [draining_seat], now=now[0]), state, client)
+    assert rejected["receipts"][0]["reason_code"] == "live_lease"
+    leases.live = False
+    now[0] += timedelta(seconds=6)
+    stopped = engine.reconcile(
+        snapshot({"pursers": demand()}, [draining_seat], now=now[0]), state, client)
+    assert stopped["receipts"][0]["outcome"] == "succeeded"
+    assert stopped["receipts"][0]["committed"] is True
+
+    now[0] += timedelta(seconds=1)
+    repeated = reconciler(max_operation_attempts=1).reconcile(
+        snapshot({"pursers": demand()}, [draining_seat], now=now[0]),
+        butler.FileFleetStateStore(state.path), client,
+    )
+    server.join(timeout=5);socket_path.unlink(missing_ok=True)
+    assert repeated["operations"] == []
+    assert runtime.adapter.stop_calls == 1
+    _revision, durable = state.load()
+    stop_rows = [row for row in durable["operations"].values()
+        if row["action"] == "stop"]
+    assert stop_rows[0]["lease_release_retries"] == 1
 
 
 def test_production_fleet_cycle_reads_products_executes_and_publishes(
