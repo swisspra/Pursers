@@ -9834,6 +9834,10 @@ def _route_css_asset_paths(
 UI_ASSET_PATHS = {
     "/ui/assets/fleet.css": ("text/css; charset=utf-8", UI_ROOT / "assets" / "fleet.css"),
     "/ui/assets/app.js": ("text/javascript; charset=utf-8", UI_ROOT / "assets" / "app.js"),
+    "/ui/assets/brand/pursers-wordmark.png": (
+        "image/png",
+        UI_ROOT / "assets" / "brand" / "pursers-wordmark.png",
+    ),
     "/ui/view-registry.js": ("text/javascript; charset=utf-8", UI_ROOT / "view-registry.js"),
     **{
         f"/ui/views/{name}.js": (

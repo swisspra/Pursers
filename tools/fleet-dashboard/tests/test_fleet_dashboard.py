@@ -74,6 +74,12 @@ def test_ui_shell_loads_packaged_assets_and_route_modules() -> None:
     for route in expected_routes:
         assert f'<script src="/ui/views/{route}.js"></script>' in dashboard.HTML_SHELL
 
+    assert (
+        '<img class="brand-logo" src="/ui/assets/brand/pursers-wordmark.png" '
+        'alt="" width="1774" height="887">'
+    ) in dashboard.HTML_SHELL
+    assert 'aria-label="Pursers Fleet home"' in dashboard.HTML_SHELL
+
 
 def test_primary_route_modules_own_renderers_and_receive_shared_context() -> None:
     app = dashboard.UI_ASSETS["/ui/assets/app.js"][1].decode("utf-8")
@@ -570,6 +576,10 @@ def test_ui_assets_are_packaged_with_etag_revalidation() -> None:
             assert caught.value.code == 304
             assert caught.value.headers["ETag"] == expected_etag
             assert caught.value.read() == b""
+
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(root + "/ui/assets/brand/missing.png")
+        assert caught.value.code == 404
     finally:
         server.shutdown()
         server.server_close()
@@ -582,6 +592,18 @@ def test_ui_asset_bytes_match_packaged_files() -> None:
         assert path.is_file()
         assert body == path.read_bytes()
         assert etag == f'"{hashlib.sha256(body).hexdigest()}"'
+
+
+def test_brand_asset_is_exact_binary_png_with_safe_content_type() -> None:
+    route = "/ui/assets/brand/pursers-wordmark.png"
+    content_type, body, etag = dashboard.UI_ASSETS[route]
+
+    assert content_type == "image/png"
+    assert body.startswith(b"\x89PNG\r\n\x1a\n")
+    assert hashlib.sha256(body).hexdigest() == (
+        "6a1b7ee76b9d91ea431d8ef63b9c8ba4b9ae5f5c822e67bc24745692b29805d5"
+    )
+    assert etag == f'"{hashlib.sha256(body).hexdigest()}"'
 
 
 def registry(projects: dict) -> dict:

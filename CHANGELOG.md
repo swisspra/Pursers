@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Apply the supplied Pursers artwork to the repository README and Fleet
+  Dashboard navigation, with normalized tracked assets, byte-fidelity records,
+  responsive intrinsic sizing, and an explicit safe binary PNG route.
+
 ### Fixed
 
 - Recover a verified crashed managed seat as a new executor incarnation without
