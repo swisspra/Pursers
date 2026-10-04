@@ -44,7 +44,7 @@ Generic JSON editors, arbitrary shell execution, copying secrets through the bro
 
 | Field(s) | Existing authority | Gap | Required API behavior | Failure behavior |
 | --- | --- | --- | --- | --- |
-| `review_policy` | `PursersClient.board_review_policy_set` | Project setup forces `strict`; no general dashboard writer | `GET` current policy and revision; `POST` allowlisted policy with admin check and read-back | Reject weakening/unknown values; never substitute operator review |
+| `review_policy` | `BoardClient.board_review_policy_set` | Project setup forces `strict`; no general dashboard writer | `GET` current policy and revision; `POST` allowlisted policy with admin check and read-back | Reject weakening/unknown values; never substitute operator review |
 | `stale_after_days` | `board_stale_after_set` | Status only | Typed integer preview explaining identity effects; admin save; board-status read-back | Conflict/permission error leaves old value visible |
 | `archive_after_days`, `inline_history_limit`, `invite_prune_after_days` | Central board config | No bounded client/dashboard setter | Add explicit setter(s) with documented ranges and impact; no generic config object | Block unsafe zero/oversize values; preview archive consequences |
 | `journal_retention_days`, `journal_row_cap` | Central journal-retention setter | No dashboard route | Typed retention editor, estimated policy effect, admin save and status read-back | Report compaction/unavailability separately from save failure |

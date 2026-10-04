@@ -197,7 +197,7 @@ Source: `prepare_autonomous_butler_config`, `tools/fleet-dashboard/butler_settin
 
 | Domain | Source symbol/file | Current capability | Redesign surface | Status / target package |
 | --- | --- | --- | --- | --- |
-| Ticket lifecycle | `PursersClient.ticket_create/claim/update/progress_update/annotate/submit/review/cancel/list/history_list` in `packages/client/src/pursers_client/client.py:1206-1663` | Dashboard reads all states/evidence; intake and human decisions write; ordinary ticket work remains authenticated-agent tooling | Work, ticket detail, Inbox | main read; route/Inbox package `TK-925e8c4b9657ebc5f5e5` |
+| Ticket lifecycle | `BoardClient.ticket_create/claim/update/progress_update/annotate/submit/review/cancel/list/history_list` in `packages/client/src/pursers_client/client.py:1206-1663` | Dashboard reads all states/evidence; intake and human decisions write; ordinary ticket work remains authenticated-agent tooling | Work, ticket detail, Inbox | main read; route/Inbox package `TK-925e8c4b9657ebc5f5e5` |
 | Questions and human requests | `ticket_question_ask/answer`, `ticket_request_human/human_resolve` | Human resolution and typed content are writable; generic conversation reply is not invented | Inbox | main; typed unification package |
 | Review independence | Central review principal checks and delivery policy validation | Reviewer actions are not exposed as operator substitutes | Work/detail | main guard; retain |
 | Journal/search/pagination | board detail views, activity projection, ticket list/history pagination | Bounded windows, cursors and truncation | Activity/search | main read; no unbounded Home fan-out |
@@ -205,8 +205,8 @@ Source: `prepare_autonomous_butler_config`, `tools/fleet-dashboard/butler_settin
 | Usage/overhead | `read_overhead_stats`, `/api/overhead` | Source/window-aware diagnostics | Activity/Diagnostics | main read; cost remains unknown unless observed |
 | Resources/prompts/skills | Central resources and MCP tools; seat skill suggestions | Resource state is tool-visible; seat skills are editable; no complete dashboard catalog/onboarding | Settings > Resources & skills | gap → `TK-da4fa65758fe7e6e8f1e` plus backend package if mutation required |
 | Sonar/UnifiedMCP | No complete baseline dashboard schema/handler for connector source, grouping, dedup, observations, zero-issue gate or writeback | Any displayed status would be documentation-only | Settings > Sources | missing backend → `TK-09b833b7aa9cca640ac6` |
-| Doctor/import/bridge | `SeatConfigSurface.doctor/import_discovered/install_bridge/upgrade_all` | Guarded jobs and bounded logs | Settings > Diagnostics | main |
-| Release/stage/restart | `release_ops.py`, `/api/config/ops/{plan,apply}` | Exact expiring plan then async job; rollback/status projected | Settings > Release | main, high-risk grouping |
+| Doctor/import/bridge | `SeatConfigManager.doctor/import_discovered/install_bridge/upgrade_all` in `tools/fleet-dashboard/fleet_dashboard.py:7769-9327` | Guarded jobs and bounded logs | Settings > Diagnostics | main |
+| Release/stage/restart | `tools/fleet-dashboard/release_ops.py`, `POST /api/config/ops/plan` and `POST /api/config/ops` | Exact expiring plan then async job; rollback/status projected | Settings > Release | main, high-risk grouping |
 | Rollback | Release plan receipts and release status | Operation-specific, not a generic rollback button | Settings > Release | main partial; never shell shortcut |
 | Personal profile/app setup | `packages/personal/src/pursers_personal/cli.py` | CLI supports setup/activate/doctor/rotate/restart/rollback/uninstall | Guided onboarding | CLI/file-only; dashboard scope needs explicit product decision |
 
