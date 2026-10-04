@@ -932,6 +932,32 @@ for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
   home.screenshot = await page.screenshot({{
     path: {json.dumps(str(evidence_dir))} + `/fleet-home-${{viewport.width}}x${{viewport.height}}.png`
   }});
+  const workflowRoutes = [];
+  for (const theme of ["light", "dark"]) {{
+    await page.evaluate(value => {{ document.documentElement.dataset.theme=value; }}, theme);
+    await page.evaluate(() => {{ location.hash="#/work"; }});
+    await page.waitForSelector("#central-sections [data-work-layout]", {{state:"attached",timeout:10000}});
+    const work = await page.evaluate(() => ({{
+      route: location.hash,
+      kanban: getComputedStyle(document.querySelector('[data-work-layout="kanban"]')).display,
+      list: getComputedStyle(document.querySelector('[data-work-layout="list"]')).display,
+      lanes: document.querySelectorAll('[data-work-lane]').length,
+      tickets: document.querySelectorAll('[data-pursers-ticket="TK-live"]').length,
+    }}));
+    work.screenshot = await page.screenshot({{path:{json.dumps(str(evidence_dir))}+`/fleet-work-${{theme}}-${{viewport.width}}x${{viewport.height}}.png`}});
+    await page.evaluate(() => {{ location.hash="#/inbox"; }});
+    await page.waitForSelector("#central-sections .inbox-master-detail", {{state:"visible",timeout:10000}});
+    const inbox = await page.evaluate(() => {{
+      const root=document.querySelector('.inbox-master-detail'), first=document.querySelector('[data-inbox-select]');
+      const before=root.dataset.inboxMobileView;
+      if (innerWidth<=800 && first) first.click();
+      const selected=document.querySelector('.inbox-master-detail').dataset.inboxMobileView;
+      if (innerWidth<=800) document.querySelector('[data-inbox-back]')?.click();
+      return {{route:location.hash,before,selected,after:document.querySelector('.inbox-master-detail').dataset.inboxMobileView,source:first?.dataset.inboxSource||null}};
+    }});
+    inbox.screenshot = await page.screenshot({{path:{json.dumps(str(evidence_dir))}+`/fleet-inbox-${{theme}}-${{viewport.width}}x${{viewport.height}}.png`}});
+    workflowRoutes.push({{theme,work,inbox}});
+  }}
   await page.evaluate(() => {{ location.hash="#/team"; }});
   await page.waitForFunction(() => document.querySelectorAll(".agent-card").length===35, undefined, {{timeout:10000}});
   const team = await page.evaluate(async () => {{
@@ -988,7 +1014,7 @@ for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
     const restored = document.querySelector("#intake-form textarea");
     return {{...reading,draft:restored.value,draftFocused:document.activeElement===restored,dirty:restored.form.dataset.dirty||null,networkAdvanced:detailData.generated_at!==revisionBefore}};
   }});
-  results.push({{viewport,home,team,settings,detail}});
+  results.push({{viewport,home,workflowRoutes,team,settings,detail}});
 }}
 console.log(JSON.stringify(results));
 """
@@ -1018,6 +1044,25 @@ console.log(JSON.stringify(results));
         screenshot = Path(row["home"]["screenshot"])
         assert screenshot.parent == evidence_dir
         assert screenshot.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        for workflow in row["workflowRoutes"]:
+            assert workflow["theme"] in {"light", "dark"}
+            assert workflow["work"]["route"] == "#/work"
+            assert workflow["work"]["lanes"] >= 1
+            assert workflow["work"]["tickets"] >= 1
+            if row["viewport"]["width"] <= 800:
+                assert workflow["work"]["kanban"] == "none"
+                assert workflow["work"]["list"] == "block"
+                assert workflow["inbox"]["before"] == "list"
+                assert workflow["inbox"]["selected"] == "detail"
+                assert workflow["inbox"]["after"] == "list"
+            else:
+                assert workflow["work"]["kanban"] == "grid"
+                assert workflow["work"]["list"] == "none"
+                assert workflow["inbox"]["before"] == "detail"
+            for surface in (workflow["work"], workflow["inbox"]):
+                image = Path(surface["screenshot"])
+                assert image.parent == evidence_dir
+                assert image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         assert row["team"]["route"] == "#/team"
         assert row["team"]["count"] == 35
         assert row["team"]["open"] is True

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -84,3 +86,59 @@ def test_inbox_alias_and_focused_ticket_assets_are_packaged() -> None:
     assert "Independent review rounds" in app
     assert ".ticket-focus-grid" in css
     assert "@media(max-width:800px){.ticket-focus-head,.ticket-focus-grid" in css
+
+
+def test_ticket_detail_falls_back_to_literal_seat_suite_report() -> None:
+    ticket = {
+        "ticket_id": "TK-suite",
+        "status": "submitted",
+        "submission_history": [{
+            "summary": "Ready",
+            "test_output": "",
+            "notes": "branch_and_commit: codex/TK-suite@" + "b" * 40
+            + "\nseat-suite-report: pytest -q: 19 passed; browser mobile/light passed\nnext-action: review",
+        }],
+    }
+
+    detail = dashboard._detail_ticket(ticket)
+
+    assert detail["submission_evidence"]["test_output"] == (
+        "pytest -q: 19 passed; browser mobile/light passed"
+    )
+
+
+def test_typed_inbox_mobile_list_detail_back_and_independent_bounds() -> None:
+    registry = dashboard.UI_ASSETS["/ui/view-registry.js"][1].decode("utf-8")
+    inbox = dashboard.UI_ASSETS["/ui/views/approvals.js"][1].decode("utf-8")
+    reviews = [
+        {"central": "work", "board": {"board_id": "pursers", "label": "Pursers"},
+         "ticket": {"id": f"TK-{index:03d}", "title": f"Review {index}", "status": "submitted"}}
+        for index in range(55)
+    ]
+    program = f"""
+const listeners=[];const host={{innerHTML:''}};
+global.document={{querySelector:s=>s==='#central-sections'?host:s==='.inbox-master-detail'?{{}}:null,createElement:()=>({{dataset:{{}}}}),head:{{append:()=>{{}}}},addEventListener:(k,cb)=>listeners.push([k,cb])}};
+global.matchMedia=()=>({{matches:true}});
+eval({json.dumps(registry)});eval({json.dumps(inbox)});
+const human={{central:'work',board:{{board_id:'pursers',label:'Pursers'}},h:{{request_id:'HR-1',kind:'decision',message:'Choose a safe option'}}}};
+const context={{esc:v=>String(v),fmt:v=>v,pageHead:()=>'',warmTruthStrip:()=>'',centralLabels:['work'],fleetData:{{work:{{}}}},
+ humanRequestRows:()=>[human,human],humanRequestCard:()=>'<form data-inbox-source-action="human"><button data-human-action="accept">Accept</button></form>',
+ butlerHoldRows:()=>[],butlerHoldCard:()=>'',warmTickets:()=>{json.dumps(reviews)},warmBoards:()=>[],ticketHref:()=> '#ticket',boardHref:()=> '#board',
+ butlerAgreementRows:()=>[],butlerTicketAgreementRows:()=>[],butlerRepeatedTicketRows:()=>[],butlerEvaluationTruncationRows:()=>[],butlerScoreCard:()=>'',butlerRepeatedTicketCard:()=>''}};
+const first=globalThis.FleetViewModules.render('approvals',context);
+for(const [kind,cb] of listeners)if(kind==='click')cb({{target:{{closest:s=>s==='[data-inbox-select]'?{{dataset:{{inboxSelect:'human:work:pursers:HR-1'}}}}:null}}}});
+const selected=host.innerHTML;
+for(const [kind,cb] of listeners)if(kind==='click')cb({{target:{{closest:s=>s==='[data-inbox-back]'?{{}}:null}}}});
+console.log(JSON.stringify({{first,selected,back:host.innerHTML}}));
+"""
+    rendered = json.loads(subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    ).stdout)
+
+    assert 'data-inbox-mobile-view="list"' in rendered["first"]
+    assert "2 duplicate records collapsed" in rendered["first"]
+    assert "50 shown" in rendered["first"]
+    assert "5 history item(s) omitted independently" in rendered["first"]
+    assert 'data-inbox-mobile-view="detail"' in rendered["selected"]
+    assert 'data-human-action="accept"' in rendered["selected"]
+    assert 'data-inbox-mobile-view="list"' in rendered["back"]

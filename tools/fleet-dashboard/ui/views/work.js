@@ -279,6 +279,49 @@
     </button>`;
   }
 
+  function kanbanCard(item, context) {
+    const {esc, fmt, ticketHref} = context;
+    const {central, board, ticket} = item;
+    const href = ticketHref(central, board.board_id, ticket.id);
+    const activity = activityRecord(ticket);
+    const activityText = activity
+      ? `${activityLabel(activity.stage)} · ${activityLabel(activity.state)}`
+      : progressEmptyLabel(ticket);
+    return `<article class="work-kanban-card" data-pursers-ticket="${esc(ticket.id)}" data-work-state="${esc(groupFor(ticket.status).key)}">
+      <div class="work-kanban-card-head"><span class="work-state-mark" aria-hidden="true"></span><span>${esc(statusLabel(ticket))}</span></div>
+      <a class="work-ticket-title" href="${href}">${esc(ticket.title || '(untitled)')}</a>
+      <code>${esc(ticket.id)}</code>
+      <p>${esc(activityText)}</p>
+      <dl><div><dt>Owner</dt><dd>${esc(ownerLabel(ticket))}</dd></div><div><dt>Next</dt><dd>${esc(nextAction(ticket))}</dd></div></dl>
+      <footer><span>${esc(board.label)} · ${esc(fmt(ticket.updated_at))}</span><a href="${href}">Open details</a></footer>
+    </article>`;
+  }
+
+  function renderKanban(visible, context) {
+    const {esc} = context;
+    const populated = statusGroups.filter(group => visible.some(item => group.statuses.includes(item.ticket.status)));
+    const other = visible.some(item => !knownStatuses.has(item.ticket.status))
+      ? [{key: 'other', label: 'Other reported state', statuses: []}]
+      : [];
+    return `<section class="work-kanban" aria-labelledby="work-ledger-title" data-work-layout="kanban">
+      ${[...populated, ...other].map(group => {
+        const items = visible.filter(item => group.key === 'other'
+          ? !knownStatuses.has(item.ticket.status)
+          : group.statuses.includes(item.ticket.status));
+        return `<section class="work-kanban-lane" data-work-lane="${esc(group.key)}">
+          <header><h4>${esc(group.label)}</h4><span>${esc(items.length)}</span></header>
+          <div>${items.map(item => kanbanCard(item, context)).join('')}</div>
+        </section>`;
+      }).join('')}
+    </section>`;
+  }
+
+  function renderMobileList(visible, context) {
+    return `<section class="work-mobile-list" aria-labelledby="work-ledger-title" data-work-layout="list">
+      ${visible.map(item => ticketRow(item, context)).join('')}
+    </section>`;
+  }
+
   function renderWarmWork() {
     const context = latestContext;
     const {esc, pageHead, warmTruthStrip, warmTickets} = context;
@@ -309,12 +352,7 @@
     const activeLabel = activeFilter === 'all' ? 'All visible' : groupLabel(activeFilter);
     const filterOpen = typeof matchMedia === 'function' && matchMedia('(min-width: 801px)').matches ? ' open' : '';
     const ledger = visible.length
-      ? `<section class="work-ledger" aria-labelledby="work-ledger-title">
-          <div class="work-ledger-head" aria-hidden="true">
-            <span>State</span><span>Work item</span><span>Activity</span><span>Owner and lease</span><span>Next action</span><span>Open</span>
-          </div>
-          <div class="work-ledger-body">${visible.map(item => ticketRow(item, context)).join('')}</div>
-        </section>`
+      ? `${renderKanban(visible, context)}${renderMobileList(visible, context)}`
       : `<div class="empty-guidance work-empty">
           <h3>No work in this view</h3>
           <p>${tickets.length ? 'Choose another state to see its visible work.' : 'Choose a project and use its guarded intake to describe the result you need. Older work may exist outside this bounded view.'}</p>

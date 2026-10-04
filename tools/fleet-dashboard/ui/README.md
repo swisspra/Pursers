@@ -49,6 +49,10 @@ project directly or asks the operator to choose a project before entering the
 existing scoped intake flow.
 
 Work, Projects, Team, Activity, and Inbox now use the Nocturne shell while
-preserving their bounded sources and guarded handlers. Ticket deep links open an
-evidence-first detail surface with lifecycle, delivery, review, question, and
-journal provenance. Settings/onboarding remains a separately owned migration.
+preserving their bounded sources and guarded handlers. Work renders lifecycle
+Kanban lanes on wider screens and a deliberate single-column list on narrow
+screens. Inbox keeps actionable items and bounded history separate, deduplicates
+by source identity, and uses a mobile list/detail flow with a Back control.
+Ticket deep links open an evidence-first detail surface with lifecycle, delivery,
+review, question, test-suite fallback, worker-assessment, and journal provenance.
+Settings/onboarding remains a separately owned migration.

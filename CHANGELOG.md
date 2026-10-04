@@ -12,8 +12,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Complete the non-Settings Nocturne workflow routes with an `#/inbox` entry
   point (while preserving `#/approvals`), evidence-first ticket detail, bounded
   submission/test/file evidence, independent review rounds, coordination
-  questions, and responsive source-backed Work, Projects, Team, and Activity
-  surfaces.
+  questions, worker-assessment provenance, a desktop lifecycle Kanban with an
+  intentional mobile list, and a typed Inbox master/detail flow with independent
+  actionable/history bounds and source-specific guarded actions.
 - Introduce the first Nocturne Fleet Dashboard slice: a light/dark token system,
   accessible mobile navigation drawer, source-backed Home status and observed
   seat summaries, and project-scoped intent entry without changing dashboard

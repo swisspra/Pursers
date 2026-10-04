@@ -2495,6 +2495,25 @@ def coordinator_findings_stale(
 BRANCH_COMMIT_RE = re.compile(
     r"branch_and_commit\s*:\s*([^\s@]+)\s*@\s*([0-9a-fA-F]{40})"
 )
+SEAT_SUITE_REPORT_RE = re.compile(
+    r"^seat-suite-report\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def ticket_seat_suite_report(ticket: dict[str, Any]) -> str | None:
+    """Return bounded literal worker suite evidence when the structured field is empty."""
+    submissions = ticket.get("submission_history")
+    latest = submissions[-1] if isinstance(submissions, list) and submissions else {}
+    for value in (
+        latest.get("notes") if isinstance(latest, dict) else None,
+        ticket.get("notes"),
+    ):
+        if not isinstance(value, str):
+            continue
+        match = SEAT_SUITE_REPORT_RE.search(value)
+        if match:
+            return _clip(match.group(1).strip(), 5_000) or None
+    return None
 
 
 def ticket_branch_commit(ticket: dict[str, Any]) -> tuple[str, str] | None:
@@ -3252,7 +3271,11 @@ def _detail_ticket(
     if not isinstance(latest_submission, dict):
         latest_submission = {}
     result = project_ticket_result(ticket)
-    test_output = _clip(latest_submission.get("test_output"), 5_000) or None
+    test_output = (
+        _clip(latest_submission.get("test_output"), 5_000)
+        or ticket_seat_suite_report(ticket)
+        or None
+    )
     raw_reviews = ticket.get("review_history")
     review_rounds = []
     if isinstance(raw_reviews, list):
