@@ -9,14 +9,15 @@ conformance and in-process Central tests.
 ## Protocol baseline
 
 The implementation targets ACP wire protocol **version 1**. The following
-official sources were fetched on 2026-09-14:
+official sources were fetched on 2026-10-04:
 
 - [ACP v1 overview](https://agentclientprotocol.com/protocol/v1/overview)
 - [initialization and capability negotiation](https://agentclientprotocol.com/protocol/v1/initialization)
 - [session setup and optional loading](https://agentclientprotocol.com/protocol/v1/session-setup)
 - [prompt turns, updates, cancellation, and stop reasons](https://agentclientprotocol.com/protocol/v1/prompt-turn)
 - [permission requests and outcomes](https://agentclientprotocol.com/protocol/v1/tool-calls)
-- [official repository at the inspected commit](https://github.com/agentclientprotocol/agent-client-protocol/tree/205918585fc99d97aa10b0d3619d5678dfcda712)
+- [session configuration options](https://agentclientprotocol.com/protocol/v1/session-config-options)
+- [official v1 schema at the inspected commit](https://github.com/agentclientprotocol/agent-client-protocol/tree/20361dd25a4a24228b4c519d8389a300fd9294ad/schema/v1)
 - [stable `schema-v1.21.0` artifact](https://github.com/agentclientprotocol/agent-client-protocol/releases/tag/schema-v1.21.0)
 
 ACP v1 negotiates a single integer major version. `schema-v1.21.0` is the
@@ -35,6 +36,27 @@ session, runs prompt turns, exposes updates through `next_update()` or the
 `updates()` async iterator, resolves permission requests through a callback,
 cancels turns, applies request/update timeouts, and fails pending calls if the
 subprocess exits or violates framing.
+
+After `new_session()` or `load_session()`, call
+`discover_session_config(session_id)` to read the agent-produced configuration
+without an LLM call. It returns the complete ordered `configOptions` state and
+preserves grouped selects and unknown categories/types. If `configOptions` is
+absent, it exposes the documented legacy `modes` state as a single `mode`
+selector; an explicitly present empty `configOptions` list still wins over
+legacy modes.
+
+Use `set_config_option()` for one selection or `apply_config_preset()` for a
+saved `session_options` mapping before the first prompt. Select and boolean
+values are validated against the latest complete agent state. Preset application
+follows agent order and replaces/revalidates state after every response, so a
+model change can alter later reasoning choices. Agent-driven
+`config_option_update` notifications also replace the complete cached state.
+Unknown option types remain discoverable but cannot be applied; missing IDs,
+unsupported types/values, disappearing dependent options, and responses that do
+not report the requested current value raise `ACPConfigMismatch` instead of
+silently pretending a saved selection was applied. Boolean support is
+implemented and advertised as `session.configOptions.boolean: {}` unless the
+caller explicitly supplies `null`.
 
 The permission callback receives the complete `session/request_permission`
 params object. It may return an offered option ID, an ACP outcome object, or
@@ -81,6 +103,13 @@ and commit without access to the source repository. The ACP permission broker
 also canonicalizes requested paths, rejects protected Git/credential paths,
 never selects `allow_always`, and permits terminal requests only with an argv
 and cwd inside the clone.
+
+ACP session configuration does not standardize provider authentication,
+accounts, `CODEX_HOME`, or native CLI profiles. Those remain separate host
+configuration. The production sandbox still denies agent network access, so a
+selected provider that requires login refresh or direct network access remains
+an integration compatibility gap; configuration selection does not relax that
+policy.
 
 The focused coverage lives in
 [`tests/test_acp_client.py`](tests/test_acp_client.py) and
@@ -131,6 +160,10 @@ Top-level fields include:
 - `sessionId`: fixed ID returned by `session/new`;
 - `loadSession` / `--load-session`: advertise and implement `session/load`;
 - `loadUpdates`: update objects replayed during `session/load`;
+- `configOptions` / `loadConfigOptions`: complete setup configuration state;
+- `modes` / `loadModes`: legacy session mode state;
+- `expectedSetConfigRequests`, `setConfigResponses`, `setConfigNotifications`,
+  `setConfigDelays`, and `disconnectOnSetConfig`: configuration request cases;
 - `promptActions`: ordered scripted actions;
 - `stopReason`: final reason, defaulting to `end_turn`.
 
