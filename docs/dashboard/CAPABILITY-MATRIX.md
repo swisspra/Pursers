@@ -3,9 +3,10 @@
 This inventory is the source contract for the Nocturne dashboard redesign. The
 original field audit was generated against `origin/main` at
 `e3958382a484afc471d8790c6ad73ba05fe022d2`. The integration candidate is based
-on `origin/main` at `71d74965084b36d8457e9d2f295a054c96117c85`, adds the approved Settings
-candidate `5202b4dc1602a4bbf901c6d2e58dcf60ccd9fd2c`, and includes the reviewed ACP
-runner integration `3b9983629500177ea430b3c94ba104d61c60e6c0`. This does not assert that a
+on green `origin/main` at `fcce73dca7c5c550b33a1892b17b5e3701c6e4ab`, adds the approved Settings
+candidate `5202b4dc1602a4bbf901c6d2e58dcf60ccd9fd2c`, and retains the reviewed ACP
+runner source `3b9983629500177ea430b3c94ba104d61c60e6c0` already merged into that base.
+This does not assert that a
 running dashboard is at that revision: `/api/version` is the read-back source
 for the deployed SHA and dirty state.
 
