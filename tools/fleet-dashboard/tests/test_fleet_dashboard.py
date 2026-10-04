@@ -111,7 +111,9 @@ def test_primary_route_modules_own_renderers_and_receive_shared_context() -> Non
 
     assert "view.render(context)" in registry
     assert "view.bind(context, root)" in registry
-    assert "FleetViewModules.render(kind,fleetViewContext())" in app
+    assert "const context=fleetViewContext()" in app
+    assert "FleetViewModules.render(kind,context)" in app
+    assert "FleetViewModules.bind(kind,context,host)" in app
 
 
 def test_home_pending_coverage_never_renders_false_zero_totals() -> None:

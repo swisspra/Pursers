@@ -10,6 +10,7 @@
   const managed = new Map();
   const dispatch = new Map();
   const deliveries = new Map();
+  const settledSettings = new Set();
   let seatInventory = null;
   let seatBridge = null;
   let selectedCentral = '';
@@ -328,7 +329,8 @@
     const scope = ensureScope();
     if (!scope) return;
     const key = keyFor(selectedCentral, selectedBoard);
-    if (loadingKey === key || (!force && managed.has(key) && dispatch.has(key) && deliveries.has(selectedCentral) && seatInventory)) return;
+    if (loadingKey === key || (!force && settledSettings.has(key))) return;
+    settledSettings.delete(key);
     loadingKey = key;
     settingsError = '';
     renderHub?.();
@@ -344,6 +346,7 @@
     const failures = results.filter(result => result.status === 'rejected');
     if (failures.length) settingsError = `${failures.length} settings source${failures.length === 1 ? '' : 's'} unavailable. ${failures.map(result => result.reason.message).join('; ')}`;
     loadingKey = '';
+    settledSettings.add(key);
     renderHub?.();
   }
 
@@ -532,7 +535,11 @@
       try { await api(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(action === 'doctor' ? {} : {})}); settingsNotice = `${action} job queued. Results remain in the existing operations view.`; renderHub?.(); } catch (error) { settingsError = `${action}: ${error.message}`; renderHub?.(); }
     }));
     setSettingsMode(root, settingsMode);
-    root.querySelector('.settings-control-bar')?.setAttribute('data-settings-bound', 'true');
+    const key = keyFor(selectedCentral, selectedBoard);
+    root.querySelector('.settings-control-bar')?.setAttribute(
+      'data-settings-bound',
+      String(settledSettings.has(key) && loadingKey !== key)
+    );
     void loadSettings();
   }
 

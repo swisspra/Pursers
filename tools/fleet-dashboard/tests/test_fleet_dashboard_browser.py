@@ -630,14 +630,21 @@ await page.cdp("Emulation.setDeviceMetricsOverride", {{
   width: 320, height: 900, deviceScaleFactor: 1, mobile: false,
 }});
 await page.goto({json.dumps(url)});
+await page.waitForSelector('[data-settings-bound="true"]', {{state: "attached", timeout: 20000}});
 await page.waitForSelector(".autonomous-config-form", {{state: "attached", timeout: 10000}});
-await page.waitForSelector('[data-settings-bound="true"]', {{state: "attached", timeout: 10000}});
+await page.evaluate(() => {{
+  const form = document.querySelector(".autonomous-config-form");
+  if (!form?.isConnected) throw new Error("Settled Settings form is not connected");
+  globalThis.__coldSettingsForm = form;
+}});
 const advanced = '[data-settings-mode="advanced"]';
 await page.waitForSelector(advanced, {{state: "visible", timeout: 10000}});
 await page.evaluate(() => document.querySelector('[data-settings-mode="advanced"]').click());
 await page.waitForFunction(
   () => document.querySelector('[data-settings-mode="advanced"]')?.getAttribute("aria-pressed") === "true"
-    && document.querySelector('[data-settings-mode="simple"]')?.getAttribute("aria-pressed") === "false",
+    && document.querySelector('[data-settings-mode="simple"]')?.getAttribute("aria-pressed") === "false"
+    && globalThis.__coldSettingsForm?.isConnected
+    && globalThis.__coldSettingsForm === document.querySelector(".autonomous-config-form"),
   undefined,
   {{timeout: 10000}},
 );
@@ -685,6 +692,9 @@ const before = await page.evaluate(() => {{
 }});
 await page.evaluate(() => {{
   const button = document.querySelector(".autonomous-config-form button[type=submit]");
+  if (!globalThis.__coldSettingsForm?.isConnected || button.form !== globalThis.__coldSettingsForm) {{
+    throw new Error("Cold Settings form was replaced before submission");
+  }}
   const invalid = [...button.form.elements].filter(element => element.willValidate && !element.checkValidity()).map(element => ({{name: element.name, value: element.value, message: element.validationMessage}}));
   if (invalid.length) throw new Error(`Autonomous form invalid: ${{JSON.stringify(invalid)}}`);
   button.form.requestSubmit(button);
@@ -713,7 +723,7 @@ console.log(JSON.stringify({{before, after, team}}));
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=45,
         )
     finally:
         server.shutdown()
