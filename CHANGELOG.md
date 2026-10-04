@@ -19,7 +19,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   of nested transient transport groups. Recovery preserves positive cursors,
   pending events, leases and active model processes; mixed/authentication groups
   fail closed, and exhaustion records a durable actionable reason without a
-  duplicate model launch.
+  duplicate model launch. A failed Butler registry refresh skips to the next
+  scheduled cycle rather than immediately replaying potentially completed
+  mechanical actions.
 - Recover a verified crashed managed seat as a new executor incarnation without
   replaying an old successful start. Duplicate observations use a generation and
   process-reference CAS; live leases and unverified identities fail closed. A

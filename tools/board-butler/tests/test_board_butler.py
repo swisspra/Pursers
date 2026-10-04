@@ -3698,6 +3698,126 @@ def test_persistent_refresh_conflict_is_reported_without_terminating_resident(
     assert '"phase":"registry_refresh"' in warning
 
 
+def test_transient_grouped_refresh_failure_skips_cycle_then_recovers(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = args(tmp_path)
+    options.once = False
+    options.refresh_seconds = 0
+    options.runtime_status_file = tmp_path / "runtime.json"
+    marked: list[str] = []
+    original_mark = butler.RuntimeStatus.mark
+
+    def record_mark(self: Any, activity: str, at: Any = None) -> None:
+        marked.append(activity)
+        original_mark(self, activity, at)
+
+    monkeypatch.setattr(butler.RuntimeStatus, "mark", record_mark)
+
+    class StopResident(RuntimeError):
+        pass
+
+    class Backend:
+        latest_seq = 10
+        subscription_healthy = True
+        refreshes = 0
+        waits = 0
+        partial_mechanical_actions = 0
+        pending_reads = 0
+
+        async def __aenter__(self) -> "Backend":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def refresh_registry_findings(self, _now: Any) -> Mapping[str, Any]:
+            self.refreshes += 1
+            if self.refreshes == 1:
+                self.partial_mechanical_actions += 1
+                raise ExceptionGroup(
+                    "grouped transport",
+                    [butler.httpx2.RemoteProtocolError("server disconnected")],
+                )
+            return {"active_boards": ["pursers"]}
+
+        async def pending_questions(self) -> list[Mapping[str, Any]]:
+            self.pending_reads += 1
+            return []
+
+        async def wait_for_question(
+            self, cursor: int, _timeout: float
+        ) -> tuple[int, None]:
+            self.waits += 1
+            if self.waits == 1:
+                assert self.refreshes == 1
+                assert self.partial_mechanical_actions == 1
+                return cursor, None
+            raise StopResident
+
+    backend = Backend()
+    with pytest.raises(StopResident):
+        asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
+
+    assert backend.refreshes == 2
+    assert backend.waits == 2
+    assert backend.partial_mechanical_actions == 1
+    assert backend.pending_reads == 1
+    assert "registry_refresh_transient_transport_failure" in marked
+    assert "registry_refresh" in marked
+    warning = capsys.readouterr().err
+    assert '"action":"skipped_to_next_refresh_cycle"' in warning
+    assert '"error_classes":["RemoteProtocolError"]' in warning
+    assert '"phase":"registry_refresh"' in warning
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        PermissionError("authentication failed"),
+        ExceptionGroup(
+            "mixed refresh failure",
+            [
+                butler.httpx2.RemoteProtocolError("server disconnected"),
+                ValueError("invalid refresh data"),
+            ],
+        ),
+    ],
+    ids=["authentication", "mixed-group"],
+)
+def test_refresh_auth_and_mixed_groups_fail_closed(
+    tmp_path: Path, failure: Exception
+) -> None:
+    options = args(tmp_path)
+    options.once = False
+    options.refresh_seconds = 60
+
+    class Backend:
+        latest_seq = 10
+        subscription_healthy = True
+
+        async def __aenter__(self) -> "Backend":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def refresh_registry_findings(self, _now: Any) -> Mapping[str, Any]:
+            raise failure
+
+        async def wait_for_question(
+            self, _cursor: int, _timeout: float
+        ) -> tuple[int, None]:
+            raise AssertionError("fail-closed refresh must not reach subscription wait")
+
+    with pytest.raises(Exception) as raised:
+        asyncio.run(butler.run(options, backend_factory=lambda *_args: Backend()))
+
+    assert raised.value is failure
+
+
 def test_restart_replays_pending_question_after_concurrent_refresh_conflict(
     tmp_path: Path,
 ) -> None:

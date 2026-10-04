@@ -15449,6 +15449,25 @@ def report_refresh_state_write_conflict(
     runtime.mark("registry_refresh_state_write_conflict")
 
 
+def report_refresh_transport_failure(
+    runtime: RuntimeStatus, failure: BaseException
+) -> None:
+    warning = {
+        "event": "transport_failure",
+        "phase": "registry_refresh",
+        "reason_code": "transient_transport_failure",
+        "error_classes": sorted(
+            {type(item).__name__ for item in _transport_exception_leaves(failure)}
+        ),
+        "action": "skipped_to_next_refresh_cycle",
+    }
+    print(
+        "board-butler: " + json.dumps(warning, sort_keys=True, separators=(",", ":")),
+        file=sys.stderr,
+    )
+    runtime.mark("registry_refresh_transient_transport_failure")
+
+
 async def run(
     args: argparse.Namespace,
     *,
@@ -15528,6 +15547,13 @@ async def run(
                             observation = await refresh(utc_now())
                         except StateWriteConflict as exc:
                             report_refresh_state_write_conflict(runtime, exc)
+                        except Exception as exc:
+                            if not _transient_transport_failure(exc):
+                                raise
+                            # A refresh can fail after durable or mechanical work.
+                            # Do not replay it inside this cycle; the next scheduled
+                            # cycle uses the existing idempotency guards.
+                            report_refresh_transport_failure(runtime, exc)
                         else:
                             refreshed_cycle = True
                             runtime.mark("registry_refresh")

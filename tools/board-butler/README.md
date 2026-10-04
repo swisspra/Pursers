@@ -399,6 +399,11 @@ groups, reconnect up to three times from the last observed cursor. Mixed groups,
 authentication, authorization and invalid event data fail closed. Retry and
 exhaustion are recorded in the bounded `board_butler_subscription_health` state;
 the resident then continues its normal refresh cycle without resetting the cursor.
+A pure typed transport failure during registry refresh is recorded in the local
+runtime status and skips directly to the next scheduled cycle instead of replaying
+a refresh that may already have completed durable or mechanical work. Mixed,
+authentication, authorization and invalid-data refresh failures still terminate
+the resident fail-closed.
 `--dry-run` prints the real derived state and any proposed question finding,
 performs no ticket action, and makes no Central write or cursor-file update.
 
