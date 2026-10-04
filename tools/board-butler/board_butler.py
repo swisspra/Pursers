@@ -710,6 +710,10 @@ class FleetDemand:
     provider_kinds: Mapping[str, str] = field(default_factory=dict)
     provider_local_readiness: Mapping[str, bool] = field(default_factory=dict)
     provider_quota_status: Mapping[str, str] = field(default_factory=dict)
+    source_board_ids: tuple[str, ...] = ()
+    excluded_parked: int = 0
+    excluded_blocked: int = 0
+    duplicate_rows: int = 0
 
     def __post_init__(self) -> None:
         if any(
@@ -720,6 +724,9 @@ class FleetDemand:
                 self.acp_backlog,
                 self.oldest_ticket_age_s,
                 self.expiring_offers,
+                self.excluded_parked,
+                self.excluded_blocked,
+                self.duplicate_rows,
                 *self.provider_latency_ms.values(),
             )
         ):
@@ -741,14 +748,19 @@ class FleetDemand:
             for status in self.provider_quota_status.values()
         ):
             raise ValueError("provider quota status is invalid")
+        if len(set(self.source_board_ids)) != len(self.source_board_ids) or any(
+            not isinstance(board_id, str) or not board_id
+            for board_id in self.source_board_ids
+        ):
+            raise ValueError("fleet demand source boards are invalid")
 
     @property
     def work_pressure(self) -> int:
         weights = {1: 1, 2: 2, 3: 4}
         pressure = sum(weights[tier] * count for tier, count in self.open_by_tier.items())
-        # An offer near expiry and an aged queue are starvation signals, not
-        # permission to exceed any human-owned maximum.
-        pressure += self.expiring_offers
+        # An offer belongs to an already-counted open ticket. Keep expiring
+        # offers as an observable starvation signal, but never count the same
+        # runnable unit twice when deriving capacity.
         if pressure and self.oldest_ticket_age_s >= 300:
             pressure += 1
         return pressure
@@ -774,6 +786,7 @@ class FleetSeat:
     transition_at: datetime
     managed: bool = True
     last_failure_at: datetime | None = None
+    reason_code: str | None = None
 
     def __post_init__(self) -> None:
         if self.role not in FLEET_ROLES or self.lifecycle not in FLEET_LIFECYCLES:
@@ -782,6 +795,11 @@ class FleetSeat:
             raise ValueError("fleet seat generation or transition time is invalid")
         if self.last_failure_at is not None and self.last_failure_at.tzinfo is None:
             raise ValueError("fleet seat failure time is invalid")
+        if self.reason_code is not None and (
+            not isinstance(self.reason_code, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", self.reason_code)
+        ):
+            raise ValueError("fleet seat reason code is invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", self.template_digest_sha256):
             raise ValueError("fleet seat template digest is invalid")
 
@@ -1760,9 +1778,17 @@ def registry_fleet_snapshots(board_snapshots, configured_boards, home_board):
         if (not isinstance(rows, list) or not isinstance(snapshot.get("agents"), list)
                 or (snapshot.get("truncated") and snapshot.get("coordination_tickets_complete") is not True)):
             raise ValueError(f"{board}: registry fleet demand is incomplete")
-        tickets.extend(rows)
-    selected[home_board] = {**selected[home_board], "coordination_tickets": tickets,
-                            "coordination_tickets_complete": True}
+        tickets.extend(
+            {**row, "_fleet_source_board": board}
+            if isinstance(row, Mapping) else row
+            for row in rows
+        )
+    selected[home_board] = {
+        **selected[home_board],
+        "coordination_tickets": tickets,
+        "coordination_tickets_complete": True,
+        "_fleet_source_board_ids": pooled,
+    }
     return selected
 
 
@@ -1801,8 +1827,43 @@ def fleet_snapshot_from_products(
         acp_backlog = 0
         ages: list[int] = []
         expiring = 0
+        raw_source_boards = board.get("_fleet_source_board_ids", [board_id])
+        if (
+            not isinstance(raw_source_boards, list)
+            or not raw_source_boards
+            or any(not isinstance(item, str) or not item for item in raw_source_boards)
+            or len(set(raw_source_boards)) != len(raw_source_boards)
+        ):
+            raise ValueError(f"{board_id}: fleet demand source boards are invalid")
+        source_boards: set[str] = set(raw_source_boards)
+        seen_tickets: set[tuple[str, str]] = set()
+        excluded_parked = 0
+        excluded_blocked = 0
+        duplicate_rows = 0
         for ticket in rows:
             if not isinstance(ticket, Mapping):
+                continue
+            source_board = ticket.get("_fleet_source_board", board_id)
+            if not isinstance(source_board, str) or not source_board:
+                raise ValueError(f"{board_id}: fleet demand source board is invalid")
+            if source_board not in source_boards:
+                raise ValueError(f"{board_id}: fleet demand source board is unauthorized")
+            ticket_id = ticket.get("ticket_id")
+            if isinstance(ticket_id, str) and ticket_id:
+                identity = (source_board, ticket_id)
+                if identity in seen_tickets:
+                    duplicate_rows += 1
+                    continue
+                seen_tickets.add(identity)
+            if ticket.get("parked") is True:
+                excluded_parked += 1
+                continue
+            human_request = ticket.get("human_request")
+            if ticket.get("status") == "needs_human" or (
+                isinstance(human_request, Mapping)
+                and human_request.get("resolution") is None
+            ):
+                excluded_blocked += 1
                 continue
             status = ticket.get("status")
             if status == "submitted":
@@ -1882,6 +1943,10 @@ def fleet_snapshot_from_products(
             provider_kinds=kinds,
             provider_local_readiness=local_readiness,
             provider_quota_status=quota_status,
+            source_board_ids=tuple(sorted(source_boards)),
+            excluded_parked=excluded_parked,
+            excluded_blocked=excluded_blocked,
+            duplicate_rows=duplicate_rows,
         )
     seats: list[FleetSeat] = []
     required = {
@@ -1942,6 +2007,7 @@ def fleet_snapshot_from_products(
                 transition_at=transition_at,
                 managed=row["managed"],
                 last_failure_at=last_failure_at,
+                reason_code=row.get("reason_code"),
             )
         )
     load_ratio = host_observation.get("load_ratio")
@@ -2217,6 +2283,7 @@ class FleetReconciler:
             last_down = _fleet_state_time(board_prior, "last_scale_down_at")
             seats = [seat for seat in snapshot.seats if seat.board_id == board_id]
             counts: dict[str, int] = {}
+            explanation_by_role: dict[str, dict[str, Any]] = {}
             for role in FLEET_ROLES:
                 role_policy = policy.roles[role]
                 idle_since = _fleet_role_idle_time(board_prior, role)
@@ -2236,6 +2303,22 @@ class FleetReconciler:
                         seat.lifecycle in {"stopped", "draining"}
                         and _healthy_provider(demand, policy, seat.provider)))
                 )
+                approved = sum(
+                    1
+                    for seat in seats
+                    if seat.managed
+                    and seat.role == role
+                    and seat.template_id in policy.approved_template_ids
+                )
+                authorization_blocked = any(
+                    seat.role == role
+                    and seat.template_id in policy.approved_template_ids
+                    and seat.reason_code in {
+                        "registry_authorization_unverified",
+                        "duplicate_template_principal",
+                    }
+                    for seat in seats
+                )
                 if pressure:
                     requested = max(
                         role_policy.minimum,
@@ -2245,6 +2328,16 @@ class FleetReconciler:
                 else:
                     requested = role_policy.minimum
                 requested = max(requested, live)
+                demand_requested = requested
+                limiting_reasons: list[str] = []
+                if demand_requested > role_policy.maximum:
+                    limiting_reasons.append("role_cap")
+                if demand_requested > approved and not authorization_blocked:
+                    limiting_reasons.append("template_pool")
+                elif demand_requested > available and authorization_blocked:
+                    limiting_reasons.append("authorization")
+                elif demand_requested > available:
+                    limiting_reasons.append("provider")
                 requested = min(requested, role_policy.maximum, available)
                 previous = int(role_prior.get(role, 0) or 0)
                 if pressure == 0:
@@ -2270,6 +2363,7 @@ class FleetReconciler:
                     starvation = pressure > previous * role_policy.backlog_per_seat
                     if cooldown and not starvation:
                         requested = previous
+                        limiting_reasons.append("cooldown")
                 if requested < previous and last_down is not None:
                     if (now - last_down).total_seconds() < policy.scale_down_cooldown_s:
                         requested = previous
@@ -2277,23 +2371,27 @@ class FleetReconciler:
                 # desired state remains within the immutable role maximum while
                 # operation selection separately refuses to stop a live holder.
                 counts[role] = min(role_policy.maximum, max(live, requested))
-                explanations.append(
-                    {
-                        "board_id": board_id,
-                        "role": role,
-                        "pressure": pressure,
-                        "live_leases": live,
-                        "healthy_approved_seats": available,
-                        "requested": counts[role],
-                        "reason": (
-                            "demand"
-                            if pressure
-                            else "idle_grace"
-                            if counts[role] > role_policy.minimum
-                            else "minimum"
-                        ),
-                    }
-                )
+                explanation = {
+                    "board_id": board_id,
+                    "role": role,
+                    "pressure": pressure,
+                    "live_leases": live,
+                    "approved_templates": approved,
+                    "healthy_approved_seats": available,
+                    "demand_requested": demand_requested,
+                    "role_maximum": role_policy.maximum,
+                    "requested": counts[role],
+                    "limiting_reasons": limiting_reasons,
+                    "reason": (
+                        "demand"
+                        if pressure
+                        else "idle_grace"
+                        if counts[role] > role_policy.minimum
+                        else "minimum"
+                    ),
+                }
+                explanations.append(explanation)
+                explanation_by_role[role] = explanation
             # Board maxima are applied without sacrificing a live lease. Any
             # impossible live-lease oversubscription is reported and no stop is planned.
             provider_budget = sum(
@@ -2313,7 +2411,21 @@ class FleetReconciler:
                 for provider, maximum in policy.provider_maximums.items()
             )
             budget = min(policy.board_maximum, provider_budget)
+            before_board_trim = dict(counts)
             self._trim_counts(counts, budget, demand)
+            for role in FLEET_ROLES:
+                if counts[role] < before_board_trim[role]:
+                    reason = (
+                        "board_cap"
+                        if policy.board_maximum <= provider_budget
+                        else "provider"
+                    )
+                    reasons = explanation_by_role[role]["limiting_reasons"]
+                    if reason not in reasons:
+                        reasons.append(reason)
+                explanation_by_role[role]["requested"] = counts[role]
+                explanation_by_role[role]["board_maximum"] = policy.board_maximum
+                explanation_by_role[role]["provider_capacity"] = provider_budget
             result[board_id] = counts
         return result, explanations
 
@@ -2622,7 +2734,21 @@ class FleetReconciler:
         if set(snapshot.demands) != set(self.board_policies):
             raise ValueError("snapshot does not cover the configured registry")
         desired, explanations = self._requested_counts(snapshot, prior)
+        before_host_cap = copy.deepcopy(desired)
         self._apply_host_cap(desired, snapshot)
+        host_reason = (
+            "headroom"
+            if not snapshot.host_capacity_available or snapshot.host_load_ratio >= 0.95
+            else "host_cap"
+        )
+        for explanation in explanations:
+            board_id = str(explanation["board_id"])
+            role = str(explanation["role"])
+            if desired[board_id][role] < before_host_cap[board_id][role]:
+                reasons = explanation["limiting_reasons"]
+                if host_reason not in reasons:
+                    reasons.append(host_reason)
+                explanation["requested"] = desired[board_id][role]
         provider_desired = self._provider_desired(desired, snapshot, prior)
         operations = self._operations(
             desired, provider_desired, snapshot, prior
@@ -2861,6 +2987,54 @@ class FleetReconciler:
             }
             for provider in sorted(demand.provider_health)
         ]
+
+        def public_limit_reason(raw: Sequence[str]) -> str:
+            reasons = set(raw)
+            if "headroom" in reasons:
+                return "headroom"
+            if reasons & {"role_cap", "board_cap", "host_cap"}:
+                return "role_cap"
+            for reason in ("template_pool", "provider", "cooldown", "authorization"):
+                if reason in reasons:
+                    return reason
+            return "none"
+
+        role_explanations = {
+            str(item["role"]): item
+            for item in plan.explanations
+            if item.get("board_id") == board_id and item.get("role") in FLEET_ROLES
+        }
+        role_limit_reasons = {
+            role: public_limit_reason(
+                role_explanations.get(role, {}).get("limiting_reasons", [])
+            )
+            for role in FLEET_ROLES
+        }
+        limiting_reason = next(
+            (
+                reason
+                for reason in (
+                    "headroom",
+                    "role_cap",
+                    "template_pool",
+                    "provider",
+                    "cooldown",
+                    "authorization",
+                )
+                if reason in role_limit_reasons.values()
+            ),
+            "none",
+        )
+        template_pool = {
+            role: sum(
+                1
+                for seat in seats
+                if seat.role == role
+                and seat.template_id in self.board_policies[board_id].approved_template_ids
+            )
+            for role in FLEET_ROLES
+        }
+        policy = self.board_policies[board_id]
         return {
             "schema": "autonomous_butler_state_v1",
             "schema_version": 1,
@@ -2883,6 +3057,35 @@ class FleetReconciler:
                 "observed_at": now.isoformat(),
             },
             "connectors": connectors,
+            "coverage": {
+                "scope": "registry_shared",
+                "authorized": "authorization" not in role_limit_reasons.values(),
+                "source_board_ids": list(demand.source_board_ids or (board_id,)),
+                "demand": {
+                    "open_by_tier": {
+                        str(tier): int(demand.open_by_tier.get(tier, 0))
+                        for tier in (1, 2, 3)
+                    },
+                    "review_backlog": demand.review_backlog,
+                    "acp_backlog": demand.acp_backlog,
+                    "expiring_offers": demand.expiring_offers,
+                    "excluded_parked": demand.excluded_parked,
+                    "excluded_blocked": demand.excluded_blocked,
+                    "duplicate_rows": demand.duplicate_rows,
+                },
+                "effective_limits": {
+                    "role_maximums": {
+                        role: policy.roles[role].maximum for role in FLEET_ROLES
+                    },
+                    "board_maximum": policy.board_maximum,
+                    "template_pool": template_pool,
+                    "provider_maximums": dict(policy.provider_maximums),
+                    "host_role_capacity": self.host_policy.role_capacity,
+                    "host_active": sum(1 for seat in snapshot.seats if seat.active),
+                },
+                "role_limiting_reasons": role_limit_reasons,
+                "limiting_reason": limiting_reason,
+            },
             "kill_latched": False,
         }
 

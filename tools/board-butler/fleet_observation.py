@@ -69,6 +69,13 @@ class LocalFleetObserver:
                      'boards': {b: {'seats': {}} for b in active_boards}}
         leases = {'boards': {b: {'seats': {}} for b in active_boards}}
         seats, health, limits = [], {b: {} for b in active_boards}, {b: {} for b in active_boards}
+        principal_counts = {
+            template.principal_id: sum(
+                1 for candidate in self.templates.values()
+                if candidate.principal_id == template.principal_id
+            )
+            for template in self.templates.values()
+        }
         for template_id, template in self.templates.items():
             binding = self.bindings.get(template_id, {})
             binding_mapping = isinstance(binding, Mapping)
@@ -86,7 +93,8 @@ class LocalFleetObserver:
             )
             previous = self.stored.get(seat_id, {})
             service = self.services.inspect(seat_id, template)
-            known, busy = bool(active_boards), False
+            principal_unique = principal_counts.get(template.principal_id) == 1
+            known, busy = bool(active_boards) and principal_unique, False
             for board in active_boards:
                 snapshot, membership = snapshots.get(board, {}), memberships.get(board, {})
                 agents, tickets = snapshot.get('agents'), snapshot.get('coordination_tickets', snapshot.get('tickets'))
@@ -116,7 +124,7 @@ class LocalFleetObserver:
                          and agent.get('role') == template.role
                          and member.get('role') == ('reviewer' if template.role == 'reviewer' else 'member')
                          and all(type(caps.get(k)) is type(v) and caps[k] == v for k,v in template.capabilities.items()))
-                if not valid:
+                if not valid or not principal_unique:
                     known = False
                     continue
                 readiness['boards'][board]['seats'][seat_id] = {
@@ -165,15 +173,19 @@ class LocalFleetObserver:
                 reason_code = 'unexpected_process_loss_live_lease'
             if ((prior_active and not service.identity_verified) or not known
                     or not binding or not binding_valid or board_id not in active_boards): lifecycle = 'unhealthy'
+            if not known and reason_code is None:
+                reason_code = 'registry_authorization_unverified'
             if prior_active and not service.identity_verified:
                 reason_code = 'service_identity_unverified'
+            if not principal_unique:
+                reason_code = 'duplicate_template_principal'
             if board_id not in active_boards:
                 raise ValueError('template binding targets an inactive board')
             row = {'seat_id': seat_id, 'board_id': board_id, 'role': template.role, 'provider': provider,
                 'template_id': template_id, 'template_digest_sha256': template.digest_sha256,
                 'generation': previous.get('generation', 1), 'lifecycle': lifecycle,
                 'transition_at': datetime.fromtimestamp(previous.get('last_mutation', now.timestamp()), timezone.utc).isoformat(),
-                'managed': enabled if binding_valid else False}
+                'managed': enabled if binding_valid and principal_unique else False}
             if isinstance(previous.get('last_failure'), (int, float)):
                 row['last_failure_at'] = datetime.fromtimestamp(
                     previous['last_failure'], timezone.utc).isoformat()
@@ -181,7 +193,7 @@ class LocalFleetObserver:
                 row['reason_code'] = reason_code
             seats.append(row)
             health[board_id][provider] = providers.get(provider, {'status': 'unknown', 'latency_ms': 0})
-            if enabled and binding_valid:
+            if enabled and binding_valid and principal_unique:
                 limits[board_id][provider] = limits[board_id].get(provider, 0) + 1
         observation = {'schema': 'pursers_fleet_observation_v1', 'schema_version': 1,
             'observed_at': now.isoformat(), 'stale_after': expiry, 'executor_seats': seats,
