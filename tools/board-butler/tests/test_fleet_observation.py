@@ -134,10 +134,20 @@ def test_verified_process_loss_advances_incarnation_once(tmp_path, prior_lifecyc
     row = observation['executor_seats'][0]
     assert (row['generation'], row['lifecycle'], row['reason_code']) == (
         8, 'stopped', 'unexpected_process_loss_reconciled')
+    assert row['last_failure_at'] == NOW.isoformat()
     assert store.seat('seat')['process_ref'] is None
     assert store.reconcile_unexpected_stop('seat', expected_generation=7,
         expected_process_ref='pid:old', now=NOW.timestamp()+1) is None
     assert store.seat('seat')['generation'] == 8
+    repeated = observer_api()['LocalFleetObserver'](
+        {'t':template}, services, store.observation_snapshot(),
+        {'t':{'board_id':'a','provider':'worker'}},
+        recover=store.reconcile_unexpected_stop,
+    )
+    second, _, _ = repeated.collect(['a','b'], boards, members,
+        NOW + timedelta(seconds=1), {'worker':{'status':'healthy','latency_ms':1}}, {})
+    assert second['executor_seats'][0]['generation'] == 8
+    assert second['executor_seats'][0]['last_failure_at'] == NOW.isoformat()
     store.connection.close()
 
 

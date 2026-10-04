@@ -446,8 +446,22 @@ loss into executor state before planning. It atomically advances the stored
 generation, clears the old process reference and marks the seat stopped only when
 the exact previous generation/process pair still matches. This gives the next start
 a new operation ID while making repeated snapshots and controller restarts no-ops.
+The observation carries the executor's failure timestamp, so the reconciler waits
+for `failure_backoff_s` before sending that start. Repeated observations preserve
+the original timestamp rather than extending the backoff.
 An active lease or unverified service identity remains unhealthy and visible rather
 than being restarted.
+
+Executor idempotency is keyed by the operation ID and a semantic request digest.
+The digest excludes renewable `caller_auth` and `deadline` fields, while the
+Ed25519 signature separately binds the semantic digest, key, nonce, signing time
+and deadline. A lost response can therefore be retried after its original deadline
+without changing the logical payload. Completed or uncertain operations still
+replay or fail closed without another mutation, and a changed action, generation,
+template, roster or authorization fingerprint remains
+`operation_id_payload_changed`. Only terminal pre-execution cooldown rejections
+(`failure_backoff_active` and `mutation_cooldown_active`) may reopen; the
+reconciler's existing attempt limit and backoff remain authoritative.
 
 If an operator starts a managed service outside the executor, the new process
 reference is intentionally not accepted by observation alone. Send an explicitly

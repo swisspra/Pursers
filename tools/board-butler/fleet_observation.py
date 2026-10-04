@@ -174,6 +174,9 @@ class LocalFleetObserver:
                 'generation': previous.get('generation', 1), 'lifecycle': lifecycle,
                 'transition_at': datetime.fromtimestamp(previous.get('last_mutation', now.timestamp()), timezone.utc).isoformat(),
                 'managed': enabled if binding_valid else False}
+            if isinstance(previous.get('last_failure'), (int, float)):
+                row['last_failure_at'] = datetime.fromtimestamp(
+                    previous['last_failure'], timezone.utc).isoformat()
             if reason_code is not None:
                 row['reason_code'] = reason_code
             seats.append(row)

@@ -18,7 +18,10 @@
         "key_id": {"$ref": "#/$defs/id"},
         "nonce": {"$ref": "#/$defs/id"},
         "signed_at": {"type": "string", "format": "date-time"},
-        "request_digest_sha256": {"$ref": "#/$defs/sha256"},
+        "request_digest_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Digest of the stable semantic request fields; caller_auth and deadline are excluded. The signature separately binds the digest, key, nonce, signed_at and deadline."
+        },
         "signature_base64": {"type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$"}
       }
     },
@@ -45,7 +48,11 @@
         "supervisor_roster_digest_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
         "target_template_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
         "target_template_digest_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
-        "deadline": {"type": "string", "format": "date-time"},
+        "deadline": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Renewable transport deadline bound by caller_auth.signature_base64 but excluded from the semantic request digest."
+        },
         "caller_auth": {"$ref": "#/$defs/callerAuth"}
       }
     },
@@ -59,7 +66,10 @@
         "message_type": {"const": "result"},
         "operation_id": {"$ref": "#/$defs/id"},
         "board_id": {"$ref": "#/$defs/id"},
-        "request_digest_sha256": {"$ref": "#/$defs/sha256"},
+        "request_digest_sha256": {
+          "$ref": "#/$defs/sha256",
+          "description": "Stable semantic request digest used for operation replay across renewed authentication deadlines."
+        },
         "replayed": {"type": "boolean"},
         "outcome": {"enum": ["succeeded", "rejected", "failed", "cancelled", "unknown"]},
         "committed": {"type": "boolean"},

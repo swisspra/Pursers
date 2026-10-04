@@ -734,12 +734,15 @@ class FleetSeat:
     live_lease: bool
     transition_at: datetime
     managed: bool = True
+    last_failure_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.role not in FLEET_ROLES or self.lifecycle not in FLEET_LIFECYCLES:
             raise ValueError("fleet seat role or lifecycle is invalid")
         if self.generation < 1 or self.transition_at.tzinfo is None:
             raise ValueError("fleet seat generation or transition time is invalid")
+        if self.last_failure_at is not None and self.last_failure_at.tzinfo is None:
+            raise ValueError("fleet seat failure time is invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", self.template_digest_sha256):
             raise ValueError("fleet seat template digest is invalid")
 
@@ -856,7 +859,11 @@ class UnixFleetExecutorClient:
 
     @staticmethod
     def _request_digest(request: Mapping[str, Any]) -> str:
-        unsigned = {key: value for key, value in request.items() if key != "caller_auth"}
+        unsigned = {
+            key: value
+            for key, value in request.items()
+            if key not in {"caller_auth", "deadline"}
+        }
         return hashlib.sha256(
             json.dumps(
                 unsigned,
@@ -921,6 +928,7 @@ class UnixFleetExecutorClient:
                 self.key_id.encode("utf-8"),
                 nonce.encode("utf-8"),
                 signed_at.encode("utf-8"),
+                request["deadline"].encode("utf-8"),
             )
         )
         request["caller_auth"] = {
@@ -1856,7 +1864,14 @@ def fleet_snapshot_from_products(
         if not isinstance(row["managed"], bool):
             raise ValueError("executor managed flag is invalid")
         transition_at = parse_time(row["transition_at"])
-        if transition_at is None:
+        last_failure_at = (
+            parse_time(row.get("last_failure_at"))
+            if row.get("last_failure_at") is not None
+            else None
+        )
+        if transition_at is None or (
+            row.get("last_failure_at") is not None and last_failure_at is None
+        ):
             raise ValueError("executor transition time is invalid")
         agent = agent_indexes.get(board_id, {}).get(str(row["seat_id"]))
         lease_expiry = (
@@ -1887,6 +1902,7 @@ def fleet_snapshot_from_products(
                 live_lease=live,
                 transition_at=transition_at,
                 managed=row["managed"],
+                last_failure_at=last_failure_at,
             )
         )
     load_ratio = host_observation.get("load_ratio")
@@ -2336,6 +2352,15 @@ class FleetReconciler:
                 last_success = max(last_success, at.timestamp())
         return (-last_success, demand.provider_latency_ms.get(seat.provider, 10**9), seat.seat_id)
 
+    @staticmethod
+    def _failure_backoff_elapsed(
+        seat: FleetSeat, policy: FleetBoardPolicy, now: datetime
+    ) -> bool:
+        return (
+            seat.last_failure_at is None
+            or (now - seat.last_failure_at).total_seconds() >= policy.failure_backoff_s
+        )
+
     def _provider_desired(
         self,
         requested: Mapping[str, Mapping[str, int]],
@@ -2366,7 +2391,10 @@ class FleetReconciler:
             for role in FLEET_ROLES:
                 candidates = sorted(
                     (seat for seat in inventory if seat.role == role and seat.lifecycle == "stopped"
-                     and _healthy_provider(demand, policy, seat.provider)),
+                     and _healthy_provider(demand, policy, seat.provider)
+                     and self._failure_backoff_elapsed(
+                         seat, policy, snapshot.observed_at
+                     )),
                     key=lambda seat: self._start_priority(seat, demand, prior),
                 )
                 for seat in candidates:
@@ -2464,6 +2492,7 @@ class FleetReconciler:
                         for seat in role_seats
                         if seat.lifecycle == "stopped"
                         and _healthy_provider(demand, policy, seat.provider)
+                        and self._failure_backoff_elapsed(seat, policy, now)
                     ),
                     key=lambda seat: self._start_priority(seat, demand, prior),
                 )

@@ -13,7 +13,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import jsonschema
 import pytest
@@ -107,7 +107,9 @@ def seat(
     lifecycle: str = "stopped",
     busy: bool = False,
     live: bool = False,
+    generation: int = 1,
     transition_at: datetime | None = None,
+    last_failure_at: datetime | None = None,
     template_id: str | None = None,
     template_digest: str = DIGEST,
     managed: bool = True,
@@ -119,13 +121,14 @@ def seat(
         provider=provider,
         template_id=template_id or f"template:{role}:{provider}",
         template_digest_sha256=template_digest,
-        generation=1,
+        generation=generation,
         lifecycle=lifecycle,
         ready=lifecycle in {"ready", "busy"},
         busy=busy,
         live_lease=live,
         transition_at=transition_at or NOW - timedelta(minutes=10),
         managed=managed,
+        last_failure_at=last_failure_at,
     )
 
 
@@ -853,6 +856,52 @@ def test_crash_recovery_reuses_operation_key_and_executor_replay_boundary() -> N
     assert durable["operations"][second.calls[0].operation_id]["attempts"] == 2
 
 
+def test_recovered_process_loss_honors_failure_backoff_across_restart() -> None:
+    failed = seat(
+        "worker-a",
+        "worker",
+        generation=2,
+        last_failure_at=NOW,
+        transition_at=NOW,
+    )
+    before = snapshot({"pursers": demand(work=1)}, [failed], now=NOW)
+    engine = reconciler()
+
+    assert engine.plan(before, {}).operations == ()
+    still_backing_off = snapshot(
+        before.demands, [failed], now=NOW + timedelta(seconds=4)
+    )
+    assert reconciler().plan(still_backing_off, {}).operations == ()
+
+    cooled = snapshot(before.demands, [failed], now=NOW + timedelta(seconds=5))
+    plan = reconciler().plan(cooled, {})
+    assert [(item.action, item.expected_seat_generation) for item in plan.operations] == [
+        ("start", 2)
+    ]
+
+
+def test_transient_executor_rejection_does_not_exceed_attempt_limit() -> None:
+    engine = reconciler()
+    stopped = seat("worker-a", "worker")
+    operation = engine.plan(
+        snapshot({"pursers": demand(work=1)}, [stopped]), {}
+    ).operations[0]
+    prior = {
+        "operations": {
+            operation.operation_id: {
+                "attempts": 3,
+                "outcome": "rejected",
+                "reason_code": "failure_backoff_active",
+                "last_attempt_at": (NOW - timedelta(minutes=1)).isoformat(),
+            }
+        }
+    }
+
+    assert engine.plan(
+        snapshot({"pursers": demand(work=1)}, [stopped]), prior
+    ).operations == ()
+
+
 def test_new_crash_incarnation_does_not_replay_completed_start() -> None:
     engine = reconciler()
     old = seat("worker-a", "worker")
@@ -1240,6 +1289,7 @@ def test_desired_state_document_matches_landed_strict_schema() -> None:
 class FakeServiceAdapter:
     def __init__(self) -> None:
         self.observation = fleet_executor.ServiceObservation(False, False, False, True)
+        self.start_calls = 0
 
     def inspect(self, seat_id: str, template: Any) -> Any:
         return self.observation
@@ -1248,6 +1298,7 @@ class FakeServiceAdapter:
         self.observation = fleet_executor.ServiceObservation(True, False, False, True)
 
     def start(self, seat_id: str, template: Any) -> None:
+        self.start_calls += 1
         self.observation = fleet_executor.ServiceObservation(
             True, True, True, True, f"fake:{seat_id}:1"
         )
@@ -1384,6 +1435,271 @@ def test_real_executor_integration_starts_approved_seat(tmp_path: Path) -> None:
     assert report["receipts"][0]["outcome"] == "succeeded"
     assert report["receipts"][0]["committed"] is True
     assert adapter.observation.ready is True
+
+
+def _transport_fixture(
+    tmp_path: Path, now: list[datetime], *, failure_backoff_s: int = 5
+) -> SimpleNamespace:
+    repository = tmp_path / "repos" / "project"
+    seat_root = tmp_path / "seats" / "worker-a"
+    credential = tmp_path / "worker.env"
+    repository.mkdir(parents=True)
+    seat_root.mkdir(parents=True)
+    credential.write_text("", encoding="utf-8")
+    template = fleet_executor.SeatTemplate.from_record(
+        "template:worker:direct",
+        {
+            "role": "worker",
+            "principal_id": "PR-worker-a",
+            "credential_ref": "credential.worker-a",
+            "repository_root": str(repository),
+            "seat_root": str(seat_root),
+            "command": [sys.executable, "-c", "raise SystemExit(0)"],
+            "boards": "registry",
+            "capabilities": {
+                "can_work": True,
+                "can_review": False,
+                "tier_max": 2,
+                "max_parallel": 1,
+            },
+        },
+    )
+    private = Ed25519PrivateKey.generate()
+    private_path = (tmp_path / "butler.key").resolve()
+    private_path.write_bytes(
+        private.private_bytes(
+            serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw,
+            serialization.NoEncryption(),
+        )
+    )
+    private_path.chmod(0o600)
+    policy = fleet_executor.ExecutorPolicy(
+        authorization_fingerprint_sha256=FINGERPRINT,
+        templates={template.template_id: template},
+        caller_keys={"butler-local": private.public_key()},
+        credential_paths={"credential.worker-a": credential},
+        repository_roots=(repository.parent.resolve(),),
+        seat_roots=(seat_root.parent.resolve(),),
+        board_caps={"pursers": 2},
+        host_cap=2,
+        signature_skew_s=90,
+        mutation_cooldown_s=0,
+        failure_backoff_s=failure_backoff_s,
+    )
+    adapter = FakeServiceAdapter()
+    store_path = tmp_path / "executor" / "executor.sqlite3"
+    store = fleet_executor.ExecutorStore(store_path)
+    service = fleet_executor.FleetExecutor(
+        policy,
+        store,
+        adapter,
+        KnownLease(),
+        ReadyRegistry(),
+        ReceiptSink(),
+        clock=lambda: now[0].timestamp(),
+    )
+    return SimpleNamespace(
+        template=template,
+        private_path=private_path,
+        adapter=adapter,
+        policy=policy,
+        store_path=store_path,
+        store=store,
+        service=service,
+    )
+
+
+def _serve_executor(
+    socket_path: Path,
+    service_factory: Callable[[], Any],
+    ready: threading.Event,
+    *,
+    connections: int,
+    drop_first_response: bool = False,
+) -> None:
+    service = service_factory()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(os.fspath(socket_path))
+        socket_path.chmod(0o600)
+        listener.listen(connections)
+        ready.set()
+        for index in range(connections):
+            connection, _ = listener.accept()
+            with connection:
+                payload = bytearray()
+                while not payload.endswith(b"\n"):
+                    payload.extend(connection.recv(4096))
+                result = service.handle(json.loads(payload))
+                if not (drop_first_response and index == 0):
+                    connection.sendall(fleet_executor.canonical_json(result) + b"\n")
+
+
+def _short_socket_path(tmp_path: Path) -> Path:
+    suffix = abs(hash(os.fspath(tmp_path))) & 0xFFFFFFFF
+    path = Path("/tmp") / f"pursers-fx-{os.getpid()}-{suffix:x}.sock"
+    path.unlink(missing_ok=True)
+    return path
+
+
+def test_real_transport_recovers_loss_once_after_backoff_and_restart(
+    tmp_path: Path,
+) -> None:
+    now = [NOW]
+    runtime = _transport_fixture(tmp_path, now)
+    runtime.store.save_seat(
+        seat_id="worker-a",
+        board_id="pursers",
+        template=runtime.template,
+        identity_id=None,
+        state_id=None,
+        state_dir_id=None,
+        generation=1,
+        lifecycle="ready",
+        process_ref="fake:worker-a:old",
+        now=(NOW - timedelta(minutes=1)).timestamp(),
+    )
+    recovered = runtime.store.reconcile_unexpected_stop(
+        "worker-a",
+        expected_generation=1,
+        expected_process_ref="fake:worker-a:old",
+        now=NOW.timestamp(),
+    )
+    assert recovered is not None
+    runtime.store.connection.close()
+    stopped = seat(
+        "worker-a",
+        "worker",
+        generation=2,
+        transition_at=NOW,
+        last_failure_at=NOW,
+        template_id=runtime.template.template_id,
+        template_digest=runtime.template.digest_sha256,
+    )
+    demand_snapshot = {"pursers": demand(work=1)}
+    assert reconciler().plan(snapshot(demand_snapshot, [stopped]), {}).operations == ()
+
+    now[0] = NOW + timedelta(seconds=5)
+    socket_path = _short_socket_path(tmp_path)
+    ready = threading.Event()
+    server = threading.Thread(
+        target=_serve_executor,
+        args=(
+            socket_path,
+            lambda: fleet_executor.FleetExecutor(
+                runtime.policy,
+                fleet_executor.ExecutorStore(runtime.store_path),
+                runtime.adapter,
+                KnownLease(),
+                ReadyRegistry(),
+                ReceiptSink(),
+                clock=lambda: now[0].timestamp(),
+            ),
+            ready,
+        ),
+        kwargs={"connections": 1},
+        daemon=True,
+    )
+    server.start()
+    assert ready.wait(timeout=5)
+    state = butler.FileFleetStateStore((tmp_path / "fleet-state.json").resolve())
+    cooled = snapshot(demand_snapshot, [stopped], now=now[0])
+    report = reconciler().reconcile(
+        cooled,
+        state,
+        butler.UnixFleetExecutorClient(
+            socket_path,
+            "butler-local",
+            runtime.private_path,
+            clock=lambda: now[0],
+        ),
+    )
+    server.join(timeout=5)
+    socket_path.unlink(missing_ok=True)
+
+    assert report["receipts"][0]["outcome"] == "succeeded"
+    assert runtime.adapter.start_calls == 1
+    now[0] += timedelta(seconds=1)
+    restarted = reconciler()
+    repeated = restarted.reconcile(
+        snapshot(demand_snapshot, [stopped], now=now[0]),
+        state,
+        butler.UnixFleetExecutorClient(
+            socket_path,
+            "butler-local",
+            runtime.private_path,
+            clock=lambda: now[0],
+        ),
+    )
+    assert repeated["operations"] == []
+    assert runtime.adapter.start_calls == 1
+
+
+def test_real_transport_lost_response_replays_after_deadline_renewal(
+    tmp_path: Path,
+) -> None:
+    now = [NOW]
+    runtime = _transport_fixture(tmp_path, now, failure_backoff_s=0)
+    runtime.store.connection.close()
+    operation = reconciler().plan(
+        snapshot(
+            {"pursers": demand(work=1)},
+            [
+                seat(
+                    "worker-a",
+                    "worker",
+                    template_id=runtime.template.template_id,
+                    template_digest=runtime.template.digest_sha256,
+                )
+            ],
+        ),
+        {},
+    ).operations[0]
+    socket_path = _short_socket_path(tmp_path)
+    ready = threading.Event()
+    server = threading.Thread(
+        target=_serve_executor,
+        args=(
+            socket_path,
+            lambda: fleet_executor.FleetExecutor(
+                runtime.policy,
+                fleet_executor.ExecutorStore(runtime.store_path),
+                runtime.adapter,
+                KnownLease(),
+                ReadyRegistry(),
+                ReceiptSink(),
+                clock=lambda: now[0].timestamp(),
+            ),
+            ready,
+        ),
+        kwargs={"connections": 2, "drop_first_response": True},
+        daemon=True,
+    )
+    server.start()
+    assert ready.wait(timeout=5)
+    first_client = butler.UnixFleetExecutorClient(
+        socket_path,
+        "butler-local",
+        runtime.private_path,
+        clock=lambda: now[0],
+    )
+    with pytest.raises(RuntimeError, match="response ended early"):
+        first_client.execute(operation)
+
+    now[0] += timedelta(seconds=30)
+    restarted_client = butler.UnixFleetExecutorClient(
+        socket_path,
+        "butler-local",
+        runtime.private_path,
+        clock=lambda: now[0],
+    )
+    replay = restarted_client.execute(operation)
+    server.join(timeout=5)
+    socket_path.unlink(missing_ok=True)
+
+    assert replay["outcome"] == "succeeded"
+    assert replay["replayed"] is True
+    assert runtime.adapter.start_calls == 1
 
 
 def test_production_fleet_cycle_reads_products_executes_and_publishes(

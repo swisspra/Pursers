@@ -71,6 +71,10 @@ SUPERVISOR_ROSTER_ACTION_KINDS = frozenset(
     for kind in kinds
 )
 SIGNING_CONTEXT = b"pursers-executor-v1"
+SEMANTIC_DIGEST_EXCLUDED_FIELDS = frozenset({"caller_auth", "deadline"})
+RETRYABLE_PRE_EXECUTION_REJECTIONS = frozenset(
+    {"failure_backoff_active", "mutation_cooldown_active"}
+)
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REQUEST_FIELDS = frozenset(
@@ -138,8 +142,12 @@ def canonical_json(value: Any) -> bytes:
 
 
 def request_digest(request: Mapping[str, Any]) -> str:
-    unsigned = {key: value for key, value in request.items() if key != "caller_auth"}
-    return hashlib.sha256(canonical_json(unsigned)).hexdigest()
+    semantic = {
+        key: value
+        for key, value in request.items()
+        if key not in SEMANTIC_DIGEST_EXCLUDED_FIELDS
+    }
+    return hashlib.sha256(canonical_json(semantic)).hexdigest()
 
 
 def template_digest(template: Mapping[str, Any]) -> str:
@@ -518,7 +526,11 @@ class JsonlReceiptPublisher:
                     continue
                 if prior.get("request_digest_sha256") != request_digest_sha256:
                     raise RuntimeError("receipt_operation_digest_changed")
-                return
+                stable_fields = (
+                    "outcome", "committed", "reason_code", "process_ref", "checkout_ref"
+                )
+                if all(prior.get(field) == receipt.get(field) for field in stable_fields):
+                    return
         if self.path.exists() and self.path.stat().st_size + len(line) > self.max_bytes:
             raise RuntimeError("receipt_queue_full")
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
@@ -600,6 +612,30 @@ class ExecutorStore:
                 "INSERT INTO operations VALUES (?, ?, 'pending', NULL, ?)",
                 (operation_id, digest, now),
             )
+
+    def retry_rejected(
+        self,
+        key_id: str,
+        nonce: str,
+        digest: str,
+        operation_id: str,
+        now: float,
+    ) -> None:
+        """Atomically reopen only the exact authenticated rejected operation."""
+        with self.connection:
+            prior_nonce = self.connection.execute(
+                "SELECT digest, operation_id FROM nonces WHERE key_id = ? AND nonce = ?",
+                (key_id, nonce),
+            ).fetchone()
+            if prior_nonce != (digest, operation_id):
+                raise PolicyError("operation_auth_changed")
+            changed = self.connection.execute(
+                "UPDATE operations SET state = 'pending', result_json = NULL, updated_at = ? "
+                "WHERE operation_id = ? AND digest = ? AND state = 'terminal'",
+                (now, operation_id, digest),
+            ).rowcount
+            if changed != 1:
+                raise PolicyError("operation_outcome_unknown")
 
     def finish(self, operation_id: str, result: Mapping[str, Any], now: float) -> None:
         with self.connection:
@@ -1412,6 +1448,7 @@ class FleetExecutor:
                 key_id.encode(),
                 nonce.encode(),
                 str(auth["signed_at"]).encode(),
+                str(request["deadline"]).encode(),
             )
         )
         try:
@@ -1511,19 +1548,35 @@ class FleetExecutor:
         digest, key_id = self._authenticate(request)
         operation_id = str(request["operation_id"])
         previous = self.store.operation(operation_id)
+        retry_rejected = False
         if previous:
             prior_digest, state, result_json = previous
             if prior_digest != digest:
                 raise PolicyError("operation_id_payload_changed")
             if state == "terminal" and result_json:
                 result = json.loads(result_json)
-                result["replayed"] = True
-                self.publisher.publish(result)
-                return result
-            raise PolicyError("operation_outcome_unknown")
+                retry_rejected = (
+                    result.get("outcome") == "rejected"
+                    and result.get("committed") is False
+                    and result.get("reason_code")
+                    in RETRYABLE_PRE_EXECUTION_REJECTIONS
+                )
+                if not retry_rejected:
+                    result["replayed"] = True
+                    self.publisher.publish(result)
+                    return result
+            else:
+                raise PolicyError("operation_outcome_unknown")
         self._authorize_supervisor_roster(request)
         auth = request["caller_auth"]
-        self.store.reserve(key_id, auth["nonce"], digest, operation_id, self.clock())
+        if retry_rejected:
+            self.store.retry_rejected(
+                key_id, auth["nonce"], digest, operation_id, self.clock()
+            )
+        else:
+            self.store.reserve(
+                key_id, auth["nonce"], digest, operation_id, self.clock()
+            )
         try:
             result = self._execute(request, digest)
         except PolicyError as exc:
@@ -1565,7 +1618,7 @@ class FleetExecutor:
             )
             if stored_binding != requested_binding and not adopting_legacy:
                 raise PolicyError("seat_identity_or_state_drift")
-        target: ServiceTemplate | None = None
+        target: SeatTemplate | None = None
         if action == "re_role":
             target = self._target_template(request)
             if target.template_id == template.template_id:
