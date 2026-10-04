@@ -18,6 +18,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   automatically. Provider-authenticated ACP activation stays fail-closed until
   a dedicated auth/egress boundary is configured; Zed remains an optional GUI
   client rather than a dependency of headless seats.
+- Apply the supplied Pursers artwork to the repository README and Fleet
+  Dashboard navigation, with normalized tracked assets, byte-fidelity records,
+  responsive intrinsic sizing, and an explicit safe binary PNG route.
 
 ### Fixed
 
@@ -25,6 +28,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the first prompt, failing closed when a model, mode, or reasoning choice is no
   longer advertised.
 
+- Keep event seats and the resident Butler alive through bounded, typed recovery
+  of nested transient transport groups. Recovery preserves positive cursors,
+  pending events, leases and active model processes; mixed/authentication groups
+  fail closed, and exhaustion records a durable actionable reason without a
+  duplicate model launch. A failed Butler registry refresh skips to the next
+  scheduled cycle rather than immediately replaying potentially completed
+  mechanical actions.
 - Recover a verified crashed managed seat as a new executor incarnation without
   replaying an old successful start. Duplicate observations use a generation and
   process-reference CAS; live leases and unverified identities fail closed. A
@@ -37,6 +47,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Keep event-seat drivers alive after bounded model timeout/failure, skip stale or
   foreign journal work before model launch, and retain the existing one-shot owned
   continuation and human-escalation contract.
+- Recover a drained seat's signed stop once after an exhausted pre-execution
+  `live_lease` rejection and a fresh lease-free observation, without replaying
+  committed or uncertain outcomes. Managed event seats now advertise no new work
+  while draining, finish an owned lease, and clear the drain marker only on an
+  explicit signed restart.
 
 ## [5.1.0] - 2026-10-03
 

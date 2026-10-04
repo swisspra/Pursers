@@ -343,6 +343,9 @@ verifies `/bin/ps` identifies a live, non-zombie `board_butler.py` process
 before reporting a running state or sending `SIGTERM`. A stale runtime file is
 therefore shown as **Configured · not running**, never as running.
 
+For a single authorized host pool serving several WORK boards, follow the
+[shared registry fleet migration, acceptance, and rollback runbook](../../docs/operations/shared-registry-fleet.md).
+
 The Settings page distinguishes **Not configured**, **Configured · not
 running**, **Running · shadow**, and **Running · active**, and shows the last
 observed activity. **Stop butler now** creates the private local `KILLED`
@@ -394,9 +397,18 @@ Without `--once`, the process waits in the journal/seat push stream for a
 coordinator-question cue, with a bounded timeout used to run the next registry
 refresh. There is no status polling or cursor-0 catch-up. The positive cursor
 file is reused across restarts; a zero or invalid cursor starts at the current
-journal watermark. `--dry-run` prints the real derived state and any proposed
-question finding, performs no ticket action, and makes no Central write or
-cursor-file update.
+journal watermark. Pure typed transport failures, including nested exception
+groups, reconnect up to three times from the last observed cursor. Mixed groups,
+authentication, authorization and invalid event data fail closed. Retry and
+exhaustion are recorded in the bounded `board_butler_subscription_health` state;
+the resident then continues its normal refresh cycle without resetting the cursor.
+A pure typed transport failure during registry refresh is recorded in the local
+runtime status and skips directly to the next scheduled cycle instead of replaying
+a refresh that may already have completed durable or mechanical work. Mixed,
+authentication, authorization and invalid-data refresh failures still terminate
+the resident fail-closed.
+`--dry-run` prints the real derived state and any proposed question finding,
+performs no ticket action, and makes no Central write or cursor-file update.
 
 ## Declared configuration
 

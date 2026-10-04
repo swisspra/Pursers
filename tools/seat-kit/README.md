@@ -149,9 +149,15 @@ Reviewer `verify` fetches and detaches the submitted SHA, compares the commit
 stat and paths with `files_changed`, reports every remote branch containing the
 SHA, rejects a SHA already on `origin/main`, runs a bounded credential leak
 scan, and optionally re-runs allow-listed pytest/unittest commands found in the
-ticket evidence. Generic rules cover JWTs, bearer tokens, private-key headers,
-API-key shapes, and macOS/Linux/Windows home-directory paths. Operator-specific
-regexes are loaded one per line from `~/.pursers/leak-markers.txt`; set
+ticket evidence. The leak scan checks added and deleted hunk lines across the
+cumulative merge-base-to-submission diff, so earlier repair commits remain in
+scope when their content survives in the submitted tree. It skips unchanged
+context and diff metadata; deleted lines remain covered because review output
+can itself expose a credential. Generic rules cover JWTs, bearer tokens,
+private-key headers, API-key shapes, and macOS/Linux/Windows home-directory
+paths. The API-key rule recognizes unquoted DOM form-element accessors as code,
+while other unquoted dotted values remain fail-closed. Operator-specific regexes are loaded one per line from
+`~/.pursers/leak-markers.txt`; set
 `PURSERS_LEAK_MARKERS_FILE` to override the path. `verify` and `approve` print
 only the loaded marker count, never the regexes. An empty marker file is a WARN
 to record in `review_notes`, not an approval blocker. Documented fixtures
@@ -315,14 +321,20 @@ zero-test summaries remain rejected; SHA, leak-scan and model evidence stay requ
 Upgrade existing managed seats with `seat_new.py --upgrade` to receive this gate.
 Workers retain approved branches until the delivery PR is confirmed merged.
 
-Event seats reconnect after recognized temporary Central transport failures with
-5, 10, 20, 40, then at most 60 seconds between attempts. Saved positive cursors and
-pending events are retained; reconnecting does not itself invoke a model.
-Authentication/authorization failures, malformed responses and model execution
-failures remain visible failures rather than being blindly retried.
+Event seats recover recognized temporary Central transport failures through four
+attempts with 5, 10 and 20 second delays. Bootstrap, event preflight, presence and
+wait recovery retain saved positive cursors, pending events and live lease state;
+reconnecting does not itself invoke a model. The durable event state records the
+recovery phase, typed leaf exception classes and the next operator action when the
+bounded window is exhausted. Authentication/authorization failures, mixed exception
+groups, malformed responses and model execution failures remain visible failures
+rather than being blindly retried.
 
 During a managed model turn, the event runner refreshes the same seat presence on
 every active registry board every 120 seconds. These keepalives preserve the
 configured role, capabilities, host and principal; they do not count as model
-progress or invoke another model. A failed presence check stops the child process,
-and the configured turn timeout bounds both the model and its keepalives.
+progress or invoke another model. A pure transient transport failure gets the same
+bounded grace while the existing child remains alive. Exhaustion records an
+actionable durable reason and stops that child without launching a duplicate; a
+non-transport presence failure still stops immediately. The configured turn timeout
+bounds both the model and its keepalives.

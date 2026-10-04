@@ -73,7 +73,7 @@ SUPERVISOR_ROSTER_ACTION_KINDS = frozenset(
 SIGNING_CONTEXT = b"pursers-executor-v1"
 SEMANTIC_DIGEST_EXCLUDED_FIELDS = frozenset({"caller_auth", "deadline"})
 RETRYABLE_PRE_EXECUTION_REJECTIONS = frozenset(
-    {"failure_backoff_active", "mutation_cooldown_active"}
+    {"failure_backoff_active", "live_lease", "mutation_cooldown_active"}
 )
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1029,6 +1029,10 @@ class SystemdUserAdapter:
             raise RuntimeError("systemd_daemon_reload_failed")
 
     def start(self, seat_id: str, template: SeatTemplate) -> None:
+        drain_path = self.drain_dir / f"{seat_id}.json"
+        if drain_path.is_symlink():
+            raise RuntimeError("drain_path_symlink")
+        drain_path.unlink(missing_ok=True)
         result = self._run("start", self._unit_name(seat_id))
         if result.returncode != 0:
             raise RuntimeError("systemd_start_failed")
@@ -1225,6 +1229,10 @@ class LaunchdUserAdapter:
             raise RuntimeError("launchd_bootstrap_failed")
 
     def start(self, seat_id: str, template: SeatTemplate) -> None:
+        drain_path = self.drain_dir / f"{seat_id}.json"
+        if drain_path.is_symlink():
+            raise RuntimeError("drain_path_symlink")
+        drain_path.unlink(missing_ok=True)
         result = self._run("kickstart", "-k", self._target(seat_id))
         if result.returncode != 0:
             raise RuntimeError("launchd_start_failed")

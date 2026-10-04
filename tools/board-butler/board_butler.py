@@ -71,6 +71,8 @@ from typing import (
 )
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import anyio
+import httpx2
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
@@ -158,6 +160,43 @@ OBSERVATION_HISTORY_DAYS = 7
 OBSERVATION_FINDING_KIND = "butler_observation"
 GATE_QUEUE_NAG_DEPTH = 3
 GATE_QUEUE_ESCALATE_DEPTH = 8
+
+
+def _transport_exception_leaves(exc: BaseException) -> list[BaseException]:
+    pending = [exc]
+    leaves = []
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        nested = []
+        if isinstance(current, BaseExceptionGroup):
+            nested.extend(current.exceptions)
+        if current.__cause__ is not None:
+            nested.append(current.__cause__)
+        if nested:
+            pending.extend(nested)
+        else:
+            leaves.append(current)
+    return leaves
+
+
+def _transient_transport_failure(exc: BaseException) -> bool:
+    """Retry only pure typed transport groups; mixed/auth groups fail closed."""
+    leaves = _transport_exception_leaves(exc)
+    retryable = (
+        ConnectionError,
+        TimeoutError,
+        httpx2.TransportError,
+        anyio.BrokenResourceError,
+        anyio.ClosedResourceError,
+        anyio.EndOfStream,
+    )
+    return bool(leaves) and all(isinstance(item, retryable) for item in leaves)
+
+
 GATE_QUEUE_NAG_AGE_S = 15 * 60
 GATE_QUEUE_ESCALATE_AGE_S = 60 * 60
 QUESTION_NAG_COUNT = 5
@@ -570,6 +609,7 @@ FLEET_LIFECYCLES = (
 )
 MAX_FLEET_OPERATION_HISTORY = 512
 MAX_FLEET_EXPLANATIONS = 300
+MAX_LEASE_RELEASE_RECOVERY_ATTEMPTS = 1
 
 
 @dataclass(frozen=True)
@@ -671,6 +711,10 @@ class FleetDemand:
     provider_kinds: Mapping[str, str] = field(default_factory=dict)
     provider_local_readiness: Mapping[str, bool] = field(default_factory=dict)
     provider_quota_status: Mapping[str, str] = field(default_factory=dict)
+    source_board_ids: tuple[str, ...] = ()
+    excluded_parked: int = 0
+    excluded_blocked: int = 0
+    duplicate_rows: int = 0
 
     def __post_init__(self) -> None:
         if any(
@@ -681,6 +725,9 @@ class FleetDemand:
                 self.acp_backlog,
                 self.oldest_ticket_age_s,
                 self.expiring_offers,
+                self.excluded_parked,
+                self.excluded_blocked,
+                self.duplicate_rows,
                 *self.provider_latency_ms.values(),
             )
         ):
@@ -702,14 +749,19 @@ class FleetDemand:
             for status in self.provider_quota_status.values()
         ):
             raise ValueError("provider quota status is invalid")
+        if len(set(self.source_board_ids)) != len(self.source_board_ids) or any(
+            not isinstance(board_id, str) or not board_id
+            for board_id in self.source_board_ids
+        ):
+            raise ValueError("fleet demand source boards are invalid")
 
     @property
     def work_pressure(self) -> int:
         weights = {1: 1, 2: 2, 3: 4}
         pressure = sum(weights[tier] * count for tier, count in self.open_by_tier.items())
-        # An offer near expiry and an aged queue are starvation signals, not
-        # permission to exceed any human-owned maximum.
-        pressure += self.expiring_offers
+        # An offer belongs to an already-counted open ticket. Keep expiring
+        # offers as an observable starvation signal, but never count the same
+        # runnable unit twice when deriving capacity.
         if pressure and self.oldest_ticket_age_s >= 300:
             pressure += 1
         return pressure
@@ -735,6 +787,7 @@ class FleetSeat:
     transition_at: datetime
     managed: bool = True
     last_failure_at: datetime | None = None
+    reason_code: str | None = None
 
     def __post_init__(self) -> None:
         if self.role not in FLEET_ROLES or self.lifecycle not in FLEET_LIFECYCLES:
@@ -743,6 +796,11 @@ class FleetSeat:
             raise ValueError("fleet seat generation or transition time is invalid")
         if self.last_failure_at is not None and self.last_failure_at.tzinfo is None:
             raise ValueError("fleet seat failure time is invalid")
+        if self.reason_code is not None and (
+            not isinstance(self.reason_code, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", self.reason_code)
+        ):
+            raise ValueError("fleet seat reason code is invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", self.template_digest_sha256):
             raise ValueError("fleet seat template digest is invalid")
 
@@ -1721,9 +1779,17 @@ def registry_fleet_snapshots(board_snapshots, configured_boards, home_board):
         if (not isinstance(rows, list) or not isinstance(snapshot.get("agents"), list)
                 or (snapshot.get("truncated") and snapshot.get("coordination_tickets_complete") is not True)):
             raise ValueError(f"{board}: registry fleet demand is incomplete")
-        tickets.extend(rows)
-    selected[home_board] = {**selected[home_board], "coordination_tickets": tickets,
-                            "coordination_tickets_complete": True}
+        tickets.extend(
+            {**row, "_fleet_source_board": board}
+            if isinstance(row, Mapping) else row
+            for row in rows
+        )
+    selected[home_board] = {
+        **selected[home_board],
+        "coordination_tickets": tickets,
+        "coordination_tickets_complete": True,
+        "_fleet_source_board_ids": pooled,
+    }
     return selected
 
 
@@ -1762,8 +1828,43 @@ def fleet_snapshot_from_products(
         acp_backlog = 0
         ages: list[int] = []
         expiring = 0
+        raw_source_boards = board.get("_fleet_source_board_ids", [board_id])
+        if (
+            not isinstance(raw_source_boards, list)
+            or not raw_source_boards
+            or any(not isinstance(item, str) or not item for item in raw_source_boards)
+            or len(set(raw_source_boards)) != len(raw_source_boards)
+        ):
+            raise ValueError(f"{board_id}: fleet demand source boards are invalid")
+        source_boards: set[str] = set(raw_source_boards)
+        seen_tickets: set[tuple[str, str]] = set()
+        excluded_parked = 0
+        excluded_blocked = 0
+        duplicate_rows = 0
         for ticket in rows:
             if not isinstance(ticket, Mapping):
+                continue
+            source_board = ticket.get("_fleet_source_board", board_id)
+            if not isinstance(source_board, str) or not source_board:
+                raise ValueError(f"{board_id}: fleet demand source board is invalid")
+            if source_board not in source_boards:
+                raise ValueError(f"{board_id}: fleet demand source board is unauthorized")
+            ticket_id = ticket.get("ticket_id")
+            if isinstance(ticket_id, str) and ticket_id:
+                identity = (source_board, ticket_id)
+                if identity in seen_tickets:
+                    duplicate_rows += 1
+                    continue
+                seen_tickets.add(identity)
+            if ticket.get("parked") is True:
+                excluded_parked += 1
+                continue
+            human_request = ticket.get("human_request")
+            if ticket.get("status") == "needs_human" or (
+                isinstance(human_request, Mapping)
+                and human_request.get("resolution") is None
+            ):
+                excluded_blocked += 1
                 continue
             status = ticket.get("status")
             if status == "submitted":
@@ -1843,6 +1944,10 @@ def fleet_snapshot_from_products(
             provider_kinds=kinds,
             provider_local_readiness=local_readiness,
             provider_quota_status=quota_status,
+            source_board_ids=tuple(sorted(source_boards)),
+            excluded_parked=excluded_parked,
+            excluded_blocked=excluded_blocked,
+            duplicate_rows=duplicate_rows,
         )
     seats: list[FleetSeat] = []
     required = {
@@ -1903,6 +2008,7 @@ def fleet_snapshot_from_products(
                 transition_at=transition_at,
                 managed=row["managed"],
                 last_failure_at=last_failure_at,
+                reason_code=row.get("reason_code"),
             )
         )
     load_ratio = host_observation.get("load_ratio")
@@ -2178,6 +2284,7 @@ class FleetReconciler:
             last_down = _fleet_state_time(board_prior, "last_scale_down_at")
             seats = [seat for seat in snapshot.seats if seat.board_id == board_id]
             counts: dict[str, int] = {}
+            explanation_by_role: dict[str, dict[str, Any]] = {}
             for role in FLEET_ROLES:
                 role_policy = policy.roles[role]
                 idle_since = _fleet_role_idle_time(board_prior, role)
@@ -2197,6 +2304,22 @@ class FleetReconciler:
                         seat.lifecycle in {"stopped", "draining"}
                         and _healthy_provider(demand, policy, seat.provider)))
                 )
+                approved = sum(
+                    1
+                    for seat in seats
+                    if seat.managed
+                    and seat.role == role
+                    and seat.template_id in policy.approved_template_ids
+                )
+                authorization_blocked = any(
+                    seat.role == role
+                    and seat.template_id in policy.approved_template_ids
+                    and seat.reason_code in {
+                        "registry_authorization_unverified",
+                        "duplicate_template_principal",
+                    }
+                    for seat in seats
+                )
                 if pressure:
                     requested = max(
                         role_policy.minimum,
@@ -2206,6 +2329,16 @@ class FleetReconciler:
                 else:
                     requested = role_policy.minimum
                 requested = max(requested, live)
+                demand_requested = requested
+                limiting_reasons: list[str] = []
+                if demand_requested > role_policy.maximum:
+                    limiting_reasons.append("role_cap")
+                if demand_requested > approved and not authorization_blocked:
+                    limiting_reasons.append("template_pool")
+                elif demand_requested > available and authorization_blocked:
+                    limiting_reasons.append("authorization")
+                elif demand_requested > available:
+                    limiting_reasons.append("provider")
                 requested = min(requested, role_policy.maximum, available)
                 previous = int(role_prior.get(role, 0) or 0)
                 if pressure == 0:
@@ -2231,6 +2364,7 @@ class FleetReconciler:
                     starvation = pressure > previous * role_policy.backlog_per_seat
                     if cooldown and not starvation:
                         requested = previous
+                        limiting_reasons.append("cooldown")
                 if requested < previous and last_down is not None:
                     if (now - last_down).total_seconds() < policy.scale_down_cooldown_s:
                         requested = previous
@@ -2238,23 +2372,27 @@ class FleetReconciler:
                 # desired state remains within the immutable role maximum while
                 # operation selection separately refuses to stop a live holder.
                 counts[role] = min(role_policy.maximum, max(live, requested))
-                explanations.append(
-                    {
-                        "board_id": board_id,
-                        "role": role,
-                        "pressure": pressure,
-                        "live_leases": live,
-                        "healthy_approved_seats": available,
-                        "requested": counts[role],
-                        "reason": (
-                            "demand"
-                            if pressure
-                            else "idle_grace"
-                            if counts[role] > role_policy.minimum
-                            else "minimum"
-                        ),
-                    }
-                )
+                explanation = {
+                    "board_id": board_id,
+                    "role": role,
+                    "pressure": pressure,
+                    "live_leases": live,
+                    "approved_templates": approved,
+                    "healthy_approved_seats": available,
+                    "demand_requested": demand_requested,
+                    "role_maximum": role_policy.maximum,
+                    "requested": counts[role],
+                    "limiting_reasons": limiting_reasons,
+                    "reason": (
+                        "demand"
+                        if pressure
+                        else "idle_grace"
+                        if counts[role] > role_policy.minimum
+                        else "minimum"
+                    ),
+                }
+                explanations.append(explanation)
+                explanation_by_role[role] = explanation
             # Board maxima are applied without sacrificing a live lease. Any
             # impossible live-lease oversubscription is reported and no stop is planned.
             provider_budget = sum(
@@ -2274,7 +2412,21 @@ class FleetReconciler:
                 for provider, maximum in policy.provider_maximums.items()
             )
             budget = min(policy.board_maximum, provider_budget)
+            before_board_trim = dict(counts)
             self._trim_counts(counts, budget, demand)
+            for role in FLEET_ROLES:
+                if counts[role] < before_board_trim[role]:
+                    reason = (
+                        "board_cap"
+                        if policy.board_maximum <= provider_budget
+                        else "provider"
+                    )
+                    reasons = explanation_by_role[role]["limiting_reasons"]
+                    if reason not in reasons:
+                        reasons.append(reason)
+                explanation_by_role[role]["requested"] = counts[role]
+                explanation_by_role[role]["board_maximum"] = policy.board_maximum
+                explanation_by_role[role]["provider_capacity"] = provider_budget
             result[board_id] = counts
         return result, explanations
 
@@ -2556,7 +2708,18 @@ class FleetReconciler:
                 ).total_seconds()
                 < self.board_policies[operation.board_id].failure_backoff_s
             )
-            if attempts < self.max_operation_attempts and not backoff_active:
+            lease_release_recovery = (
+                operation.action == "stop"
+                and isinstance(prior_row, Mapping)
+                and prior_row.get("status") == "terminal"
+                and prior_row.get("outcome") == "rejected"
+                and prior_row.get("committed") is False
+                and prior_row.get("reason_code") == "live_lease"
+                and attempts >= self.max_operation_attempts
+                and int(prior_row.get("lease_release_retries", 0) or 0)
+                < MAX_LEASE_RELEASE_RECOVERY_ATTEMPTS
+            )
+            if (attempts < self.max_operation_attempts or lease_release_recovery) and not backoff_active:
                 filtered.append(operation)
         return tuple(filtered)
 
@@ -2583,7 +2746,21 @@ class FleetReconciler:
         if set(snapshot.demands) != set(self.board_policies):
             raise ValueError("snapshot does not cover the configured registry")
         desired, explanations = self._requested_counts(snapshot, prior)
+        before_host_cap = copy.deepcopy(desired)
         self._apply_host_cap(desired, snapshot)
+        host_reason = (
+            "headroom"
+            if not snapshot.host_capacity_available or snapshot.host_load_ratio >= 0.95
+            else "host_cap"
+        )
+        for explanation in explanations:
+            board_id = str(explanation["board_id"])
+            role = str(explanation["role"])
+            if desired[board_id][role] < before_host_cap[board_id][role]:
+                reasons = explanation["limiting_reasons"]
+                if host_reason not in reasons:
+                    reasons.append(host_reason)
+                explanation["requested"] = desired[board_id][role]
         provider_desired = self._provider_desired(desired, snapshot, prior)
         operations = self._operations(
             desired, provider_desired, snapshot, prior
@@ -2646,6 +2823,19 @@ class FleetReconciler:
         operations = copy.deepcopy(dict(prior.get("operations", {})))
         for operation in plan.operations:
             row = dict(operations.get(operation.operation_id, {}))
+            attempts = int(row.get("attempts", 0) or 0)
+            lease_release_recovery = (
+                operation.action == "stop"
+                and row.get("status") == "terminal"
+                and row.get("outcome") == "rejected"
+                and row.get("committed") is False
+                and row.get("reason_code") == "live_lease"
+                and attempts >= self.max_operation_attempts
+            )
+            if lease_release_recovery:
+                row["lease_release_retries"] = (
+                    int(row.get("lease_release_retries", 0) or 0) + 1
+                )
             row.update(
                 {
                     "operation_id": operation.operation_id,
@@ -2670,7 +2860,7 @@ class FleetReconciler:
                         operation.target_template_digest_sha256
                     ),
                     "status": "pending",
-                    "attempts": int(row.get("attempts", 0) or 0),
+                    "attempts": attempts,
                 }
             )
             operations[operation.operation_id] = row
@@ -2822,6 +3012,54 @@ class FleetReconciler:
             }
             for provider in sorted(demand.provider_health)
         ]
+
+        def public_limit_reason(raw: Sequence[str]) -> str:
+            reasons = set(raw)
+            if "headroom" in reasons:
+                return "headroom"
+            if reasons & {"role_cap", "board_cap", "host_cap"}:
+                return "role_cap"
+            for reason in ("template_pool", "provider", "cooldown", "authorization"):
+                if reason in reasons:
+                    return reason
+            return "none"
+
+        role_explanations = {
+            str(item["role"]): item
+            for item in plan.explanations
+            if item.get("board_id") == board_id and item.get("role") in FLEET_ROLES
+        }
+        role_limit_reasons = {
+            role: public_limit_reason(
+                role_explanations.get(role, {}).get("limiting_reasons", [])
+            )
+            for role in FLEET_ROLES
+        }
+        limiting_reason = next(
+            (
+                reason
+                for reason in (
+                    "headroom",
+                    "role_cap",
+                    "template_pool",
+                    "provider",
+                    "cooldown",
+                    "authorization",
+                )
+                if reason in role_limit_reasons.values()
+            ),
+            "none",
+        )
+        template_pool = {
+            role: sum(
+                1
+                for seat in seats
+                if seat.role == role
+                and seat.template_id in self.board_policies[board_id].approved_template_ids
+            )
+            for role in FLEET_ROLES
+        }
+        policy = self.board_policies[board_id]
         return {
             "schema": "autonomous_butler_state_v1",
             "schema_version": 1,
@@ -2844,6 +3082,35 @@ class FleetReconciler:
                 "observed_at": now.isoformat(),
             },
             "connectors": connectors,
+            "coverage": {
+                "scope": "registry_shared",
+                "authorized": "authorization" not in role_limit_reasons.values(),
+                "source_board_ids": list(demand.source_board_ids or (board_id,)),
+                "demand": {
+                    "open_by_tier": {
+                        str(tier): int(demand.open_by_tier.get(tier, 0))
+                        for tier in (1, 2, 3)
+                    },
+                    "review_backlog": demand.review_backlog,
+                    "acp_backlog": demand.acp_backlog,
+                    "expiring_offers": demand.expiring_offers,
+                    "excluded_parked": demand.excluded_parked,
+                    "excluded_blocked": demand.excluded_blocked,
+                    "duplicate_rows": demand.duplicate_rows,
+                },
+                "effective_limits": {
+                    "role_maximums": {
+                        role: policy.roles[role].maximum for role in FLEET_ROLES
+                    },
+                    "board_maximum": policy.board_maximum,
+                    "template_pool": template_pool,
+                    "provider_maximums": dict(policy.provider_maximums),
+                    "host_role_capacity": self.host_policy.role_capacity,
+                    "host_active": sum(1 for seat in snapshot.seats if seat.active),
+                },
+                "role_limiting_reasons": role_limit_reasons,
+                "limiting_reason": limiting_reason,
+            },
             "kill_latched": False,
         }
 
@@ -14039,6 +14306,8 @@ class CentralBackend:
         membership_current: bool | None = None,
         resource_uris: Sequence[str] = (),
         denied_resource_uri: str | None = None,
+        reason_code: str = "subscription_authorization_denied",
+        error_classes: Sequence[str] = (),
     ) -> None:
         """Persist one bounded, credential-free wait diagnostic."""
         try:
@@ -14074,11 +14343,16 @@ class CentralBackend:
             document["recovered_at"] = now
         else:
             document["last_failure"] = {
-                "reason_code": "subscription_authorization_denied",
+                "reason_code": reason_code,
                 "attempts": int(attempts or 1),
-                "membership_current": bool(membership_current),
+                "membership_current": (
+                    membership_current
+                    if isinstance(membership_current, bool)
+                    else None
+                ),
                 "denied_resource_uri": denied_resource_uri,
                 "resource_uris": [str(uri)[:256] for uri in resource_uris[:8]],
+                "error_classes": sorted({str(item)[:120] for item in error_classes})[:8],
                 "observed_at": now,
             }
         encoded = json.dumps(document, sort_keys=True, separators=(",", ":"))
@@ -14205,7 +14479,61 @@ class CentralBackend:
                 quiet_for = (
                     max(0.0, deadline - asyncio.get_running_loop().time())
                     if deadline is not None
-                    else max(0.1, float(self.args.refresh_seconds))
+                    else max(
+                        0.1,
+                        float(
+                            getattr(
+                                self.args,
+                                "refresh_seconds",
+                                DEFAULT_REFRESH_SECONDS,
+                            )
+                        ),
+                    )
+                )
+                if quiet_for > 0:
+                    await asyncio.sleep(quiet_for)
+                return current[0], None
+            except Exception as exc:
+                if not _transient_transport_failure(exc):
+                    raise
+                attempts += 1
+                retrying = attempts < SUBSCRIPTION_RECONNECT_ATTEMPTS
+                self.subscription_healthy = False
+                self._subscription_failure_active = True
+                await self._write_subscription_health(
+                    status="retrying" if retrying else "failed_closed",
+                    attempts=attempts,
+                    membership_current=None,
+                    resource_uris=resources,
+                    reason_code="transient_transport_failure",
+                    error_classes=[
+                        type(item).__name__
+                        for item in _transport_exception_leaves(exc)
+                    ],
+                )
+                if retrying:
+                    delay = SUBSCRIPTION_RECONNECT_BASE_DELAY_S * (2 ** (attempts - 1))
+                    if deadline is not None:
+                        delay = min(
+                            delay,
+                            max(0.0, deadline - asyncio.get_running_loop().time()),
+                        )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+                quiet_for = (
+                    max(0.0, deadline - asyncio.get_running_loop().time())
+                    if deadline is not None
+                    else max(
+                        0.1,
+                        float(
+                            getattr(
+                                self.args,
+                                "refresh_seconds",
+                                DEFAULT_REFRESH_SECONDS,
+                            )
+                        ),
+                    )
                 )
                 if quiet_for > 0:
                     await asyncio.sleep(quiet_for)
@@ -15349,6 +15677,25 @@ def report_refresh_state_write_conflict(
     runtime.mark("registry_refresh_state_write_conflict")
 
 
+def report_refresh_transport_failure(
+    runtime: RuntimeStatus, failure: BaseException
+) -> None:
+    warning = {
+        "event": "transport_failure",
+        "phase": "registry_refresh",
+        "reason_code": "transient_transport_failure",
+        "error_classes": sorted(
+            {type(item).__name__ for item in _transport_exception_leaves(failure)}
+        ),
+        "action": "skipped_to_next_refresh_cycle",
+    }
+    print(
+        "board-butler: " + json.dumps(warning, sort_keys=True, separators=(",", ":")),
+        file=sys.stderr,
+    )
+    runtime.mark("registry_refresh_transient_transport_failure")
+
+
 async def run(
     args: argparse.Namespace,
     *,
@@ -15428,6 +15775,13 @@ async def run(
                             observation = await refresh(utc_now())
                         except StateWriteConflict as exc:
                             report_refresh_state_write_conflict(runtime, exc)
+                        except Exception as exc:
+                            if not _transient_transport_failure(exc):
+                                raise
+                            # A refresh can fail after durable or mechanical work.
+                            # Do not replay it inside this cycle; the next scheduled
+                            # cycle uses the existing idempotency guards.
+                            report_refresh_transport_failure(runtime, exc)
                         else:
                             refreshed_cycle = True
                             runtime.mark("registry_refresh")

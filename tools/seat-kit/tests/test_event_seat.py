@@ -92,6 +92,38 @@ def test_event_environment_preserves_configured_identity_capabilities(tmp_path,m
     assert reviewer['PURSERS_CAN_REVIEW']=='true'
 
 
+def test_drain_marker_disables_admission_but_preserves_owned_lease(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    cfg=codex_config(tmp_path)
+    cfg['state_file']=str(tmp_path/'runtime'/'seats'/'worker-a.json')
+    runner=api()['EventSeatRunner'](cfg)
+    marker=runner.drain_path();marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({'schema':'pursers_seat_drain_v1','seat_id':'worker-a'}))
+    marker.chmod(0o600)
+    assert runner.environment()['PURSERS_CAN_WORK']=='false'
+    identity=SimpleNamespace(agent_name='worker-a',role='worker',agent_id='AI-exact',
+        principal_id='PR-exact')
+
+    class Client:
+        def __init__(self,ticket):self.identity=identity;self.ticket=ticket
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+        async def ticket_get(self,*args,**kwargs):return {'ticket':self.ticket}
+
+    owned={'ticket_id':'TK-owned','status':'claimed','claimed_by_agent_id':'AI-exact',
+        'claimed_by_principal_id':'PR-exact','lease_expires_at_epoch':200,
+        'claimed_at':'2030-01-01T00:00:00+00:00'}
+    runner.client=lambda _board:Client(owned)
+    assert asyncio.run(runner.event_authorized({'board':'home','ticket':'TK-owned'},100)) == (
+        True,'owned_lease')
+    offered={'ticket_id':'TK-new','status':'open','work_offer':{'kind':'work',
+        'agent_id':'AI-exact','agent_name':'worker-a','expires_at_epoch':200}}
+    runner.client=lambda _board:Client(offered)
+    assert asyncio.run(runner.event_authorized({'board':'home','ticket':'TK-new'},100)) == (
+        False,'seat_draining')
+
+
 def test_long_turn_refreshes_three_boards_and_stops_after_clean_exit(tmp_path,monkeypatch):
     module=api();runner=module['EventSeatRunner'](codex_config(tmp_path))
     runner.active_boards=['home','project-a','project-b']
@@ -214,6 +246,70 @@ def test_stale_event_preflight_skips_model_and_preserves_cursor(tmp_path):
     assert runner.state['cursor']=={'home':42}
     assert runner.state['pending']==[]
     assert runner.state['last_skip']['reason']=='stale_or_foreign_event'
+
+
+def test_event_preflight_claims_broadcast_before_paid_turn(tmp_path):
+    from types import SimpleNamespace
+
+    runner=api()['EventSeatRunner'](config(tmp_path))
+    ticket={'ticket_id':'TK-broadcast','status':'open',
+            'dispatch_state':{'state':'broadcast','kind':'work'}}
+    calls=[]
+    class Client:
+        identity=SimpleNamespace(agent_id='AI-worker',principal_id='PR-worker',
+                                 agent_name='worker-a',role='worker')
+        async def __aenter__(self):return self
+        async def __aexit__(self,*_args):pass
+        async def ticket_get(self,*_args,**_kwargs):return {'ticket':dict(ticket)}
+        async def ticket_claim(self,ticket_id):
+            calls.append(ticket_id)
+            ticket.update(status='claimed',claimed_by_agent_id='AI-worker',
+                          claimed_by_principal_id='PR-worker',
+                          lease_expires_at_epoch=10**12,claimed_at='claim-one')
+    runner.client=lambda _board:Client()
+    authorized,reason=__import__('asyncio').run(
+        runner.event_authorized({'board':'home','ticket':'TK-broadcast'},100))
+    assert (authorized,reason)==(True,'claim_acquired')
+    assert calls==['TK-broadcast']
+
+
+def test_event_preflight_loser_skips_broadcast_race_without_model(tmp_path):
+    from types import SimpleNamespace
+
+    runner=api()['EventSeatRunner'](config(tmp_path))
+    ticket={'ticket_id':'TK-broadcast','status':'open',
+            'dispatch_state':{'state':'broadcast','kind':'work'}}
+    class Client:
+        identity=SimpleNamespace(agent_id='AI-worker',principal_id='PR-worker',
+                                 agent_name='worker-a',role='worker')
+        async def __aenter__(self):return self
+        async def __aexit__(self,*_args):pass
+        async def ticket_get(self,*_args,**_kwargs):return {'ticket':dict(ticket)}
+        async def ticket_claim(self,_ticket_id):
+            ticket.update(dispatch_state={'state':'offered','kind':'work'},
+                          work_offer={'kind':'work','agent_id':'AI-other',
+                                      'agent_name':'worker-b','expires_at_epoch':10**12})
+            raise RuntimeError('ticket is not offered to this seat')
+    runner.client=lambda _board:Client()
+    authorized,reason=__import__('asyncio').run(
+        runner.event_authorized({'board':'home','ticket':'TK-broadcast'},100))
+    assert (authorized,reason)==(False,'claim_race_lost')
+
+
+def test_rate_limit_never_claims_work_before_a_model_turn_is_available(tmp_path):
+    cfg=config(tmp_path)
+    runner=api()['EventSeatRunner'](cfg)
+    runner.preflight_enabled=True
+    runner.state['runs']=[100]
+    async def claim(*_args):
+        pytest.fail('rate-limited seat must not claim work')
+    runner.event_authorized=claim
+    runner.run_command=lambda *_args,**_kwargs:pytest.fail('rate-limited seat must not run model')
+    delay=runner.process({'new_seq':{'home':42},'events':[
+        {'kind':'ticket_offered','board_id':'home','ticket_id':'TK-broadcast','id':'broadcast'}
+    ]},101)
+    assert delay==3599
+    assert len(runner.state['pending'])==1
 
 
 @pytest.mark.parametrize('role',["worker","reviewer"])
@@ -360,6 +456,169 @@ def test_transport_reconnect_preserves_cursor_and_only_runs_after_an_offer(tmp_p
     assert waits==[{'home':42},{'home':42},{'home':42},{'home':43}]
     assert len(calls)==1
     assert runner.state['cursor']=={'home':43}
+
+
+def test_wait_transport_exhaustion_is_bounded_and_preserves_cursor(tmp_path,monkeypatch):
+    module=api();runner=module['EventSeatRunner'](config(tmp_path))
+    runner.state['cursor']={'home':42};calls=[];delays=[]
+    async def bootstrap():runner.active_boards=['home']
+    runner.bootstrap=bootstrap
+    runner.reconcile_owned=no_owned_tickets
+    def wait(command,**kwargs):
+        calls.append(json.loads(command[command.index('--since')+1]))
+        raise module['subprocess'].CalledProcessError(
+            1,command,stderr='RemoteProtocolError: server disconnected')
+    monkeypatch.setattr(module['subprocess'],'run',wait)
+    monkeypatch.setattr(module['time'],'sleep',delays.append)
+    with pytest.raises(module['TransportRecoveryExhausted'],match='wait'):
+        runner.run()
+    assert calls==[{'home':42}]*module['TRANSPORT_RECOVERY_ATTEMPTS']
+    assert delays==[5,10,20]
+    assert runner.state['cursor']=={'home':42}
+    failure=runner.state['last_transport_failure']
+    assert failure['phase']=='wait'
+    assert failure['status']=='exhausted'
+    assert failure['action']=='exit_with_saved_positive_cursors; do_not_reset_or_replay_model'
+
+
+def test_bootstrap_nested_transport_recovers_without_cursor_reset(tmp_path,monkeypatch):
+    import httpx2
+
+    module=api();runner=module['EventSeatRunner'](config(tmp_path))
+    runner.state['cursor']={'home':42};attempts=0
+    async def bootstrap():
+        nonlocal attempts
+        attempts+=1
+        if attempts<3:
+            raise ExceptionGroup('transport',[httpx2.RemoteProtocolError('closed')])
+        runner.active_boards=['home']
+    async def no_delay(_seconds):pass
+    runner.bootstrap=bootstrap
+    runner.reconcile_owned=no_owned_tickets
+    monkeypatch.setattr(module['asyncio'],'sleep',no_delay)
+    monkeypatch.setattr(module['subprocess'],'run',
+        lambda *args,**kwargs: (_ for _ in ()).throw(KeyboardInterrupt))
+    with pytest.raises(KeyboardInterrupt):runner.run()
+    assert attempts==3
+    assert runner.state['cursor']=={'home':42}
+    assert runner.state['last_transport_failure']['phase']=='bootstrap'
+    assert runner.state['last_transport_failure']['status']=='recovered'
+
+
+def test_typed_nested_transport_groups_retry_but_mixed_groups_fail_closed():
+    import httpx2
+
+    classify=api()['transient_wait_failure']
+    transport=ExceptionGroup('outer',[ExceptionGroup(
+        'inner',[httpx2.RemoteProtocolError('server disconnected')])])
+    assert classify(transport) is True
+    assert classify(ExceptionGroup('mixed',[
+        httpx2.RemoteProtocolError('server disconnected'),
+        ValueError('invalid response'),
+    ])) is False
+    assert classify(ExceptionGroup('auth mixed',[
+        httpx2.RemoteProtocolError('server disconnected'),
+        RuntimeError('HTTP 401 Unauthorized'),
+    ])) is False
+
+
+def test_preflight_transport_recovery_preserves_cursor_and_launches_once(tmp_path,monkeypatch):
+    import httpx2
+
+    module=api();cfg=config(tmp_path);cfg['max_runs_per_hour']=None
+    runner=module['EventSeatRunner'](cfg);runner.active_boards=['home']
+    runner.preflight_enabled=True;runner.state['cursor']={'home':41}
+    attempts=0
+    async def authorize(_event,_now):
+        nonlocal attempts
+        attempts+=1
+        if attempts<3:
+            raise ExceptionGroup('transport',[httpx2.RemoteProtocolError('closed')])
+        return True,'owned_lease'
+    async def no_delay(_seconds):pass
+    calls=[]
+    runner.event_authorized=authorize
+    runner.run_command=lambda *args,**kwargs:calls.append(args)
+    monkeypatch.setattr(module['asyncio'],'sleep',no_delay)
+    runner.process({'new_seq':{'home':42},'events':[{
+        'kind':'ticket_offered','board_id':'home','ticket_id':'TK-one','id':'one'}]},100)
+    assert attempts==3
+    assert len(calls)==1
+    assert runner.state['cursor']=={'home':42}
+    assert runner.state['pending']==[]
+    assert runner.state['last_transport_failure']['status']=='recovered'
+    assert runner.state['last_transport_failure']['phase']=='event_preflight'
+
+
+def test_active_model_survives_nested_transport_recovery_without_relaunch(tmp_path,monkeypatch):
+    import httpx2
+
+    module=api();runner=module['EventSeatRunner'](codex_config(tmp_path))
+    runner.active_boards=['home'];refreshes=0
+    async def refresh():
+        nonlocal refreshes
+        refreshes+=1
+        if refreshes in {2,3}:
+            raise ExceptionGroup('transport',[httpx2.RemoteProtocolError('closed')])
+    async def no_delay(_seconds):pass
+    runner.refresh_presence=refresh
+    runner.monotonic=lambda:next(iter_clock)
+    iter_clock=iter([0,0,120,120,120])
+    class Process:
+        waits=0;terminated=False
+        def wait(self,timeout=None):
+            self.waits+=1
+            if self.waits==1:raise module['subprocess'].TimeoutExpired(['model'],timeout)
+            return 0
+        def poll(self):return 0 if self.waits>1 else None
+        def terminate(self):self.terminated=True
+        def kill(self):pytest.fail('recovered model must not be killed')
+    process=Process();launches=[]
+    def launch(*args,**kwargs):launches.append((args,kwargs));return process
+    monkeypatch.setattr(module['subprocess'],'Popen',launch)
+    monkeypatch.setattr(module['asyncio'],'sleep',no_delay)
+    runner._run(['model'])
+    assert len(launches)==1
+    assert refreshes==4
+    assert process.terminated is False
+    assert runner.state['last_transport_failure']['status']=='recovered'
+    assert runner.state['last_transport_failure']['attempts']==2
+
+
+def test_active_model_stops_after_bounded_transport_exhaustion(tmp_path,monkeypatch):
+    import httpx2
+
+    module=api();runner=module['EventSeatRunner'](codex_config(tmp_path))
+    runner.active_boards=['home'];refreshes=0
+    async def refresh():
+        nonlocal refreshes
+        refreshes+=1
+        if refreshes>1:
+            raise ExceptionGroup('transport',[httpx2.RemoteProtocolError('closed')])
+    async def no_delay(_seconds):pass
+    runner.refresh_presence=refresh
+    clock=iter([0,0,120]);runner.monotonic=lambda:next(clock)
+    class Process:
+        terminated=False
+        def wait(self,timeout=None):
+            if self.terminated:return 0
+            raise module['subprocess'].TimeoutExpired(['model'],timeout)
+        def poll(self):return None if not self.terminated else 0
+        def terminate(self):self.terminated=True
+        def kill(self):pytest.fail('cooperative model should terminate')
+    process=Process();launches=[]
+    def launch(*args,**kwargs):launches.append((args,kwargs));return process
+    monkeypatch.setattr(module['subprocess'],'Popen',launch)
+    monkeypatch.setattr(module['asyncio'],'sleep',no_delay)
+    with pytest.raises(module['TransportRecoveryExhausted'],match='presence_active_model'):
+        runner._run(['model'])
+    assert len(launches)==1
+    assert refreshes==1+module['TRANSPORT_RECOVERY_ATTEMPTS']
+    assert process.terminated is True
+    failure=runner.state['last_transport_failure']
+    assert failure['status']=='exhausted'
+    assert failure['reason_code']=='transport_recovery_exhausted'
+    assert failure['action']=='stop_model_after_grace; preserve ticket lease and partial work'
 
 
 def test_wait_authentication_failure_stops_without_retry(tmp_path, monkeypatch):

@@ -2228,6 +2228,128 @@ def test_central_wait_persistent_invalid_membership_fails_closed(
     assert client.credential not in (client.health_value or "")
 
 
+def test_central_wait_recovers_nested_typed_transport_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx2
+
+    options = args(tmp_path)
+    backend = butler.CentralBackend(options, "opaque")
+    backend.identity = SimpleNamespace(agent_id="AI-butler", principal_id="PR-butler")
+
+    class Client:
+        calls = 0
+        health_value: str | None = None
+
+        def events(self, **arguments: Any) -> Any:
+            self.calls += 1
+            call = self.calls
+            async def stream() -> Any:
+                if call <= 2:
+                    raise ExceptionGroup("transport", [
+                        ExceptionGroup("nested", [
+                            httpx2.RemoteProtocolError("server disconnected")
+                        ])
+                    ])
+                arguments["subscription_callback"]()
+                yield {"seq": 11, "kind": butler.QUESTION_EVENT,
+                       "ticket_id": "TK-source", "question_id": "CQ-source"}
+            return stream()
+
+        async def board_question_inbox(self, **_arguments: Any) -> Mapping[str, Any]:
+            return {"questions": [question("What is the status of TK-source?")]}
+
+        async def board_state_get(self, _key: str) -> Mapping[str, Any]:
+            if self.health_value is None: raise RuntimeError("state key not found")
+            return {"state": {"value": self.health_value}}
+
+        async def board_state_update(self, _key: str, value: str, **_arguments: Any) -> Mapping[str, Any]:
+            self.health_value = value
+            return {"ok": True}
+
+    async def no_delay(_seconds: float) -> None: pass
+    monkeypatch.setattr(butler.asyncio, "sleep", no_delay)
+    client = Client(); backend.client = client
+    cursor, received = asyncio.run(backend.wait_for_question(10, 2.0))
+    assert cursor == 11
+    assert received is not None and received["question_id"] == "CQ-source"
+    assert client.calls == 3
+    assert backend.subscription_healthy is True
+    health = json.loads(client.health_value or "{}")
+    assert health["status"] == "healthy"
+    assert health["last_failure"]["reason_code"] == "transient_transport_failure"
+    assert health["last_failure"]["error_classes"] == ["RemoteProtocolError"]
+
+
+def test_central_wait_mixed_transport_group_fails_closed_without_retry(
+    tmp_path: Path,
+) -> None:
+    import httpx2
+
+    options = args(tmp_path)
+    backend = butler.CentralBackend(options, "opaque")
+    backend.identity = SimpleNamespace(agent_id="AI-butler", principal_id="PR-butler")
+
+    class Client:
+        calls = 0
+        def events(self, **_arguments: Any) -> Any:
+            self.calls += 1
+            async def stream() -> Any:
+                raise ExceptionGroup("mixed", [
+                    httpx2.RemoteProtocolError("server disconnected"),
+                    ValueError("invalid event payload"),
+                ])
+                yield {}
+            return stream()
+
+    client = Client(); backend.client = client
+    with pytest.raises(ExceptionGroup, match="mixed"):
+        asyncio.run(backend.wait_for_question(10, 2.0))
+    assert client.calls == 1
+    assert backend.subscription_healthy is True
+
+
+def test_central_wait_persistent_transport_failure_is_bounded_and_durable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import httpx2
+
+    options = args(tmp_path)
+    backend = butler.CentralBackend(options, "opaque")
+    backend.identity = SimpleNamespace(agent_id="AI-butler", principal_id="PR-butler")
+
+    class Client:
+        calls = 0
+        health_value: str | None = None
+        def events(self, **_arguments: Any) -> Any:
+            self.calls += 1
+            async def stream() -> Any:
+                raise ExceptionGroup("transport", [
+                    httpx2.RemoteProtocolError("server disconnected")
+                ])
+                yield {}
+            return stream()
+        async def board_state_get(self, _key: str) -> Mapping[str, Any]:
+            if self.health_value is None: raise RuntimeError("state key not found")
+            return {"state": {"value": self.health_value}}
+        async def board_state_update(self, _key: str, value: str, **_arguments: Any) -> Mapping[str, Any]:
+            self.health_value = value
+            return {"ok": True}
+
+    async def no_delay(_seconds: float) -> None: pass
+    monkeypatch.setattr(butler.asyncio, "sleep", no_delay)
+    client = Client(); backend.client = client
+    cursor, received = asyncio.run(backend.wait_for_question(10, None))
+    assert (cursor, received) == (10, None)
+    assert client.calls == butler.SUBSCRIPTION_RECONNECT_ATTEMPTS
+    assert backend.subscription_healthy is False
+    health = json.loads(client.health_value or "{}")
+    assert health["status"] == "failed_closed"
+    assert health["last_failure"]["attempts"] == butler.SUBSCRIPTION_RECONNECT_ATTEMPTS
+    assert health["last_failure"]["membership_current"] is None
+    assert health["last_failure"]["reason_code"] == "transient_transport_failure"
+
+
 def test_resident_survives_failed_wait_then_processes_one_later_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3574,6 +3696,126 @@ def test_persistent_refresh_conflict_is_reported_without_terminating_resident(
     assert '"action":"deferred_for_refresh_retry"' in warning
     assert '"board_id":"fullplatts"' in warning
     assert '"phase":"registry_refresh"' in warning
+
+
+def test_transient_grouped_refresh_failure_skips_cycle_then_recovers(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    options = args(tmp_path)
+    options.once = False
+    options.refresh_seconds = 0
+    options.runtime_status_file = tmp_path / "runtime.json"
+    marked: list[str] = []
+    original_mark = butler.RuntimeStatus.mark
+
+    def record_mark(self: Any, activity: str, at: Any = None) -> None:
+        marked.append(activity)
+        original_mark(self, activity, at)
+
+    monkeypatch.setattr(butler.RuntimeStatus, "mark", record_mark)
+
+    class StopResident(RuntimeError):
+        pass
+
+    class Backend:
+        latest_seq = 10
+        subscription_healthy = True
+        refreshes = 0
+        waits = 0
+        partial_mechanical_actions = 0
+        pending_reads = 0
+
+        async def __aenter__(self) -> "Backend":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def refresh_registry_findings(self, _now: Any) -> Mapping[str, Any]:
+            self.refreshes += 1
+            if self.refreshes == 1:
+                self.partial_mechanical_actions += 1
+                raise ExceptionGroup(
+                    "grouped transport",
+                    [butler.httpx2.RemoteProtocolError("server disconnected")],
+                )
+            return {"active_boards": ["pursers"]}
+
+        async def pending_questions(self) -> list[Mapping[str, Any]]:
+            self.pending_reads += 1
+            return []
+
+        async def wait_for_question(
+            self, cursor: int, _timeout: float
+        ) -> tuple[int, None]:
+            self.waits += 1
+            if self.waits == 1:
+                assert self.refreshes == 1
+                assert self.partial_mechanical_actions == 1
+                return cursor, None
+            raise StopResident
+
+    backend = Backend()
+    with pytest.raises(StopResident):
+        asyncio.run(butler.run(options, backend_factory=lambda *_args: backend))
+
+    assert backend.refreshes == 2
+    assert backend.waits == 2
+    assert backend.partial_mechanical_actions == 1
+    assert backend.pending_reads == 1
+    assert "registry_refresh_transient_transport_failure" in marked
+    assert "registry_refresh" in marked
+    warning = capsys.readouterr().err
+    assert '"action":"skipped_to_next_refresh_cycle"' in warning
+    assert '"error_classes":["RemoteProtocolError"]' in warning
+    assert '"phase":"registry_refresh"' in warning
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        PermissionError("authentication failed"),
+        ExceptionGroup(
+            "mixed refresh failure",
+            [
+                butler.httpx2.RemoteProtocolError("server disconnected"),
+                ValueError("invalid refresh data"),
+            ],
+        ),
+    ],
+    ids=["authentication", "mixed-group"],
+)
+def test_refresh_auth_and_mixed_groups_fail_closed(
+    tmp_path: Path, failure: Exception
+) -> None:
+    options = args(tmp_path)
+    options.once = False
+    options.refresh_seconds = 60
+
+    class Backend:
+        latest_seq = 10
+        subscription_healthy = True
+
+        async def __aenter__(self) -> "Backend":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def refresh_registry_findings(self, _now: Any) -> Mapping[str, Any]:
+            raise failure
+
+        async def wait_for_question(
+            self, _cursor: int, _timeout: float
+        ) -> tuple[int, None]:
+            raise AssertionError("fail-closed refresh must not reach subscription wait")
+
+    with pytest.raises(Exception) as raised:
+        asyncio.run(butler.run(options, backend_factory=lambda *_args: Backend()))
+
+    assert raised.value is failure
 
 
 def test_restart_replays_pending_question_after_concurrent_refresh_conflict(

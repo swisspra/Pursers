@@ -59,6 +59,9 @@ AUTONOMOUS_STATES = frozenset(
     }
 )
 AUTONOMOUS_ROLES = ("worker", "reviewer", "acp_worker")
+FLEET_LIMIT_REASONS = frozenset(
+    {"none", "role_cap", "template_pool", "authorization", "headroom", "provider", "cooldown"}
+)
 AUTONOMOUS_RUNNERS = frozenset({"direct_api", "acp"})
 AUTONOMOUS_COMMANDS = frozenset(
     {"reconcile_now", "enable_connector", "disable_connector", "kill", "resume"}
@@ -168,6 +171,94 @@ def _project_health(value: Any, *, connector: bool = False) -> dict[str, Any] | 
     return result
 
 
+def _project_fleet_coverage(value: Any) -> dict[str, Any] | None:
+    """Project the bounded shared-registry demand and effective-limit contract."""
+    if not isinstance(value, Mapping):
+        return None
+    sources = value.get("source_board_ids")
+    demand = value.get("demand")
+    limits = value.get("effective_limits")
+    role_reasons = value.get("role_limiting_reasons")
+    if (
+        value.get("scope") != "registry_shared"
+        or type(value.get("authorized")) is not bool
+        or not isinstance(sources, list)
+        or not sources
+        or len(sources) > 1_000
+        or not isinstance(demand, Mapping)
+        or not isinstance(limits, Mapping)
+        or not isinstance(role_reasons, Mapping)
+        or value.get("limiting_reason") not in FLEET_LIMIT_REASONS
+    ):
+        return None
+    clean_sources = [_state_identifier(item) for item in sources]
+    if any(item is None for item in clean_sources) or len(set(clean_sources)) != len(clean_sources):
+        return None
+    open_by_tier = demand.get("open_by_tier")
+    if not isinstance(open_by_tier, Mapping) or set(open_by_tier) != {"1", "2", "3"}:
+        return None
+    clean_demand = {
+        "open_by_tier": {tier: _state_count(open_by_tier[tier]) for tier in ("1", "2", "3")}
+    }
+    for name in (
+        "review_backlog",
+        "acp_backlog",
+        "expiring_offers",
+        "excluded_parked",
+        "excluded_blocked",
+        "duplicate_rows",
+    ):
+        clean_demand[name] = _state_count(demand.get(name))
+    role_maximums = limits.get("role_maximums")
+    template_pool = limits.get("template_pool")
+    provider_maximums = limits.get("provider_maximums")
+    if (
+        any(item is None for item in clean_demand["open_by_tier"].values())
+        or any(clean_demand[name] is None for name in clean_demand if name != "open_by_tier")
+        or not isinstance(role_maximums, Mapping)
+        or not isinstance(template_pool, Mapping)
+        or not isinstance(provider_maximums, Mapping)
+        or len(provider_maximums) > 32
+        or set(role_maximums) != set(AUTONOMOUS_ROLES)
+        or set(template_pool) != set(AUTONOMOUS_ROLES)
+        or set(role_reasons) != set(AUTONOMOUS_ROLES)
+    ):
+        return None
+    clean_role_maximums = {role: _state_count(role_maximums[role]) for role in AUTONOMOUS_ROLES}
+    clean_template_pool = {role: _state_count(template_pool[role]) for role in AUTONOMOUS_ROLES}
+    clean_providers: dict[str, int] = {}
+    for provider, maximum in provider_maximums.items():
+        clean_provider = _state_identifier(provider)
+        clean_maximum = _state_count(maximum)
+        if clean_provider is None or clean_maximum is None:
+            return None
+        clean_providers[clean_provider] = clean_maximum
+    clean_limits = {
+        "role_maximums": clean_role_maximums,
+        "board_maximum": _state_count(limits.get("board_maximum")),
+        "template_pool": clean_template_pool,
+        "provider_maximums": clean_providers,
+        "host_role_capacity": _state_count(limits.get("host_role_capacity")),
+        "host_active": _state_count(limits.get("host_active")),
+    }
+    if (
+        any(item is None for item in clean_role_maximums.values())
+        or any(item is None for item in clean_template_pool.values())
+        or any(item is None for item in clean_limits.values() if not isinstance(item, Mapping))
+        or any(role_reasons[role] not in FLEET_LIMIT_REASONS for role in AUTONOMOUS_ROLES)
+    ):
+        return None
+    return {
+        "scope": "registry_shared",
+        "authorized": value["authorized"],
+        "source_board_ids": clean_sources,
+        "demand": clean_demand,
+        "effective_limits": clean_limits,
+        "role_limiting_reasons": {role: role_reasons[role] for role in AUTONOMOUS_ROLES},
+        "limiting_reason": value["limiting_reason"],
+    }
+
+
 def _project_autonomous_state(value: Any, board_id: Any) -> dict[str, Any] | None:
     """Allowlist one strict public state projection and discard unknown fields."""
     if not isinstance(value, Mapping) or value.get("schema") != "autonomous_butler_state_v1":
@@ -273,6 +364,11 @@ def _project_autonomous_state(value: Any, board_id: Any) -> dict[str, Any] | Non
         "connectors": projected_connectors,
         "kill_latched": value["kill_latched"],
     }
+    if "coverage" in value:
+        coverage = _project_fleet_coverage(value["coverage"])
+        if coverage is None:
+            return None
+        result["coverage"] = coverage
     reason_code = value.get("reason_code")
     if reason_code is not None:
         if not isinstance(reason_code, str) or not re.fullmatch(
