@@ -244,6 +244,61 @@ class RetentionSettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result.structured_content["audit"])
         self.assertEqual(self.service.load("alpha")["retention_settings_audit"], [])
 
+    async def test_legacy_journal_setter_advances_revision_and_records_audit(self) -> None:
+        initial = await self.call(
+            "alpha", "board_retention_settings_get", agent_name="admin-agent"
+        )
+        initial_revision = initial.structured_content["revision"]
+
+        updated = await self.call(
+            "alpha",
+            "board_journal_retention_set",
+            agent_name="admin-agent",
+            journal_retention_days=30,
+            journal_row_cap=8_000,
+        )
+        payload = updated.structured_content
+        self.assertEqual(payload["revision"], initial_revision + 1)
+        self.assertEqual(payload["audit"]["revision_from"], initial_revision)
+        self.assertEqual(payload["audit"]["revision_to"], initial_revision + 1)
+        self.assertEqual(
+            payload["audit"]["changed_fields"],
+            ["journal_retention_days", "journal_row_cap"],
+        )
+        self.assertEqual(
+            payload["audit"]["previous"],
+            {"journal_retention_days": 7, "journal_row_cap": 50_000},
+        )
+        self.assertEqual(
+            payload["audit"]["current"],
+            {"journal_retention_days": 30, "journal_row_cap": 8_000},
+        )
+        actor = self.service.member(
+            self.service.load("alpha"), self.admin, "admin-agent"
+        )
+        self.assertEqual(payload["audit"]["actor_agent_id"], actor["agent_id"])
+        self.assertEqual(payload["audit"]["actor_principal_id"], "PR-admin")
+        self.assertTrue(payload["audit"]["maintenance_run"])
+        self.assertEqual(
+            self.service.load("alpha")["retention_settings_audit"],
+            [payload["audit"]],
+        )
+
+        for tool in (
+            "board_retention_settings_preview",
+            "board_retention_settings_apply",
+        ):
+            with self.subTest(tool=tool), self.assertRaisesRegex(
+                ToolError, "revision conflict"
+            ):
+                await self.call(
+                    "alpha",
+                    tool,
+                    agent_name="admin-agent",
+                    changes={"journal_retention_days": 7, "journal_row_cap": 50_000},
+                    expected_revision=initial_revision,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

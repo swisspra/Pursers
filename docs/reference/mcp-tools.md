@@ -1147,7 +1147,7 @@ Required authorization: `board:coordinate`.
 | `journal_row_cap` | `integer` | required | — |
 | `expected_generation` | `string | null` | optional | `null` |
 
-Response fields: `ok, board_id, journal_retention_days, previous_journal_retention_days, journal_row_cap, previous_journal_row_cap, changed, journal_compaction, renewed_ticket_ids, events`.
+Response fields: `ok, board_id, journal_retention_days, previous_journal_retention_days, journal_row_cap, previous_journal_row_cap, revision, audit, changed, journal_compaction, renewed_ticket_ids, events`.
 
 ### `board_dispatch_policy_set`
 

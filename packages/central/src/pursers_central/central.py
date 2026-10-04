@@ -8851,22 +8851,58 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 raise PermissionError(
                     "changing journal retention requires board admin or coordinator"
                 )
+            projection = retention_settings_projection(document)
+            current_revision = projection["revision"]
             config = document["config"]
-            previous_days = int(
-                config.get(
-                    "journal_retention_days", DEFAULT_JOURNAL_RETENTION_DAYS
+            previous_days = projection["settings"]["journal_retention_days"]
+            previous_cap = projection["settings"]["journal_row_cap"]
+            changed_fields = sorted(
+                field
+                for field, value in (
+                    ("journal_retention_days", journal_retention_days),
+                    ("journal_row_cap", journal_row_cap),
                 )
-            )
-            previous_cap = int(
-                config.get("journal_row_cap", DEFAULT_JOURNAL_ROW_CAP)
+                if projection["settings"][field] != value
             )
             config["journal_retention_days"] = journal_retention_days
             config["journal_row_cap"] = journal_row_cap
             config["journal_retention_updated_at"] = iso_at(now)
             config["journal_retention_updated_by_agent_id"] = actor["agent_id"]
+            audit = None
+            revision = current_revision
+            if changed_fields:
+                revision += 1
+                config["retention_settings_revision"] = revision
+                config["retention_settings_updated_at"] = iso_at(now)
+                config["retention_settings_updated_by_agent_id"] = actor["agent_id"]
+                sequence = int(document["next_retention_settings_audit_seq"])
+                document["next_retention_settings_audit_seq"] = sequence + 1
+                current = {
+                    "journal_retention_days": journal_retention_days,
+                    "journal_row_cap": journal_row_cap,
+                }
+                audit = {
+                    "audit_id": f"RS-{sequence:012d}",
+                    "schema_version": RETENTION_SETTINGS_SCHEMA_VERSION,
+                    "revision_from": current_revision,
+                    "revision_to": revision,
+                    "changed_fields": changed_fields,
+                    "previous": {
+                        field: projection["settings"][field]
+                        for field in changed_fields
+                    },
+                    "current": {field: current[field] for field in changed_fields},
+                    "actor_agent_id": actor["agent_id"],
+                    "actor_principal_id": principal.principal_id,
+                    "at": iso_at(now),
+                    "maintenance_run": True,
+                }
+                document["retention_settings_audit"].append(audit)
             return {
                 "previous_days": previous_days,
                 "previous_cap": previous_cap,
+                "revision": revision,
+                "audit": copy.deepcopy(audit),
                 "released": released,
                 "renewed": renewed,
             }
@@ -8887,6 +8923,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "previous_journal_retention_days": result["previous_days"],
             "journal_row_cap": journal_row_cap,
             "previous_journal_row_cap": result["previous_cap"],
+            "revision": result["revision"],
+            "audit": result["audit"],
             "changed": (
                 result["previous_days"] != journal_retention_days
                 or result["previous_cap"] != journal_row_cap

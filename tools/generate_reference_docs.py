@@ -194,6 +194,11 @@ SPECIAL_RESPONSE_FIELDS = {
         "changed, changed_fields, audit, maintenance_run, "
         "requires_separate_maintenance_confirmation"
     ),
+    "board_journal_retention_set": (
+        "ok, board_id, journal_retention_days, previous_journal_retention_days, "
+        "journal_row_cap, previous_journal_row_cap, revision, audit, changed, "
+        "journal_compaction, renewed_ticket_ids, events"
+    ),
 }
 
 COMPACT_RESPONSE_FIELDS = {

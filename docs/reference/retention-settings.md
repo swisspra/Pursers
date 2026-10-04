@@ -33,5 +33,6 @@ Saving settings never archives tickets, bounds ticket histories, prunes invites,
 compacts journals, changes leases, or runs another maintenance action. Destructive
 maintenance remains a separate explicit operation through `board_archive_run` or
 `journal_compact`. The older `board_journal_retention_set` tool retains its historical
-immediate-compaction behavior for compatibility and is not the dashboard settings-save
-contract.
+immediate-compaction behavior for compatibility, but its changed writes advance the
+same revision and append the same actor/value audit evidence. It is not the dashboard
+settings-save contract.
