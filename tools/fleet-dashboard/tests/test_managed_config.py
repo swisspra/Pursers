@@ -342,6 +342,23 @@ def test_board_butler_effective_policy_resolves_precedence_and_provenance() -> N
     assert "Remove an override field" in effective["inheritance"]["reset_semantics"]
 
 
+def test_board_butler_safe_defaults_match_authoritative_answer_classes() -> None:
+    module_path = Path(__file__).parents[2] / "board-butler" / "board_butler.py"
+    spec = importlib.util.spec_from_file_location(
+        "managed_config_authoritative_board_butler", module_path
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    effective = asyncio.run(
+        make_fetcher(ManagedClient()).fetch_managed_configuration("pursers")
+    )["families"]["board_butler"]["effective"]
+    assert set(effective["answer_scope"]) == set(module.ANSWER_CLASSES)
+    assert effective["answer_scope"]["approved_merge"] == "escalate"
+
+
 @pytest.mark.parametrize(
     "payload",
     [

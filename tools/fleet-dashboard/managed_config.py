@@ -30,6 +30,7 @@ BOARD_BUTLER_DEFAULTS: dict[str, Any] = {
             "waiver_applicability",
             "corpus_lookup",
             "coverage_check",
+            "approved_merge",
             "scope_change",
             "gate_waiver",
             "release",
