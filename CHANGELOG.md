@@ -14,6 +14,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   process-reference CAS; live leases and unverified identities fail closed. A
   signed, lease-safe `adopt` action records verified operator-started processes
   without silently accepting an arbitrary replacement PID.
+- Honor executor failure backoff before restarting a recovered seat, and keep
+  signed operation replay stable when authentication timestamps and deadlines are
+  renewed. Cooldown rejections can retry within the bounded controller policy;
+  committed, uncertain and changed-business-payload operations remain fail-closed.
 - Keep event-seat drivers alive after bounded model timeout/failure, skip stale or
   foreign journal work before model launch, and retain the existing one-shot owned
   continuation and human-escalation contract.

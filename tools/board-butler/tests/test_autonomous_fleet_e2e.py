@@ -772,6 +772,7 @@ class DirectSignedExecutorClient:
                 b"butler-local",
                 nonce.encode(),
                 signed_at.encode(),
+                request["deadline"].encode(),
             )
         )
         request["caller_auth"] = {

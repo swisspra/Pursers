@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import stat
 import sys
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -199,9 +201,10 @@ def signed_request(
     roster_revision: int | None = None,
     roster_digest: str | None = None,
     target_template: executor.SeatTemplate | None = None,
+    now: float = NOW,
 ) -> dict[str, Any]:
     template = runtime["template"]
-    signed_at = datetime.fromtimestamp(NOW, timezone.utc).isoformat()
+    signed_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
     request: dict[str, Any] = {
         "schema": executor.SCHEMA,
         "schema_version": 1,
@@ -225,7 +228,7 @@ def signed_request(
         "target_template_digest_sha256": (
             target_template.digest_sha256 if target_template is not None else None
         ),
-        "deadline": datetime.fromtimestamp(NOW + 60, timezone.utc).isoformat(),
+        "deadline": datetime.fromtimestamp(now + 60, timezone.utc).isoformat(),
         "caller_auth": {
             "scheme": "local_ed25519_v1",
             "key_id": "butler-local",
@@ -245,6 +248,7 @@ def signed_request(
             b"butler-local",
             request["caller_auth"]["nonce"].encode(),
             signed_at.encode(),
+            request["deadline"].encode(),
         )
     )
     signature = runtime["private"].sign(message)
@@ -841,6 +845,137 @@ def test_identical_operation_replays_without_second_mutation(runtime: dict[str, 
     assert second == {**first, "replayed": True}
     assert len(runtime["adapter"].calls) == call_count
     assert len(runtime["publisher"].receipts) == 1
+
+
+def test_semantic_digest_renews_deadline_but_rejects_business_change(
+    runtime: dict[str, Any],
+) -> None:
+    first = signed_request(runtime, "start", "op-semantic", now=NOW)
+    renewed = signed_request(runtime, "start", "op-semantic", now=NOW + 30)
+    changed = signed_request(runtime, "stop", "op-semantic", now=NOW + 30)
+
+    assert first["deadline"] != renewed["deadline"]
+    assert executor.request_digest(first) == executor.request_digest(renewed)
+    assert executor.request_digest(first) != executor.request_digest(changed)
+
+
+def test_terminal_backoff_rejection_retries_same_semantic_operation_once(
+    runtime: dict[str, Any],
+) -> None:
+    now = [NOW]
+    original = runtime["service"]
+    service = executor.FleetExecutor(
+        replace(original.policy, failure_backoff_s=30),
+        original.store,
+        runtime["adapter"],
+        runtime["leases"],
+        runtime["readiness"],
+        runtime["publisher"],
+        clock=lambda: now[0],
+    )
+    service.store.save_seat(
+        seat_id="worker-a",
+        board_id="pursers",
+        template=runtime["template"],
+        identity_id=None,
+        state_id=None,
+        state_dir_id=None,
+        generation=1,
+        lifecycle="stopped",
+        process_ref=None,
+        now=NOW,
+        failed=True,
+    )
+    first_request = signed_request(runtime, "start", "op-backoff", now=NOW)
+    first = service.handle(first_request)
+
+    changed = signed_request(runtime, "stop", "op-backoff", now=NOW)
+    with pytest.raises(executor.PolicyError, match="operation_id_payload_changed"):
+        service.handle(changed)
+
+    now[0] = NOW + 31
+    retry_request = signed_request(runtime, "start", "op-backoff", now=now[0])
+    retry = service.handle(retry_request)
+
+    assert first["outcome"] == "rejected"
+    assert first["reason_code"] == "failure_backoff_active"
+    assert first["request_digest_sha256"] == retry["request_digest_sha256"]
+    assert retry["outcome"] == "succeeded"
+    assert retry["committed"] is True
+    assert runtime["adapter"].calls.count(("start", "worker-a")) == 1
+
+
+def test_loaded_legacy_deadline_bound_operation_row_fails_closed(
+    runtime: dict[str, Any],
+) -> None:
+    request = signed_request(runtime, "start", "op-legacy-row")
+    legacy_unsigned = {
+        key: value for key, value in request.items() if key != "caller_auth"
+    }
+    legacy_digest = hashlib.sha256(
+        executor.canonical_json(legacy_unsigned)
+    ).hexdigest()
+    runtime["service"].store.connection.execute(
+        "INSERT INTO operations VALUES (?, ?, 'terminal', ?, ?)",
+        (
+            "op-legacy-row",
+            legacy_digest,
+            json.dumps(
+                {
+                    "operation_id": "op-legacy-row",
+                    "request_digest_sha256": legacy_digest,
+                    "outcome": "rejected",
+                    "committed": False,
+                    "reason_code": "failure_backoff_active",
+                }
+            ),
+            NOW,
+        ),
+    )
+    runtime["service"].store.connection.commit()
+
+    with pytest.raises(executor.PolicyError, match="operation_id_payload_changed"):
+        runtime["service"].handle(request)
+    assert runtime["adapter"].calls.count(("start", "worker-a")) == 0
+
+
+def test_pending_operation_remains_unknown_after_executor_restart(
+    runtime: dict[str, Any],
+) -> None:
+    request = signed_request(runtime, "start", "op-pending-restart")
+    auth = request["caller_auth"]
+    digest = executor.request_digest(request)
+    store_path = runtime["service"].store.connection.execute(
+        "PRAGMA database_list"
+    ).fetchone()[2]
+    runtime["service"].store.reserve(
+        auth["key_id"], auth["nonce"], digest, request["operation_id"], NOW
+    )
+    runtime["service"].store.connection.close()
+    restarted = executor.FleetExecutor(
+        runtime["service"].policy,
+        executor.ExecutorStore(Path(store_path)),
+        runtime["adapter"],
+        runtime["leases"],
+        runtime["readiness"],
+        runtime["publisher"],
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(executor.PolicyError, match="operation_outcome_unknown"):
+        restarted.handle(request)
+    assert runtime["adapter"].calls.count(("start", "worker-a")) == 0
+
+
+def test_nonretryable_rejection_remains_terminal(runtime: dict[str, Any]) -> None:
+    runtime["leases"].observation = executor.LeaseObservation(False)
+    first_request = signed_request(runtime, "stop", "op-nonretryable")
+    first = runtime["service"].handle(first_request)
+    second = runtime["service"].handle(first_request)
+
+    assert first["reason_code"] == "seat_unknown"
+    assert second == {**first, "replayed": True}
+    assert runtime["adapter"].calls.count(("stop", "worker-a")) == 0
 
 
 def test_operation_payload_change_and_nonce_reuse_fail_closed(runtime: dict[str, Any]) -> None:
@@ -1551,6 +1686,13 @@ def test_receipt_queue_is_idempotent_and_rejects_digest_change(tmp_path: Path) -
     publisher.publish(receipt)
     publisher.publish(receipt)
     assert path.read_text().count("\n") == 1
+    publisher.publish(
+        {**receipt, "outcome": "succeeded", "committed": True, "replayed": False}
+    )
+    publisher.publish(
+        {**receipt, "outcome": "succeeded", "committed": True, "replayed": True}
+    )
+    assert path.read_text().count("\n") == 2
     with pytest.raises(RuntimeError, match="receipt_operation_digest_changed"):
         publisher.publish({**receipt, "request_digest_sha256": "b" * 64})
 
