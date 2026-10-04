@@ -203,7 +203,6 @@ def test_model_timeout_is_durable_and_driver_can_continue(tmp_path):
 
 
 def test_stale_event_preflight_skips_model_and_preserves_cursor(tmp_path):
-    import asyncio
     cfg=config(tmp_path);cfg['max_runs_per_hour']=None
     runner=api()['EventSeatRunner'](cfg);runner.active_boards=['home']
     runner.preflight_enabled=True

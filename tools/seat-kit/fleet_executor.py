@@ -56,6 +56,20 @@ SUPERVISOR_ROSTER_FIELDS = frozenset(
         "findings",
     }
 )
+SUPERVISOR_ACTION_ROSTER_KINDS = {
+    "inspect": frozenset(),
+    "start": frozenset({"provision", "start", "resume"}),
+    "drain": frozenset({"drain"}),
+    "stop": frozenset({"pause", "stop", "remove"}),
+    "re_role": frozenset({"re_role"}),
+    # External adoption is recovery of an existing seat, never provisioning.
+    "adopt": frozenset({"resume"}),
+}
+SUPERVISOR_ROSTER_ACTION_KINDS = frozenset(
+    kind
+    for kinds in SUPERVISOR_ACTION_ROSTER_KINDS.values()
+    for kind in kinds
+)
 SIGNING_CONTEXT = b"pursers-executor-v1"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1300,13 +1314,6 @@ class FleetExecutor:
             )
         ):
             raise PolicyError("supervisor_roster_authorization_mismatch")
-        aliases = {
-            "start": {"provision", "start", "resume"},
-            "drain": {"drain"},
-            "stop": {"pause", "stop", "remove"},
-            "re_role": {"re_role"},
-            "inspect": set(),
-        }
         if request.get("action") == "inspect":
             return
         matches = [
@@ -1314,7 +1321,10 @@ class FleetExecutor:
             for row in roster.get("actions", [])
             if isinstance(row, Mapping)
             and row.get("seat_id") == request.get("seat_id")
-            and row.get("kind") in aliases.get(str(request.get("action")), set())
+            and row.get("kind")
+            in SUPERVISOR_ACTION_ROSTER_KINDS.get(
+                str(request.get("action")), frozenset()
+            )
             and row.get("generation") == request.get("expected_seat_generation")
             and row.get("identity_id") == request.get("identity_id")
             and row.get("state_id") == request.get("state_id")
@@ -2018,9 +2028,10 @@ def _valid_supervisor_roster(document: Any) -> bool:
         seats_by_id[str(seat["seat_id"])] = seat
     provisioned_identifiers = set(identifiers)
     for action in actions:
-        if not isinstance(action, Mapping) or action.get("kind") not in {
-            "provision", "start", "drain", "pause", "resume", "stop", "remove", "re_role"
-        }:
+        if (
+            not isinstance(action, Mapping)
+            or action.get("kind") not in SUPERVISOR_ROSTER_ACTION_KINDS
+        ):
             return False
         required = {"kind", "seat_id", "identity_id", "state_id", "state_dir_id", "generation"}
         expected = set(required)
