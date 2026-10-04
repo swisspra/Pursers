@@ -146,6 +146,23 @@ Acceptance:
   `bridge_name` and `board_connector_name`, update an unrelated field, and prove the
   preview, applied host config and inventory preserve all five byte-for-byte.
 
+Stable backend contract:
+
+- `GET /api/config/managed?board_id=...` returns
+  `fleet_managed_config_v1`, effective secret-safe Board Butler policy,
+  authoritative board-policy and membership revisions, apply semantics, and
+  explicit availability for each Settings family.
+- `POST /api/config/managed/plan` accepts only the typed `board_policy` or
+  `membership` family, requires the read revision, verifies board-admin authority,
+  and returns a two-minute immutable plan and digest.
+- `POST /api/config/managed/apply` consumes that exact plan once, rechecks
+  authority and source state, reads Central back, never restarts a process, and
+  reports bounded rollback evidence for a partial board-policy failure.
+- Source connectors remain unavailable pending `TK-dcc6d183eb1e15126e1f` and
+  Central retention remains unavailable pending `TK-eebab5f77b7a6b63eb37`.
+  Their absence is part of the contract; callers must not infer saved or active
+  state.
+
 ### Package B — Settings and onboarding (`TK-da4fa65758fe7e6e8f1e`)
 
 Depends on Package A contracts and the shell from `TK-97b702c2b8d66dcac7fb`. Owns:

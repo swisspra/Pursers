@@ -95,6 +95,15 @@ from butler_settings import (
     validate_board_butler_document,
     validate_autonomous_command_request,
 )
+from managed_config import (
+    PLAN_SCHEMA as MANAGED_PLAN_SCHEMA,
+    board_policy_projection,
+    contract as managed_configuration_contract,
+    membership_projection,
+    plan_digest as managed_plan_digest,
+    validate_board_policy_changes,
+    validate_membership_change,
+)
 from public_projection import (
     load_or_create_alias_key,
     make_public_handler,
@@ -160,6 +169,7 @@ CONFIG_OPS_PLAN_TTL_SECONDS = 120
 CONFIG_SEAT_PLAN_TTL_SECONDS = 600
 DOOR_CREDENTIAL_PLAN_TTL_SECONDS = 300
 CONFIG_PLAN_LIMIT = 50
+MANAGED_PLAN_TTL_SECONDS = 120
 GIT_TIMEOUT_SECONDS = 120
 GIT_ERROR_TAIL_CHARS = 2_000
 CONFIG_STATE_DIR = runtime_environment.dashboard_state_dir()
@@ -468,6 +478,16 @@ class FleetClient(Protocol):
         fallback_broadcast: bool,
     ) -> dict[str, Any]: ...
     async def board_claim_ttl_set(self, claim_ttl_s: int) -> dict[str, Any]: ...
+    async def board_review_policy_set(self, review_policy: str) -> dict[str, Any]: ...
+    async def board_stale_after_set(self, stale_after_days: int) -> dict[str, Any]: ...
+    async def board_members(self) -> dict[str, Any]: ...
+    async def board_member_add(
+        self, principal_id: str, role: str = "member"
+    ) -> dict[str, Any]: ...
+    async def board_member_remove(self, principal_id: str) -> dict[str, Any]: ...
+    async def board_member_set_role(
+        self, principal_id: str, role: str
+    ) -> dict[str, Any]: ...
     async def ticket_get(self, ticket_id: str) -> dict[str, Any]: ...
 
     async def memory_read(
@@ -4936,6 +4956,8 @@ class FleetFetcher:
         self._door_plans: dict[str, dict[str, Any]] = {}
         self._door_plan_lock = threading.Lock()
         self._door_audit_lock = threading.Lock()
+        self._managed_plans: dict[str, dict[str, Any]] = {}
+        self._managed_plan_lock = threading.Lock()
         self._client_pool = _FleetClientPool(config, client_factory)
         self._summary_snapshots: dict[str, dict[str, Any]] = {}
 
@@ -5719,6 +5741,200 @@ class FleetFetcher:
             "offers": offers,
             "open_tickets": open_tickets,
             "timeline": timeline,
+        }
+
+    async def _managed_board_state(
+        self, board_id: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        async with self._client(board_id) as client:
+            status = await client.board_status()
+            members = await client.board_members()
+        return board_policy_projection(status), membership_projection(members)
+
+    async def fetch_managed_configuration(self, board_id: str) -> dict[str, Any]:
+        """Return one stable, secret-safe Settings backend contract."""
+        board_policy, memberships = await self._managed_board_state(board_id)
+        coordinator = await self.fetch_config()
+        effective = coordinator.get("effective")
+        stored = coordinator.get("config")
+        board_butler = None
+        if isinstance(effective, dict):
+            board_butler = effective.get("board_butler")
+        if board_butler is None and isinstance(stored, dict):
+            board_butler = stored.get("board_butler")
+        if board_butler is not None:
+            try:
+                board_butler = validate_board_butler_document(board_butler)
+            except ButlerSettingsError:
+                board_butler = None
+        return managed_configuration_contract(
+            board_id=board_id,
+            board_policy=board_policy,
+            memberships=memberships,
+            board_butler=board_butler,
+        )
+
+    async def prepare_managed_configuration(self, request: Any) -> dict[str, Any]:
+        """Prepare one immutable policy or membership change."""
+        if not isinstance(request, dict):
+            raise ValueError("managed configuration request must be an object")
+        family = request.get("family")
+        expected_fields = (
+            {"board_id", "family", "expected_sha256", "changes"}
+            if family == "board_policy"
+            else {"board_id", "family", "expected_sha256", "change"}
+            if family == "membership"
+            else set()
+        )
+        if not expected_fields or set(request) != expected_fields:
+            raise ValueError("managed configuration request fields are invalid")
+        board_id = request.get("board_id")
+        if not isinstance(board_id, str):
+            raise ValueError("board_id is required")
+        expected = request.get("expected_sha256")
+        if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected):
+            raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
+        await self._require_board_admin(board_id)
+        board_policy, memberships = await self._managed_board_state(board_id)
+        current = board_policy if family == "board_policy" else memberships
+        if current["expected_sha256"] != expected:
+            raise ConfigConflictError(
+                "Managed configuration changed; reload before planning"
+            )
+        if family == "board_policy":
+            change = validate_board_policy_changes(request["changes"])
+            after = {**board_policy["values"], **change}
+            details: dict[str, Any] = {
+                "changes": change,
+                "before": board_policy["values"],
+                "after": after,
+            }
+        else:
+            change = validate_membership_change(request["change"])
+            details = {"change": change, "before": memberships["members"]}
+        now = self.now_factory()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        expires = now.astimezone(timezone.utc) + timedelta(
+            seconds=MANAGED_PLAN_TTL_SECONDS
+        )
+        plan = {
+            "schema": MANAGED_PLAN_SCHEMA,
+            "schema_version": 1,
+            "plan_id": uuid.uuid4().hex,
+            "board_id": board_id,
+            "family": family,
+            "expected_sha256": expected,
+            "apply_mode": "hot-apply",
+            "expires_at": expires.isoformat(),
+            "expires_at_epoch": expires.timestamp(),
+            **details,
+        }
+        plan["digest"] = managed_plan_digest(plan)
+        with self._managed_plan_lock:
+            expired = [
+                key
+                for key, value in self._managed_plans.items()
+                if value["expires_at_epoch"] <= now.timestamp()
+            ]
+            for key in expired:
+                self._managed_plans.pop(key, None)
+            if len(self._managed_plans) >= CONFIG_PLAN_LIMIT:
+                self._managed_plans.pop(next(iter(self._managed_plans)))
+            self._managed_plans[plan["plan_id"]] = copy.deepcopy(plan)
+        return copy.deepcopy(plan)
+
+    async def apply_managed_configuration(
+        self, plan_id: Any, digest: Any
+    ) -> dict[str, Any]:
+        """Consume one exact plan, verify source state, mutate, and read back."""
+        if not isinstance(plan_id, str) or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
+            raise ValueError("managed configuration plan_id is invalid")
+        if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise ValueError("managed configuration digest is invalid")
+        with self._managed_plan_lock:
+            plan = self._managed_plans.pop(plan_id, None)
+        if plan is None:
+            raise KeyError(plan_id)
+        if not hmac.compare_digest(plan["digest"], digest):
+            raise ValueError("managed configuration plan digest mismatch")
+        now = self.now_factory()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        if now.timestamp() >= plan["expires_at_epoch"]:
+            raise ConfigConflictError("Managed configuration plan expired")
+        board_id = plan["board_id"]
+        await self._require_board_admin(board_id)
+        board_policy, memberships = await self._managed_board_state(board_id)
+        current = board_policy if plan["family"] == "board_policy" else memberships
+        if current["expected_sha256"] != plan["expected_sha256"]:
+            raise ConfigConflictError(
+                "Managed configuration changed; prepare a new plan"
+            )
+        rollback: dict[str, Any] = {"attempted": False, "succeeded": None}
+        async with self._client(board_id) as client:
+            if plan["family"] == "board_policy":
+                applied: list[str] = []
+                try:
+                    for field, value in plan["changes"].items():
+                        if field == "review_policy":
+                            await client.board_review_policy_set(value)
+                        else:
+                            await client.board_stale_after_set(value)
+                        applied.append(field)
+                except Exception:
+                    rollback["attempted"] = bool(applied)
+                    rollback["succeeded"] = True
+                    for field in reversed(applied):
+                        try:
+                            if field == "review_policy":
+                                await client.board_review_policy_set(
+                                    plan["before"][field]
+                                )
+                            else:
+                                await client.board_stale_after_set(
+                                    plan["before"][field]
+                                )
+                        except Exception:
+                            rollback["succeeded"] = False
+                    raise RuntimeError(
+                        "Managed board policy apply failed; rollback "
+                        + ("succeeded" if rollback["succeeded"] else "failed")
+                    )
+            else:
+                change = plan["change"]
+                if change["operation"] == "add":
+                    await client.board_member_add(
+                        change["principal_id"], change["role"]
+                    )
+                elif change["operation"] == "remove":
+                    await client.board_member_remove(change["principal_id"])
+                else:
+                    await client.board_member_set_role(
+                        change["principal_id"], change["role"]
+                    )
+        read_policy, read_memberships = await self._managed_board_state(board_id)
+        readback = read_policy if plan["family"] == "board_policy" else read_memberships
+        if plan["family"] == "board_policy" and any(
+            readback["values"].get(field) != value
+            for field, value in plan["after"].items()
+        ):
+            raise RuntimeError("Managed board policy read-back did not match the plan")
+        return {
+            "ok": True,
+            "schema": "fleet_managed_config_receipt_v1",
+            "plan_id": plan_id,
+            "family": plan["family"],
+            "board_id": board_id,
+            "apply_mode": "hot-apply",
+            "restart_performed": False,
+            "rollback": rollback,
+            "readback": readback,
         }
 
     async def save_dispatch(self, board_id: str, payload: Any) -> dict[str, Any]:
@@ -9660,6 +9876,39 @@ class DashboardCache:
             self._async_runner.run(self.fetchers[label].fetch_dispatch(board_id)), label
         )
 
+    def get_managed_configuration(
+        self, board_id: str, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            self._async_runner.run(
+                self.fetchers[label].fetch_managed_configuration(board_id)
+            ),
+            label,
+        )
+
+    def plan_managed_configuration(
+        self, request: Any, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            self._async_runner.run(
+                self.fetchers[label].prepare_managed_configuration(request)
+            ),
+            label,
+        )
+
+    def apply_managed_configuration(
+        self, plan_id: Any, digest: Any, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            self._async_runner.run(
+                self.fetchers[label].apply_managed_configuration(plan_id, digest)
+            ),
+            label,
+        )
+
     def save_dispatch(
         self, board_id: str, value: Any, central: str | None = None
     ) -> dict[str, Any]:
@@ -10552,6 +10801,37 @@ def make_handler(
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            if route == "/api/config/managed":
+                try:
+                    board_id = requested_board(self.path)
+                    body = _json_bytes(
+                        cache_call(
+                            "get_managed_configuration", board_id, central=central
+                        )
+                    )
+                except ValueError as exc:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc), "central": label}),
+                    )
+                    return
+                except PermissionError as exc:
+                    self._send(
+                        403,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc), "central": label}),
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - bounded type only.
+                    self._send(
+                        503,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": type(exc).__name__, "central": label}),
+                    )
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
             if route == "/api/butler":
                 try:
                     payload = butlers.view(
@@ -10720,6 +11000,8 @@ def make_handler(
             self._evidence_context = None
             self._evidence_before = None
             config_routes = {
+                "/api/config/managed/plan",
+                "/api/config/managed/apply",
                 "/api/config/plan",
                 "/api/config/suggestions",
                 "/api/config/apply",
@@ -10810,7 +11092,27 @@ def make_handler(
                 raw_request = self.rfile.read(length)
                 self._prepare_evidence("POST", route, raw_request)
                 request = json.loads(raw_request)
-                if route == "/api/config/plan":
+                if route == "/api/config/managed/plan":
+                    body = _json_bytes(
+                        cache_call(
+                            "plan_managed_configuration", request, central=central
+                        )
+                    )
+                elif route == "/api/config/managed/apply":
+                    if not isinstance(request, dict) or set(request) != {
+                        "plan_id",
+                        "digest",
+                    }:
+                        raise ValueError("request must contain only plan_id and digest")
+                    body = _json_bytes(
+                        cache_call(
+                            "apply_managed_configuration",
+                            request["plan_id"],
+                            request["digest"],
+                            central=central,
+                        )
+                    )
+                elif route == "/api/config/plan":
                     body = _json_bytes(seats.plan(request))
                 elif route == "/api/config/suggestions":
                     body = _json_bytes(seats.suggestions(request))
