@@ -154,6 +154,9 @@ absolute `file`, plus its own optional `prefix`. A header may set
 `unlocks`; an absent optional secret omits that header and its tool family from
 probe expectations instead of failing the connector. The legacy declaration
 `secret_ref` with endpoint `secret_header`/`secret_prefix` remains supported.
+The versioned, side-effect-free adapter API, canonical fields, migration rules,
+redaction behavior, and desired/effective comparison are documented in
+[Connector and source configuration contract](../../docs/connector-source-configuration.md).
 
 ```json
 {

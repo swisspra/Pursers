@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import importlib.util
 import re
@@ -26,6 +27,13 @@ MAX_SOURCE_PROJECTS = 2_000
 MAX_RETRY_BACKOFF_S = 7 * 86_400
 PROJECT_HINT_RE = re.compile(r"^[^\x00-\x1f/\\]{1,120}$")
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+_CONFIGURATION_CONTRACT_API = runpy.run_path(
+    str(Path(__file__).with_name("configuration_contract.py"))
+)
+ConfigurationContract = _CONFIGURATION_CONTRACT_API["ConfigurationContract"]
+build_configuration_contract = _CONFIGURATION_CONTRACT_API["build_contract"]
+read_private_configuration = _CONFIGURATION_CONTRACT_API["read_private_json"]
 
 
 def _load_project_lifecycle() -> Any:
@@ -275,6 +283,82 @@ def parse_source_policies(document: Mapping[str, Any]) -> dict[str, IntakeSource
             ),
         )
     return result
+
+
+def inspect_source_onboarding_configuration(
+    document: Mapping[str, Any],
+) -> ConfigurationContract:
+    """Return the public desired/effective onboarding contract.
+
+    Validation is delegated to ``parse_source_policies``.  The method performs no
+    clone, registry, board, branch, or credential operation.
+    """
+    policies = parse_source_policies(document)
+    effective_sources: dict[str, Any] = {}
+    for source_id, policy in policies.items():
+        source: dict[str, Any] = {
+            "domain": policy.domain,
+            "projects_root": str(policy.projects_root),
+            "auto_onboard": policy.auto_onboard,
+            "per_cycle_cap": policy.per_cycle_cap,
+            "retry_limit": policy.retry_limit,
+            "retry_backoff_s": policy.retry_backoff_s,
+            "repositories": {
+                hint: {
+                    "repository_url": resolution.repository_url,
+                    "integration_ref": resolution.integration_ref,
+                }
+                for hint, resolution in policy.repositories.items()
+            },
+            "member_roles": dict(policy.member_roles),
+            "activate_delivery_policy": policy.activate_delivery_policy,
+        }
+        if policy.default_ticket_tier is not None:
+            source["default_ticket_tier"] = policy.default_ticket_tier
+        if policy.discovery is not None:
+            source["discovery"] = copy.deepcopy(dict(policy.discovery))
+        if policy.delivery_workflow is not None:
+            source["delivery_workflow"] = copy.deepcopy(dict(policy.delivery_workflow))
+        if policy.delivery_policy is not None:
+            source["delivery_policy"] = copy.deepcopy(dict(policy.delivery_policy))
+        if policy.delivery_policy_group is not None:
+            source["delivery_policy_group"] = policy.delivery_policy_group
+        effective_sources[source_id] = source
+    return build_configuration_contract(
+        kind="source_onboarding",
+        desired=document,
+        effective={"sources": effective_sources},
+        capabilities={
+            "schema_versions": [1],
+            "domains": ["personal", "work"],
+            "repository_mapping": ["explicit_https"],
+            "discovery_kinds": ["sonar_ado"],
+            "delivery_workflows": ["direct", "integration"],
+            "delivery_policy_modes": ["batch_pr", "branch_only", "per_ticket_pr"],
+            "bounds": {
+                "sources": 100,
+                "repositories_per_source": MAX_SOURCE_PROJECTS,
+                "per_cycle_cap": [1, 100],
+                "retry_limit": [1, 20],
+                "retry_backoff_s": [1, 86_400],
+            },
+        },
+        unsupported=(
+            "automatic_credential_creation",
+            "automatic_connector_enablement",
+            "fuzzy_repository_mapping",
+            "unapproved_external_mutation",
+        ),
+    )
+
+
+def load_source_onboarding_configuration(
+    path: Path, *, root: Path | None = None
+) -> ConfigurationContract:
+    """Read an owned private file and return its side-effect-free contract."""
+    return inspect_source_onboarding_configuration(
+        read_private_configuration(path, root=root)
+    )
 
 
 def safe_project_name(project_hint: str) -> str:
