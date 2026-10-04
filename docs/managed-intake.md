@@ -449,6 +449,15 @@ a new operation ID while making repeated snapshots and controller restarts no-op
 An active lease or unverified service identity remains unhealthy and visible rather
 than being restarted.
 
+If an operator starts a managed service outside the executor, the new process
+reference is intentionally not accepted by observation alone. Send an explicitly
+signed executor `adopt` request for the exact stored generation only after the
+configured adapter verifies the same template identity and Central reports known,
+lease-free state. Adoption advances the generation and records a terminal receipt;
+stale requests, unknown leases, live leases and arbitrary process replacements are
+rejected. This is the supported reconciliation path after a verified manual restart;
+do not edit executor SQLite or delete old operation receipts.
+
 ### Existing macOS Codex fleet cutover
 
 Use the shipped reconciler, signed Fleet Executor and launchd adapter as the one

@@ -728,6 +728,27 @@ class ExecutorStore:
             ).rowcount
         return self.seat(seat_id) if changed == 1 else None
 
+    def adopt_verified_process(
+        self,
+        seat_id: str,
+        *,
+        expected_generation: int,
+        expected_process_ref: str,
+        process_ref: str,
+        now: float,
+    ) -> dict[str, Any] | None:
+        """CAS an explicitly authorized, identity-verified external restart."""
+        if expected_generation < 1 or not expected_process_ref or not process_ref:
+            raise ValueError("process adoption evidence is incomplete")
+        with self.connection:
+            changed = self.connection.execute(
+                "UPDATE seats SET generation = generation + 1, lifecycle = 'ready', "
+                "process_ref = ?, last_mutation = ? WHERE seat_id = ? AND generation = ? "
+                "AND process_ref = ? AND lifecycle IN ('starting','ready','busy','draining','unhealthy')",
+                (process_ref, now, seat_id, expected_generation, expected_process_ref),
+            ).rowcount
+        return self.seat(seat_id) if changed == 1 else None
+
 
 class SystemdUserAdapter:
     """Narrow ``systemctl --user`` adapter with injected runner for tests."""
@@ -1320,7 +1341,7 @@ class FleetExecutor:
             raise PolicyError("message_type_invalid")
         for field in ("operation_id", "board_id", "seat_id", "template_id"):
             _require_id(request.get(field), field)
-        if request.get("action") not in {"inspect", "start", "drain", "stop", "re_role"}:
+        if request.get("action") not in {"inspect", "start", "drain", "stop", "re_role", "adopt"}:
             raise PolicyError("action_invalid")
         if not isinstance(request.get("expected_seat_generation"), int) or isinstance(
             request.get("expected_seat_generation"), bool
@@ -1543,7 +1564,8 @@ class FleetExecutor:
                 raise PolicyError("principal_not_independent")
         observation = self.adapter.inspect(seat_id, template)
         if (
-            seat
+            action != "adopt"
+            and seat
             and observation.running
             and seat["process_ref"]
             and seat["process_ref"] != observation.process_ref
@@ -1559,6 +1581,37 @@ class FleetExecutor:
                 digest,
                 "succeeded",
                 committed=False,
+                process_ref=observation.process_ref,
+            )
+        if action == "adopt":
+            if not seat:
+                raise PolicyError("seat_unknown")
+            if (
+                not observation.exists
+                or not observation.running
+                or not observation.ready
+                or not observation.identity_verified
+                or not observation.process_ref
+                or observation.process_ref == seat.get("process_ref")
+            ):
+                raise PolicyError("process_adoption_unverified")
+            self._check_registry_readiness(board_id, seat_id, template)
+            lease = self.leases.observe(board_id, seat_id)
+            if not lease.known:
+                raise PolicyError("lease_state_unknown")
+            if lease.live:
+                raise PolicyError("live_lease")
+            adopted = self.store.adopt_verified_process(
+                seat_id,
+                expected_generation=generation,
+                expected_process_ref=str(seat.get("process_ref") or ""),
+                process_ref=observation.process_ref,
+                now=now,
+            )
+            if adopted is None:
+                raise PolicyError("seat_generation_mismatch")
+            return self._result(
+                request, digest, "succeeded", committed=True,
                 process_ref=observation.process_ref,
             )
         self._check_cooldown(seat, now)
