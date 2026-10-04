@@ -6,6 +6,13 @@ runtime. `acp_client.py` is a dependency-free asyncio ACP client,
 seat, and `tests/fake_acp_agent.py` is a scriptable subprocess used for
 conformance and in-process Central tests.
 
+`runner_catalog.py` adds a bounded, non-executing view of the official ACP
+Registry plus immutable exact-version selection locks. `runner_preset.py`
+defines portable, secret-free native Codex/Goose and ACP runner presets. Their
+architecture, migration, rollback, and downstream integration boundary are in
+[`docs/design/acp-runner-selection.md`](../../docs/design/acp-runner-selection.md).
+Catalog listing and resolution never install or launch an agent.
+
 ## Protocol baseline
 
 The implementation targets ACP wire protocol **version 1**. The following
