@@ -3035,6 +3035,21 @@ class OrchestratorEngine:
         current_cursor_map = {
             b: self.cursor_map.get(b, since_map.get(b, 0)) for b in target_boards
         }
+        connected = bool(self.subscription_health.get("connected", False))
+        lagging_boards = {
+            board_id: {
+                "requested_cursor": since_map[board_id],
+                "available_cursor": current_cursor_map[board_id],
+            }
+            for board_id in target_boards
+            if current_cursor_map[board_id] < since_map[board_id]
+        }
+        stale_reasons = []
+        if not connected:
+            stale_reasons.append("subscription_disconnected")
+        if lagging_boards:
+            stale_reasons.append("cursor_behind_request")
+        stale = bool(stale_reasons)
         unassignable_tickets = []
         for cache_key, ticket_data in self.ticket_cache.items():
             board_id, separator, ticket_id = cache_key.partition(":")
@@ -3085,6 +3100,10 @@ class OrchestratorEngine:
 
         return {
             "cursor_map": current_cursor_map,
+            "data_status": "stale" if stale else "current",
+            "stale": stale,
+            "stale_reasons": stale_reasons,
+            "lagging_boards": lagging_boards,
             "tickets": tickets,
             "new_tickets": new_tickets,
             "annotations": annotations,
@@ -3092,7 +3111,8 @@ class OrchestratorEngine:
             "unassignable_tickets": unassignable_tickets,
             "human_requests": human_requests,
             "subscription": {
-                "connected": bool(self.subscription_health.get("connected", False)),
+                "connected": connected,
+                "status": "stale" if stale else "current",
                 "last_event_at": self.subscription_health.get("last_event_at"),
                 "reconnects": int(self.subscription_health.get("reconnects", 0)),
             },
@@ -5107,6 +5127,10 @@ def _normalize_wait_for(wait_for: str) -> str:
     return normalized
 
 
+class WaitPolicyError(ToolError):
+    """A safe caller configuration error raised before delivery starts."""
+
+
 def _resolve_wait_for(wait_for: str, role: str | None) -> str:
     selected = _normalize_wait_for(wait_for)
     if selected == WAIT_FOR_AUTO:
@@ -5114,11 +5138,13 @@ def _resolve_wait_for(wait_for: str, role: str | None) -> str:
             return WAIT_FOR_SUBMITTED
         if role == "worker":
             return WAIT_FOR_CLAIMABLE
-        raise ToolError(
+        raise WaitPolicyError(
             "wait_for='auto' is available only to worker or reviewer seats"
         )
     if selected == WAIT_FOR_SUBMITTED and role != "reviewer":
-        raise ToolError("wait_for='submitted' requires board:review authorization")
+        raise WaitPolicyError(
+            "wait_for='submitted' requires board:review authorization"
+        )
     return selected
 
 
@@ -5862,11 +5888,12 @@ async def _a2a_wait_impl(
     # The process-level seat scope is authoritative.  A registry seat must not
     # be narrowed accidentally by a generated prompt or host that serializes
     # the currently known board list.  Re-resolving the sentinel on every call
-    # also picks up projects activated after the seat started.
+    # also picks up projects activated after the seat started.  An omitted
+    # boards argument remains the legacy single-board compatibility path.
     configured_scope = os.environ.get("PURSERS_BOARDS", "").strip().casefold()
-    if configured_scope == "registry":
+    if boards is not None and configured_scope == "registry":
         boards = "registry"
-    elif configured_scope == "home":
+    elif boards is not None and configured_scope == "home":
         boards = [BOARD_ID]
 
     if boards == "registry":
@@ -6065,6 +6092,8 @@ def _wait_failure_class(exc: BaseException) -> tuple[str, list[str]]:
             "board": "central",
         }.get(join_failure.cause_class, "central")
         return cause_class, classes
+    if any(isinstance(item, WaitPolicyError) for item in nested):
+        return "configuration", classes
     detail = " ".join(str(item) for item in nested).casefold()
     if any(
         name in {
@@ -6110,7 +6139,10 @@ def _structured_wait_error(
     board_ids = _wait_error_board_ids(boards, since_seq)
     cursor = _wait_error_cursor(boards, since_seq)
     cause_class, exception_classes = _wait_failure_class(exc)
-    push = WAIT_MODE == "push"
+    policy_error = any(
+        isinstance(item, WaitPolicyError) for item in _nested_exceptions(exc)
+    )
+    push = WAIT_MODE == "push" and not policy_error
     retryable = cause_class not in {
         "authentication",
         "authorization",
@@ -6129,7 +6161,11 @@ def _structured_wait_error(
         "timed_out": False,
         "mode": "error",
         "mode_by_board": {board_id: "error" for board_id in board_ids},
-        "reason": "push_unavailable" if push else "wait_unavailable",
+        "reason": (
+            "wait_configuration"
+            if policy_error
+            else "push_unavailable" if push else "wait_unavailable"
+        ),
         "resynced": (
             {board_id: False for board_id in board_ids}
             if isinstance(cursor, dict)
@@ -6137,10 +6173,19 @@ def _structured_wait_error(
         ),
         "skipped_boards": {},
         "error": {
-            "code": "push_unavailable" if push else "wait_unavailable",
+            "code": (
+                "wait_configuration"
+                if policy_error
+                else "push_unavailable" if push else "wait_unavailable"
+            ),
             "cause_class": cause_class,
             "exception_classes": exception_classes,
             "message": (
+                "a2a_wait configuration is incompatible with the joined seat; "
+                "no caller cursor was advanced. Repair the wait selection, then "
+                "re-arm from new_seq."
+                if policy_error
+                else
                 "a2a_wait could not complete; no caller cursor was advanced. "
                 "Check the wait-bridge/Central transport, then re-arm from new_seq."
             ),
@@ -6240,11 +6285,12 @@ async def a2a_wait(
                 started=started,
             )
             error = result["error"]
-            for board_id in _wait_error_board_ids(boards, since_seq):
-                await report_push_unavailable(
-                    board_id,
-                    f"{error['code']}:{error['cause_class']}",
-                )
+            if error["code"] == "push_unavailable":
+                for board_id in _wait_error_board_ids(boards, since_seq):
+                    await report_push_unavailable(
+                        board_id,
+                        f"{error['code']}:{error['cause_class']}",
+                    )
             _log(
                 "WARNING: a2a_wait returned a structured failure "
                 f"code={error['code']} cause_class={error['cause_class']} "

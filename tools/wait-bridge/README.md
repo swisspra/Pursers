@@ -688,6 +688,12 @@ paths are not returned. Authentication, authorization, and local configuration
 failures are marked non-retryable until the named configuration is repaired.
 This is not a polling fallback or a cursor reset.
 
+A coordinator or orchestrator must select an explicit `wait_for` view. Using
+`wait_for="auto"` with either role now returns `reason=wait_configuration` and
+`cause_class=configuration` without opening a subscription, recording a push
+failure, advancing a cursor, or entering a reconnect loop. Repair the selected
+view or joined seat configuration, then re-arm from the unchanged `new_seq`.
+
 For a per-call identity, the entry snapshot exact-filters
 `claimed_by_agent_id`. This prevents substring matches such as `session-a` and
 `session-a-2` from crossing over. Central authorizes `lease_renew` at principal
@@ -703,6 +709,12 @@ Subscription failures are retained under `push_unavailable` until that seat
 records a healthy push return, so poll fallback is visible outside stderr.
 
 ## Orchestrator digest bounds
+
+Every digest labels its cached view with top-level `data_status` and `stale`,
+plus `subscription.status`. A disconnected subscriber or a requested cursor
+beyond the cache reports the corresponding `stale_reasons`; `lagging_boards`
+shows requested and available cursors. Cached rows may remain available for
+diagnosis, but callers must not treat a `stale` digest as current board state.
 
 `board_digest(..., max_transitions_per_ticket=N)` declares an exact per-ticket
 cap: every returned ticket satisfies `len(ticket["transitions"]) <= N` and

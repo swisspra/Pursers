@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -234,6 +235,94 @@ class A2AWaitValidationTests(unittest.IsolatedAsyncioTestCase):
         rendered = repr(result)
         self.assertNotIn("TOKEN_PLACEHOLDER", rendered)
         self.assertNotIn("/private/host/path", rendered)
+
+    async def test_coordinator_auto_failure_is_configuration_and_rearms_explicitly(
+        self,
+    ) -> None:
+        class Meter:
+            def __init__(self) -> None:
+                self.push_failures: list[tuple[str, str, str | None]] = []
+
+            @asynccontextmanager
+            async def poll_cycle(self):
+                yield
+
+            async def record_push_unavailable(
+                self, board_id: str, agent_name: str, reason: str | None
+            ) -> None:
+                self.push_failures.append((board_id, agent_name, reason))
+
+            async def record_wait_return(self, *_args: object) -> None:
+                return None
+
+        meter = Meter()
+
+        class Client:
+            pass
+
+        client = Client()
+        client.meter = meter
+
+        calls: list[str] = []
+
+        async def resolve_wait(*args: object, **kwargs: object) -> dict[str, object]:
+            selected = str(kwargs.get("wait_for", args[7]))
+            calls.append(selected)
+            wait_server._resolve_wait_for(selected, "orchestrator")
+            return {
+                "new_seq": {"pursers": 48_283},
+                "events": [],
+                "waited_s": 0.0,
+                "timed_out": True,
+                "mode": "push",
+                "mode_by_board": {"pursers": "push"},
+                "reason": "timeout",
+                "resynced": {"pursers": False},
+                "skipped_boards": {},
+            }
+
+        context = SimpleNamespace(
+            request_context=SimpleNamespace(
+                lifespan_context={"client": client}
+            )
+        )
+        with (
+            patch.object(wait_server, "WAIT_MODE", "push"),
+            patch.object(wait_server, "_a2a_wait_impl", resolve_wait),
+        ):
+            failed = await wait_server.a2a_wait(
+                context,
+                since_seq={"pursers": 48_283},
+                timeout_s=1,
+                boards=["pursers"],
+                only_mine=False,
+                wait_for="auto",
+            )
+            rearmed = await wait_server.a2a_wait(
+                context,
+                since_seq=failed["new_seq"],
+                timeout_s=1,
+                boards=["pursers"],
+                only_mine=False,
+                wait_for="claimable",
+            )
+
+        self.assertEqual(calls, ["auto", "claimable"])
+        self.assertEqual(failed["new_seq"], {"pursers": 48_283})
+        self.assertEqual(failed["reason"], "wait_configuration")
+        self.assertEqual(failed["error"]["code"], "wait_configuration")
+        self.assertEqual(failed["error"]["cause_class"], "configuration")
+        self.assertEqual(
+            failed["error"]["exception_classes"], ["WaitPolicyError"]
+        )
+        self.assertFalse(failed["error"]["retryable"])
+        self.assertEqual(
+            failed["error"]["action"],
+            "repair_configuration_then_rearm_from_unchanged_cursor",
+        )
+        self.assertEqual(meter.push_failures, [])
+        self.assertTrue(rearmed["timed_out"])
+        self.assertEqual(rearmed["mode"], "push")
 
 
 if __name__ == "__main__":
