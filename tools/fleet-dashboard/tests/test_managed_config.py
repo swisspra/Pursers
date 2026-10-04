@@ -30,6 +30,7 @@ class ManagedClient:
         self.stale_after_days = 3
         self.members = {PRINCIPAL_A: "admin"}
         self.fail_stale = False
+        self.membership_behavior = "normal"
 
     async def __aenter__(self) -> Self:
         return self
@@ -106,15 +107,29 @@ class ManagedClient:
         return {"ok": True}
 
     async def board_member_add(self, principal_id: str, role: str) -> dict:
-        self.members[principal_id] = role
+        if self.membership_behavior != "noop":
+            self.members[principal_id] = (
+                "member" if self.membership_behavior == "mismatch" else role
+            )
+            if self.membership_behavior == "mismatch":
+                self.membership_behavior = "normal"
         return {"ok": True}
 
     async def board_member_remove(self, principal_id: str) -> dict:
-        del self.members[principal_id]
+        if self.membership_behavior == "mismatch":
+            self.members[principal_id] = "reviewer"
+            self.membership_behavior = "normal"
+        elif self.membership_behavior != "noop":
+            self.members.pop(principal_id, None)
         return {"ok": True}
 
     async def board_member_set_role(self, principal_id: str, role: str) -> dict:
-        self.members[principal_id] = role
+        if self.membership_behavior != "noop":
+            self.members[principal_id] = (
+                "member" if self.membership_behavior == "mismatch" else role
+            )
+            if self.membership_behavior == "mismatch":
+                self.membership_behavior = "normal"
         return {"ok": True}
 
 
@@ -136,17 +151,22 @@ def test_managed_contract_is_typed_and_redacts_references() -> None:
     result = asyncio.run(fetcher.fetch_managed_configuration("pursers"))
 
     assert result["schema"] == "fleet_managed_config_v1"
-    provider = result["families"]["board_butler"]["effective"]["global"][
-        "classification"
-    ]
-    assert provider == {
-        "model": "bounded-model",
-        "endpoint_configured": True,
-        "key_configured": True,
-    }
+    effective = result["families"]["board_butler"]["effective"]
+    provider = effective["classification"]
+    assert provider["model"] == "bounded-model"
+    assert provider["endpoint_configured"] is True
+    assert provider["key_configured"] is True
     encoded = json.dumps(result)
     assert "/PRIVATE/" not in encoded
     assert "private-trace" not in encoded
+    assert effective["mode"] == "shadow"
+    assert effective["provenance"]["mode"] == "global"
+    assert effective["inheritance"]["precedence"] == [
+        "safe_defaults",
+        "global",
+        "project",
+        "board",
+    ]
     assert result["families"]["source_connectors"]["dependency_ticket"] == (
         "TK-dcc6d183eb1e15126e1f"
     )
@@ -240,6 +260,86 @@ def test_membership_plan_apply_uses_exact_principal_and_readback() -> None:
         }
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("operation", "principal_id", "role"),
+    [
+        ("add", PRINCIPAL_B, "reviewer"),
+        ("remove", PRINCIPAL_A, None),
+        ("set_role", PRINCIPAL_A, "reviewer"),
+    ],
+)
+@pytest.mark.parametrize("behavior", ["noop", "mismatch"])
+def test_membership_apply_rejects_bad_readback_and_restores_before_state(
+    operation: str, principal_id: str, role: str | None, behavior: str
+) -> None:
+    client = ManagedClient()
+    fetcher = make_fetcher(client)
+
+    async def scenario() -> None:
+        _policy, members = await fetcher._managed_board_state("pursers")
+        change = {"operation": operation, "principal_id": principal_id}
+        if role is not None:
+            change["role"] = role
+        plan = await fetcher.prepare_managed_configuration(
+            {
+                "board_id": "pursers",
+                "family": "membership",
+                "expected_sha256": members["expected_sha256"],
+                "change": change,
+            }
+        )
+        before = dict(client.members)
+        client.membership_behavior = behavior
+        with pytest.raises(RuntimeError, match="read-back did not match"):
+            await fetcher.apply_managed_configuration(plan["plan_id"], plan["digest"])
+        assert client.members == before
+
+    asyncio.run(scenario())
+
+
+def test_board_butler_effective_policy_resolves_precedence_and_provenance() -> None:
+    client = ManagedClient()
+
+    async def layered_state(key: str | None = None) -> dict:
+        result = await ManagedClient.board_state_get(client, key)
+        if key != "coordinator_config":
+            return result
+        document = json.loads(result["state"]["value"])
+        document["board_butler"]["global"].update(
+            {"mode": "shadow", "ceilings": {"per_hour": 4, "per_ticket": 2}}
+        )
+        document["board_butler"]["projects"] = {
+            "Pursers": {"ceilings": {"per_hour": 6}, "hold_before_post_s": 60}
+        }
+        document["board_butler"]["boards"] = {
+            "pursers": {"mode": "active", "ceilings": {"per_ticket": 3}}
+        }
+        return {"state": {"value": json.dumps(document)}}
+
+    client.board_state_get = layered_state  # type: ignore[method-assign]
+    result = asyncio.run(make_fetcher(client).fetch_managed_configuration("pursers"))
+    effective = result["families"]["board_butler"]["effective"]
+    assert effective["mode"] == "active"
+    assert effective["ceilings"] == {
+        "per_hour": 6,
+        "per_ticket": 3,
+        "per_board": 20,
+    }
+    assert effective["provenance"]["mode"] == "board:pursers"
+    assert effective["provenance"]["ceilings"] == {
+        "per_hour": "project:Pursers",
+        "per_ticket": "board:pursers",
+        "per_board": "safe_defaults",
+    }
+    assert effective["inheritance"]["applied_layers"] == [
+        "safe_defaults",
+        "global",
+        "project:Pursers",
+        "board:pursers",
+    ]
+    assert "Remove an override field" in effective["inheritance"]["reset_semantics"]
 
 
 @pytest.mark.parametrize(

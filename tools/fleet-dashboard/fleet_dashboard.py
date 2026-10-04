@@ -5760,13 +5760,45 @@ class FleetFetcher:
         """Return one stable, secret-safe Settings backend contract."""
         board_policy, memberships = await self._managed_board_state(board_id)
         coordinator = await self.fetch_config()
-        effective = coordinator.get("effective")
         stored = coordinator.get("config")
         board_butler = None
-        if isinstance(effective, dict):
-            board_butler = effective.get("board_butler")
-        if board_butler is None and isinstance(stored, dict):
+        project_name = None
+        default_per_hour = 5
+        if isinstance(stored, dict):
             board_butler = stored.get("board_butler")
+            intake = stored.get("intake")
+            if (
+                isinstance(intake, dict)
+                and type(intake.get("rate_per_hour")) is int
+                and 1 <= intake["rate_per_hour"] <= 100
+            ):
+                default_per_hour = intake["rate_per_hour"]
+        async with self._client(self.config.home_board) as client:
+            registry = await client.board_state_get(key="project_registry")
+        state = registry.get("state") if isinstance(registry, dict) else None
+        raw_registry = state.get("value") if isinstance(state, dict) else None
+        try:
+            registry_document = (
+                json.loads(raw_registry) if isinstance(raw_registry, str) else raw_registry
+            )
+        except json.JSONDecodeError:
+            registry_document = None
+        projects = (
+            registry_document.get("projects")
+            if isinstance(registry_document, dict)
+            else None
+        )
+        if isinstance(projects, dict):
+            matches = [
+                name
+                for name, project in projects.items()
+                if isinstance(name, str)
+                and isinstance(project, dict)
+                and project.get("board_id") == board_id
+                and project.get("status", "active") == "active"
+            ]
+            if len(matches) == 1:
+                project_name = matches[0]
         if board_butler is not None:
             try:
                 board_butler = validate_board_butler_document(board_butler)
@@ -5777,6 +5809,8 @@ class FleetFetcher:
             board_policy=board_policy,
             memberships=memberships,
             board_butler=board_butler,
+            board_butler_project=project_name,
+            board_butler_default_per_hour=default_per_hour,
         )
 
     async def prepare_managed_configuration(self, request: Any) -> dict[str, Any]:
@@ -5816,7 +5850,19 @@ class FleetFetcher:
             }
         else:
             change = validate_membership_change(request["change"])
-            details = {"change": change, "before": memberships["members"]}
+            before = memberships["members"]
+            after_by_principal = {
+                row["principal_id"]: row["role"] for row in before
+            }
+            if change["operation"] in {"add", "set_role"}:
+                after_by_principal[change["principal_id"]] = change["role"]
+            else:
+                after_by_principal.pop(change["principal_id"], None)
+            details = {
+                "change": change,
+                "before": before,
+                "after": after_by_principal,
+            }
         now = self.now_factory()
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
@@ -5925,6 +5971,52 @@ class FleetFetcher:
             for field, value in plan["after"].items()
         ):
             raise RuntimeError("Managed board policy read-back did not match the plan")
+        if plan["family"] == "membership":
+            readback_roles = {
+                row["principal_id"]: row["role"]
+                for row in readback.get("members", [])
+            }
+            before_roles = {
+                row["principal_id"]: row["role"]
+                for row in plan.get("before", [])
+            }
+        if plan["family"] == "membership" and readback_roles != plan["after"]:
+            if readback_roles == before_roles:
+                rollback["succeeded"] = True
+                raise RuntimeError(
+                    "Managed membership read-back did not match the plan; "
+                    "rollback not needed because no change was observed"
+                )
+            rollback["attempted"] = True
+            before_by_principal = {
+                row["principal_id"]: row for row in plan["before"]
+            }
+            prior = before_by_principal.get(plan["change"]["principal_id"])
+            principal_id = plan["change"]["principal_id"]
+            try:
+                async with self._client(board_id) as client:
+                    if prior is None:
+                        await client.board_member_remove(principal_id)
+                    elif principal_id in readback_roles:
+                        await client.board_member_set_role(
+                            prior["principal_id"], prior["role"]
+                        )
+                    else:
+                        await client.board_member_add(
+                            prior["principal_id"], prior["role"]
+                        )
+                _policy, restored = await self._managed_board_state(board_id)
+                restored_roles = {
+                    row["principal_id"]: row["role"]
+                    for row in restored["members"]
+                }
+                rollback["succeeded"] = restored_roles == before_roles
+            except Exception:
+                rollback["succeeded"] = False
+            raise RuntimeError(
+                "Managed membership read-back did not match the plan; rollback "
+                + ("succeeded" if rollback["succeeded"] else "failed")
+            )
         return {
             "ok": True,
             "schema": "fleet_managed_config_receipt_v1",
