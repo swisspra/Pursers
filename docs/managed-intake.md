@@ -462,6 +462,11 @@ template, roster or authorization fingerprint remains
 `operation_id_payload_changed`. Only terminal pre-execution cooldown rejections
 (`failure_backoff_active` and `mutation_cooldown_active`) may reopen; the
 reconciler's existing attempt limit and backoff remain authoritative.
+Executor operation rows written by an older release used a deadline-bound digest.
+They are never reclassified as semantic-digest rows: after upgrade, a renewed
+request for such an operation fails closed as `operation_id_payload_changed`.
+Preserve the row for audit and let a newly observed seat generation produce a new
+operation ID; never rewrite executor SQLite to force replay.
 
 If an operator starts a managed service outside the executor, the new process
 reference is intentionally not accepted by observation alone. Send an explicitly

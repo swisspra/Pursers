@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -888,6 +889,10 @@ def test_terminal_backoff_rejection_retries_same_semantic_operation_once(
     first_request = signed_request(runtime, "start", "op-backoff", now=NOW)
     first = service.handle(first_request)
 
+    changed = signed_request(runtime, "stop", "op-backoff", now=NOW)
+    with pytest.raises(executor.PolicyError, match="operation_id_payload_changed"):
+        service.handle(changed)
+
     now[0] = NOW + 31
     retry_request = signed_request(runtime, "start", "op-backoff", now=now[0])
     retry = service.handle(retry_request)
@@ -898,6 +903,68 @@ def test_terminal_backoff_rejection_retries_same_semantic_operation_once(
     assert retry["outcome"] == "succeeded"
     assert retry["committed"] is True
     assert runtime["adapter"].calls.count(("start", "worker-a")) == 1
+
+
+def test_loaded_legacy_deadline_bound_operation_row_fails_closed(
+    runtime: dict[str, Any],
+) -> None:
+    request = signed_request(runtime, "start", "op-legacy-row")
+    legacy_unsigned = {
+        key: value for key, value in request.items() if key != "caller_auth"
+    }
+    legacy_digest = hashlib.sha256(
+        executor.canonical_json(legacy_unsigned)
+    ).hexdigest()
+    runtime["service"].store.connection.execute(
+        "INSERT INTO operations VALUES (?, ?, 'terminal', ?, ?)",
+        (
+            "op-legacy-row",
+            legacy_digest,
+            json.dumps(
+                {
+                    "operation_id": "op-legacy-row",
+                    "request_digest_sha256": legacy_digest,
+                    "outcome": "rejected",
+                    "committed": False,
+                    "reason_code": "failure_backoff_active",
+                }
+            ),
+            NOW,
+        ),
+    )
+    runtime["service"].store.connection.commit()
+
+    with pytest.raises(executor.PolicyError, match="operation_id_payload_changed"):
+        runtime["service"].handle(request)
+    assert runtime["adapter"].calls.count(("start", "worker-a")) == 0
+
+
+def test_pending_operation_remains_unknown_after_executor_restart(
+    runtime: dict[str, Any],
+) -> None:
+    request = signed_request(runtime, "start", "op-pending-restart")
+    auth = request["caller_auth"]
+    digest = executor.request_digest(request)
+    store_path = runtime["service"].store.connection.execute(
+        "PRAGMA database_list"
+    ).fetchone()[2]
+    runtime["service"].store.reserve(
+        auth["key_id"], auth["nonce"], digest, request["operation_id"], NOW
+    )
+    runtime["service"].store.connection.close()
+    restarted = executor.FleetExecutor(
+        runtime["service"].policy,
+        executor.ExecutorStore(Path(store_path)),
+        runtime["adapter"],
+        runtime["leases"],
+        runtime["readiness"],
+        runtime["publisher"],
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(executor.PolicyError, match="operation_outcome_unknown"):
+        restarted.handle(request)
+    assert runtime["adapter"].calls.count(("start", "worker-a")) == 0
 
 
 def test_nonretryable_rejection_remains_terminal(runtime: dict[str, Any]) -> None:

@@ -1438,7 +1438,7 @@ def test_real_executor_integration_starts_approved_seat(tmp_path: Path) -> None:
 
 
 def _transport_fixture(
-    tmp_path: Path, now: list[datetime], *, failure_backoff_s: int = 5
+    tmp_path: Path, now: list[datetime], *, failure_backoff_s: int = 30
 ) -> SimpleNamespace:
     repository = tmp_path / "repos" / "project"
     seat_root = tmp_path / "seats" / "worker-a"
@@ -1579,7 +1579,7 @@ def test_real_transport_recovers_loss_once_after_backoff_and_restart(
     demand_snapshot = {"pursers": demand(work=1)}
     assert reconciler().plan(snapshot(demand_snapshot, [stopped]), {}).operations == ()
 
-    now[0] = NOW + timedelta(seconds=5)
+    now[0] = NOW + timedelta(seconds=30)
     socket_path = _short_socket_path(tmp_path)
     ready = threading.Event()
     server = threading.Thread(
@@ -1639,7 +1639,7 @@ def test_real_transport_lost_response_replays_after_deadline_renewal(
     tmp_path: Path,
 ) -> None:
     now = [NOW]
-    runtime = _transport_fixture(tmp_path, now, failure_backoff_s=0)
+    runtime = _transport_fixture(tmp_path, now)
     runtime.store.connection.close()
     operation = reconciler().plan(
         snapshot(
@@ -1699,6 +1699,83 @@ def test_real_transport_lost_response_replays_after_deadline_renewal(
 
     assert replay["outcome"] == "succeeded"
     assert replay["replayed"] is True
+    assert runtime.adapter.start_calls == 1
+
+
+def test_real_transport_retries_terminal_backoff_rejection_after_30_seconds(
+    tmp_path: Path,
+) -> None:
+    now = [NOW]
+    runtime = _transport_fixture(tmp_path, now)
+    runtime.store.save_seat(
+        seat_id="worker-a",
+        board_id="pursers",
+        template=runtime.template,
+        identity_id=None,
+        state_id=None,
+        state_dir_id=None,
+        generation=1,
+        lifecycle="stopped",
+        process_ref=None,
+        now=NOW.timestamp(),
+        failed=True,
+    )
+    runtime.store.connection.close()
+    operation = reconciler().plan(
+        snapshot(
+            {"pursers": demand(work=1)},
+            [
+                seat(
+                    "worker-a",
+                    "worker",
+                    template_id=runtime.template.template_id,
+                    template_digest=runtime.template.digest_sha256,
+                )
+            ],
+        ),
+        {},
+    ).operations[0]
+    socket_path = _short_socket_path(tmp_path)
+    ready = threading.Event()
+    server = threading.Thread(
+        target=_serve_executor,
+        args=(
+            socket_path,
+            lambda: fleet_executor.FleetExecutor(
+                runtime.policy,
+                fleet_executor.ExecutorStore(runtime.store_path),
+                runtime.adapter,
+                KnownLease(),
+                ReadyRegistry(),
+                ReceiptSink(),
+                clock=lambda: now[0].timestamp(),
+            ),
+            ready,
+        ),
+        kwargs={"connections": 2},
+        daemon=True,
+    )
+    server.start()
+    assert ready.wait(timeout=5)
+    first = butler.UnixFleetExecutorClient(
+        socket_path,
+        "butler-local",
+        runtime.private_path,
+        clock=lambda: now[0],
+    ).execute(operation)
+    now[0] += timedelta(seconds=30)
+    retry = butler.UnixFleetExecutorClient(
+        socket_path,
+        "butler-local",
+        runtime.private_path,
+        clock=lambda: now[0],
+    ).execute(operation)
+    server.join(timeout=5)
+    socket_path.unlink(missing_ok=True)
+
+    assert first["reason_code"] == "failure_backoff_active"
+    assert first["request_digest_sha256"] == retry["request_digest_sha256"]
+    assert retry["outcome"] == "succeeded"
     assert runtime.adapter.start_calls == 1
 
 
