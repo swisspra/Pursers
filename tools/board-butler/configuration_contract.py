@@ -103,6 +103,8 @@ def _is_sensitive(path: tuple[str, ...], key: str, value: Any) -> bool:
     lowered = key.casefold()
     if key in _PRIVATE_PATH_KEYS:
         return isinstance(value, str)
+    if lowered == "secret_ref" and isinstance(value, str):
+        return Path(value).is_absolute()
     if lowered in _SECRET_VALUE_KEYS or lowered.endswith(("_password", "_token")):
         return True
     if path and path[0] == "secrets":

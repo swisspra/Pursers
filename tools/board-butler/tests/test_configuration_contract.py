@@ -162,6 +162,44 @@ def test_connector_contract_rejects_stale_version_unknown_fields_and_bad_mapping
             default_actor_id="butler",
         )
 
+    for tool_shape in (
+        {
+            "tools": [
+                {
+                    "name": "fetch",
+                    "effect": "read_only",
+                    "replay": "never",
+                    "stable_call_id_field": None,
+                }
+            ],
+            "risky_tools": [],
+            "denied_tools": [],
+        },
+        {
+            "tools_read_only": ["fetch"],
+            "tools_risky_mutating": [],
+            "tools_denied": [],
+        },
+    ):
+        document = connector_document()
+        connector = document["connectors"][0]
+        for key in (
+            "tools_read_only",
+            "tools_risky_mutating",
+            "tools_denied",
+        ):
+            connector.pop(key, None)
+        connector.update(tool_shape)
+        connector["invented_adapter"] = True
+        write_private(path, document)
+        with pytest.raises(butler.ConnectorConfigError, match="unknown keys"):
+            butler.inspect_connector_source_configuration(
+                path,
+                default_board_id="pursers",
+                default_project_id="registry",
+                default_actor_id="butler",
+            )
+
     document = connector_document()
     document["sources"][0]["routing"] = {
         "project_hint_is_registry_key": True,
@@ -201,6 +239,62 @@ def test_contract_compare_reports_secret_change_without_values() -> None:
     ).compare()
     assert added["changes"][0]["effective"] == contract_api.REDACTED
     assert "/private/three" not in json.dumps(added)
+
+
+def test_contract_redacts_absolute_secret_references_in_export_and_compare(
+    tmp_path: Path,
+) -> None:
+    private_ref = str(tmp_path / "legacy-connector.secret")
+    nested_ref = str(tmp_path / "legacy-header.secret")
+    document = connector_document()
+    document["connectors"][0].update(
+        {
+            "transport": "streamable_http",
+            "secret_ref": private_ref,
+        }
+    )
+    document["endpoints"]["endpoint:test"] = {
+        "transport": "streamable_http",
+        "url": "http://127.0.0.1:8123/mcp",
+        "secret_headers": {
+            "Authorization": {"secret_ref": nested_ref, "prefix": "Bearer"}
+        },
+    }
+    path = tmp_path / "connectors.json"
+    write_private(path, document)
+
+    snapshot = butler.inspect_connector_source_configuration(
+        path,
+        default_board_id="pursers",
+        default_project_id="registry",
+        default_actor_id="butler",
+    )
+
+    exported = json.dumps(snapshot.export(), sort_keys=True)
+    compared = json.dumps(snapshot.compare(), sort_keys=True)
+
+    for private_path in (
+        private_ref,
+        nested_ref,
+    ):
+        assert private_path not in exported
+        assert private_path not in compared
+    assert contract_api.REDACTED in exported
+    assert contract_api.REDACTED in compared
+
+
+def test_contract_keeps_opaque_secret_reference_ids() -> None:
+    snapshot = contract_api.build_contract(
+        kind="connector_source",
+        desired={"connectors": [{"secret_ref": "secret:connector"}]},
+        effective={"connectors": [{"secret_ref": "secret:connector"}]},
+        capabilities={},
+    )
+
+    assert (
+        snapshot.export()["desired"]["connectors"][0]["secret_ref"]
+        == "secret:connector"
+    )
 
 
 def test_private_reader_rejects_relative_symlink_and_root_escape(tmp_path: Path) -> None:

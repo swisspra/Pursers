@@ -5497,7 +5497,26 @@ def _runtime_tool_list(
     return tools, list(risky_mutating), list(denied)
 
 
+_RUNTIME_DECLARATION_KEYS = {
+    "connector_id",
+    "enabled",
+    "transport",
+    "protocol_revision",
+    "endpoint_ref",
+    "secret_ref",
+    "tools",
+    "resources",
+    "risky_tools",
+    "denied_tools",
+    "tools_read_only",
+    "tools_risky_mutating",
+    "tools_denied",
+    "limits",
+}
+
+
 def _runtime_declaration(value: Mapping[str, Any]) -> ConnectorDeclaration:
+    _connector_keys(value, _RUNTIME_DECLARATION_KEYS, "connector")
     tools, risky, denied = _runtime_tool_list(value)
     default_limits = {
         "timeout_ms": 30_000,
@@ -5671,7 +5690,13 @@ def load_connector_runtimes(
         if singular is not None:
             declarations = [singular]
         elif "connector_id" in document:
-            declarations = [document]
+            declarations = [
+                {
+                    key: document[key]
+                    for key in _RUNTIME_DECLARATION_KEYS
+                    if key in document
+                }
+            ]
     if not isinstance(declarations, list) or not 1 <= len(declarations) <= 32:
         raise ConnectorConfigError("connector config declarations are invalid")
     endpoints = document.get("endpoints")
