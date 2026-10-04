@@ -997,14 +997,14 @@ for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
     ticket.open = true;
     ticket.querySelector("summary").focus();
     let overflowStyle = document.querySelector("#refresh-overflow-fixture");
-    if (!overflowStyle) {{ overflowStyle=document.createElement("style");overflowStyle.id="refresh-overflow-fixture";overflowStyle.textContent="#detail-view .table-scroll table{{min-width:1800px}}";document.head.appendChild(overflowStyle); }}
-    const scroller = document.querySelector("#detail-view .table-scroll");
+    if (!overflowStyle) {{ overflowStyle=document.createElement("style");overflowStyle.id="refresh-overflow-fixture";overflowStyle.textContent="#detail-view .ticket-focus{{overflow-x:auto}}#detail-view .ticket-focus-head{{min-width:1800px}}";document.head.appendChild(overflowStyle); }}
+    const scroller = document.querySelector("#detail-view .ticket-focus");
     if (scroller) scroller.scrollLeft = 35;
     window.scrollTo(0, Math.min(420, document.documentElement.scrollHeight-innerHeight));
     const beforeY = window.scrollY, beforeX = scroller?.scrollLeft||0;
     for (let index=0;index<3;index+=1) await refreshDetail();
     ticket = document.querySelector('[data-ticket="TK-live"]');
-    const reading = {{route:location.hash,open:ticket.open,focused:document.activeElement===ticket.querySelector("summary"),beforeY,afterY:window.scrollY,beforeX,afterX:document.querySelector("#detail-view .table-scroll")?.scrollLeft||0,revision:detailData.generated_at}};
+    const reading = {{route:location.hash,open:ticket.open,focused:document.activeElement===ticket.querySelector("summary"),beforeY,afterY:window.scrollY,beforeX,afterX:document.querySelector("#detail-view .ticket-focus")?.scrollLeft||0,revision:detailData.generated_at}};
     const draft = document.querySelector("#intake-form textarea");
     draft.value = "unsaved form survives three refreshes";
     draft.dispatchEvent(new Event("input",{{bubbles:true}}));

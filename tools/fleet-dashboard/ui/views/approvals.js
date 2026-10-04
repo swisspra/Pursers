@@ -5,6 +5,7 @@
   let context;
   let selectedKey = '';
   let detailOpen = false;
+  let wasMobile = null;
   const ACTIONABLE_LIMIT = 50;
   const HISTORY_LIMIT = 50;
   const REVIEW_STATUSES = new Set(['submitted', 'reviewing', 'in_review']);
@@ -80,7 +81,9 @@
     const items=typedItems(), actionableAll=items.filter(item=>item.actionable), historyAll=items.filter(item=>!item.actionable), actionable=actionableAll.slice(0,ACTIONABLE_LIMIT), history=historyAll.slice(0,HISTORY_LIMIT);
     if (!items.some(item=>item.key===selectedKey)) selectedKey=actionable[0]?.key||history[0]?.key||'';
     const selected=items.find(item=>item.key===selectedKey), mobile=typeof matchMedia==='function'&&matchMedia('(max-width: 800px)').matches;
-    if (!mobile) detailOpen=true;
+    if (mobile && wasMobile !== true) detailOpen=false;
+    else if (!mobile) detailOpen=true;
+    wasMobile=mobile;
     return `${pageHead('Inbox','Decisions and conversations','Typed sources keep human requests, Butler drafts, intake, and read-only review conversations separate.')}${warmTruthStrip()}${sourceState()}<aside class="approvals-boundary"><strong>Actions stay source-specific.</strong><span>Human answers, Butler marks, intake decisions, and independent review retain their own permissions and handlers.</span></aside><section class="inbox-master-detail${detailOpen?' is-detail-open':''}" data-inbox-mobile-view="${detailOpen?'detail':'list'}"><div class="inbox-list" aria-label="Inbox items"><header><div><h3>Needs action</h3><p>${esc(actionableAll.length)} actionable; history is counted separately.</p></div><span class="status">${esc(actionable.length)} shown</span></header>${actionable.map(itemButton).join('')||'<p class="empty">No connected source is waiting for action.</p>'}${actionableAll.length>actionable.length?`<p class="warning">${esc(actionableAll.length-actionable.length)} actionable item(s) omitted by the bounded list.</p>`:''}<header><div><h3>History and guarded queues</h3><p>Read-only review conversations and intake entry points.</p></div><span class="status">${esc(history.length)} shown</span></header>${history.map(itemButton).join('')||'<p class="empty">No bounded history is available.</p>'}${historyAll.length>history.length?`<p class="warning">${esc(historyAll.length-history.length)} history item(s) omitted independently.</p>`:''}</div><div class="inbox-detail" aria-live="polite"><button type="button" class="button inbox-back" data-inbox-back>← Back to Inbox</button>${selected?`<header><span class="status">${esc(selected.label)}</span><h3>${esc(selected.title)}</h3><p>${esc(selected.meta)}</p></header>${selected.render()}`:'<p class="empty">Select an Inbox item.</p>'}</div></section>${evidenceGroups()}`;
   }
 
