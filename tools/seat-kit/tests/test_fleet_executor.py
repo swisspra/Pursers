@@ -1003,6 +1003,12 @@ def test_stop_requires_known_lease_state_and_refuses_live_lease(runtime: dict[st
     assert live["reason_code"] == "live_lease"
     assert ("stop", "worker-a") not in runtime["adapter"].calls
 
+    runtime["leases"].observation = executor.LeaseObservation(True)
+    released = runtime["service"].handle(signed_request(runtime, "stop", "op-stop-live"))
+    assert released["outcome"] == "succeeded"
+    assert released["request_digest_sha256"] == live["request_digest_sha256"]
+    assert runtime["adapter"].calls.count(("stop", "worker-a")) == 1
+
 
 def test_drain_then_stop_without_live_lease_increments_generation(runtime: dict[str, Any]) -> None:
     runtime["service"].handle(signed_request(runtime, "start", "op-start"))
@@ -1578,7 +1584,10 @@ def test_launchd_adapter_start_stop_start_reuses_loaded_job(tmp_path: Path) -> N
     adapter.stop("worker-a", template)
     stopped = adapter.inspect("worker-a", template)
     adapter.instantiate("worker-a", template)
+    adapter.drain("worker-a", template)
+    assert (tmp_path / "drain" / "worker-a.json").is_file()
     adapter.start("worker-a", template)
+    assert not (tmp_path / "drain" / "worker-a.json").exists()
     second = adapter.inspect("worker-a", template)
 
     assert first.ready and first.identity_verified

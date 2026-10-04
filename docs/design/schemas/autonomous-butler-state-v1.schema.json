@@ -39,12 +39,78 @@
     },
     "executor": {"$ref": "#/$defs/health"},
     "connectors": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/connectorHealth"}},
+    "coverage": {"$ref": "#/$defs/fleetCoverage"},
     "current_command_id": {"$ref": "#/$defs/id"},
     "current_operation_id": {"$ref": "#/$defs/id"}
   },
   "$defs": {
     "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"},
     "count": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "limitReason": {"enum": ["none", "role_cap", "template_pool", "authorization", "headroom", "provider", "cooldown"]},
+    "roleCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker", "reviewer", "acp_worker"],
+      "properties": {
+        "worker": {"$ref": "#/$defs/count"},
+        "reviewer": {"$ref": "#/$defs/count"},
+        "acp_worker": {"$ref": "#/$defs/count"}
+      }
+    },
+    "roleReasons": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["worker", "reviewer", "acp_worker"],
+      "properties": {
+        "worker": {"$ref": "#/$defs/limitReason"},
+        "reviewer": {"$ref": "#/$defs/limitReason"},
+        "acp_worker": {"$ref": "#/$defs/limitReason"}
+      }
+    },
+    "fleetCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "authorized", "source_board_ids", "demand", "effective_limits", "role_limiting_reasons", "limiting_reason"],
+      "properties": {
+        "scope": {"const": "registry_shared"},
+        "authorized": {"type": "boolean"},
+        "source_board_ids": {"type": "array", "minItems": 1, "maxItems": 1000, "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "demand": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["open_by_tier", "review_backlog", "acp_backlog", "expiring_offers", "excluded_parked", "excluded_blocked", "duplicate_rows"],
+          "properties": {
+            "open_by_tier": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["1", "2", "3"],
+              "properties": {"1": {"$ref": "#/$defs/count"}, "2": {"$ref": "#/$defs/count"}, "3": {"$ref": "#/$defs/count"}}
+            },
+            "review_backlog": {"$ref": "#/$defs/count"},
+            "acp_backlog": {"$ref": "#/$defs/count"},
+            "expiring_offers": {"$ref": "#/$defs/count"},
+            "excluded_parked": {"$ref": "#/$defs/count"},
+            "excluded_blocked": {"$ref": "#/$defs/count"},
+            "duplicate_rows": {"$ref": "#/$defs/count"}
+          }
+        },
+        "effective_limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["role_maximums", "board_maximum", "template_pool", "provider_maximums", "host_role_capacity", "host_active"],
+          "properties": {
+            "role_maximums": {"$ref": "#/$defs/roleCounts"},
+            "board_maximum": {"$ref": "#/$defs/count"},
+            "template_pool": {"$ref": "#/$defs/roleCounts"},
+            "provider_maximums": {"type": "object", "maxProperties": 32, "propertyNames": {"$ref": "#/$defs/id"}, "additionalProperties": {"$ref": "#/$defs/count"}},
+            "host_role_capacity": {"$ref": "#/$defs/count"},
+            "host_active": {"$ref": "#/$defs/count"}
+          }
+        },
+        "role_limiting_reasons": {"$ref": "#/$defs/roleReasons"},
+        "limiting_reason": {"$ref": "#/$defs/limitReason"}
+      }
+    },
     "roleState": {
       "type": "object",
       "additionalProperties": false,

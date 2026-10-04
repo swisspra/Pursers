@@ -2785,6 +2785,12 @@ def test_fetcher_consumes_product_config_commands_and_actual_state() -> None:
     assert view["actual_state_available"] is True
     assert view["actual_state"]["schema"] == "autonomous_butler_state_v1"
     assert view["actual_state"]["config_revision"] == 3
+    assert view["actual_state"]["coverage"]["scope"] == "registry_shared"
+    assert view["actual_state"]["coverage"]["authorized"] is True
+    assert view["actual_state"]["coverage"]["limiting_reason"] == "template_pool"
+    assert view["actual_state"]["coverage"]["effective_limits"][
+        "host_role_capacity"
+    ] == 3
     assert view["config"]["desired"]["connectors"][0][
         "secret_configured"
     ] is True
