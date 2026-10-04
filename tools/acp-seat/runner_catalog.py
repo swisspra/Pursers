@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"
@@ -444,7 +444,12 @@ def _is_exact_version(value: Any) -> bool:
 def _validate_binary_cmd(value: Any) -> str:
     cmd = _safe_string(value, "registry_binary_cmd", maximum=512)
     path = PurePosixPath(cmd.replace("\\", "/"))
-    if path.is_absolute() or ".." in path.parts or any(char.isspace() for char in cmd):
+    if (
+        path.is_absolute()
+        or PureWindowsPath(cmd).drive
+        or ".." in path.parts
+        or any(char.isspace() for char in cmd)
+    ):
         raise CatalogError("registry_binary_cmd_unsafe")
     return cmd
 

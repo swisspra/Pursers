@@ -145,6 +145,33 @@ def test_argv_contract_never_parses_shell_and_rejects_unsafe_command(
         )
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "C:/Windows/System32/cmd.exe",
+        r"C:\Windows\System32\cmd.exe",
+        "C:cmd.exe",
+    ],
+)
+def test_registry_refresh_rejects_windows_drive_binary_commands(
+    tmp_path: Path, command: str
+) -> None:
+    with pytest.raises(catalog.CatalogError, match="registry_binary_cmd_unsafe"):
+        catalog.refresh_catalog(
+            tmp_path / "cache", fetch=lambda *_: registry(command=command)
+        )
+
+
+def test_registry_refresh_and_resolve_preserve_relative_binary_command(
+    tmp_path: Path,
+) -> None:
+    view = catalog.refresh_catalog(
+        tmp_path / "cache", fetch=lambda *_: registry(command="bin/demo")
+    )
+    resolved = view.resolve("demo-agent", "2.3.4", "darwin-aarch64", "binary")
+    assert resolved["launch"]["argv"][0] == "bin/demo"
+
+
 def test_selection_lock_is_immutable_and_idempotent(tmp_path: Path) -> None:
     view = catalog.refresh_catalog(tmp_path / "cache", fetch=lambda *_: registry())
     resolved = view.resolve("demo-agent", "2.3.4", "darwin-aarch64", "npx")
@@ -402,6 +429,33 @@ def test_binary_selection_lock_validates_source_integrity_and_launch_consistency
     invalid_launch["launch"]["cwd"] = None
     with pytest.raises(catalog.CatalogError):
         catalog.persist_selection_lock(tmp_path / "launch.json", invalid_launch)
+
+
+@pytest.mark.parametrize("entrypoint", ["persist", "load"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "C:/Windows/System32/cmd.exe",
+        r"C:\Windows\System32\cmd.exe",
+        "C:cmd.exe",
+    ],
+)
+def test_selection_lock_rejects_windows_drive_binary_commands(
+    tmp_path: Path, entrypoint: str, command: str
+) -> None:
+    view = catalog.refresh_catalog(tmp_path / "cache", fetch=lambda *_: registry())
+    resolved = view.resolve("demo-agent", "2.3.4", "darwin-aarch64", "binary")
+    resolved["launch"]["argv"][0] = command
+
+    with pytest.raises(catalog.CatalogError, match="registry_binary_cmd_unsafe"):
+        if entrypoint == "persist":
+            catalog.persist_selection_lock(tmp_path / "selection.json", resolved)
+        else:
+            lock = tmp_path / "selection.json"
+            lock.write_text(
+                json.dumps({"schema": catalog.LOCK_SCHEMA, "resolved": resolved})
+            )
+            catalog.load_selection_lock(lock)
 
 
 def test_legacy_native_preset_roundtrip_preserves_identity_and_profile() -> None:
