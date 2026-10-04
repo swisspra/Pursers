@@ -445,9 +445,10 @@ class CatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(
             request_context=SimpleNamespace(lifespan_context={"client": client})
         )
-        result = await wait_server.a2a_wait(
-            context, since_seq=0, timeout_s=1, only_mine=False
-        )
+        with patch.dict(os.environ, {"PURSERS_BOARDS": "registry"}):
+            result = await wait_server.a2a_wait(
+                context, since_seq=0, timeout_s=1, only_mine=False
+            )
         self.assertEqual(result["new_seq"], 0)
         self.assertEqual(result["events"], [])
         self.assertEqual(result["reason"], "push_unavailable")

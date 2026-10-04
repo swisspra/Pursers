@@ -310,9 +310,10 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
                 lifespan_context={"client": client}
             )
         )
-        result = await wait_server.a2a_wait(
-            context, since_seq=0, only_mine=True
-        )
+        with patch.dict(os.environ, {"PURSERS_BOARDS": "registry"}):
+            result = await wait_server.a2a_wait(
+                context, since_seq=0, only_mine=True
+            )
 
         self.assertEqual(client.join_calls, [])
         self.assertEqual(

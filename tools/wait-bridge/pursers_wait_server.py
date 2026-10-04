@@ -5888,11 +5888,12 @@ async def _a2a_wait_impl(
     # The process-level seat scope is authoritative.  A registry seat must not
     # be narrowed accidentally by a generated prompt or host that serializes
     # the currently known board list.  Re-resolving the sentinel on every call
-    # also picks up projects activated after the seat started.
+    # also picks up projects activated after the seat started.  An omitted
+    # boards argument remains the legacy single-board compatibility path.
     configured_scope = os.environ.get("PURSERS_BOARDS", "").strip().casefold()
-    if configured_scope == "registry":
+    if boards is not None and configured_scope == "registry":
         boards = "registry"
-    elif configured_scope == "home":
+    elif boards is not None and configured_scope == "home":
         boards = [BOARD_ID]
 
     if boards == "registry":
