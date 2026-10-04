@@ -227,9 +227,7 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await prompt, {"stopReason": "cancelled"})
 
     async def test_cancelling_prompt_task_notifies_agent(self) -> None:
-        client = self.client(
-            {"promptActions": [{"type": "wait_for_cancel"}]}
-        )
+        client = self.client({"promptActions": [{"type": "wait_for_cancel"}]})
         await self.initialized(client)
         session_id = await client.new_session(self.root)
         prompt = asyncio.create_task(client.prompt(session_id, "cancel me"))
@@ -258,10 +256,382 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
         client = self.client({})
         await self.initialized(client)
 
-        with self.assertRaisesRegex(
-            acp_client.ACPProtocolError, "did not advertise"
-        ):
+        with self.assertRaisesRegex(acp_client.ACPProtocolError, "did not advertise"):
             await client.load_session("missing", self.root)
+
+    async def test_new_session_preserves_order_groups_and_unknown_metadata(
+        self,
+    ) -> None:
+        options = [
+            {
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "fast",
+                "options": [
+                    {
+                        "group": "recommended",
+                        "name": "Recommended",
+                        "options": [
+                            {"value": "fast", "name": "Fast"},
+                            {"value": "deep", "name": "Deep"},
+                        ],
+                    }
+                ],
+            },
+            {
+                "id": "future",
+                "name": "Future control",
+                "category": "future_category",
+                "type": "range",
+                "currentValue": 3,
+                "futureField": {"preserved": True},
+            },
+        ]
+        client = self.client({"configOptions": options})
+        await self.initialized(client)
+        session_id = await client.new_session(self.root)
+
+        discovered = client.discover_session_config(session_id)
+        self.assertEqual(
+            discovered,
+            {"source": "configOptions", "configOptions": options, "modes": None},
+        )
+        discovered["configOptions"][0]["name"] = "mutated"
+        self.assertEqual(
+            client.discover_session_config(session_id)["configOptions"][0]["name"],
+            "Model",
+        )
+
+    async def test_load_session_preserves_returned_config_options(self) -> None:
+        options = [
+            {
+                "id": "mode",
+                "name": "Mode",
+                "category": "_agent_mode",
+                "type": "select",
+                "currentValue": "plan",
+                "options": [{"value": "plan", "name": "Plan"}],
+            }
+        ]
+        client = self.client({"loadConfigOptions": options}, load_flag=True)
+        await self.initialized(client)
+        await client.load_session("saved-session", self.root)
+
+        self.assertEqual(
+            client.discover_session_config("saved-session"),
+            {"source": "configOptions", "configOptions": options, "modes": None},
+        )
+
+    async def test_set_config_option_validates_grouped_select_and_boolean(self) -> None:
+        initial = [
+            {
+                "id": "model",
+                "name": "Model",
+                "type": "select",
+                "currentValue": "fast",
+                "options": [
+                    {
+                        "group": "models",
+                        "name": "Models",
+                        "options": [
+                            {"value": "fast", "name": "Fast"},
+                            {"value": "deep", "name": "Deep"},
+                        ],
+                    }
+                ],
+            },
+            {
+                "id": "brave",
+                "name": "Brave",
+                "type": "boolean",
+                "currentValue": False,
+            },
+        ]
+        after_model = json.loads(json.dumps(initial))
+        after_model[0]["currentValue"] = "deep"
+        final = json.loads(json.dumps(after_model))
+        final[1]["currentValue"] = True
+        client = self.client(
+            {
+                "requireBooleanCapability": True,
+                "configOptions": initial,
+                "expectedSetConfigRequests": [
+                    {
+                        "sessionId": "config-session",
+                        "configId": "model",
+                        "value": "deep",
+                    },
+                    {
+                        "sessionId": "config-session",
+                        "configId": "brave",
+                        "value": True,
+                        "type": "boolean",
+                    },
+                ],
+                "setConfigResponses": [after_model, final],
+                "sessionId": "config-session",
+            }
+        )
+        await self.initialized(client)
+        session_id = await client.new_session(self.root)
+
+        await client.set_config_option(session_id, "model", "deep")
+        result = await client.set_config_option(session_id, "brave", True)
+        self.assertEqual(result, final)
+        with self.assertRaisesRegex(
+            acp_client.ACPConfigError, "not currently advertised"
+        ):
+            await client.set_config_option(session_id, "model", "missing")
+
+    async def test_apply_preset_refreshes_dependent_options(self) -> None:
+        initial = [
+            {
+                "id": "model",
+                "name": "Model",
+                "category": "model",
+                "type": "select",
+                "currentValue": "small",
+                "options": [
+                    {"value": "small", "name": "Small"},
+                    {"value": "large", "name": "Large"},
+                ],
+            },
+            {
+                "id": "thought",
+                "name": "Thought",
+                "category": "thought_level",
+                "type": "select",
+                "currentValue": "low",
+                "options": [{"value": "low", "name": "Low"}],
+            },
+        ]
+        dependent = json.loads(json.dumps(initial))
+        dependent[0]["currentValue"] = "large"
+        dependent[1]["options"] = [{"value": "high", "name": "High"}]
+        dependent[1]["currentValue"] = "high"
+        client = self.client(
+            {
+                "sessionId": "dependent",
+                "configOptions": initial,
+                "setConfigResponses": [dependent, dependent],
+                "expectedSetConfigRequests": [
+                    {
+                        "sessionId": "dependent",
+                        "configId": "model",
+                        "value": "large",
+                    },
+                    {
+                        "sessionId": "dependent",
+                        "configId": "thought",
+                        "value": "high",
+                    },
+                ],
+            }
+        )
+        await self.initialized(client)
+        session_id = await client.new_session(self.root)
+
+        result = await client.apply_config_preset(
+            session_id, {"thought": "high", "model": "large"}
+        )
+        self.assertEqual(
+            result,
+            {"source": "configOptions", "configOptions": dependent, "modes": None},
+        )
+
+    async def test_preset_mismatch_is_actionable_for_missing_and_unknown_types(
+        self,
+    ) -> None:
+        options = [
+            {
+                "id": "future",
+                "name": "Future",
+                "type": "range",
+                "currentValue": 1,
+            }
+        ]
+        client = self.client({"configOptions": options})
+        await self.initialized(client)
+        session_id = await client.new_session(self.root)
+
+        with self.assertRaisesRegex(
+            acp_client.ACPConfigError, "option ID is not advertised"
+        ):
+            await client.apply_config_preset(session_id, {"missing": "value"})
+        with self.assertRaisesRegex(
+            acp_client.ACPConfigError, "unsupported option type 'range'"
+        ):
+            await client.apply_config_preset(session_id, {"future": "2"})
+
+    async def test_set_config_does_not_pretend_stale_response_applied(self) -> None:
+        option = {
+            "id": "model",
+            "name": "Model",
+            "type": "select",
+            "currentValue": "one",
+            "options": [
+                {"value": "one", "name": "One"},
+                {"value": "two", "name": "Two"},
+            ],
+        }
+        client = self.client(
+            {"configOptions": [option], "setConfigResponses": [[option]]}
+        )
+        await self.initialized(client)
+        session_id = await client.new_session(self.root)
+
+        with self.assertRaisesRegex(
+            acp_client.ACPConfigMismatch, "did not report the requested value"
+        ):
+            await client.set_config_option(session_id, "model", "two")
+        self.assertEqual(
+            client.discover_session_config(session_id)["configOptions"][0][
+                "currentValue"
+            ],
+            "one",
+        )
+
+    async def test_config_update_notification_replaces_complete_state(self) -> None:
+        initial = [
+            {
+                "id": "model",
+                "name": "Model",
+                "type": "select",
+                "currentValue": "one",
+                "options": [{"value": "one", "name": "One"}],
+            }
+        ]
+        replacement = [
+            {
+                "id": "mode",
+                "name": "Mode",
+                "category": "new_category",
+                "type": "select",
+                "currentValue": "code",
+                "options": [{"value": "code", "name": "Code"}],
+            }
+        ]
+        client = self.client(
+            {
+                "configOptions": initial,
+                "promptActions": [
+                    {
+                        "type": "update",
+                        "update": {
+                            "sessionUpdate": "config_option_update",
+                            "configOptions": replacement,
+                        },
+                    }
+                ],
+            }
+        )
+        await self.initialized(client)
+        session_id = await client.new_session(self.root)
+        await client.prompt(session_id, "refresh")
+        await client.next_update(timeout=1)
+
+        self.assertEqual(
+            client.discover_session_config(session_id)["configOptions"], replacement
+        )
+
+    async def test_legacy_modes_are_used_only_without_config_options(self) -> None:
+        modes = {
+            "currentModeId": "ask",
+            "availableModes": [
+                {"id": "ask", "name": "Ask"},
+                {"id": "code", "name": "Code"},
+            ],
+        }
+        client = self.client({"modes": modes})
+        await self.initialized(client)
+        session_id = await client.new_session(self.root)
+
+        discovered = client.discover_session_config(session_id)
+        self.assertEqual(
+            discovered,
+            {
+                "source": "modes",
+                "configOptions": [client._legacy_mode_option(modes)],
+                "modes": modes,
+            },
+        )
+        result = await client.apply_config_preset(session_id, {"mode": "code"})
+        updated_modes = json.loads(json.dumps(modes))
+        updated_modes["currentModeId"] = "code"
+        self.assertEqual(
+            result,
+            {
+                "source": "modes",
+                "configOptions": [client._legacy_mode_option(updated_modes)],
+                "modes": updated_modes,
+            },
+        )
+
+        preferred = self.client({"modes": modes, "configOptions": []})
+        await self.initialized(preferred)
+        preferred_id = await preferred.new_session(self.root)
+        self.assertEqual(
+            preferred.discover_session_config(preferred_id),
+            {"source": "configOptions", "configOptions": [], "modes": modes},
+        )
+
+    async def test_no_options_agent_accepts_empty_preset_and_rejects_saved_value(
+        self,
+    ) -> None:
+        client = self.client({})
+        await self.initialized(client)
+        session_id = await client.new_session(self.root)
+
+        self.assertEqual(
+            await client.apply_config_preset(session_id, {}),
+            {"source": "none", "configOptions": [], "modes": None},
+        )
+        with self.assertRaisesRegex(
+            acp_client.ACPConfigError, "no session configuration"
+        ):
+            await client.apply_config_preset(session_id, {"model": "saved"})
+
+    async def test_set_config_timeout_cancel_and_disconnect(self) -> None:
+        option = {
+            "id": "model",
+            "name": "Model",
+            "type": "select",
+            "currentValue": "one",
+            "options": [
+                {"value": "one", "name": "One"},
+                {"value": "two", "name": "Two"},
+            ],
+        }
+        slow = self.client({"configOptions": [option], "setConfigDelays": [0.15]})
+        await self.initialized(slow)
+        slow_id = await slow.new_session(self.root)
+        with self.assertRaises(acp_client.ACPTimeoutError):
+            await slow.set_config_option(slow_id, "model", "two", timeout=0.02)
+        await asyncio.sleep(0.2)
+        self.assertIsNone(slow.process.returncode)
+
+        cancelled = self.client({"configOptions": [option], "setConfigDelays": [0.15]})
+        await self.initialized(cancelled)
+        cancelled_id = await cancelled.new_session(self.root)
+        task = asyncio.create_task(
+            cancelled.set_config_option(cancelled_id, "model", "two")
+        )
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.2)
+        self.assertIsNone(cancelled.process.returncode)
+
+        disconnected = self.client(
+            {"configOptions": [option], "disconnectOnSetConfig": True}
+        )
+        await self.initialized(disconnected)
+        disconnected_id = await disconnected.new_session(self.root)
+        with self.assertRaises(acp_client.ACPProcessError):
+            await disconnected.set_config_option(disconnected_id, "model", "two")
 
     async def test_new_session_rejects_relative_cwd(self) -> None:
         client = self.client({})
@@ -292,9 +662,7 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
             await client.initialize(protocol_version=1)
 
     async def test_prompt_timeout_ignores_late_response(self) -> None:
-        client = self.client(
-            {"promptActions": [{"type": "sleep", "seconds": 0.15}]}
-        )
+        client = self.client({"promptActions": [{"type": "sleep", "seconds": 0.15}]})
         await self.initialized(client)
         session_id = await client.new_session(self.root)
 
@@ -305,11 +673,7 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_agent_crash_fails_pending_prompt(self) -> None:
         client = self.client(
-            {
-                "promptActions": [
-                    {"type": "crash", "code": 23, "stderr": "crash-marker"}
-                ]
-            }
+            {"promptActions": [{"type": "crash", "code": 23, "stderr": "crash-marker"}]}
         )
         await self.initialized(client)
         session_id = await client.new_session(self.root)
@@ -318,9 +682,7 @@ class ACPClientTests(unittest.IsolatedAsyncioTestCase):
             await client.prompt(session_id, "crash")
 
     async def test_malformed_agent_output_is_protocol_error(self) -> None:
-        client = self.client(
-            {"promptActions": [{"type": "raw", "text": "{not-json"}]}
-        )
+        client = self.client({"promptActions": [{"type": "raw", "text": "{not-json"}]})
         await self.initialized(client)
         session_id = await client.new_session(self.root)
 
