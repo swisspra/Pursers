@@ -1010,6 +1010,73 @@ def test_verify_leak_rules_allow_documented_synthetic_fixtures(tmp_path: Path) -
     assert generated._leak_rule_names(fixtures) == []
 
 
+def test_verify_diff_leak_scan_ignores_unchanged_api_key_context(
+    tmp_path: Path,
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_diff_context",
+    )
+    diff = "\n".join(
+        [
+            "diff --git a/app.js b/app.js",
+            "--- a/app.js",
+            "+++ b/app.js",
+            "@@ -1,3 +1,3 @@",
+            " const payload={api_key:form.elements.api_key.value};",
+            "-function fleetViewContext(){return oldContext}",
+            "+function fleetViewContext(){return newContext}",
+            "+status.textContent='API key is configured by the operator';",
+        ]
+    )
+
+    rules, _marker_count = generated._leak_scan_diff(diff)
+
+    assert "api-key" not in rules
+
+
+def test_verify_leak_scan_distinguishes_property_reference_from_secret(
+    tmp_path: Path,
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_api_key_reference",
+    )
+
+    assert generated._leak_rule_names(
+        "const payload={api_key:form.elements.api_key.value};"
+    ) == []
+    assert "api-key" in generated._leak_rule_names(
+        "const payload={api_key:'" + "Z" * 24 + "'};"
+    )
+    assert "api-key" in generated._leak_rule_names(
+        "const payload={api_key:abc.def.ghi.jkl};"
+    )
+
+
+@pytest.mark.parametrize("prefix", ["+", "-"])
+def test_verify_diff_leak_scan_checks_added_and_deleted_secret_values(
+    tmp_path: Path, prefix: str
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_diff_secret_" + ("added" if prefix == "+" else "deleted"),
+    )
+    diff = "\n".join(
+        [
+            "diff --git a/config.txt b/config.txt",
+            "--- a/config.txt",
+            "+++ b/config.txt",
+            "@@ -1 +1 @@",
+            prefix + "OPENAI_API_KEY=" + "Z" * 24,
+        ]
+    )
+
+    rules, _marker_count = generated._leak_scan_diff(diff)
+
+    assert "api-key" in rules
+
+
 def test_verify_leak_rules_ignore_jwt_vocabulary_and_fake_fixture(
     tmp_path: Path,
 ) -> None:

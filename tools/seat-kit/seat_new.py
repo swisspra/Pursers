@@ -44,6 +44,8 @@ Before approval:
 
 Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
 
+The verifier scans added and deleted unified-diff hunk lines, including changes from every commit between the integration merge-base and the submitted SHA. It does not scan unchanged context or diff metadata. Deleted lines remain in scope because a credential exposed by review output is still a leak.
+
 Approval notes must contain a full 40-hex SHA, an unambiguously successful pytest `N passed` tail or paired unittest `Ran N tests` plus `OK` tail, or a complete Jest/Vitest suite-and-test summary (positive passing counts equal totals), `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
 
 Rejecting is normal and cheap; a wrong approval is expensive."""
@@ -157,6 +159,12 @@ SECRET_VALUE_PATTERN = (
     rf"(?!(?:{SYNTHETIC_VALUE_RE})(?![A-Za-z0-9._~+/=-]))"
     r"[A-Za-z0-9._~+/=-]{12,}"
 )
+API_KEY_PATTERN = re.compile(
+    rf"(?i)\b(?:[A-Z0-9]+[_-])*"
+    rf"(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|client[_-]?secret)"
+    rf"\s*[:=]\s*"
+    rf"(?P<quote>[\"']?)(?P<value>{SECRET_VALUE_PATTERN})"
+)
 LEAK_PATTERNS = {
     "home-directory-path": re.compile(
         r"(?i)(?:"
@@ -168,12 +176,7 @@ LEAK_PATTERNS = {
         rf"(?i)(?<![A-Za-z0-9._-])(?:authorization[ \t]*:[ \t]*)?"
         rf"bearer[ \t]+{SECRET_VALUE_PATTERN}"
     ),
-    "api-key": re.compile(
-        rf"(?i)\b(?:[A-Z0-9]+[_-])*"
-        rf"(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|client[_-]?secret)"
-        rf"\s*[:=]\s*"
-        rf"[\"']?{SECRET_VALUE_PATTERN}"
-    ),
+    "api-key": API_KEY_PATTERN,
     "private-key": re.compile(
         rf"-----BEGIN (?!(?:SYNTHETIC|EXAMPLE|SAMPLE|DUMMY)\b)"
         rf"(?:[A-Z0-9 ]+ )?{PRIVATE_KEY_MARKER}-----"
@@ -183,6 +186,10 @@ LEAK_PATTERNS = {
         r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"
     ),
 }
+SYMBOLIC_PROPERTY_RE = re.compile(
+    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+\."
+    r"(?:value|api_key|apiKey|access_key|accessKey|client_secret|clientSecret)"
+)
 
 
 def _load_stored_door_environment() -> None:
@@ -321,8 +328,14 @@ def _leak_scan(text: str) -> tuple[list[str], int]:
     rules = [
         name
         for name, pattern in LEAK_PATTERNS.items()
-        if name != "jwt" and pattern.search(text)
+        if name not in {"api-key", "jwt"} and pattern.search(text)
     ]
+    if any(
+        match.group("quote")
+        or not SYMBOLIC_PROPERTY_RE.fullmatch(match.group("value"))
+        for match in API_KEY_PATTERN.finditer(text)
+    ):
+        rules.append("api-key")
     for match in LEAK_PATTERNS["jwt"].finditer(text):
         encoded_header = match.group(0).split(".", 1)[0]
         try:
@@ -339,6 +352,24 @@ def _leak_scan(text: str) -> tuple[list[str], int]:
     if any(pattern.search(text) for pattern in operator_patterns):
         rules.append("operator-marker")
     return sorted(set(rules)), len(operator_patterns)
+
+
+def _changed_diff_text(diff: str) -> str:
+    """Return added and deleted hunk content, excluding context and metadata."""
+    changed: list[str] = []
+    in_hunk = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            in_hunk = False
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and line.startswith(("+", "-")):
+            changed.append(line[1:])
+    return "\n".join(changed)
+
+
+def _leak_scan_diff(diff: str) -> tuple[list[str], int]:
+    return _leak_scan(_changed_diff_text(diff))
 
 
 def _leak_rule_names(text: str) -> list[str]:
@@ -834,7 +865,7 @@ def _verify_ticket(
         if remote.startswith("origin/") and remote != expected_remote
     )
     diff = _git(repo, "diff", "--no-ext-diff", "--no-renames", base, sha).stdout
-    leak_rules, marker_count = _leak_scan(diff)
+    leak_rules, marker_count = _leak_scan_diff(diff)
     leak_line = "leak-scan: clean" if not leak_rules else f"leak-scan: {len(leak_rules)} matches"
     print(f"verified-sha: {sha}")
     print(f"submitted-branch: {branch}")
