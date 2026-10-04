@@ -1052,6 +1052,9 @@ def test_verify_leak_scan_distinguishes_property_reference_from_secret(
     assert "api-key" in generated._leak_rule_names(
         "const payload={api_key:abc.def.ghi.jkl};"
     )
+    assert "api-key" in generated._leak_rule_names(
+        "const payload={api_key:abc.def.ghi.value};"
+    )
 
 
 @pytest.mark.parametrize("prefix", ["+", "-"])

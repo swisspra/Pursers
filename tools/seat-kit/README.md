@@ -155,7 +155,8 @@ scope when their content survives in the submitted tree. It skips unchanged
 context and diff metadata; deleted lines remain covered because review output
 can itself expose a credential. Generic rules cover JWTs, bearer tokens,
 private-key headers, API-key shapes, and macOS/Linux/Windows home-directory
-paths. Operator-specific regexes are loaded one per line from
+paths. The API-key rule recognizes unquoted DOM form-element accessors as code,
+while other unquoted dotted values remain fail-closed. Operator-specific regexes are loaded one per line from
 `~/.pursers/leak-markers.txt`; set
 `PURSERS_LEAK_MARKERS_FILE` to override the path. `verify` and `approve` print
 only the loaded marker count, never the regexes. An empty marker file is a WARN

@@ -187,8 +187,8 @@ LEAK_PATTERNS = {
     ),
 }
 SYMBOLIC_PROPERTY_RE = re.compile(
-    r"[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+\."
-    r"(?:value|api_key|apiKey|access_key|accessKey|client_secret|clientSecret)"
+    r"[A-Za-z_$][A-Za-z0-9_$]*\.elements\."
+    r"(?:api_key|apiKey|access_key|accessKey|client_secret|clientSecret)\.value"
 )
 
 
