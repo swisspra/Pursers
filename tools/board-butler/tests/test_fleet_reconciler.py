@@ -113,6 +113,7 @@ def seat(
     template_id: str | None = None,
     template_digest: str = DIGEST,
     managed: bool = True,
+    reason_code: str | None = None,
 ) -> Any:
     return butler.FleetSeat(
         seat_id=seat_id,
@@ -129,6 +130,7 @@ def seat(
         transition_at=transition_at or NOW - timedelta(minutes=10),
         managed=managed,
         last_failure_at=last_failure_at,
+        reason_code=reason_code,
     )
 
 
@@ -156,12 +158,14 @@ def reconciler(
     host_cap: int = 8,
     config_revision: int = 7,
     fingerprint: str = FINGERPRINT,
+    max_operation_attempts: int = 3,
 ) -> Any:
     return butler.FleetReconciler(
         butler.FleetHostPolicy(host_cap, 2, host_cap + 2),
         dict(policies or {"pursers": board_policy()}),
         config_revision=config_revision,
         authorization_fingerprint_sha256=fingerprint,
+        max_operation_attempts=max_operation_attempts,
     )
 
 
@@ -494,7 +498,8 @@ def test_product_snapshot_selector_consumes_real_board_shaped_state() -> None:
         NOW,
     )
 
-    assert selected.demands["pursers"].work_pressure == 6
+    assert selected.demands["pursers"].work_pressure == 5
+    assert selected.demands["pursers"].expiring_offers == 1
     assert selected.demands["pursers"].review_backlog == 1
     assert selected.seats[0].live_lease is True
     assert selected.seats[0].ready is True
@@ -689,6 +694,26 @@ def test_live_lease_is_never_drained_or_stopped_when_demand_drops_to_zero() -> N
     plan = reconciler().plan(snapshot({"pursers": demand()}, [holder]), {})
 
     assert plan.desired["pursers"]["worker"] == 1
+    assert plan.operations == ()
+
+
+def test_exhausted_live_lease_stop_gets_only_one_release_recovery() -> None:
+    engine = reconciler(max_operation_attempts=1)
+    draining = seat("worker-a", "worker", lifecycle="draining")
+    operation = engine._operation(draining, "stop")
+    prior = {
+        "boards": {"pursers": {"desired": {
+            "worker": 0, "reviewer": 0, "acp_worker": 0},
+            "role_idle_since": {role: (NOW - timedelta(minutes=5)).isoformat()
+                for role in butler.FLEET_ROLES}}},
+        "operations": {operation.operation_id: {
+            "operation_id": operation.operation_id, "board_id": "pursers",
+            "action": "stop", "seat_id": "worker-a", "status": "terminal",
+            "attempts": 2, "outcome": "rejected", "committed": False,
+            "reason_code": "live_lease", "lease_release_retries": 1,
+            "last_attempt_at": (NOW - timedelta(minutes=1)).isoformat()}},
+    }
+    plan = engine.plan(snapshot({"pursers": demand()}, [draining]), prior)
     assert plan.operations == ()
 
 
@@ -1290,6 +1315,7 @@ class FakeServiceAdapter:
     def __init__(self) -> None:
         self.observation = fleet_executor.ServiceObservation(False, False, False, True)
         self.start_calls = 0
+        self.stop_calls = 0
 
     def inspect(self, seat_id: str, template: Any) -> Any:
         return self.observation
@@ -1307,6 +1333,7 @@ class FakeServiceAdapter:
         pass
 
     def stop(self, seat_id: str, template: Any) -> None:
+        self.stop_calls += 1
         self.observation = fleet_executor.ServiceObservation(True, False, False, True)
 
 
@@ -1777,6 +1804,79 @@ def test_real_transport_retries_terminal_backoff_rejection_after_30_seconds(
     assert first["request_digest_sha256"] == retry["request_digest_sha256"]
     assert retry["outcome"] == "succeeded"
     assert runtime.adapter.start_calls == 1
+
+
+def test_signed_drain_recovers_once_after_live_lease_releases(tmp_path: Path) -> None:
+    now = [NOW]
+    runtime = _transport_fixture(tmp_path, now, failure_backoff_s=0)
+    runtime.adapter.observation = fleet_executor.ServiceObservation(
+        True, True, True, True, "fake:worker-a:1"
+    )
+    runtime.store.save_seat(
+        seat_id="worker-a", board_id="pursers", template=runtime.template,
+        identity_id=None, state_id=None, state_dir_id=None, generation=1,
+        lifecycle="ready", process_ref="fake:worker-a:1", now=NOW.timestamp(),
+    )
+    runtime.store.connection.close()
+
+    class ToggleLease:
+        live = True
+        def observe(self, _board_id: str, _seat_id: str) -> Any:
+            return fleet_executor.LeaseObservation(True, live_work=self.live)
+
+    leases = ToggleLease()
+    socket_path = _short_socket_path(tmp_path)
+    ready = threading.Event()
+    server = threading.Thread(
+        target=_serve_executor,
+        args=(socket_path, lambda: fleet_executor.FleetExecutor(
+            runtime.policy, fleet_executor.ExecutorStore(runtime.store_path),
+            runtime.adapter, leases, ReadyRegistry(), ReceiptSink(),
+            clock=lambda: now[0].timestamp()), ready),
+        kwargs={"connections": 3}, daemon=True,
+    )
+    server.start();assert ready.wait(timeout=5)
+    state = butler.FileFleetStateStore((tmp_path / "fleet-state.json").resolve())
+    engine = reconciler(max_operation_attempts=1)
+    client = butler.UnixFleetExecutorClient(
+        socket_path, "butler-local", runtime.private_path, clock=lambda: now[0]
+    )
+    ready_seat = seat("worker-a", "worker", lifecycle="ready",
+        template_id=runtime.template.template_id,
+        template_digest=runtime.template.digest_sha256)
+    engine.reconcile(snapshot({"pursers": demand()}, [ready_seat]), state, client)
+
+    now[0] += timedelta(seconds=61)
+    drained = engine.reconcile(
+        snapshot({"pursers": demand()}, [ready_seat], now=now[0]), state, client)
+    assert drained["receipts"][0]["outcome"] == "succeeded"
+    draining_seat = seat("worker-a", "worker", lifecycle="draining",
+        template_id=runtime.template.template_id,
+        template_digest=runtime.template.digest_sha256)
+
+    now[0] += timedelta(seconds=6)
+    rejected = engine.reconcile(
+        snapshot({"pursers": demand()}, [draining_seat], now=now[0]), state, client)
+    assert rejected["receipts"][0]["reason_code"] == "live_lease"
+    leases.live = False
+    now[0] += timedelta(seconds=6)
+    stopped = engine.reconcile(
+        snapshot({"pursers": demand()}, [draining_seat], now=now[0]), state, client)
+    assert stopped["receipts"][0]["outcome"] == "succeeded"
+    assert stopped["receipts"][0]["committed"] is True
+
+    now[0] += timedelta(seconds=1)
+    repeated = reconciler(max_operation_attempts=1).reconcile(
+        snapshot({"pursers": demand()}, [draining_seat], now=now[0]),
+        butler.FileFleetStateStore(state.path), client,
+    )
+    server.join(timeout=5);socket_path.unlink(missing_ok=True)
+    assert repeated["operations"] == []
+    assert runtime.adapter.stop_calls == 1
+    _revision, durable = state.load()
+    stop_rows = [row for row in durable["operations"].values()
+        if row["action"] == "stop"]
+    assert stop_rows[0]["lease_release_retries"] == 1
 
 
 def test_production_fleet_cycle_reads_products_executes_and_publishes(
@@ -2287,6 +2387,88 @@ def test_registry_fleet_demand_includes_projects_without_double_counting():
     snapshots['project']['coordination_tickets_complete'] = False
     with pytest.raises(ValueError, match='incomplete'):
         butler.registry_fleet_snapshots(snapshots, ['home', 'separate'], 'home')
+
+
+def test_shared_registry_pool_counts_only_runnable_unique_work_across_three_boards():
+    snapshots = {
+        'home': {'agents': [], 'tickets': [
+            {'ticket_id': 'TK-home', 'status': 'open', 'tier': 1, 'tags': []},
+        ]},
+        'project-a': {'agents': [], 'tickets': [
+            {'ticket_id': 'TK-parked', 'status': 'open', 'tier': 3, 'tags': [], 'parked': True},
+            {'ticket_id': 'TK-a', 'status': 'open', 'tier': 2, 'tags': []},
+            {'ticket_id': 'TK-a', 'status': 'open', 'tier': 2, 'tags': []},
+        ]},
+        'project-b': {'agents': [], 'tickets': [
+            {'ticket_id': 'TK-b', 'status': 'submitted', 'tier': 1, 'tags': []},
+            {'ticket_id': 'TK-blocked', 'status': 'needs_human', 'tier': 3, 'tags': []},
+            {'ticket_id': 'TK-resolved', 'status': 'open', 'tier': 1, 'tags': [],
+             'human_request': {'resolution': {'action': 'accept'}}},
+        ]},
+    }
+    selected = butler.registry_fleet_snapshots(snapshots, ['home'], 'home')
+    product = butler.fleet_snapshot_from_products(
+        selected,
+        [],
+        {'home': {'direct': {'status': 'healthy', 'latency_ms': 1}}},
+        {'load_ratio': 0.1, 'capacity_available': True, 'executor_status': 'healthy'},
+        NOW,
+    )
+    demand = product.demands['home']
+    assert demand.source_board_ids == ('home', 'project-a', 'project-b')
+    assert demand.open_by_tier == {1: 2, 2: 1, 3: 0}
+    assert demand.review_backlog == 1
+    assert demand.excluded_parked == 1
+    assert demand.excluded_blocked == 1
+    assert demand.duplicate_rows == 1
+    engine = reconciler({'home': board_policy('home')})
+    plan = engine.plan(
+        snapshot(product.demands, [seat('worker-a', 'worker', board_id='home')]),
+        {},
+    )
+    assert [(item.action, item.seat_id) for item in plan.operations] == [
+        ('start', 'worker-a')
+    ]
+
+
+def test_state_exposes_effective_limits_and_capacity_reason():
+    policy = board_policy(maximum=3)
+    policy = replace(policy, roles={
+        **policy.roles,
+        'worker': butler.FleetRolePolicy(0, 1, 1, 1),
+    })
+    engine = reconciler({'pursers': policy}, host_cap=3)
+    current = snapshot(
+        {'pursers': replace(demand(work=4), source_board_ids=('pursers', 'project-a'))},
+        [seat('worker-a', 'worker'), seat('reviewer-a', 'reviewer')],
+    )
+    plan = engine.plan(current, {})
+    state = engine.desired_state_document('pursers', current, plan)
+    coverage = state['coverage']
+    assert coverage['source_board_ids'] == ['pursers', 'project-a']
+    assert coverage['effective_limits']['role_maximums']['worker'] == 1
+    assert coverage['effective_limits']['template_pool']['worker'] == 1
+    assert coverage['role_limiting_reasons']['worker'] == 'role_cap'
+    assert coverage['limiting_reason'] == 'role_cap'
+
+
+def test_state_reports_unverified_registry_authorization_instead_of_provider():
+    engine = reconciler()
+    current = snapshot(
+        {'pursers': demand(work=1)},
+        [seat(
+            'worker-a',
+            'worker',
+            lifecycle='unhealthy',
+            reason_code='registry_authorization_unverified',
+        )],
+    )
+    plan = engine.plan(current, {})
+    coverage = engine.desired_state_document('pursers', current, plan)['coverage']
+    assert plan.operations == ()
+    assert coverage['authorized'] is False
+    assert coverage['role_limiting_reasons']['worker'] == 'authorization'
+    assert coverage['limiting_reason'] == 'authorization'
 
 
 @pytest.mark.parametrize('available', [700, 50])

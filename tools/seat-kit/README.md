@@ -149,9 +149,15 @@ Reviewer `verify` fetches and detaches the submitted SHA, compares the commit
 stat and paths with `files_changed`, reports every remote branch containing the
 SHA, rejects a SHA already on `origin/main`, runs a bounded credential leak
 scan, and optionally re-runs allow-listed pytest/unittest commands found in the
-ticket evidence. Generic rules cover JWTs, bearer tokens, private-key headers,
-API-key shapes, and macOS/Linux/Windows home-directory paths. Operator-specific
-regexes are loaded one per line from `~/.pursers/leak-markers.txt`; set
+ticket evidence. The leak scan checks added and deleted hunk lines across the
+cumulative merge-base-to-submission diff, so earlier repair commits remain in
+scope when their content survives in the submitted tree. It skips unchanged
+context and diff metadata; deleted lines remain covered because review output
+can itself expose a credential. Generic rules cover JWTs, bearer tokens,
+private-key headers, API-key shapes, and macOS/Linux/Windows home-directory
+paths. The API-key rule recognizes unquoted DOM form-element accessors as code,
+while other unquoted dotted values remain fail-closed. Operator-specific regexes are loaded one per line from
+`~/.pursers/leak-markers.txt`; set
 `PURSERS_LEAK_MARKERS_FILE` to override the path. `verify` and `approve` print
 only the loaded marker count, never the regexes. An empty marker file is a WARN
 to record in `review_notes`, not an approval blocker. Documented fixtures

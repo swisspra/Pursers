@@ -34,6 +34,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Keep event-seat drivers alive after bounded model timeout/failure, skip stale or
   foreign journal work before model launch, and retain the existing one-shot owned
   continuation and human-escalation contract.
+- Recover a drained seat's signed stop once after an exhausted pre-execution
+  `live_lease` rejection and a fresh lease-free observation, without replaying
+  committed or uncertain outcomes. Managed event seats now advertise no new work
+  while draining, finish an owned lease, and clear the drain marker only on an
+  explicit signed restart.
 
 ## [5.1.0] - 2026-10-03
 

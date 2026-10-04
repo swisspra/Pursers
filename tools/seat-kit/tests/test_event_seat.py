@@ -92,6 +92,38 @@ def test_event_environment_preserves_configured_identity_capabilities(tmp_path,m
     assert reviewer['PURSERS_CAN_REVIEW']=='true'
 
 
+def test_drain_marker_disables_admission_but_preserves_owned_lease(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    cfg=codex_config(tmp_path)
+    cfg['state_file']=str(tmp_path/'runtime'/'seats'/'worker-a.json')
+    runner=api()['EventSeatRunner'](cfg)
+    marker=runner.drain_path();marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps({'schema':'pursers_seat_drain_v1','seat_id':'worker-a'}))
+    marker.chmod(0o600)
+    assert runner.environment()['PURSERS_CAN_WORK']=='false'
+    identity=SimpleNamespace(agent_name='worker-a',role='worker',agent_id='AI-exact',
+        principal_id='PR-exact')
+
+    class Client:
+        def __init__(self,ticket):self.identity=identity;self.ticket=ticket
+        async def __aenter__(self):return self
+        async def __aexit__(self,*args):pass
+        async def ticket_get(self,*args,**kwargs):return {'ticket':self.ticket}
+
+    owned={'ticket_id':'TK-owned','status':'claimed','claimed_by_agent_id':'AI-exact',
+        'claimed_by_principal_id':'PR-exact','lease_expires_at_epoch':200,
+        'claimed_at':'2030-01-01T00:00:00+00:00'}
+    runner.client=lambda _board:Client(owned)
+    assert asyncio.run(runner.event_authorized({'board':'home','ticket':'TK-owned'},100)) == (
+        True,'owned_lease')
+    offered={'ticket_id':'TK-new','status':'open','work_offer':{'kind':'work',
+        'agent_id':'AI-exact','agent_name':'worker-a','expires_at_epoch':200}}
+    runner.client=lambda _board:Client(offered)
+    assert asyncio.run(runner.event_authorized({'board':'home','ticket':'TK-new'},100)) == (
+        False,'seat_draining')
+
+
 def test_long_turn_refreshes_three_boards_and_stops_after_clean_exit(tmp_path,monkeypatch):
     module=api();runner=module['EventSeatRunner'](codex_config(tmp_path))
     runner.active_boards=['home','project-a','project-b']
@@ -214,6 +246,70 @@ def test_stale_event_preflight_skips_model_and_preserves_cursor(tmp_path):
     assert runner.state['cursor']=={'home':42}
     assert runner.state['pending']==[]
     assert runner.state['last_skip']['reason']=='stale_or_foreign_event'
+
+
+def test_event_preflight_claims_broadcast_before_paid_turn(tmp_path):
+    from types import SimpleNamespace
+
+    runner=api()['EventSeatRunner'](config(tmp_path))
+    ticket={'ticket_id':'TK-broadcast','status':'open',
+            'dispatch_state':{'state':'broadcast','kind':'work'}}
+    calls=[]
+    class Client:
+        identity=SimpleNamespace(agent_id='AI-worker',principal_id='PR-worker',
+                                 agent_name='worker-a',role='worker')
+        async def __aenter__(self):return self
+        async def __aexit__(self,*_args):pass
+        async def ticket_get(self,*_args,**_kwargs):return {'ticket':dict(ticket)}
+        async def ticket_claim(self,ticket_id):
+            calls.append(ticket_id)
+            ticket.update(status='claimed',claimed_by_agent_id='AI-worker',
+                          claimed_by_principal_id='PR-worker',
+                          lease_expires_at_epoch=10**12,claimed_at='claim-one')
+    runner.client=lambda _board:Client()
+    authorized,reason=__import__('asyncio').run(
+        runner.event_authorized({'board':'home','ticket':'TK-broadcast'},100))
+    assert (authorized,reason)==(True,'claim_acquired')
+    assert calls==['TK-broadcast']
+
+
+def test_event_preflight_loser_skips_broadcast_race_without_model(tmp_path):
+    from types import SimpleNamespace
+
+    runner=api()['EventSeatRunner'](config(tmp_path))
+    ticket={'ticket_id':'TK-broadcast','status':'open',
+            'dispatch_state':{'state':'broadcast','kind':'work'}}
+    class Client:
+        identity=SimpleNamespace(agent_id='AI-worker',principal_id='PR-worker',
+                                 agent_name='worker-a',role='worker')
+        async def __aenter__(self):return self
+        async def __aexit__(self,*_args):pass
+        async def ticket_get(self,*_args,**_kwargs):return {'ticket':dict(ticket)}
+        async def ticket_claim(self,_ticket_id):
+            ticket.update(dispatch_state={'state':'offered','kind':'work'},
+                          work_offer={'kind':'work','agent_id':'AI-other',
+                                      'agent_name':'worker-b','expires_at_epoch':10**12})
+            raise RuntimeError('ticket is not offered to this seat')
+    runner.client=lambda _board:Client()
+    authorized,reason=__import__('asyncio').run(
+        runner.event_authorized({'board':'home','ticket':'TK-broadcast'},100))
+    assert (authorized,reason)==(False,'claim_race_lost')
+
+
+def test_rate_limit_never_claims_work_before_a_model_turn_is_available(tmp_path):
+    cfg=config(tmp_path)
+    runner=api()['EventSeatRunner'](cfg)
+    runner.preflight_enabled=True
+    runner.state['runs']=[100]
+    async def claim(*_args):
+        pytest.fail('rate-limited seat must not claim work')
+    runner.event_authorized=claim
+    runner.run_command=lambda *_args,**_kwargs:pytest.fail('rate-limited seat must not run model')
+    delay=runner.process({'new_seq':{'home':42},'events':[
+        {'kind':'ticket_offered','board_id':'home','ticket_id':'TK-broadcast','id':'broadcast'}
+    ]},101)
+    assert delay==3599
+    assert len(runner.state['pending'])==1
 
 
 @pytest.mark.parametrize('role',["worker","reviewer"])

@@ -351,6 +351,7 @@ owned lease. A Codex subscription seat can use this private configuration:
   "seat_dir": "/PATH/TO/seats/worker-example",
   "board_script": "/PATH/TO/seats/worker-example/bin/board.sh",
   "state_file": "/PATH/TO/state/seats/worker-example.json",
+  "drain_file": "/PATH/TO/state/drain/worker-example.json",
   "token_file": "/PATH/TO/auth/worker-example.jwt",
   "codex": "/PATH/TO/bin/codex",
   "effort": "high", "service_tier": "fast",
@@ -372,6 +373,14 @@ saved cursor. `workspace-write` enables network for the authorized registry work
 use `danger-full-access` only for a seat whose operator policy already grants it.
 The host cap is concurrent seats, not an hourly run throttle. `null` above means no
 invented hourly throttle; operators may set a real policy value when required.
+
+`drain_file` is optional when `state_file` follows the shown `state/seats/<seat>.json`
+layout; the runner then derives `state/drain/<seat>.json`. A valid owner-only Fleet
+Executor drain marker disables work/review admission on every registry board while
+an already-owned lease is allowed to finish. Fresh offers are declined without a
+model launch. A later signed `start` removes the marker before starting the service,
+making the resume transition explicit; malformed or non-owner-only markers fail
+closed.
 
 The backward-compatible Goose configuration is:
 
@@ -792,6 +801,13 @@ when capacity is needed again. A subsequent observation can start it afresh.
 Live leases and busy work prevent this stop. This avoids treating a draining
 process as a ready replacement forever. No model requests are needed for this
 reconciliation, and no seat or hourly execution limit changes are required.
+
+If a signed stop exhausted its normal attempt budget only because the executor still
+observed `live_lease`, one later fresh lease-free fleet observation permits exactly
+one recovery attempt with the same operation ID and semantic digest. A committed,
+unknown, changed-payload, changed-generation, or second lease-release recovery stays
+blocked. Successful replay remains durable across Butler restarts and repeated
+observations do not issue a duplicate stop.
 
 ### Optional hourly intake limits and quota recovery
 
