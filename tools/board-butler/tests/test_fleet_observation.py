@@ -112,6 +112,62 @@ def test_executor_snapshot_returns_copies(tmp_path):
     store.connection.close()
 
 
+@pytest.mark.parametrize('prior_lifecycle', ['ready', 'draining'])
+def test_verified_process_loss_advances_incarnation_once(tmp_path, prior_lifecycle):
+    template, boards, members, _ = fixture()
+    store = fleet_executor.ExecutorStore(tmp_path/'executor.sqlite3')
+    store.connection.execute(
+        "INSERT INTO seats VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ('seat','a','t','a'*64,'p',None,None,None,7,prior_lifecycle,'pid:old',
+         NOW.timestamp()-60,None),
+    )
+    store.connection.commit()
+    services = SimpleNamespace(inspect=lambda *_: fleet_executor.ServiceObservation(
+        True, False, False, True, None))
+    observer = observer_api()['LocalFleetObserver'](
+        {'t':template}, services, store.observation_snapshot(),
+        {'t':{'board_id':'a','provider':'worker'}},
+        recover=store.reconcile_unexpected_stop,
+    )
+    observation, _, _ = observer.collect(['a','b'], boards, members, NOW,
+        {'worker':{'status':'healthy','latency_ms':1}}, {})
+    row = observation['executor_seats'][0]
+    assert (row['generation'], row['lifecycle'], row['reason_code']) == (
+        8, 'stopped', 'unexpected_process_loss_reconciled')
+    assert store.seat('seat')['process_ref'] is None
+    assert store.reconcile_unexpected_stop('seat', expected_generation=7,
+        expected_process_ref='pid:old', now=NOW.timestamp()+1) is None
+    assert store.seat('seat')['generation'] == 8
+    store.connection.close()
+
+
+def test_process_loss_with_live_lease_or_unverified_identity_fails_closed(tmp_path):
+    template, boards, members, _ = fixture()
+    stored = {'seat': {'generation':7,'lifecycle':'ready','process_ref':'pid:old',
+                       'last_mutation':NOW.timestamp()-60}}
+    recoveries=[]
+    def recover(*args, **kwargs):
+        recoveries.append((args, kwargs))
+    boards['a']['agents'][0]['lease_expires_at']=(NOW+timedelta(minutes=2)).isoformat()
+    stopped = SimpleNamespace(inspect=lambda *_: fleet_executor.ServiceObservation(
+        True, False, False, True, None))
+    observer = observer_api()['LocalFleetObserver']({'t':template},stopped,stored,
+        {'t':{'board_id':'a','provider':'worker'}}, recover=recover)
+    observation,_,_=observer.collect(['a','b'],boards,members,NOW,{}, {})
+    assert observation['executor_seats'][0]['lifecycle']=='unhealthy'
+    assert observation['executor_seats'][0]['reason_code']=='unexpected_process_loss_live_lease'
+    assert recoveries == []
+    del boards['a']['agents'][0]['lease_expires_at']
+    unverified = SimpleNamespace(inspect=lambda *_: fleet_executor.ServiceObservation(
+        False, False, False, False, None))
+    observer = observer_api()['LocalFleetObserver']({'t':template},unverified,stored,
+        {'t':{'board_id':'a','provider':'worker'}}, recover=recover)
+    observation,_,_=observer.collect(['a','b'],boards,members,NOW,{}, {})
+    assert observation['executor_seats'][0]['lifecycle']=='unhealthy'
+    assert observation['executor_seats'][0]['reason_code']=='service_identity_unverified'
+    assert recoveries == []
+
+
 def test_native_cli_accepts_local_observation_paths(tmp_path):
     from test_fleet_reconciler import butler
     args = butler.parse_args(['--token-path', str(tmp_path/'token'), '--repo', str(tmp_path),

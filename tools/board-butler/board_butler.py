@@ -13662,24 +13662,27 @@ class CentralBackend:
             store = executor["ExecutorStore"](state / "executor.sqlite3")
             try:
                 stored = store.observation_snapshot()
+                services = executor["service_adapter"](policy, state)
+                providers = {
+                    name: observe_local_provider(record)
+                    for name, record in document["providers"].items()
+                }
+                headroom = read_host_headroom(self.args.repo)
+                host = {"load_ratio": headroom.get("load_ratio", 1),
+                        "capacity_available": host_meets_headroom(headroom, thresholds),
+                        "executor_status": "healthy" if self.args.fleet_executor_socket.is_socket() else "unavailable"}
+                observer = observer_api["LocalFleetObserver"](
+                    policy.templates, services, stored, document["templates"],
+                    recover=store.reconcile_unexpected_stop,
+                )
+                # Use the beginning of collection as the freshness origin: slow probes
+                # must not make old registry evidence appear newly observed.
+                observation, readiness, leases = observer.collect(active_boards, board_snapshots, memberships, now, providers, host)
+                observer_api["publish"](state / "registry-readiness.json", readiness)
+                observer_api["publish"](state / "leases.json", leases)
+                observer_api["publish"](self.args.fleet_observation_file, observation)
             finally:
                 store.connection.close()
-            services = executor["service_adapter"](policy, state)
-            providers = {
-                name: observe_local_provider(record)
-                for name, record in document["providers"].items()
-            }
-            headroom = read_host_headroom(self.args.repo)
-            host = {"load_ratio": headroom.get("load_ratio", 1),
-                    "capacity_available": host_meets_headroom(headroom, thresholds),
-                    "executor_status": "healthy" if self.args.fleet_executor_socket.is_socket() else "unavailable"}
-            observer = observer_api["LocalFleetObserver"](policy.templates, services, stored, document["templates"])
-            # Use the beginning of collection as the freshness origin: slow probes
-            # must not make old registry evidence appear newly observed.
-            observation, readiness, leases = observer.collect(active_boards, board_snapshots, memberships, now, providers, host)
-            observer_api["publish"](state / "registry-readiness.json", readiness)
-            observer_api["publish"](state / "leases.json", leases)
-            observer_api["publish"](self.args.fleet_observation_file, observation)
         await asyncio.to_thread(collect)
 
     async def _reconcile_fleet(

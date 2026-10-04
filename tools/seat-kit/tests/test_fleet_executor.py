@@ -311,6 +311,201 @@ def test_start_creates_ready_seat_and_publishes_bounded_receipt(runtime: dict[st
     ).validate(result)
 
 
+def test_explicit_adoption_of_verified_external_restart_is_lease_safe(runtime: dict[str, Any]) -> None:
+    runtime["service"].handle(signed_request(runtime, "start", "op-start-before-adopt"))
+    runtime["adapter"].observations["worker-a"] = executor.ServiceObservation(
+        True, True, True, True, "fake:worker-a:external")
+
+    adopted = runtime["service"].handle(
+        signed_request(runtime, "adopt", "op-adopt", generation=1))
+
+    assert adopted["outcome"] == "succeeded"
+    assert adopted["committed"] is True
+    assert runtime["service"].store.seat("worker-a")["generation"] == 2
+    assert runtime["service"].store.seat("worker-a")["process_ref"] == "fake:worker-a:external"
+    replay = runtime["service"].handle(
+        signed_request(runtime, "adopt", "op-adopt", generation=1))
+    assert replay["replayed"] is True
+
+
+def _prepare_canonical_adoption(
+    runtime: dict[str, Any],
+    *,
+    roster_kind: str = "resume",
+    roster_generation: int = 1,
+    binding_suffix: str = "worker-a",
+) -> dict[str, Any]:
+    stored_binding = {
+        "identity_id": "identity:worker-a",
+        "state_id": "state:worker-a",
+        "state_dir_id": "state-dir:worker-a",
+    }
+    binding = {
+        "identity_id": f"identity:{binding_suffix}",
+        "state_id": f"state:{binding_suffix}",
+        "state_dir_id": f"state-dir:{binding_suffix}",
+    }
+    if runtime["service"].store.seat("worker-a") is None:
+        provision = {
+            "kind": "provision",
+            "target_role": "worker",
+            "template_id": "worker-standard",
+            "seat_id": "worker-a",
+            **stored_binding,
+            "generation": 1,
+        }
+        document = supervisor_roster(actions=[provision])
+        runtime["service"].supervisor_control = {
+            "source": "canonical",
+            "document": document,
+        }
+        started = runtime["service"].handle(
+            signed_request(
+                runtime,
+                "start",
+                "op-canonical-start-before-adopt",
+                **stored_binding,
+                roster_revision=document["revision"],
+                roster_digest=executor.hashlib.sha256(
+                    executor.canonical_json(document)
+                ).hexdigest(),
+            )
+        )
+        assert started["outcome"] == "succeeded"
+
+    seat = {
+        "seat_id": "worker-a",
+        **binding,
+        "generation": roster_generation,
+        "role": "worker",
+        "lifecycle": "ready",
+        "work_claim": False,
+        "review_lease": False,
+        "transition_at": datetime.fromtimestamp(NOW - 600, timezone.utc).isoformat(),
+    }
+    action = {
+        "kind": roster_kind,
+        "seat_id": "worker-a",
+        **binding,
+        "generation": roster_generation,
+    }
+    document = supervisor_roster(actions=[action], seats=[seat], revision=2)
+    assert executor._valid_supervisor_roster(document)
+    runtime["service"].supervisor_control = {
+        "source": "canonical",
+        "document": document,
+    }
+    runtime["adapter"].observations["worker-a"] = executor.ServiceObservation(
+        True, True, True, True, "fake:worker-a:external"
+    )
+    return {
+        **binding,
+        "roster_revision": document["revision"],
+        "roster_digest": executor.hashlib.sha256(
+            executor.canonical_json(document)
+        ).hexdigest(),
+    }
+
+
+def test_canonical_resume_authorizes_verified_lease_free_adoption(
+    runtime: dict[str, Any],
+) -> None:
+    request_fields = _prepare_canonical_adoption(runtime)
+
+    adopted = runtime["service"].handle(
+        signed_request(runtime, "adopt", "op-canonical-adopt", **request_fields)
+    )
+
+    assert adopted["outcome"] == "succeeded"
+    assert adopted["committed"] is True
+    assert runtime["service"].store.seat("worker-a")["generation"] == 2
+    assert (
+        runtime["service"].store.seat("worker-a")["process_ref"]
+        == "fake:worker-a:external"
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("stale_generation", "seat_generation_mismatch"),
+        ("live_lease", "live_lease"),
+        ("unknown_lease", "lease_state_unknown"),
+        ("unverified_process", "process_adoption_unverified"),
+        ("mismatched_binding", "seat_identity_or_state_drift"),
+    ],
+)
+def test_canonical_adoption_guards_fail_closed(
+    runtime: dict[str, Any], case: str, reason: str
+) -> None:
+    request_fields = _prepare_canonical_adoption(
+        runtime,
+        roster_generation=2 if case == "stale_generation" else 1,
+        binding_suffix="changed" if case == "mismatched_binding" else "worker-a",
+    )
+    if case == "live_lease":
+        runtime["leases"].observation = executor.LeaseObservation(
+            True, live_work=True
+        )
+    elif case == "unknown_lease":
+        runtime["leases"].observation = executor.LeaseObservation(False)
+    elif case == "unverified_process":
+        runtime["adapter"].observations["worker-a"] = executor.ServiceObservation(
+            True, True, True, False, "fake:worker-a:external"
+        )
+
+    result = runtime["service"].handle(
+        signed_request(
+            runtime,
+            "adopt",
+            f"op-canonical-adopt-{case}",
+            generation=2 if case == "stale_generation" else 1,
+            **request_fields,
+        )
+    )
+
+    assert result["outcome"] == "rejected"
+    assert result["reason_code"] == reason
+    assert runtime["service"].store.seat("worker-a")["generation"] == 1
+
+
+def test_canonical_adoption_rejects_unrelated_roster_action(
+    runtime: dict[str, Any],
+) -> None:
+    request_fields = _prepare_canonical_adoption(runtime, roster_kind="start")
+
+    with pytest.raises(
+        executor.PolicyError, match="operation_not_in_supervisor_roster"
+    ):
+        runtime["service"].handle(
+            signed_request(
+                runtime,
+                "adopt",
+                "op-canonical-adopt-unauthorized",
+                **request_fields,
+            )
+        )
+
+
+@pytest.mark.parametrize("verified,live,reason", [
+    (False, False, "process_adoption_unverified"),
+    (True, True, "live_lease"),
+])
+def test_external_restart_adoption_fails_closed(runtime: dict[str, Any], verified: bool,
+                                                live: bool, reason: str) -> None:
+    runtime["service"].handle(signed_request(runtime, "start", "op-start-adopt-guard"))
+    runtime["adapter"].observations["worker-a"] = executor.ServiceObservation(
+        True, True, True, verified, "fake:worker-a:external")
+    runtime["leases"].observation = executor.LeaseObservation(True, live_work=live)
+
+    result = runtime["service"].handle(
+        signed_request(runtime, "adopt", f"op-adopt-{reason}", generation=1))
+
+    assert result["outcome"] == "rejected"
+    assert result["reason_code"] == reason
+    assert runtime["service"].store.seat("worker-a")["generation"] == 1
+
+
 def test_canonical_supervisor_roster_authorizes_only_matching_mutation(
     runtime: dict[str, Any],
 ) -> None:
