@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import platform as host_platform
 import re
@@ -165,9 +166,12 @@ def validate_catalog_pin(raw: Any) -> dict[str, str]:
         raise CatalogError("catalog_pin_agent_id_invalid")
     if not _is_exact_version(raw["agent_version"]):
         raise CatalogError("catalog_pin_version_invalid")
-    if raw["platform"] not in PLATFORMS:
+    if not isinstance(raw["platform"], str) or raw["platform"] not in PLATFORMS:
         raise CatalogError("catalog_pin_platform_invalid")
-    if raw["distribution_kind"] not in DISTRIBUTION_KINDS:
+    if (
+        not isinstance(raw["distribution_kind"], str)
+        or raw["distribution_kind"] not in DISTRIBUTION_KINDS
+    ):
         raise CatalogError("catalog_pin_distribution_invalid")
     if not isinstance(raw["registry_revision"], str) or not re.fullmatch(
         r"sha256:[0-9a-f]{64}", raw["registry_revision"]
@@ -220,7 +224,7 @@ def load_cached_catalog(
         if cache_path.is_symlink() or info.st_size > max_bytes:
             raise CatalogError("cache_untrusted")
         raw = cache_path.read_bytes()
-        cache = json.loads(raw)
+        cache = json.loads(raw, parse_constant=_reject_json_constant)
     except CatalogError:
         raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -488,7 +492,12 @@ def _validate_cache(cache: Any) -> None:
         or cache["schema"] != CACHE_SCHEMA
     ):
         raise CatalogError("cache_invalid")
-    if not isinstance(cache["fetched_at_epoch"], (int, float)):
+    fetched_at = cache["fetched_at_epoch"]
+    if (
+        isinstance(fetched_at, bool)
+        or not isinstance(fetched_at, (int, float))
+        or not math.isfinite(fetched_at)
+    ):
         raise CatalogError("cache_invalid")
     _https_url(cache["source_url"], "cache_source_url")
     if not isinstance(cache["registry_revision"], str) or not re.fullmatch(
@@ -504,6 +513,10 @@ def _validate_cache(cache: Any) -> None:
         raise CatalogError("cache_invalid")
     if _registry_revision(document) != cache["registry_revision"]:
         raise CatalogError("cache_revision_mismatch")
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise CatalogError("cache_invalid")
 
 
 def _view(cache: Mapping[str, Any], *, now: float, max_age_s: float) -> CatalogView:

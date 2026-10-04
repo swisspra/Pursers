@@ -202,6 +202,36 @@ def test_cached_catalog_rejects_content_tampering_under_old_revision(
         catalog.load_cached_catalog(cache)
 
 
+@pytest.mark.parametrize("invalid", ["NaN", "Infinity", "-Infinity"])
+def test_cached_catalog_rejects_non_finite_json_timestamp(
+    tmp_path: Path, invalid: str
+) -> None:
+    cache = tmp_path / "catalog.json"
+    catalog.refresh_catalog(cache, fetch=lambda *_: registry(), now=100.0)
+    payload = cache.read_text().replace(
+        '"fetched_at_epoch":100.0', f'"fetched_at_epoch":{invalid}'
+    )
+    assert payload != cache.read_text()
+    cache.write_text(payload)
+
+    with pytest.raises(catalog.CatalogError, match="cache_invalid"):
+        catalog.load_cached_catalog(cache, now=100.0, max_age_s=0.0)
+
+
+@pytest.mark.parametrize("invalid", [True, None, "100.0"])
+def test_cached_catalog_rejects_non_real_or_bool_timestamp(
+    tmp_path: Path, invalid: object
+) -> None:
+    cache = tmp_path / "catalog.json"
+    catalog.refresh_catalog(cache, fetch=lambda *_: registry(), now=100.0)
+    payload = json.loads(cache.read_text())
+    payload["fetched_at_epoch"] = invalid
+    cache.write_text(json.dumps(payload))
+
+    with pytest.raises(catalog.CatalogError, match="cache_invalid"):
+        catalog.load_cached_catalog(cache, now=100.0, max_age_s=0.0)
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -339,6 +369,26 @@ def test_acp_preset_rejects_channel_versions_on_create_and_roundtrip(
 )
 def test_acp_preset_rejects_invalid_catalog_pin_on_create_and_roundtrip(
     field: str, invalid: str, message: str
+) -> None:
+    value = acp_preset()
+    value["runner"]["catalog_pin"][field] = invalid
+    with pytest.raises(preset.PresetError, match=message):
+        preset.normalize_preset(value)
+    with pytest.raises(preset.PresetError, match=message):
+        preset.dumps_preset(value)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid", "message"),
+    [
+        ("platform", [], "catalog_pin_platform_invalid"),
+        ("platform", None, "catalog_pin_platform_invalid"),
+        ("distribution_kind", [], "catalog_pin_distribution_invalid"),
+        ("distribution_kind", None, "catalog_pin_distribution_invalid"),
+    ],
+)
+def test_acp_preset_rejects_non_string_catalog_pin_on_create_and_roundtrip(
+    field: str, invalid: object, message: str
 ) -> None:
     value = acp_preset()
     value["runner"]["catalog_pin"][field] = invalid
