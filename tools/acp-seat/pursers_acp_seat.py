@@ -71,6 +71,7 @@ class SeatConfig:
     base_ref: str
     work_root: Path
     policy_file: Path | None
+    session_options: dict[str, str | bool]
     lease_interval_s: float = 300.0
     wait_timeout_s: int = 180
 
@@ -122,6 +123,20 @@ def load_config(path: str | os.PathLike[str]) -> SeatConfig:
     token_file = _private_file(Path(str(seat["token_file"])), "token file")
     policy_raw = acp.get("policy_file")
     policy_file = _private_file(Path(policy_raw), "policy file") if policy_raw else None
+    options_raw = acp.get("session_options", {})
+    if (
+        not isinstance(options_raw, dict)
+        or len(options_raw) > 128
+        or not all(
+            isinstance(key, str)
+            and 0 < len(key) <= 128
+            and isinstance(value, (str, bool))
+            and not isinstance(value, int)
+            and (not isinstance(value, str) or 0 < len(value) <= 4096)
+            for key, value in options_raw.items()
+        )
+    ):
+        raise ValueError("acp.session_options must map bounded IDs to strings/booleans")
     lease_interval = float(raw.get("lease_interval_s", 300.0))
     if lease_interval <= 0:
         raise ValueError("lease_interval_s must be positive")
@@ -143,6 +158,7 @@ def load_config(path: str | os.PathLike[str]) -> SeatConfig:
         base_ref=base_ref,
         work_root=Path(str(acp["work_root"])).expanduser().resolve(),
         policy_file=policy_file,
+        session_options=dict(options_raw),
         lease_interval_s=lease_interval,
         wait_timeout_s=wait_timeout,
     )
@@ -780,6 +796,7 @@ class ACPSeatRuntime:
         git_user_name: str = "ACP Seat",
         git_user_email: str = "acp-seat@pursers.invalid",
         policy_file: Path | None = None,
+        session_options: Mapping[str, str | bool] | None = None,
         protected_files: Sequence[Path] = (),
         enforce_os_sandbox: bool = False,
         lease_interval_s: float = 300.0,
@@ -794,6 +811,7 @@ class ACPSeatRuntime:
         self.git_user_name = git_user_name
         self.git_user_email = git_user_email
         self.policy_file = policy_file
+        self.session_options = dict(session_options or {})
         self.protected_files = tuple(path.resolve() for path in protected_files)
         self.enforce_os_sandbox = enforce_os_sandbox
         self.lease_interval_s = lease_interval_s
@@ -862,6 +880,12 @@ class ACPSeatRuntime:
                     }
                 )
                 session_id = await client.new_session(work_dir)
+                if self.session_options:
+                    await client.apply_config_preset(
+                        session_id,
+                        self.session_options,
+                        timeout=self.request_timeout_s,
+                    )
                 renewal = asyncio.create_task(self._renew(ticket_id))
 
                 async def consume_updates() -> None:
@@ -1271,6 +1295,7 @@ async def run(config: SeatConfig) -> None:
             git_user_name=config.git_user_name,
             git_user_email=config.git_user_email,
             policy_file=config.policy_file,
+            session_options=config.session_options,
             protected_files=tuple(
                 path
                 for path in (

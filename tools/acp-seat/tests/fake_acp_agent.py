@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import sys
@@ -24,6 +25,9 @@ class FakeAgent:
         self.pending: dict[int, asyncio.Future[Any]] = {}
         self.tasks: set[asyncio.Task[None]] = set()
         self.next_request_id = 1000
+        self.config_options: dict[str, list[JSON]] = {}
+        self.modes: dict[str, JSON] = {}
+        self.set_config_requests: list[JSON] = []
 
     async def run(self) -> None:
         while line := await asyncio.to_thread(sys.stdin.readline):
@@ -85,6 +89,18 @@ class FakeAgent:
     async def request(self, request_id: Any, method: str, params: JSON) -> None:
         try:
             if method == "initialize":
+                if self.script.get("requireBooleanCapability"):
+                    boolean = (
+                        params.get("clientCapabilities", {})
+                        .get("session", {})
+                        .get("configOptions", {})
+                        .get("boolean")
+                    )
+                    if not isinstance(boolean, dict):
+                        await self.error(
+                            request_id, -32602, "boolean capability required"
+                        )
+                        return
                 selected = self.script.get(
                     "protocolVersion", params.get("protocolVersion", 1)
                 )
@@ -116,7 +132,16 @@ class FakeAgent:
                 session_id = str(self.script.get("sessionId", fallback_id))
                 self.sessions.add(session_id)
                 self.cancel_events[session_id] = asyncio.Event()
-                await self.result(request_id, {"sessionId": session_id})
+                result: JSON = {"sessionId": session_id}
+                if "configOptions" in self.script:
+                    options = copy.deepcopy(self.script["configOptions"])
+                    self.config_options[session_id] = options
+                    result["configOptions"] = options
+                if "modes" in self.script:
+                    modes = copy.deepcopy(self.script["modes"])
+                    self.modes[session_id] = modes
+                    result["modes"] = modes
+                await self.result(request_id, result)
             elif method == "session/load":
                 if not self.load_session:
                     await self.error(request_id, -32601, "session/load unsupported")
@@ -127,15 +152,101 @@ class FakeAgent:
                     return
                 self.sessions.add(session_id)
                 self.cancel_events[session_id] = asyncio.Event()
+                result = {}
+                if "loadConfigOptions" in self.script or "configOptions" in self.script:
+                    options = copy.deepcopy(
+                        self.script.get(
+                            "loadConfigOptions", self.script.get("configOptions")
+                        )
+                    )
+                    self.config_options[session_id] = options
+                    result["configOptions"] = options
+                if "loadModes" in self.script or "modes" in self.script:
+                    modes = copy.deepcopy(
+                        self.script.get("loadModes", self.script.get("modes"))
+                    )
+                    self.modes[session_id] = modes
+                    result["modes"] = modes
                 for update in self.script.get("loadUpdates", []):
                     await self.update(session_id, update)
-                await self.result(request_id, None)
+                await self.result(request_id, result)
+            elif method == "session/set_config_option":
+                await self.set_config_option(request_id, params)
+            elif method == "session/set_mode":
+                await self.set_mode(request_id, params)
             elif method == "test/error":
                 await self.error(request_id, -32042, "scripted remote error")
             else:
                 await self.error(request_id, -32601, f"unknown method {method}")
         except Exception as exc:
             await self.error(request_id, -32603, str(exc))
+
+    async def set_config_option(self, request_id: Any, params: JSON) -> None:
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or session_id not in self.sessions:
+            await self.error(request_id, -32602, "unknown session")
+            return
+        self.set_config_requests.append(copy.deepcopy(params))
+        index = len(self.set_config_requests) - 1
+        expected = self.script.get("expectedSetConfigRequests", [])
+        if index < len(expected) and params != expected[index]:
+            await self.error(
+                request_id,
+                -32602,
+                f"set config mismatch: {params!r} != {expected[index]!r}",
+            )
+            return
+        delays = self.script.get("setConfigDelays", [])
+        if index < len(delays):
+            await asyncio.sleep(float(delays[index]))
+        if self.script.get("disconnectOnSetConfig"):
+            sys.stdout.flush()
+            os._exit(int(self.script.get("disconnectCode", 24)))
+        responses = self.script.get("setConfigResponses", [])
+        if index < len(responses):
+            response = responses[index]
+            options = copy.deepcopy(
+                response.get("configOptions")
+                if isinstance(response, dict)
+                else response
+            )
+        else:
+            options = copy.deepcopy(self.config_options.get(session_id, []))
+            target = next(
+                (item for item in options if item.get("id") == params.get("configId")),
+                None,
+            )
+            if target is None:
+                await self.error(request_id, -32602, "unknown configId")
+                return
+            target["currentValue"] = params.get("value")
+        self.config_options[session_id] = options
+        notifications = self.script.get("setConfigNotifications", [])
+        if index < len(notifications):
+            notification = copy.deepcopy(notifications[index])
+            self.config_options[session_id] = notification
+            await self.update(
+                session_id,
+                {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": notification,
+                },
+            )
+        await self.result(request_id, {"configOptions": options})
+
+    async def set_mode(self, request_id: Any, params: JSON) -> None:
+        session_id = params.get("sessionId")
+        mode_id = params.get("modeId")
+        modes = self.modes.get(session_id)
+        if modes is None or not isinstance(mode_id, str):
+            await self.error(request_id, -32602, "legacy modes unavailable")
+            return
+        available = {mode.get("id") for mode in modes.get("availableModes", [])}
+        if mode_id not in available:
+            await self.error(request_id, -32602, "unknown modeId")
+            return
+        modes["currentModeId"] = mode_id
+        await self.result(request_id, {})
 
     async def prompt(self, request_id: Any, params: JSON) -> None:
         session_id = params.get("sessionId")
@@ -195,8 +306,10 @@ class FakeAgent:
                     return
                 if event.is_set():
                     break
-            stop_reason = "cancelled" if event.is_set() else self.script.get(
-                "stopReason", "end_turn"
+            stop_reason = (
+                "cancelled"
+                if event.is_set()
+                else self.script.get("stopReason", "end_turn")
             )
             await self.result(request_id, {"stopReason": stop_reason})
         except Exception as exc:

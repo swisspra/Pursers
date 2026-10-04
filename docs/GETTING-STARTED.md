@@ -148,6 +148,11 @@ integration:
   [AionUi extension guide](../tools/aionui-extension/README.md).
 - The Fleet dashboard is a repo-owned, loopback-only operator surface. Follow
   its [launcher and upgrade guide](../tools/fleet-dashboard/README.md).
+- Fleet can preserve a native Codex/Goose preset or prepare an exact-version
+  ACP Registry runner through an explicit catalog refresh, install preview, and
+  confirmation. Follow [managed runner setup](guides/managed-runners.md). The
+  flow does not copy native accounts into ACP or grant an ACP process access to
+  the operator home directory.
 - The optional portable Agent Skills bundle provides narrow onboarding, work,
   review, and operator workflows for Zed, Codex, and goose. Preview a
   project-scoped install and verify host support with the
