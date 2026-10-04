@@ -75,6 +75,13 @@ from seat_config import (  # noqa: I001
     discover_managed_seats,
     seat_setup_bundle,
 )
+from runner_setup import (
+    CatalogError,
+    RunnerSetupError,
+    RunnerSetupManager,
+    RuntimePathBindings,
+    compatibility_matrix,
+)
 from release_ops import ReleaseOpsManager
 import runtime_environment
 from warm_home import apply_warm_guided_home
@@ -7993,6 +8000,80 @@ class SeatConfigManager:
             raise ValueError("seat must be an object")  # noqa: TRY004 - API contract.
         return DesiredSeat.from_dict(value)
 
+    def runner_setup_bindings(
+        self,
+        registry_payload: Any,
+        *,
+        agent_name: Any,
+        role: Any,
+        board_id: Any,
+    ) -> RuntimePathBindings:
+        """Bind ACP request paths to configured seat and Fleet-owned clones."""
+        if not isinstance(agent_name, str):
+            raise TypeError("runner seat name is invalid")
+        record = next(
+            (
+                row
+                for row in self.inventory.load()["seats"]
+                if row.get("name") == agent_name
+            ),
+            None,
+        )
+        if record is None:
+            raise ValueError("configured runner seat not found")
+        desired = self._desired(record)
+        if role != desired.role or board_id != desired.anchor_board:
+            raise PermissionError("runner seat identity differs from configured inventory")
+        if not desired.seat_dir:
+            raise ValueError("configured runner seat has no private seat directory")
+        registry = (
+            registry_payload.get("registry")
+            if isinstance(registry_payload, dict)
+            else None
+        )
+        projects = registry.get("projects") if isinstance(registry, dict) else None
+        if not isinstance(projects, dict):
+            raise TypeError("project_registry is unavailable")
+        if desired.boards == "registry":
+            allowed_boards: set[str] | None = None
+        elif desired.boards == "home":
+            allowed_boards = {desired.home_board}
+        else:
+            allowed_boards = set((desired.boards or "").split(","))
+        repositories: list[Path] = []
+        for entry in projects.values():
+            if (
+                not isinstance(entry, dict)
+                or entry.get("status") != "active"
+                or entry.get("fleet", True) is False
+            ):
+                continue
+            project_board = entry.get("board_id")
+            clone = entry.get("fleet_clone_dir")
+            if (
+                allowed_boards is not None
+                and project_board not in allowed_boards
+            ) or not isinstance(clone, str) or not clone:
+                continue
+            repositories.append(Path(clone).expanduser())
+        if not repositories:
+            raise ValueError("no authorized Fleet clone is configured for this seat")
+        seat_root = Path(desired.seat_dir).expanduser()
+        policy_file = seat_root / "acp-policy.json"
+        try:
+            policy_file.lstat()
+        except FileNotFoundError:
+            policy_file = None
+        return RuntimePathBindings(
+            repository_root=self.state_dir.expanduser().resolve() / "clones",
+            private_root=self.state_dir.expanduser().resolve(),
+            repositories=tuple(repositories),
+            token_file=Path(desired.token_file).expanduser(),
+            work_root=seat_root / "work",
+            seat_root=seat_root,
+            policy_file=policy_file,
+        )
+
     @staticmethod
     def _report(rows: list[Any]) -> dict[str, Any]:
         order = {"PASS": 0, "WARN": 1, "FAIL": 2}
@@ -9909,6 +9990,7 @@ def make_handler(
     seat_manager: SeatConfigManager | None = None,
     evidence_trace: EvidenceTrace | None = None,
     butler_manager: ButlerSettingsManager | None = None,
+    runner_manager: RunnerSetupManager | None = None,
     deployment: dict[str, Any] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     selected_stats_path = (
@@ -9917,6 +9999,9 @@ def make_handler(
     workers = worker_manager or WorkerManager()
     seats = seat_manager or SeatConfigManager()
     butlers = butler_manager or ButlerSettingsManager(_default_butler_secrets_dir())
+    runners = runner_manager or RunnerSetupManager(
+        _default_config_state_dir() / "runner-setup"
+    )
     project_operation_lock = threading.RLock()
     deployed_revision = deployment_metadata() if deployment is None else dict(deployment)
 
@@ -10337,6 +10422,27 @@ def make_handler(
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            if route == "/api/config/runners":
+                values = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+                target = values.get("target")
+                if target is None:
+                    self._send(
+                        200,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"compatibility": compatibility_matrix()}),
+                    )
+                    return
+                if len(target) != 1:
+                    self._send(400, "application/json; charset=utf-8", b'{"error":"one target required"}')
+                    return
+                try:
+                    body = _json_bytes(runners.catalog(target=target[0]))
+                except (CatalogError, OSError, ValueError) as exc:
+                    body = _json_bytes({"error": str(exc), "compatibility": compatibility_matrix()})
+                    self._send(503, "application/json; charset=utf-8", body)
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
             if route == "/api/doors":
                 try:
                     is_loopback = ipaddress.ip_address(
@@ -10625,6 +10731,9 @@ def make_handler(
                 "/api/config/ops/plan",
                 "/api/config/ops",
                 "/api/config/registry/clone",
+                "/api/config/runners/refresh",
+                "/api/config/runners/plan",
+                "/api/config/runners/apply",
                 "/api/butler",
                 "/api/butler/autonomous",
                 "/api/butler/autonomous/command",
@@ -10776,6 +10885,44 @@ def make_handler(
                             "central": label,
                         }
                     )
+                elif route == "/api/config/runners/refresh":
+                    if not isinstance(request, dict) or set(request) != {"target"}:
+                        raise ValueError("request must contain only target")
+                    body = _json_bytes(runners.refresh(target=request["target"]))
+                elif route == "/api/config/runners/plan":
+                    if getattr(runners, "uses_runtime_path_bindings", False):
+                        preset = (
+                            request.get("preset")
+                            if isinstance(request, dict)
+                            else None
+                        )
+                        seat = preset.get("seat") if isinstance(preset, dict) else None
+                        runner = (
+                            preset.get("runner")
+                            if isinstance(preset, dict)
+                            else None
+                        )
+                        bindings = (
+                            seats.runner_setup_bindings(
+                                cache_call("get_project_registry", central=central),
+                                agent_name=seat.get("agent_name"),
+                                role=seat.get("role"),
+                                board_id=seat.get("board_id"),
+                            )
+                            if isinstance(seat, dict)
+                            and isinstance(runner, dict)
+                            and runner.get("kind") == "acp"
+                            else None
+                        )
+                        body = _json_bytes(
+                            runners.plan(request, runtime_bindings=bindings)
+                        )
+                    else:
+                        body = _json_bytes(runners.plan(request))
+                elif route == "/api/config/runners/apply":
+                    if not isinstance(request, dict) or set(request) != {"plan_id", "digest"}:
+                        raise ValueError("request must contain only plan_id and digest")
+                    body = _json_bytes(runners.apply(**request))
                 elif route == "/api/butler":
                     current = cache_call("get_config", central=central)
                     body = _json_bytes(
@@ -11216,6 +11363,13 @@ def make_handler(
                     _json_bytes({"error": str(exc), "central": label}),
                 )
                 return
+            except RunnerSetupError as exc:
+                self._send(
+                    409,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"error": str(exc), "central": label}),
+                )
+                return
             except RuntimeError as exc:
                 if route in {"/api/config", "/api/intake"}:
                     self._send(
@@ -11608,6 +11762,7 @@ def main(argv: list[str] | None = None) -> None:
         state_dir=seat_state_dir,
         central_url=primary_config.url,
     )
+    runner_manager = RunnerSetupManager(seat_state_dir / "runner-setup")
     try:
         trace = (
             EvidenceTrace.from_config(args.evidence_trace_config, Path(__file__))
@@ -11625,6 +11780,7 @@ def main(argv: list[str] | None = None) -> None:
             seat_manager,
             evidence_trace=trace,
             butler_manager=butler_manager,
+            runner_manager=runner_manager,
         ),
     )
     print(f"Fleet Dashboard: http://{args.host}:{args.port}", flush=True)
