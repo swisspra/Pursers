@@ -14,7 +14,8 @@ route through `FleetViewModules` and declares the UI surfaces it owns:
 - `projects.js`: projects, boards, and workspace entry points
 - `work.js`: ticket queues and filters
 - `team.js`: agents, seats, and autonomous-butler status
-- `approvals.js`: approval and human-request queues
+- `approvals.js`: typed Inbox queues; owns both `#/inbox` and the compatible
+  `#/approvals` alias
 - `activity.js`: recent and autonomous-butler activity
 - `settings.js`: seat, dispatch, release, project, and door controls
 
@@ -47,6 +48,7 @@ remain marked partial while optional sources enrich. A new intent opens the only
 project directly or asks the operator to choose a project before entering the
 existing scoped intake flow.
 
-This slice does not redesign Work, Team, Projects, Activity, Approvals/Inbox, or
-Settings/onboarding content. Those routes stay usable in the new shell and retain
-their existing owners and guarded handlers until their planned migration phases.
+Work, Projects, Team, Activity, and Inbox now use the Nocturne shell while
+preserving their bounded sources and guarded handlers. Ticket deep links open an
+evidence-first detail surface with lifecycle, delivery, review, question, and
+journal provenance. Settings/onboarding remains a separately owned migration.

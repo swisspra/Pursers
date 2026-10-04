@@ -9,11 +9,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Complete the non-Settings Nocturne workflow routes with an `#/inbox` entry
+  point (while preserving `#/approvals`), evidence-first ticket detail, bounded
+  submission/test/file evidence, independent review rounds, coordination
+  questions, and responsive source-backed Work, Projects, Team, and Activity
+  surfaces.
 - Introduce the first Nocturne Fleet Dashboard slice: a light/dark token system,
   accessible mobile navigation drawer, source-backed Home status and observed
   seat summaries, and project-scoped intent entry without changing dashboard
-  authorization or runtime behavior. Work, Team, Projects, Activity, Inbox, and
-  Settings/onboarding visual migrations remain staged follow-up work.
+  authorization or runtime behavior. Settings/onboarding remains staged
+  follow-up work.
 - Apply the supplied Pursers artwork to the repository README and Fleet
   Dashboard navigation, with normalized tracked assets, byte-fidelity records,
   responsive intrinsic sizing, and an explicit safe binary PNG route.

@@ -3251,6 +3251,63 @@ def _detail_ticket(
     )
     if not isinstance(latest_submission, dict):
         latest_submission = {}
+    result = project_ticket_result(ticket)
+    test_output = _clip(latest_submission.get("test_output"), 5_000) or None
+    raw_reviews = ticket.get("review_history")
+    review_rounds = []
+    if isinstance(raw_reviews, list):
+        for item in raw_reviews[-8:]:
+            if not isinstance(item, dict):
+                continue
+            review_rounds.append(
+                {
+                    "verdict": (
+                        item.get("verdict")
+                        if item.get("verdict") in {"approve", "reject"}
+                        else None
+                    ),
+                    "review_label": _clip(item.get("review_label"), MAX_LABEL_CHARS)
+                    or None,
+                    "reviewer": _ticket_actor_label(
+                        name=item.get("reviewed_by_agent_name"),
+                        agent_id=item.get("reviewed_by_agent_id"),
+                        agents_by_id=agents_by_id,
+                    ),
+                    "reviewed_at": _clip(item.get("reviewed_at"), 40) or None,
+                    "notes": _clip(
+                        item.get("fix_instructions") or item.get("review_notes"),
+                        MAX_SUBMISSION_CHARS,
+                    )
+                    or None,
+                    "submission_commit": _clip(item.get("submission_commit"), 64)
+                    or None,
+                }
+            )
+    raw_questions = ticket.get("coordinator_questions")
+    questions = []
+    if isinstance(raw_questions, list):
+        for item in raw_questions[-8:]:
+            if not isinstance(item, dict):
+                continue
+            asked_by = item.get("asked_by")
+            if not isinstance(asked_by, dict):
+                asked_by = {}
+            questions.append(
+                {
+                    "question_id": _clip(item.get("question_id"), MAX_LABEL_CHARS),
+                    "kind": _clip(item.get("kind") or "information", 32),
+                    "state": _clip(item.get("state") or "unknown", 32),
+                    "message": _clip(item.get("message"), MAX_SUBMISSION_CHARS),
+                    "answer": _clip(item.get("answer"), MAX_SUBMISSION_CHARS) or None,
+                    "asked_by": _ticket_actor_label(
+                        name=asked_by.get("agent_name"),
+                        agent_id=asked_by.get("agent_id"),
+                        agents_by_id=agents_by_id,
+                    ),
+                    "asked_at": _clip(item.get("asked_at"), 40) or None,
+                    "answered_at": _clip(item.get("answered_at"), 40) or None,
+                }
+            )
     raw_annotations = ticket.get("annotations")
     annotations = []
     if isinstance(raw_annotations, list):
@@ -3338,7 +3395,27 @@ def _detail_ticket(
         )
         or None,
         "status_label": _ticket_status_label(ticket, datetime.now(timezone.utc)),
-        "result": project_ticket_result(ticket),
+        "result": result,
+        "submission_evidence": {
+            "summary": result.get("summary"),
+            "branch": result.get("branch"),
+            "commit": result.get("commit"),
+            "files_changed": result.get("files_changed", []),
+            "files_omitted": result.get("files_omitted", 0),
+            "test_output": test_output,
+            "submitted_at": result.get("submitted_at"),
+        },
+        "review_rounds": review_rounds,
+        "review_rounds_omitted": max(
+            0,
+            int(ticket.get("review_history_omitted_count", 0) or 0)
+            + (
+                len(raw_reviews) - len(review_rounds)
+                if isinstance(raw_reviews, list)
+                else 0
+            ),
+        ),
+        "coordination_questions": questions,
         "delivery": project_delivery(ticket),
         "review_label": _clip(ticket.get("review_label"), MAX_LABEL_CHARS) or None,
         "annotations": annotations,

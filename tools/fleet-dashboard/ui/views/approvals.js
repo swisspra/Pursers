@@ -124,7 +124,7 @@
       <h3>Recorded agreement signals</h3>
       <p>Only source-backed Butler marks and repeated-question history appear below. Empty evidence groups are collapsed.</p>
     </div>`;
-    return `${pageHead('Approvals', 'Decisions, in safe order', 'Resolve human requests first, inspect independent review handoffs, then open guarded intake at its source.')}${warmTruthStrip()}${sourceState()}${boundary}<div class="approvals-flow">${renderWaitingForYou()}${reviewQueue()}${intakeQueue()}${evidenceIntro}</div>`;
+    return `${pageHead('Inbox', 'Decisions, drafts, and review handoffs', 'Resolve human requests first, inspect independent review handoffs, then open guarded intake at its source.')}${warmTruthStrip()}${sourceState()}${boundary}<div class="approvals-flow">${renderWaitingForYou()}${reviewQueue()}${intakeQueue()}${evidenceIntro}</div>`;
   }
 
   loadStyles();

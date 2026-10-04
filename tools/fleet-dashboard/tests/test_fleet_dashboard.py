@@ -7709,11 +7709,12 @@ def test_dashboard_uses_warm_guided_home_shell() -> None:
         "projects",
         "work",
         "team",
-        "approvals",
         "activity",
         "settings",
     ):
         assert f'data-nav="{destination}" href="#/{destination}"' in html
+    assert 'data-nav="approvals" href="#/inbox"' in html
+    assert "match[1]==='inbox'?'approvals':match[1]" in html
     assert "Your calm work home" in html
     assert "Workspace context" in html
     assert "function renderWarmHome()" in html

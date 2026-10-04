@@ -177,7 +177,7 @@
 
     const only = boards.length === 1 ? boards[0] : null;
     const intentHref = only ? boardHref(only.central, only.board.board_id) : '#/projects';
-    const headActions = `<div class="home-head-actions"><a class="button" href="#/approvals">Open Approvals${humanPending ? ` · ${esc(humanPending)}` : ''}</a><a class="primary-action" href="${esc(intentHref)}">${only ? 'New intent' : 'Choose project'}</a></div>`;
+    const headActions = `<div class="home-head-actions"><a class="button" href="#/inbox">Open Inbox${humanPending ? ` · ${esc(humanPending)}` : ''}</a><a class="primary-action" href="${esc(intentHref)}">${only ? 'New intent' : 'Choose project'}</a></div>`;
 
     return `${pageHead('Home', greeting(), `${boards.length} connected ${boards.length === 1 ? 'project' : 'projects'} · ${pending ? 'bounded summaries ready; optional detail enriching' : 'bounded source data current'}`, headActions)}${warmTruthStrip()}
       <dl class="home-status-grid" aria-label="Bounded work status">
