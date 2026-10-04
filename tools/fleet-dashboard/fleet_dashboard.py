@@ -5072,8 +5072,8 @@ class FleetFetcher:
         self._managed_plans: dict[str, dict[str, Any]] = {}
         self._managed_plan_lock = threading.Lock()
         self._source_config = SourceConfigurationStore(
-            config.connector_config_path,
-            config.source_onboarding_config_path,
+            getattr(config, "connector_config_path", None),
+            getattr(config, "source_onboarding_config_path", None),
             board_id=config.home_board,
             actor_id=config.agent_name,
         )
