@@ -41,6 +41,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Keep idle Butler refreshes from repeatedly rewriting unchanged observation
+  and Fleet state. Observer freshness remains bounded by a five-minute durable
+  heartbeat, while Central now returns exact coordinator state duplicates
+  without copying and encoding the complete board document.
 - Preserve the exact Central and board identity when changing Fleet Settings
   scope in browser-parsed HTML, including duplicate board names across Centrals,
   and cancel any pending plan when that scope changes.

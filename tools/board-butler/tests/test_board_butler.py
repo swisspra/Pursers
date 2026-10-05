@@ -3476,6 +3476,68 @@ def test_refresh_findings_cas_conflict_rereads_and_preserves_concurrent_question
     assert sum(row.get("observation_key") == "refresh-row" for row in rows) == 1
 
 
+def test_unchanged_observation_refresh_skips_writes_until_freshness_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = args(tmp_path, dry_run=False)
+    options.home_board = "away"
+    backend = butler.CentralBackend(options, "opaque")
+    initial_observation = {
+        "kind": butler.OBSERVATION_FINDING_KIND,
+        "observation_key": "stable-row",
+        "observer": "rejection_loop",
+        "level": "warn",
+        "evidence": "rejections=2",
+        "observed_at": NOW.isoformat(),
+    }
+    initial = butler.merge_observation_findings(
+        {}, [initial_observation], NOW
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.value = json.dumps(initial, sort_keys=True, separators=(",", ":"))
+            self.reads = 0
+            self.writes = 0
+
+        async def board_state_get(self, key: str) -> Mapping[str, Any]:
+            assert key == butler.STATE_KEY
+            self.reads += 1
+            return {"state": {"value": self.value}}
+
+        async def board_state_update(
+            self, key: str, value: str, **_arguments: Any
+        ) -> Mapping[str, Any]:
+            assert key == butler.STATE_KEY
+            self.writes += 1
+            self.value = value
+            return {"ok": True}
+
+    client = Client()
+
+    @contextlib.asynccontextmanager
+    async def client_for_board(board_id: str) -> Any:
+        assert board_id == "away"
+        yield client
+
+    monkeypatch.setattr(backend, "_client_for_board", client_for_board)
+    refreshed = dict(initial_observation)
+
+    async def refresh_for_six_minutes() -> None:
+        for seconds in range(10, 361, 10):
+            cycle_now = NOW + butler.timedelta(seconds=seconds)
+            refreshed["observed_at"] = cycle_now.isoformat()
+            await backend._write_observation_findings(
+                "away", [refreshed], cycle_now
+            )
+
+    asyncio.run(refresh_for_six_minutes())
+
+    # The same 36 refreshes previously issued 36 state writes per board.
+    # Facts are still read each cycle; only the five-minute heartbeat writes.
+    assert (client.reads, client.writes) == (36, 1)
+
+
 def test_evaluation_cas_conflict_preserves_concurrent_mark(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

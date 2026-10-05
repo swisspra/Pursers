@@ -67,6 +67,12 @@ curl --fail --silent http://127.0.0.1:8766/healthz
 
 A healthy response has `"status":"ok"` and `"store_backend":"sqlite"`.
 
+Exact-value `board_state_update` calls from coordinator/intake principals are
+idempotent storage no-ops. Central still verifies membership and any supplied
+CAS precondition, but preserves the existing entry metadata and board version
+instead of copying and encoding the complete board document. Worker writes keep
+the ordinary path because they may renew an active work or review lease.
+
 ## Serving other machines
 
 Central binds loopback by default. To serve agents on other machines, for

@@ -102,8 +102,12 @@ The current duties are directly traceable:
     an aggregate row records any omitted backlog.
 
 `fleet_demand_snapshot` is the machine-readable companion to those nags. On
-every refresh it replaces `board_butler.demand_snapshot` in the same
-CAS-protected state document with current gate depth,
+every refresh it derives `board_butler.demand_snapshot`. A changed observation
+is written immediately; an unchanged semantic result reuses the durable value
+for at most five minutes before a freshness heartbeat rewrites it. Producer
+timestamps are excluded from the equality check, but queue ages, counts,
+headroom, findings, and every other observed fact still trigger an immediate
+CAS-protected update. The document contains current gate depth,
 oldest queue wait and holder class; unassignable work/review counts and ages;
 idle role capacity; rejection/rework load; and normalized host load, memory,
 and disk headroom. The future reconciler may consume this structure within its

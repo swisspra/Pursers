@@ -164,6 +164,7 @@ STATE_WRITE_RETRY_BASE_DELAY_S = 0.025
 OBSERVATION_TICKET_LIMIT = 100
 OBSERVATION_HISTORY_DAYS = 7
 OBSERVATION_FINDING_KIND = "butler_observation"
+OBSERVATION_REFRESH_HEARTBEAT_S = 300
 GATE_QUEUE_NAG_DEPTH = 3
 GATE_QUEUE_ESCALATE_DEPTH = 8
 
@@ -12373,6 +12374,44 @@ def merge_observation_findings(
     return result
 
 
+def observation_semantic_fingerprint(state: Mapping[str, Any]) -> str:
+    """Hash observer facts while excluding producer freshness timestamps."""
+    findings: list[dict[str, Any]] = []
+    for item in state.get("findings", []):
+        if (
+            not isinstance(item, Mapping)
+            or item.get("kind") != OBSERVATION_FINDING_KIND
+        ):
+            continue
+        row = copy.deepcopy(dict(item))
+        row.pop("observed_at", None)
+        snapshot = row.get("demand_snapshot")
+        if isinstance(snapshot, dict):
+            snapshot.pop("observed_at", None)
+        findings.append(row)
+    findings.sort(
+        key=lambda row: (
+            str(row.get("observation_key", "")),
+            str(row.get("observer", "")),
+        )
+    )
+    board_butler = state.get("board_butler", {})
+    demand_snapshot = (
+        copy.deepcopy(board_butler.get("demand_snapshot"))
+        if isinstance(board_butler, Mapping)
+        else None
+    )
+    if isinstance(demand_snapshot, dict):
+        demand_snapshot.pop("observed_at", None)
+    material = json.dumps(
+        {"findings": findings, "demand_snapshot": demand_snapshot},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def rate_limit_finding(
     question: Mapping[str, Any], reason: str, now: datetime
 ) -> dict[str, Any]:
@@ -14074,6 +14113,8 @@ class CentralBackend:
                 sort_keys=True,
                 separators=(",", ":"),
             )
+            if encoded == previous:
+                return
             await client.board_state_update(
                 FLEET_STATE_KEY, encoded, expected_sha256=expected
             )
@@ -14454,6 +14495,8 @@ class CentralBackend:
         candidate = value
         expected = expected_value
         for attempt in range(STATE_WRITE_MAX_ATTEMPTS):
+            if candidate == expected:
+                return {"ok": True, "duplicate": True}
             expected_digest = (
                 hashlib.sha256(expected.encode("utf-8")).hexdigest()
                 if expected is not None
@@ -15013,6 +15056,27 @@ class CentralBackend:
                 raw = {}
             state, previous_value = _decode_state(raw)
             merged = merge_observation_findings(state, findings, now)
+            board_butler = state.get("board_butler", {})
+            observations = (
+                board_butler.get("observations", {})
+                if isinstance(board_butler, Mapping)
+                else {}
+            )
+            last_refresh = (
+                parse_time(observations.get("updated_at"))
+                if isinstance(observations, Mapping)
+                else None
+            )
+            unchanged = observation_semantic_fingerprint(
+                state
+            ) == observation_semantic_fingerprint(merged)
+            heartbeat_current = (
+                last_refresh is not None
+                and now - last_refresh
+                < timedelta(seconds=OBSERVATION_REFRESH_HEARTBEAT_S)
+            )
+            if unchanged and heartbeat_current:
+                return
             try:
                 await self._write_state_with_retry_for_client(
                     client,
