@@ -41,6 +41,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Update the dashboard MCP client to 2.2.0, MCP Apps to 2.0.3, Zod to
+  4.6.5, and Vite to 8.3.2. CI now builds the dashboard bundle as well as
+  checking its types so dependency updates exercise the bundler.
 - Preserve active seat turns across transient HTTP timeouts whose exception
   chains reach the underlying transport library. Bounded recovery now recognizes
   those typed causes while mixed authorization or validation failures still stop.

@@ -167,3 +167,6 @@ jobs:
 
       - name: Typecheck dashboard UI
         run: npm exec -- tsc --noEmit
+
+      - name: Build dashboard UI
+        run: npm run build
