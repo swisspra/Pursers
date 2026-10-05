@@ -1050,6 +1050,112 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         stored = await self.call("board_state_get", key="coordinator_intake")
         self.assertEqual(stored.structured_content["state"]["value"], replacement)
 
+    async def test_identical_coordinator_refresh_preserves_generation_fence(self):
+        self.principal = self.coordinator
+        value = '{"findings":[]}'
+        await self.call(
+            "board_state_update", agent_name="coordinator-1",
+            key="coordinator_findings", value=value,
+        )
+        self.service.mutate(
+            "pursers", lambda document: document.update(
+                generation_token="current", generation_revision=1,
+            ),
+        )
+        self.service.store.read_modify_write(
+            self.service._import_path("pursers"),
+            lambda document: document.update(
+                board_id="pursers", status="complete",
+                generation_token="current", generation_revision=1,
+            ), dict,
+        )
+        board_path = self.service._path("pursers")
+        version = self.service.store.document_version(board_path)
+        for expected in (None, "stale", "current"):
+            with self.subTest(expected_generation=expected):
+                token = self.service.expected_generation.set(expected)
+                try:
+                    if expected != "current":
+                        with self.assertRaises(ToolError) as raised:
+                            await self.call(
+                                "board_state_update", agent_name="coordinator-1",
+                                key="coordinator_findings", value=value,
+                            )
+                        self.assertIn(central.GENERATION_REJOIN_ERROR, str(raised.exception))
+                    else:
+                        result = await self.call(
+                            "board_state_update", agent_name="coordinator-1",
+                            key="coordinator_findings", value=value,
+                        )
+                        self.assertTrue(result.structured_content["duplicate"])
+                finally:
+                    self.service.expected_generation.reset(token)
+        self.assertEqual(self.service.store.document_version(board_path), version)
+
+    async def test_identical_coordinator_refresh_skips_large_board_mutation(self):
+        self.principal = self.coordinator
+        value = '{"findings":[],"schema_version":2}'
+        first = await self.call(
+            "board_state_update",
+            agent_name="coordinator-1",
+            key="coordinator_findings",
+            value=value,
+        )
+        self.assertFalse(first.is_error)
+
+        def enlarge(document):
+            document["tickets"].update(
+                {
+                    f"TK-large-{index:02d}": {
+                        "ticket_id": f"TK-large-{index:02d}",
+                        "status": "closed",
+                        "description": "x" * 120_000,
+                    }
+                    for index in range(29)
+                }
+            )
+
+        self.service.mutate("pursers", enlarge)
+        board_path = self.service._path("pursers")
+        logical_path = str(board_path.relative_to(self.service.store.root))
+        self.assertGreater(
+            dict(self.service.store.document_sizes("boards"))[logical_path],
+            3_000_000,
+        )
+        version = self.service.store.document_version(board_path)
+        saves = self.service.store.activity_counts(board_path)["saves"]
+        digest = hashlib.sha256(value.encode()).hexdigest()
+
+        with patch.object(
+            self.service,
+            "mutate",
+            wraps=self.service.mutate,
+        ) as mutate:
+            for _ in range(12):
+                duplicate = await self.call(
+                    "board_state_update",
+                    agent_name="coordinator-1",
+                    key="coordinator_findings",
+                    value=value,
+                    expected_sha256=digest,
+                )
+                self.assertTrue(duplicate.structured_content["duplicate"])
+
+        self.assertEqual(mutate.call_count, 0)
+        self.assertEqual(self.service.store.document_version(board_path), version)
+        self.assertEqual(
+            self.service.store.activity_counts(board_path)["saves"], saves
+        )
+
+        with self.assertRaisesRegex(ToolError, "state precondition failed"):
+            await self.call(
+                "board_state_update",
+                agent_name="coordinator-1",
+                key="coordinator_findings",
+                value=value,
+                expected_sha256="0" * 64,
+            )
+
     async def test_board_state_size_boundary_does_not_truncate_or_mutate_on_failure(self):
         self.principal = self.admin
         value = "x" * 262_144

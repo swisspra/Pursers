@@ -15430,6 +15430,52 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         now = time.time()
 
+        # Coordinator/observer refreshes commonly converge on an already
+        # stored value. Avoid a full multi-megabyte board deepcopy + JSON
+        # encode merely to refresh entry metadata. The surrounding SQLite
+        # transaction and tool lock make this a linearizable read point. Board
+        # writers retain the mutation path because it also renews their lease.
+        if authority != "write":
+            document = service.load(board_id)
+            service._assert_expected_generation(document)
+            safe_value = clean_text(
+                "value",
+                value,
+                max_length=BOARD_STATE_MAX_CHARS,
+                scrub_profile=board_scrub_profile(document),
+            )
+            assert safe_value is not None
+            state = document.get("state", {})
+            current = state.get(key) if isinstance(state, Mapping) else None
+            current_value = (
+                current.get("value") if isinstance(current, Mapping) else None
+            )
+            if expected_absent and key in state:
+                raise ValueError("state precondition failed")
+            if expected_sha256 is not None and (
+                not isinstance(current_value, str)
+                or not hmac.compare_digest(
+                    hashlib.sha256(current_value.encode("utf-8")).hexdigest(),
+                    expected_sha256,
+                )
+            ):
+                raise ValueError("state precondition failed")
+            if isinstance(current, Mapping) and current_value == safe_value:
+                service.resolve_board_context(
+                    document,
+                    principal.principal_id,
+                    COORDINATOR_MEMBERSHIP_ROLES,
+                )
+                service.member(document, principal, agent_name)
+                return {
+                    "ok": True,
+                    "key": key,
+                    "state": copy.deepcopy(dict(current)),
+                    "duplicate": True,
+                    "release_events": [],
+                    "implicitly_renewed": [],
+                }
+
         def update(document: dict[str, Any]) -> dict[str, Any]:
             safe_value = clean_text(
                 "value",
