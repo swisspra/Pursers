@@ -159,6 +159,46 @@ async function openSettings(page, url) {
   await page.waitForSelector("[data-settings-family='board_policy']", { timeout: 20_000 });
 }
 
+async function verifyColdLoads(page, url) {
+  const required = [
+    "/ui/view-registry.js",
+    "/ui/views/home.js",
+    "/ui/views/projects.js",
+    "/ui/views/work.js",
+    "/ui/views/team.js",
+    "/ui/views/approvals.js",
+    "/ui/views/activity.js",
+    "/ui/views/settings.js",
+    "/ui/assets/app.js",
+    "/ui/assets/fleet.css",
+  ];
+  const failures = [];
+  const failed = request => failures.push(`${request.resourceType()}:${request.url()}:${request.failure()?.errorText || "unknown"}`);
+  page.on("requestfailed", failed);
+  try {
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await page.goto(`${url}/#/settings`, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector("[data-settings-bound='true']", { timeout: 20_000 });
+      await page.waitForSelector("[data-settings-family='board_policy']", { timeout: 20_000 });
+      const resources = await page.evaluate(() => performance.getEntriesByType("resource").map(entry => ({
+        path: new URL(entry.name).pathname,
+        status: entry.responseStatus,
+      })));
+      const loaded = new Map(resources.map(entry => [entry.path, entry.status]));
+      const missing = required.filter(path => !loaded.has(path));
+      if (missing.length) throw new Error(`cold load ${attempt + 1} missing resources: ${missing.join(", ")}`);
+      const badStatus = required.filter(path => loaded.get(path) !== 200);
+      if (badStatus.length) throw new Error(`cold load ${attempt + 1} non-200 resources: ${badStatus.map(path => `${path}=${loaded.get(path)}`).join(", ")}`);
+      if ((await page.evaluate(() => typeof refreshFleet)) !== "function") {
+        throw new Error(`cold load ${attempt + 1} did not initialize app.js`);
+      }
+    }
+  } finally {
+    page.off("requestfailed", failed);
+  }
+  if (failures.length) throw new Error(`cold-load request failures:\n${failures.join("\n")}`);
+}
+
 async function exerciseInteractions(page) {
   await page.evaluate(() => {
     const select = document.querySelector("[data-settings-scope]");
@@ -206,6 +246,9 @@ let browser;
 try {
   browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1116, height: 900 } });
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
+  await verifyColdLoads(page, url);
   const results = [];
   for (const width of [390, 768, 1024, 1116, 1440]) {
     await page.setViewportSize({ width, height: 900 });

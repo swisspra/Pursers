@@ -37,6 +37,45 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import tomllib
 
+
+class FleetDashboardHTTPServer(ThreadingHTTPServer):
+    """HTTP listener sized for one complete browser cold load.
+
+    ``TCPServer`` defaults to a five-connection listen queue. Chromium opens
+    more connections than that while fetching the dashboard shell and route
+    modules, so a cold load can overflow the queue before the accept loop has
+    drained it. Keep both queued and active work explicitly bounded while
+    leaving enough room for a complete dashboard resource burst.
+    """
+
+    request_queue_size = 64
+    max_active_requests = 32
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self._request_slots = threading.BoundedSemaphore(self.max_active_requests)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            # ``process_request`` runs on ``serve_forever``'s accept-loop
+            # thread. Waiting here would prevent ``shutdown`` from observing
+            # the shutdown flag while every handler slot is occupied. Refuse
+            # only the request beyond the explicit active-work limit; the
+            # listen queue still absorbs a complete browser cold load.
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
 # Prefer the sibling source checkout over any installed pursers-client wheel:
 # the dashboard depends on keyword arguments newer than the last published wheel.
 _CLIENT_SRC = Path(__file__).resolve().parents[2] / "packages" / "client" / "src"
@@ -12443,7 +12482,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.public_check:
             print(f"Fleet public projection: {digest}", flush=True)
             return
-        server = ThreadingHTTPServer(
+        server = FleetDashboardHTTPServer(
             (args.host, args.port), make_public_handler(projection)
         )
         print(
@@ -12511,7 +12550,7 @@ def main(argv: list[str] | None = None) -> None:
         )
     except EvidenceTraceConfigError as exc:
         raise SystemExit(f"invalid evidence trace config: {exc}") from exc
-    server = ThreadingHTTPServer(
+    server = FleetDashboardHTTPServer(
         (args.host, args.port),
         make_handler(
             cache,
