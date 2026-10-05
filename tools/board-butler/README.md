@@ -3,8 +3,10 @@
 `board_butler.py` is a single resident coordinator seat that keeps findings
 fresh for every active board in `project_registry` and drafts evidence-backed
 answers to mechanically checkable coordinator questions. Each bounded refresh
-runs the real `tools/coordinator/coordinator.py` derivation in shadow mode; the
-butler never manufactures a timestamp or finding merely to satisfy freshness.
+runs the real `tools/coordinator/coordinator.py` derivation in shadow mode over
+the same bounded registry snapshot the Butler already read; it does not repeat
+the snapshot and ticket-list pass. The butler never manufactures a timestamp or
+finding merely to satisfy freshness.
 Inactive registry projects are not read or acted on.
 
 Question handling is independently configured per board as `off`, `assist`, or

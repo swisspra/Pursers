@@ -7,6 +7,10 @@ compatibility fallback. Push subscribes to `board://<board>/journal` plus the
 per-seat URI, then uses `BoardClient.events()` for reconnect/dedup and an
 authoritative catchup. A Central with `board_catchup(touch=False)` gets a pure
 refetch; older Centrals fall back loudly to `ack=False` for that deployment.
+If an ordinary Central call fails with a transient transport error, the bridge
+closes only its failed owned session; the next re-arm creates a fresh session
+from the unchanged caller cursor. Authentication, authorization, and
+configuration failures are never retried this way.
 Keep it on stdio; wrapping it in an HTTP transport adds request timeouts that
 defeat the wait behavior.
 

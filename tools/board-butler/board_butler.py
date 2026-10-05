@@ -15309,6 +15309,10 @@ class CentralBackend:
                 *(["--dry-run"] if self.args.dry_run else []),
             ]
         )
+        # The Butler already paid for the bounded registry read above. Reusing
+        # it avoids a second 1,000-item/750-KiB snapshot plus ticket-list pass
+        # for every active board in the same refresh.
+        coordinator_args._preloaded_cycle = (projects, snapshots, previous)
         await coordinator["run"](coordinator_args)
         if not self.args.dry_run:
             await self._write_source_intake_findings(now)

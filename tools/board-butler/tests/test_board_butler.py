@@ -5930,6 +5930,16 @@ def test_registry_refresh_runs_real_derivation_for_two_active_boards_twice(
     ]
     assert first["refreshed_at"] != second["refreshed_at"]
     assert len(calls) == 2
+    assert calls[0]._preloaded_cycle == (
+        projects,
+        {"pursers": {}, "fullplatts": {}},
+        {"pursers": {}, "fullplatts": {}},
+    )
+    assert calls[1]._preloaded_cycle == (
+        projects,
+        {"pursers": {}, "fullplatts": {}},
+        {"pursers": {}, "fullplatts": {}},
+    )
 
 
 def test_full_ticket_hydration_is_board_scoped_and_tolerates_delete_race(
