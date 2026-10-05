@@ -1201,7 +1201,7 @@ for (const viewport of [{{width:1440,height:900}},{{width:390,height:844}}]) {{
     return {{route:location.hash,beforeY,afterY:window.scrollY,open:!!current,focused:document.activeElement?.tagName||null,focusExpected:focusTarget.tagName,focusTrace,count:document.querySelectorAll(".agent-card").length}};
   }});
   await page.evaluate(() => {{ location.hash="#/settings"; }});
-  await page.waitForSelector("#central-sections .settings-groups", {{state:"visible",timeout:10000}});
+  await page.waitForSelector("#central-sections .settings-page", {{state:"visible",timeout:10000}});
   await page.waitForFunction(() => document.querySelector("#butler-settings-form") || document.querySelector(".butler-settings.error"), undefined, {{timeout:10000}});
   const settings = await page.evaluate(async () => {{
     let input = document.querySelector("#butler-settings-form input[name=model]");

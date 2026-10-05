@@ -1,6 +1,6 @@
 # Pursers roadmap
 
-Pursers 5.0.0 is the current supported release. This page separates released
+Pursers 5.2.0 is the current release train. This page separates released
 work, near-term candidates, and research so that an experiment is never
 mistaken for a commitment. Items move only after implementation, independent
 review, and the applicable release gates pass.
@@ -8,26 +8,32 @@ review, and the applicable release gates pass.
 Release artifacts and their checksum manifests are available from the generic
 [GitHub Releases page](https://github.com/swisspra/Pursers/releases).
 
-## Shipped in `v5.0.0`
+## `v5.2.0` release train
 
-The release cohort contains `pursers==5.0.0` and
-`pursers-personal==5.0.0`, with Central `0.1.0`, Client `0.1.0`, Personal
-Import `5.0.0`, Wait Bridge `0.1.0`, and ACP `0.1.0`.
+The release cohort contains `pursers==5.2.0` and
+`pursers-personal==5.2.0`, with Central `0.1.8`, Client `0.1.9`, Personal
+Import `5.0.0`, Wait Bridge `0.1.7`, and ACP `0.1.8`.
 
-Release highlights:
+Planned release highlights, subject to the final prerequisite below:
 
-- The release path builds the Python distributions, AionUi extension ZIP, and
-  locked Home runtime wheelhouse from the tagged source. The Home integration
-  retains its exact-candidate source, browser, behavior, CI, and CodeQL
-  verification boundary.
-- Project-registry entries can bind work to an exact, board-scoped HTTPS
-  repository URL. Generated seats fail closed when repository, checkout,
-  board, or operator-ownership routing is unsafe; registry administration uses
-  compare-and-set updates.
-- Fleet Dashboard CodeQL findings were remediated: sensitive-key redaction no
-  longer uses a polynomial-backtracking pattern, staged-wheel logs do not emit
-  the environment-derived path, PyPI test routing checks hostnames, and test
-  script-tag extraction handles upper-case tags.
+- Nocturne adds source-backed Inbox, Work, Settings, project, team, and
+  approval routes while preserving explicit authorization and evidence bounds.
+- Fleet Settings adds guarded preview/apply/readback contracts for connector,
+  onboarding, delivery, seat, membership, retention, Butler, and diagnostic
+  families.
+- Managed ACP setup can select exact Registry pins and session options, but
+  provider-authenticated execution remains fail-closed until a dedicated
+  auth/egress adapter is configured.
+- Central avoids duplicate state encoding while preserving generation fences;
+  wait and managed-seat recovery preserve positive cursors, leases, and paid
+  model turns across typed transient transport failures.
+- The supplied Pursers brand is included in public repository and Fleet
+  surfaces, and dashboard dependency updates are covered by type and bundle CI.
+
+At release-train preparation time, PR 83's Settings layout/browser regression
+gate remained a prerequisite rather than verified deployed behavior. The final
+tag requires its independently approved source plus full strict CI and browser
+acceptance on the integrated candidate.
 
 Central binds to loopback by default. Remote access requires an
 operator-supplied TLS certificate and key plus an allowed host. macOS is the

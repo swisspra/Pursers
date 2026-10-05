@@ -15,7 +15,8 @@ and the Personal component lock are consumers. Do not edit those pins by hand.
      --set central=<central_version> \
      --set client=<client_version> \
      --set import=<import_version> \
-     --set wait_bridge=<bridge_version>
+     --set wait_bridge=<bridge_version> \
+     --set acp=<acp_version>
    ```
 
    For a train where every alpha counter advances once, use

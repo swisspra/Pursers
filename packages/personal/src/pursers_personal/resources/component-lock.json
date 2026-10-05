@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "5.1.0",
+  "product_version": "5.2.0",
   "build_toolchain": {
     "build": "1.3.0",
     "setuptools": "80.9.0",
@@ -10,14 +10,14 @@
   },
   "components": {
     "pursers-central": {
-      "version": "0.1.7",
-      "wheel_sha256": "da7bc7451165f7194397bd32d54d644287a2a0d7e85eed440bec9aa144338422",
+      "version": "0.1.8",
+      "wheel_sha256": "d756aaa2aec14f63dd89daffae58a98895cb4d51ead392885a6304df150a11d5",
       "members": {
-        "pursers_central-0.1.7.dist-info/METADATA": "d6e31d3965fe4af8f80a3d81f2c6e96157b444a54c6a5ff6b13b517d59ac54e1",
-        "pursers_central-0.1.7.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
-        "pursers_central-0.1.7.dist-info/entry_points.txt": "1ae83629668ca4cbed9de309e64ec2541178c1766cdaab1342ed38e45ed7bd64",
-        "pursers_central-0.1.7.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
-        "pursers_central-0.1.7.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
+        "pursers_central-0.1.8.dist-info/METADATA": "b75af73a66946cbc8ff4413656f79857c5c29e8bdd999d85855be8d2101dc11f",
+        "pursers_central-0.1.8.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
+        "pursers_central-0.1.8.dist-info/entry_points.txt": "1ae83629668ca4cbed9de309e64ec2541178c1766cdaab1342ed38e45ed7bd64",
+        "pursers_central-0.1.8.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "pursers_central-0.1.8.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
         "pursers_central/__init__.py": "43cb412dd0dbb83256d0948f5e411beab29fbb3961f8d62176b1f34879948c65",
         "pursers_central/__main__.py": "8bd9f3325a7cbe104d4dca914351cf417eff40812a9972b68b64c783f03ed7de",
         "pursers_central/activity.py": "c49e32e14c3abdbcf472c4d43a3cab504f025684f362f11993f3b85a6ad39da9",
@@ -39,14 +39,14 @@
       }
     },
     "pursers-client": {
-      "version": "0.1.8",
-      "wheel_sha256": "f37a860abdcb78ee998a680892ef8ede0aac21d91717db1823d6c6a872c4ec24",
+      "version": "0.1.9",
+      "wheel_sha256": "380e291d18ab63e31737c260dd24a5f6cd02ab28b4f21d89bc85bf82107ccb92",
       "members": {
-        "pursers_client-0.1.8.dist-info/METADATA": "2ae6f4a2cd952559faac48e368143d91507879f521e619ae530d0bcc9909979f",
-        "pursers_client-0.1.8.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
-        "pursers_client-0.1.8.dist-info/entry_points.txt": "48ef04b32aedc818a11de451a8ed5ed7d92027406767af40a81216857814f2da",
-        "pursers_client-0.1.8.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
-        "pursers_client-0.1.8.dist-info/top_level.txt": "f1c543c98535c0f218812ac0a8b29ce27e28b6430eda69116c789ecc853cf7b4",
+        "pursers_client-0.1.9.dist-info/METADATA": "e587edd4c0fdc3800822234844cad62541820c72808328bf3ed0dbd6949caca3",
+        "pursers_client-0.1.9.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
+        "pursers_client-0.1.9.dist-info/entry_points.txt": "48ef04b32aedc818a11de451a8ed5ed7d92027406767af40a81216857814f2da",
+        "pursers_client-0.1.9.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "pursers_client-0.1.9.dist-info/top_level.txt": "f1c543c98535c0f218812ac0a8b29ce27e28b6430eda69116c789ecc853cf7b4",
         "pursers_client/__init__.py": "308bfe5b987bbe2b582260bfc37c5f3348152263683d0046926bfc83dc0ac91d",
         "pursers_client/client.py": "5fba7e428607ad2785409eee686191004e7994685c0de589b60e49f99d2812f4",
         "pursers_client/delivery_workflow.py": "aa470ba28ce61d3c924a45dc26dc0ec0795da39f6124dc572431834303115762",
@@ -64,7 +64,7 @@
   },
   "view": {
     "resource": "pursers_personal/resources/dashboard.html",
-    "size_bytes": 337978,
-    "sha256": "11f82667a55d8b34263c61147fc03bec5bbdacf941ef7c84a40f232a568b2b03"
+    "size_bytes": 359597,
+    "sha256": "13e4d6d17dd39466eaa556a88eef81816d97f452d0b485506bccbb726e5df57c"
   }
 }

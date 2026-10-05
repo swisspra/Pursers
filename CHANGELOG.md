@@ -7,6 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-10-05
+
+This release includes `pursers-central==0.1.8`,
+`pursers-client==0.1.9`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.2.0`, `pursers==5.2.0`,
+`pursers-wait-bridge==0.1.7`, and
+`pursers-acp==0.1.8`.
+
+Upgrade Central, clients, Personal, the wait bridge, managed runners, and ACP
+as one compatible cohort. Preserve live leases and positive cursors, and follow
+the [5.2.0 upgrade and configuration guide](docs/releases/UPGRADE-v5.2.0.md).
+
+The release includes the independently reviewed Settings layout fix and a
+required Chromium layout and interaction gate. Release candidates must pass
+the full strict CI and browser gate before tagging or publication.
+
 ### Added
 
 - Add a guarded Fleet setup flow for native Codex/Goose and exact-version ACP
@@ -27,8 +43,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Introduce the first Nocturne Fleet Dashboard slice: a light/dark token system,
   accessible mobile navigation drawer, source-backed Home status and observed
   seat summaries, and project-scoped intent entry without changing dashboard
-  authorization or runtime behavior. Settings/onboarding remains staged
-  follow-up work.
+  authorization or runtime behavior.
 - Add a versioned, secret-safe managed configuration contract and complete
   Settings workspace for Fleet operators. Typed editors now cover source
   connectors and onboarding, delivery, seats and dispatch, membership, board
@@ -41,6 +56,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Keep the Fleet Settings toolbar, section navigation, and editors in a dedicated
+  full-width page flow instead of the reusable card grid. Container-aware
+  wrapping now prevents control overlap across narrow, desktop, and zoomed
+  layouts, backed by a required hermetic Chromium geometry and interaction gate.
 - Update the dashboard MCP client to 2.2.0, MCP Apps to 2.0.3, Zod to
   4.6.5, and Vite to 8.3.2. CI now builds the dashboard bundle as well as
   checking its types so dependency updates exercise the bundler.
