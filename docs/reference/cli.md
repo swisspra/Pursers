@@ -750,9 +750,11 @@ usage: fleet_dashboard.py [-h] [--mode {private,public}] [--port PORT] [--url UR
                           [--home-board HOME_BOARD] [--agent-name AGENT_NAME] [--stale-seconds STALE_SECONDS]
                           [--cache-seconds CACHE_SECONDS] [--workers-dir WORKERS_DIR]
                           [--butler-secrets-dir BUTLER_SECRETS_DIR] [--butler-state-dir BUTLER_STATE_DIR]
-                          [--butler-entrypoint BUTLER_ENTRYPOINT] [--evidence-trace-config EVIDENCE_TRACE_CONFIG]
-                          [--case-study-manifest CASE_STUDY_MANIFEST] [--public-input PUBLIC_INPUT]
-                          [--public-alias-key PUBLIC_ALIAS_KEY] [--public-release PUBLIC_RELEASE] [--public-check]
+                          [--butler-entrypoint BUTLER_ENTRYPOINT] [--connector-config CONNECTOR_CONFIG]
+                          [--source-onboarding-config SOURCE_ONBOARDING_CONFIG]
+                          [--evidence-trace-config EVIDENCE_TRACE_CONFIG] [--case-study-manifest CASE_STUDY_MANIFEST]
+                          [--public-input PUBLIC_INPUT] [--public-alias-key PUBLIC_ALIAS_KEY]
+                          [--public-release PUBLIC_RELEASE] [--public-check]
 
 Run the loopback fleet dashboard
 
@@ -780,6 +782,10 @@ options:
                         Private Board Butler state root containing pid, runtime, and kill files
   --butler-entrypoint BUTLER_ENTRYPOINT
                         Exact board_butler.py path expected for the resident process
+  --connector-config CONNECTOR_CONFIG
+                        Private mode-0600 Board Butler connector/source configuration
+  --source-onboarding-config SOURCE_ONBOARDING_CONFIG
+                        Private mode-0600 source onboarding configuration
   --evidence-trace-config EVIDENCE_TRACE_CONFIG
                         Verifier-owned 0600 config for bounded Fleet evidence tracing
   --case-study-manifest CASE_STUDY_MANIFEST
