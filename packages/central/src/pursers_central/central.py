@@ -15437,6 +15437,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         # writers retain the mutation path because it also renews their lease.
         if authority != "write":
             document = service.load(board_id)
+            service._assert_expected_generation(document)
             safe_value = clean_text(
                 "value",
                 value,

@@ -1050,6 +1050,48 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         stored = await self.call("board_state_get", key="coordinator_intake")
         self.assertEqual(stored.structured_content["state"]["value"], replacement)
 
+    async def test_identical_coordinator_refresh_preserves_generation_fence(self):
+        self.principal = self.coordinator
+        value = '{"findings":[]}'
+        await self.call(
+            "board_state_update", agent_name="coordinator-1",
+            key="coordinator_findings", value=value,
+        )
+        self.service.mutate(
+            "pursers", lambda document: document.update(
+                generation_token="current", generation_revision=1,
+            ),
+        )
+        self.service.store.read_modify_write(
+            self.service._import_path("pursers"),
+            lambda document: document.update(
+                board_id="pursers", status="complete",
+                generation_token="current", generation_revision=1,
+            ), dict,
+        )
+        board_path = self.service._path("pursers")
+        version = self.service.store.document_version(board_path)
+        for expected in (None, "stale", "current"):
+            with self.subTest(expected_generation=expected):
+                token = self.service.expected_generation.set(expected)
+                try:
+                    if expected != "current":
+                        with self.assertRaises(ToolError) as raised:
+                            await self.call(
+                                "board_state_update", agent_name="coordinator-1",
+                                key="coordinator_findings", value=value,
+                            )
+                        self.assertIn(central.GENERATION_REJOIN_ERROR, str(raised.exception))
+                    else:
+                        result = await self.call(
+                            "board_state_update", agent_name="coordinator-1",
+                            key="coordinator_findings", value=value,
+                        )
+                        self.assertTrue(result.structured_content["duplicate"])
+                finally:
+                    self.service.expected_generation.reset(token)
+        self.assertEqual(self.service.store.document_version(board_path), version)
+
     async def test_identical_coordinator_refresh_skips_large_board_mutation(self):
         self.principal = self.coordinator
         value = '{"findings":[],"schema_version":2}'
