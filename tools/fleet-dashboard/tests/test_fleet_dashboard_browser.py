@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -385,6 +386,8 @@ def test_settings_scope_round_trips_exact_central_and_board_in_real_browser() ->
     applies: list[tuple[str, str, str]] = []
 
     class Cache:
+        central_b_started = threading.Event()
+
         @staticmethod
         def labels() -> list[str]:
             return ["central-a", "central-b"]
@@ -399,6 +402,11 @@ def test_settings_scope_round_trips_exact_central_and_board_in_real_browser() ->
         @classmethod
         def get(cls, central: str | None = None) -> dict:
             central = cls.resolve_central(central)
+            if central == "central-b":
+                cls.central_b_started.set()
+            else:
+                assert cls.central_b_started.wait(timeout=5)
+                time.sleep(0.1)
             boards = {
                 "central-a": [("same-a", "Same Board"), ("other-a", "Other Board")],
                 "central-b": [("same-b", "Same Board"), ("other-b", "Other Board")],
@@ -485,7 +493,13 @@ const before = await page.evaluate(() => [...document.querySelectorAll('[data-se
   value: option.value, central: option.dataset.central, board: option.dataset.board,
   label: option.textContent, replacement: option.value.includes('\uFFFD'),
 }})));
-await page.selectOption('[data-settings-scope]', {{label: 'Same Board · central-b · same-b'}});
+const valueFor = (central, board) => before.find(option =>
+  option.central === central && option.board === board
+)?.value;
+const selectedValue = valueFor('central-b', 'same-b');
+const changedValue = valueFor('central-a', 'other-a');
+if (!selectedValue || !changedValue) throw new Error('fixture scope identity missing');
+await page.selectOption('[data-settings-scope]', {{value: selectedValue}});
 await page.waitForFunction(() =>
   document.querySelector('[data-settings-scope]')?.selectedOptions[0]?.dataset.central === 'central-b'
   && document.querySelector('[data-settings-scope]')?.selectedOptions[0]?.dataset.board === 'same-b'
@@ -498,7 +512,7 @@ const selectedAfterReadback = await page.evaluate(() => {{
 }});
 await page.evaluate(() => document.querySelector('[data-settings-family="board_policy"]').requestSubmit());
 await page.waitForSelector('[data-settings-apply]', {{state: 'attached', timeout: 10000}});
-await page.selectOption('[data-settings-scope]', {{label: 'Other Board · central-a · other-a'}});
+await page.selectOption('[data-settings-scope]', {{value: changedValue}});
 await page.waitForFunction(() =>
   document.querySelector('[data-settings-scope]')?.selectedOptions[0]?.dataset.board === 'other-a'
   && Boolean(document.querySelector('[data-settings-family="board_policy"]'))
@@ -522,18 +536,26 @@ console.log(JSON.stringify({{before, selectedAfterReadback, afterScopeChange}}))
 
     assert completed.returncode == 0, completed.stderr
     evidence = json.loads(completed.stderr.strip().splitlines()[-1])
-    assert evidence["before"] == [
-        {"value": "scope-0", "central": "central-a", "board": "same-a",
-         "label": "Same Board · central-a · same-a", "replacement": False},
-        {"value": "scope-1", "central": "central-a", "board": "other-a",
-         "label": "Other Board · central-a · other-a", "replacement": False},
-        {"value": "scope-2", "central": "central-b", "board": "same-b",
-         "label": "Same Board · central-b · same-b", "replacement": False},
-        {"value": "scope-3", "central": "central-b", "board": "other-b",
-         "label": "Other Board · central-b · other-b", "replacement": False},
+    assert [option["central"] for option in evidence["before"]] == [
+        "central-b", "central-b", "central-a", "central-a",
     ]
+    by_identity = {
+        (option["central"], option["board"]): option
+        for option in evidence["before"]
+    }
+    assert {
+        identity: (option["label"], option["replacement"])
+        for identity, option in by_identity.items()
+    } == {
+        ("central-a", "same-a"): ("Same Board · central-a · same-a", False),
+        ("central-a", "other-a"): ("Other Board · central-a · other-a", False),
+        ("central-b", "same-b"): ("Same Board · central-b · same-b", False),
+        ("central-b", "other-b"): ("Other Board · central-b · other-b", False),
+    }
+    assert len({option["value"] for option in evidence["before"]}) == 4
     assert evidence["selectedAfterReadback"] == {
-        "value": "scope-2", "central": "central-b", "board": "same-b",
+        "value": by_identity[("central-b", "same-b")]["value"],
+        "central": "central-b", "board": "same-b",
     }
     assert evidence["afterScopeChange"] == {
         "central": "central-a", "board": "other-a", "hasApply": False,
