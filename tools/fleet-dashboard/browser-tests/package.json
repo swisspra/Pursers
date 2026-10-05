@@ -1,0 +1,12 @@
+{
+  "name": "pursers-fleet-settings-browser-gate",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node settings-layout.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

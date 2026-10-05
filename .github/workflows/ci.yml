@@ -170,3 +170,33 @@ jobs:
 
       - name: Build dashboard UI
         run: npm run build
+
+  fleet-settings-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install pinned browser gate
+        working-directory: tools/fleet-dashboard/browser-tests
+        run: |
+          npm install --ignore-scripts --no-package-lock
+          npx playwright install --with-deps chromium
+
+      - name: Verify Fleet Settings layout in Chromium
+        run: npm --prefix tools/fleet-dashboard/browser-tests test
+
+      - name: Preserve Settings visual evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: fleet-settings-layout
+          path: .artifacts/settings-layout
+          if-no-files-found: error

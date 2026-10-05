@@ -116,8 +116,32 @@ def test_primary_route_modules_own_renderers_and_receive_shared_context() -> Non
     assert "FleetViewModules.bind(kind,context,host)" in app
 
     settings = dashboard.UI_ASSETS["/ui/views/settings.js"][1].decode("utf-8")
-    assert '<div class="settings-groups">' in settings
+    assert '<div class="settings-page">' in settings
+    assert '<div class="settings-groups">' not in settings
     assert '<a href="#/seats"><b>Managed runners, Doctor, bridge and release</b>' in settings
+
+
+def test_settings_layout_has_full_width_container_and_required_browser_gate() -> None:
+    settings_css = dashboard.UI_ASSETS["/ui/views/settings.css"][1].decode("utf-8")
+    assert ".settings-page{display:grid;grid-template-columns:minmax(0,1fr)" in settings_css
+    assert "container:settings-page/inline-size" in settings_css
+    assert "@container settings-page (max-width:900px)" in settings_css
+    assert ".settings-section-nav{display:flex;flex-wrap:wrap" in settings_css
+
+    root = MODULE_PATH.parents[2]
+    workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    browser_job = workflow.split("  fleet-settings-browser:\n", 1)[1]
+    assert "npm --prefix tools/fleet-dashboard/browser-tests test" in browser_job
+    assert "npx playwright install --with-deps chromium" in browser_job
+    assert "PURSERS_EGO_TASK_SPACE_ID" not in browser_job
+
+    browser_gate = (
+        root / "tools/fleet-dashboard/browser-tests/settings-layout.mjs"
+    ).read_text(encoding="utf-8")
+    assert "[390, 768, 1024, 1116, 1440]" in browser_gate
+    assert '["light", "dark"]' in browser_gate
+    assert '["simple", "advanced"]' in browser_gate
+    assert 'document.documentElement.style.zoom = "200%"' in browser_gate
 
 
 def test_home_pending_coverage_never_renders_false_zero_totals() -> None:

@@ -41,6 +41,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Keep the Fleet Settings toolbar, section navigation, and editors in a dedicated
+  full-width page flow instead of the reusable card grid. Container-aware
+  wrapping now prevents control overlap across narrow, desktop, and zoomed
+  layouts, backed by a required hermetic Chromium geometry and interaction gate.
 - Update the dashboard MCP client to 2.2.0, MCP Apps to 2.0.3, Zod to
   4.6.5, and Vite to 8.3.2. CI now builds the dashboard bundle as well as
   checking its types so dependency updates exercise the bundler.
