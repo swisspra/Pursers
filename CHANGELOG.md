@@ -19,10 +19,9 @@ Upgrade Central, clients, Personal, the wait bridge, managed runners, and ACP
 as one compatible cohort. Preserve live leases and positive cursors, and follow
 the [5.2.0 upgrade and configuration guide](docs/releases/UPGRADE-v5.2.0.md).
 
-At release-train preparation time, the Settings layout/browser regression gate
-from PR 83 was still a release prerequisite, not verified deployed behavior.
-The final release candidate must integrate its independently approved source
-and pass the full strict CI and browser gate before tagging or publication.
+The release includes the independently reviewed Settings layout fix and a
+required Chromium layout and interaction gate. Release candidates must pass
+the full strict CI and browser gate before tagging or publication.
 
 ### Added
 
@@ -44,8 +43,7 @@ and pass the full strict CI and browser gate before tagging or publication.
 - Introduce the first Nocturne Fleet Dashboard slice: a light/dark token system,
   accessible mobile navigation drawer, source-backed Home status and observed
   seat summaries, and project-scoped intent entry without changing dashboard
-  authorization or runtime behavior. Settings/onboarding remains staged
-  follow-up work.
+  authorization or runtime behavior.
 - Add a versioned, secret-safe managed configuration contract and complete
   Settings workspace for Fleet operators. Typed editors now cover source
   connectors and onboarding, delivery, seats and dispatch, membership, board
@@ -58,6 +56,10 @@ and pass the full strict CI and browser gate before tagging or publication.
 
 ### Fixed
 
+- Keep the Fleet Settings toolbar, section navigation, and editors in a dedicated
+  full-width page flow instead of the reusable card grid. Container-aware
+  wrapping now prevents control overlap across narrow, desktop, and zoomed
+  layouts, backed by a required hermetic Chromium geometry and interaction gate.
 - Update the dashboard MCP client to 2.2.0, MCP Apps to 2.0.3, Zod to
   4.6.5, and Vite to 8.3.2. CI now builds the dashboard bundle as well as
   checking its types so dependency updates exercise the bundler.

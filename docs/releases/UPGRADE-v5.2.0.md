@@ -10,12 +10,10 @@ This guide upgrades an existing 5.1.0 installation without replacing durable
 board, registry, cursor, or fleet state. Installing packages does not migrate
 or restart a running Central, wait bridge, Board Butler, dashboard, or seat.
 
-> [!IMPORTANT]
-> At release-train preparation time, PR 83's Settings layout fix and real
-> browser regression gate were still prerequisites. They were not verified
-> deployed behavior. Do not tag, publish, or deploy 5.2.0 until the
-> independently approved Settings source is integrated and the resulting exact
-> candidate passes full strict CI and the browser layout gate.
+The release includes the independently reviewed Settings layout fix and a
+required Chromium layout and interaction gate covering narrow, desktop, and
+200% zoom layouts. Use the verified release artifacts and confirm the deployed
+dashboard revision after restarting the service.
 
 ## Compatible cohort
 
@@ -129,9 +127,10 @@ dispatch, membership, board policy, Central retention, Butler, diagnostics,
 and managed runner setup. Central retention apply changes configuration only;
 archive and journal maintenance remain separate explicit operations.
 
-Before publication, run the PR 83 desktop and mobile browser layout regression
-gate against the final integrated SHA. The earlier Settings feature tests and
-screenshots do not prove that prerequisite.
+Before publication, run the required desktop and mobile browser layout
+regression gate against the final integrated SHA. After deployment, verify
+the live Settings toolbar, navigation, and editors remain usable at the
+operator's viewport and zoom level.
 
 ## 5. Configure a managed ACP runner
 
@@ -179,7 +178,7 @@ sufficient.
   execution. That boundary requires the dedicated adapter and live acceptance
   described above.
 - Fleet Dashboard browser acceptance is verifier-owned evidence. Unit fixtures
-  and worker-produced screenshots are not substitutes for the final PR 83
+  and worker-produced screenshots are not substitutes for the required
   layout gate.
 - Installing packages does not deploy, restart, migrate, or change credentials,
   live policy, service definitions, host caps, or running seats.

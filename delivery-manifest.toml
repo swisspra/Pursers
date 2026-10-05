@@ -163,6 +163,13 @@ evidence = ["tools/dashboard-ui/README.md", "packages/personal/pyproject.toml"]
 evidence_contains = ["packages/personal/src/pursers_personal/resources/dashboard.html", "resources/*"]
 
 [[artifacts]]
+id = "node-application:pursers-fleet-settings-browser-gate"
+kind = "node-application"
+source = "tools/fleet-dashboard/browser-tests/package.json"
+state = "exempt"
+reason = "Test-only Playwright regression harness used by CI; it is not a shipped runtime application."
+
+[[artifacts]]
 id = "host-extension:pursers"
 kind = "host-extension"
 source = "tools/aionui-extension/aion-extension.json"
