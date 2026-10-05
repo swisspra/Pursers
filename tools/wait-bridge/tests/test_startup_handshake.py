@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -453,6 +454,48 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
                 "close",
             ],
         )
+
+    async def test_failed_teardown_does_not_reuse_closed_client(self) -> None:
+        for error_type in (RuntimeError, asyncio.CancelledError):
+            with self.subTest(error_type=error_type.__name__):
+                clients: list[object] = []
+
+                class FailingCloseClient:
+                    def __init__(self, *_args: object, **_kwargs: object) -> None:
+                        self.identity = None
+                        self.closed = False
+                        clients.append(self)
+
+                    async def __aenter__(self) -> "FailingCloseClient":
+                        return self
+
+                    async def __aexit__(self, *_args: object) -> None:
+                        self.closed = True
+                        if self is clients[0]:
+                            raise error_type("synthetic transport teardown failure")
+
+                connection = wait_server.DeferredBoardConnection(
+                    wait_server.BridgeStats(
+                        Path(tempfile.gettempdir()) / "unused.json"
+                    )
+                )
+                with patch.object(
+                    wait_server, "MeteredBoardClient", FailingCloseClient
+                ):
+                    try:
+                        first = await connection.client()
+                        with self.assertRaises(error_type):
+                            await connection.close()
+                        second = await connection.client()
+                        self.assertIsNot(second, first)
+                        self.assertTrue(first.closed)
+                        self.assertFalse(second.closed)
+                        self.assertEqual(len(clients), 2)
+                    finally:
+                        try:
+                            await connection.close()
+                        except (RuntimeError, asyncio.CancelledError):
+                            pass
 
     async def test_transport_failure_recycles_once_and_three_rearms_recover(
         self,
