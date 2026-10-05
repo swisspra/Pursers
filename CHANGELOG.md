@@ -41,6 +41,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Update the dashboard MCP client to 2.2.0, MCP Apps to 2.0.3, Zod to
+  4.6.5, and Vite to 8.3.2. CI now builds the dashboard bundle as well as
+  checking its types so dependency updates exercise the bundler.
 - Clear a failed wait-bridge connection even when transport teardown raises
   or is cancelled, so the next call can join with a fresh client instead of
   reusing the closed transport. Teardown errors remain visible to callers.
