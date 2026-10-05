@@ -670,7 +670,7 @@ def main() -> None:
         butler_manager=dashboard.ButlerSettingsManager(state_dir / "butler"),
         deployment={"running_sha": "synthetic", "dirty": False},
     )
-    server = dashboard.ThreadingHTTPServer(("127.0.0.1", args.port), handler)
+    server = dashboard.FleetDashboardHTTPServer(("127.0.0.1", args.port), handler)
     print(f"http://127.0.0.1:{server.server_port}", flush=True)
     server.serve_forever()
 

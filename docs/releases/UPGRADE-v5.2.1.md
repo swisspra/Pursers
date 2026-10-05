@@ -1,15 +1,15 @@
 # Upgrade to Pursers 5.2.1
 
-Pursers 5.2.1 is a focused patch for the Fleet Settings Automation policy
-layout. A populated policy card could exceed the page by a few CSS pixels at
-200% browser zoom when a visible scrollbar reduced the available width. The
-patch makes nested policy content reflow from its actual container width and
-strengthens the browser fixture so this populated state is part of the release
-gate.
+Pursers 5.2.1 is a focused Fleet Dashboard patch. It fixes the populated
+Settings Automation policy layout and prevents cold browser loads from
+overflowing Python's five-connection default listen queue while the shell and
+route modules are fetched concurrently. The listener permits up to 64 queued
+connections and 32 active request threads, so load is bounded while a complete
+dashboard resource burst fits without connection resets.
 
-No board schema, authentication rule, automation policy, or runtime behavior
-changes in this patch. Installing packages does not deploy, restart, migrate,
-or modify a running Central, dashboard, Butler, wait bridge, or seat.
+No board schema, authentication rule, or automation policy changes in this
+patch. Installing packages does not deploy, restart, migrate, or modify a
+running Central, dashboard, Butler, wait bridge, or seat.
 
 ## Compatible cohort
 
@@ -83,6 +83,12 @@ Inspect the generated 200% screenshots in both themes. Confirm that:
 
 The fixture is public-safe and uses generic synthetic identifiers. It does not
 contain live boards, credentials, policy values, paths, or host information.
+
+The gate also performs 12 uncached Settings reloads against the actual bounded
+listener. Every required route script, `app.js`, and `fleet.css` must load on
+every attempt, Settings must render, and `refreshFleet` must initialize. A
+missing resource or browser request failure fails the gate instead of leaving
+the shell at `Loading...`.
 
 ## 4. Restart and observe
 
