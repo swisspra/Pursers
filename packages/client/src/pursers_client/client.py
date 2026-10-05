@@ -1945,6 +1945,42 @@ class BoardClient:
             },
         )
 
+    async def board_retention_settings_get(self) -> dict[str, Any]:
+        """Read the admin-gated, non-destructive retention settings contract."""
+        return await self._call(
+            "board_retention_settings_get", {"agent_name": self.agent_name}
+        )
+
+    async def board_retention_settings_preview(
+        self, changes: dict[str, Any], expected_revision: int
+    ) -> dict[str, Any]:
+        """Preview one retention CAS update without running maintenance."""
+        return await self._call(
+            "board_retention_settings_preview",
+            {
+                "agent_name": self.agent_name,
+                "changes": changes,
+                "expected_revision": expected_revision,
+            },
+        )
+
+    async def board_retention_settings_apply(
+        self,
+        changes: dict[str, Any],
+        expected_revision: int,
+        *,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """CAS-apply retention values; destructive maintenance stays separate."""
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "changes": changes,
+            "expected_revision": expected_revision,
+        }
+        if expected_generation is not None:
+            arguments["expected_generation"] = expected_generation
+        return await self._call("board_retention_settings_apply", arguments)
+
     async def board_dispatch_events(self, *, limit: int = 25) -> dict[str, Any]:
         """Read Central's member-authorized cross-seat dispatch projection."""
         return await self._call("board_dispatch_events", {"limit": limit})
@@ -1956,6 +1992,43 @@ class BoardClient:
             {
                 "agent_name": self.agent_name,
                 "review_policy": review_policy,
+            },
+        )
+
+    async def board_members(self) -> dict[str, Any]:
+        """List principal-level memberships without canonical identities."""
+        return await self._call("board_members", {})
+
+    async def board_member_add(
+        self, principal_id: str, role: str = "member"
+    ) -> dict[str, Any]:
+        """Provision one exact principal through Central's admin guard."""
+        return await self._call(
+            "board_member_add",
+            {
+                "agent_name": self.agent_name,
+                "principal_id": principal_id,
+                "role": role,
+            },
+        )
+
+    async def board_member_remove(self, principal_id: str) -> dict[str, Any]:
+        """Remove one exact principal through Central's admin guard."""
+        return await self._call(
+            "board_member_remove",
+            {"agent_name": self.agent_name, "principal_id": principal_id},
+        )
+
+    async def board_member_set_role(
+        self, principal_id: str, role: str
+    ) -> dict[str, Any]:
+        """Change one exact principal's board role through Central."""
+        return await self._call(
+            "board_member_set_role",
+            {
+                "agent_name": self.agent_name,
+                "principal_id": principal_id,
+                "role": role,
             },
         )
 

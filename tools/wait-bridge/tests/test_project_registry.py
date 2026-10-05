@@ -239,6 +239,7 @@ class ProjectRegistryTests(unittest.IsolatedAsyncioTestCase):
         single_result = {"path": "single"}
 
         with (
+            patch.dict(os.environ, {"PURSERS_BOARDS": ""}),
             patch.object(
                 wait_server,
                 "_wait_for_work_many",

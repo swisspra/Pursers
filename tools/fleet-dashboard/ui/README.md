@@ -14,7 +14,8 @@ route through `FleetViewModules` and declares the UI surfaces it owns:
 - `projects.js`: projects, boards, and workspace entry points
 - `work.js`: ticket queues and filters
 - `team.js`: agents, seats, and autonomous-butler status
-- `approvals.js`: approval and human-request queues
+- `approvals.js`: typed Inbox queues; owns both `#/inbox` and the compatible
+  `#/approvals` alias
 - `activity.js`: recent and autonomous-butler activity
 - `settings.js`: seat, dispatch, release, project, and door controls
 
@@ -31,3 +32,27 @@ The compact navigation uses the supplied horizontal Pursers wordmark at
 an explicit white frame in both themes instead of recoloring the artwork. See the
 [brand asset record](../../../docs/media/brand/README.md) for provenance, intended
 placements, and the byte-preserving update procedure.
+
+## Nocturne phase 1
+
+The shared shell defines the Nocturne light/dark tokens and keeps the existing
+route modules, same-origin assets, search, shortcuts, density control, Central
+context, and selector contracts. At 800 CSS pixels and below, navigation becomes
+an off-canvas drawer with a visible current-route label, focus containment,
+Escape dismissal, and focus restoration. The Personal context remains visibly
+unavailable instead of acting like a workspace switch.
+
+Home renders bounded in-progress, review-ready, blocked, and open-queue totals;
+source status; operational attention; human decisions; and observed seats. Counts
+remain marked partial while optional sources enrich. A new intent opens the only
+project directly or asks the operator to choose a project before entering the
+existing scoped intake flow.
+
+Work, Projects, Team, Activity, and Inbox now use the Nocturne shell while
+preserving their bounded sources and guarded handlers. Work renders lifecycle
+Kanban lanes on wider screens and a deliberate single-column list on narrow
+screens. Inbox keeps actionable items and bounded history separate, deduplicates
+by source identity, and uses a mobile list/detail flow with a Back control.
+Ticket deep links open an evidence-first detail surface with lifecycle, delivery,
+review, question, test-suite fallback, worker-assessment, and journal provenance.
+Settings/onboarding remains a separately owned migration.

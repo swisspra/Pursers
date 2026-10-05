@@ -30,8 +30,8 @@ visibility only.
 
 ## Configure seats in the dashboard
 
-Start the loopback Fleet Dashboard, open **Config**, and use **Add or update
-seat** as the primary setup path. Enter only paths for the JWT token and CA
+Start the loopback Fleet Dashboard, open **Settings**, and use **Seats &
+dispatch** as the primary setup path. Enter only paths for the JWT token and CA
 files; token contents never enter the browser. **Preview exact changes** shows
 a redacted unified diff, and **Confirm and apply** creates timestamped backups
 before atomic writes. Restart the selected host when the result shows **NEEDS
@@ -52,6 +52,13 @@ shows read-only project-registry coverage. Long jobs expose a job id and are
 polled by the browser once per second. Config POSTs are loopback-only and each
 plan/apply/doctor/install action is recorded in
 `~/.pursers/fleet-dashboard/config-actions.jsonl` without credentials.
+
+Settings also provides searchable Simple and Advanced views for source
+connectors/onboarding, repository delivery, dispatch, memberships, board
+policy, Central retention, Butler and diagnostics. Mutating domains use their
+typed preview/apply contract and show whether the result is dynamic or requires
+a deliberate restart/reconnect. Source secrets are represented only by file
+references or redacted placeholders; the dashboard never returns their values.
 
 **Create fleet clone** checks out `main`, detaches at `origin/main`, and verifies
 that the working tree is clean before saving the registry path. Re-running it

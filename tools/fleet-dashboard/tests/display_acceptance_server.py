@@ -487,6 +487,59 @@ class AcceptanceCache:
             "expected_sha256": "b" * 64,
         }
 
+    def get_managed_configuration(
+        self, board_id: str, central: str | None = None
+    ) -> dict:
+        self.resolve_central(central)
+        if board_id != "fixture-board":
+            raise KeyError(board_id)
+        principal = "PR-" + "a" * 64
+        connector = {
+            "schema_version": 1,
+            "approved_connector_ids": ["connector:issues"],
+            "connectors": [{
+                "connector_id": "connector:issues", "enabled": False,
+                "transport": "streamable_http", "protocol_revision": "2026-07-28",
+                "endpoint_ref": "endpoint:issues", "secret_ref": "[redacted]",
+                "tools": [{"name": "issues_list", "effect": "read_only", "replay": "never", "stable_call_id_field": None}],
+                "resources": [], "risky_tools": [], "denied_tools": [],
+                "limits": {"timeout_ms": 30000, "max_input_bytes": 65536, "max_output_bytes": 1000000, "max_concurrency": 2, "calls_per_minute": 60},
+            }],
+            "sources": [{
+                "source_id": "issues", "connector_id": "connector:issues", "enabled": False,
+                "list_tool": "issues_list", "fixed_args": {"status": "open"}, "items_path": "issues",
+                "field_map": {"external_id": "id", "revision": "revision", "title": "title", "body": "body", "link": "url", "project_hint": "project"},
+                "routing": {"project_hint_is_registry_key": True}, "mode": "ask", "content_type": "structured", "max_pages": 1,
+            }],
+        }
+        onboarding = {"sources": {"issues": {"domain": "work", "projects_root": "[redacted]", "auto_onboard": False, "per_cycle_cap": 2, "retry_limit": 3, "retry_backoff_s": 60, "repositories": {"service": {"repository_url": "https://example.invalid/org/service.git", "integration_ref": "main"}}, "member_roles": {}, "activate_delivery_policy": False}}}
+        return {
+            "schema": "fleet_managed_config_v1", "board_id": board_id,
+            "families": {
+                "board_policy": {"status": "configurable", "values": {"review_policy": "strict", "stale_after_days": 3}, "expected_sha256": "1" * 64},
+                "memberships": {"status": "configurable", "members": [{"principal_id": principal, "role": "admin", "agent_names": ["synthetic-admin"]}], "expected_sha256": "2" * 64},
+                "central_retention": {"status": "configurable", "values": {"archive_after_days": 2, "inline_history_limit": 50, "invite_prune_after_days": 7, "journal_retention_days": 7, "journal_row_cap": 50000}, "defaults": {"archive_after_days": 2, "inline_history_limit": 50, "invite_prune_after_days": 7, "journal_retention_days": 7, "journal_row_cap": 50000}, "ranges": {"archive_after_days": {"minimum": 0, "maximum": 365}, "inline_history_limit": {"minimum": 1, "maximum": 500}, "invite_prune_after_days": {"minimum": 0, "maximum": 365}, "journal_retention_days": {"minimum": 0, "maximum": 365}, "journal_row_cap": {"minimum": 501, "maximum": 1000000}}, "expected_sha256": "3" * 64},
+                "source_connectors": {"status": "configurable", "apply_mode": "restart-required", "desired": connector, "effective": connector, "expected_sha256": "4" * 64},
+                "source_onboarding": {"status": "configurable", "apply_mode": "restart-required", "desired": onboarding, "effective": onboarding, "expected_sha256": "5" * 64},
+            },
+        }
+
+    def get_dispatch(self, board_id: str, central: str | None = None) -> dict:
+        self.resolve_central(central)
+        if board_id != "fixture-board":
+            raise KeyError(board_id)
+        return {"claim_ttl_s": 900, "offer_ttl_s": 180, "broadcast_reoffer_s": 60, "second_opinion": True, "fallback_broadcast": True}
+
+    def get_project_delivery_settings(self, central: str | None = None) -> dict:
+        self.resolve_central(central)
+        return {"projects": [{
+            "name": "Fixture Project", "repository_configured": True, "integration_ref": "main",
+            "delivery_policy_overrides": {"mode": "per_ticket_pr", "integration_branch": "pursers-integration", "mapped_base": "main", "release_trigger": {"kind": "ready"}, "validation": {"required_reviewers": 1, "test_commands": ["pytest -q"]}, "conflict_policy": "pause", "final_merge": "manual"},
+            "delivery_policy": {"mode": "per_ticket_pr", "integration_branch": "pursers-integration", "mapped_base": "main", "snapshot_branch_prefix": "codex", "final_pr_target": "main"},
+            "delivery_policy_provenance": {"mode": "repository"}, "delivery_policy_active": True,
+            "delivery_runtime": {"ready": True, "blockers": []},
+        }]}
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()

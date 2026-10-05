@@ -62,6 +62,8 @@ TOOL_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Board admin & policy", (
         "board_scrub_profile_set", "board_response_view_set",
         "board_review_policy_set", "board_stale_after_set",
+        "board_retention_settings_get", "board_retention_settings_validate",
+        "board_retention_settings_preview", "board_retention_settings_apply",
         "board_journal_retention_set", "board_dispatch_policy_set",
         "board_claim_ttl_set",
     )),
@@ -136,6 +138,10 @@ TOOL_SCOPES: dict[str, str] = {
     "board_response_view_set": "`board:write` and board-admin membership",
     "board_review_policy_set": "`board:write` and board-admin membership",
     "board_stale_after_set": "`board:coordinate`",
+    "board_retention_settings_get": "`board:read` and board-admin membership",
+    "board_retention_settings_validate": "`board:read` and board-admin membership",
+    "board_retention_settings_preview": "`board:read` and board-admin membership",
+    "board_retention_settings_apply": "`board:write` and board-admin membership",
     "board_journal_retention_set": "`board:coordinate`",
     "board_dispatch_policy_set": "`board:write` as admin, or `board:coordinate`",
     "board_claim_ttl_set": "`board:write` as admin, or `board:coordinate`",
@@ -168,6 +174,30 @@ SPECIAL_RESPONSE_FIELDS = {
         "ok, board_id, archived_ticket_count, bounded_history_count, "
         "tombstoned_member_count, pruned_invite_count, journal_compaction, "
         "durable_records_untouched"
+    ),
+    "board_retention_settings_get": (
+        "ok, board_id, schema_version, revision, settings, defaults, ranges, "
+        "operational_fields, unsupported_fields, apply_runs_maintenance, migration"
+    ),
+    "board_retention_settings_validate": (
+        "ok, valid, board_id, schema_version, revision, current, candidate, changed, "
+        "changed_fields, ranges, unsupported_fields"
+    ),
+    "board_retention_settings_preview": (
+        "ok, board_id, schema_version, revision, candidate_revision, current, "
+        "candidate, changed, changed_fields, apply_runs_maintenance, "
+        "requires_separate_maintenance_confirmation"
+    ),
+    "board_retention_settings_apply": (
+        "ok, board_id, schema_version, revision, settings, defaults, ranges, "
+        "operational_fields, unsupported_fields, apply_runs_maintenance, migration, "
+        "changed, changed_fields, audit, maintenance_run, "
+        "requires_separate_maintenance_confirmation"
+    ),
+    "board_journal_retention_set": (
+        "ok, board_id, journal_retention_days, previous_journal_retention_days, "
+        "journal_row_cap, previous_journal_row_cap, revision, audit, changed, "
+        "journal_compaction, renewed_ticket_ids, events"
     ),
 }
 

@@ -89,7 +89,8 @@
           <div class="counts projects-state-list">${statePills(counts)}</div>
         </div>
         <div class="projects-board-actions">
-          <a class="primary-action" href="${boardHref(central, board.board_id)}">Open project</a>
+          <a class="primary-action" href="${boardHref(central, board.board_id)}">New intent</a>
+          <a class="button" href="${boardHref(central, board.board_id)}">Open project</a>
           <a class="button" href="${boardHref(central, board.board_id, 'routes')}">View routes</a>
           <button class="button projects-remove" type="button" data-project-remove="${esc(board.label)}" data-central="${esc(central)}">Remove from Fleet</button>
         </div>

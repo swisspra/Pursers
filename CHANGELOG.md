@@ -18,6 +18,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   automatically. Provider-authenticated ACP activation stays fail-closed until
   a dedicated auth/egress boundary is configured; Zed remains an optional GUI
   client rather than a dependency of headless seats.
+- Complete the non-Settings Nocturne workflow routes with an `#/inbox` entry
+  point (while preserving `#/approvals`), evidence-first ticket detail, bounded
+  submission/test/file evidence, independent review rounds, coordination
+  questions, worker-assessment provenance, a desktop lifecycle Kanban with an
+  intentional mobile list, and a typed Inbox master/detail flow with independent
+  actionable/history bounds and source-specific guarded actions.
+- Introduce the first Nocturne Fleet Dashboard slice: a light/dark token system,
+  accessible mobile navigation drawer, source-backed Home status and observed
+  seat summaries, and project-scoped intent entry without changing dashboard
+  authorization or runtime behavior. Settings/onboarding remains staged
+  follow-up work.
+- Add a versioned, secret-safe managed configuration contract and complete
+  Settings workspace for Fleet operators. Typed editors now cover source
+  connectors and onboarding, delivery, seats and dispatch, membership, board
+  policy, Central retention, Butler and diagnostics; immutable plans retain
+  admin/stale-state checks, exact read-back, rollback evidence, secret
+  redaction and explicit restart semantics.
 - Apply the supplied Pursers artwork to the repository README and Fleet
   Dashboard navigation, with normalized tracked assets, byte-fidelity records,
   responsive intrinsic sizing, and an explicit safe binary PNG route.
@@ -28,6 +45,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the first prompt, failing closed when a model, mode, or reasoning choice is no
   longer advertised.
 
+- Preserve advanced managed-seat scope, credential-reference, Personal command,
+  and connector names during partial dashboard edits. Seat plans now expose a
+  stable typed contract, revision-bound provenance, restart semantics, and
+  effective-state read-back while rejecting stale or unknown fields.
+- Classify coordinator/orchestrator `a2a_wait(wait_for="auto")` failures as
+  pre-subscription configuration errors instead of transport outages, preserve
+  the caller cursor for an explicit re-arm, and keep them out of reconnect and
+  push-failure accounting. Orchestrator digests now mark disconnected or
+  cursor-behind cached views as stale with exact per-board cursor gaps.
 - Keep event seats and the resident Butler alive through bounded, typed recovery
   of nested transient transport groups. Recovery preserves positive cursors,
   pending events, leases and active model processes; mixed/authentication groups

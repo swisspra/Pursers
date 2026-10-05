@@ -213,6 +213,19 @@ console.log(JSON.stringify({{
     }
 
 
+def test_work_view_has_lifecycle_kanban_and_intentional_mobile_list() -> None:
+    work = dashboard.UI_ASSETS["/ui/views/work.js"][1].decode("utf-8")
+    css = dashboard.UI_ASSETS["/ui/views/work.css"][1].decode("utf-8")
+
+    assert 'data-work-layout="kanban"' in work
+    assert 'data-work-lane="${esc(group.key)}"' in work
+    assert 'data-work-layout="list"' in work
+    assert ".work-kanban {" in css
+    assert ".work-mobile-list { display: none; }" in css
+    assert ".work-kanban { display: none; }" in css
+    assert ".work-mobile-list { display: block;" in css
+
+
 def test_work_view_renders_durable_activity_and_keeps_legacy_fallback() -> None:
     registry = dashboard.UI_ASSETS["/ui/view-registry.js"][1].decode("utf-8")
     work = dashboard.UI_ASSETS["/ui/views/work.js"][1].decode("utf-8")

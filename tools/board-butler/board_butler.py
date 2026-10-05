@@ -79,6 +79,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 _SOURCE_OBSERVATION_API = runpy.run_path(str(Path(__file__).with_name("source_observation.py")))
 SourceObservationPolicy = _SOURCE_OBSERVATION_API["SourceObservationPolicy"]
 observe_source = _SOURCE_OBSERVATION_API["observe_source"]
+_CONFIGURATION_CONTRACT_API = runpy.run_path(
+    str(Path(__file__).with_name("configuration_contract.py"))
+)
+ConfigurationContract = _CONFIGURATION_CONTRACT_API["ConfigurationContract"]
+build_configuration_contract = _CONFIGURATION_CONTRACT_API["build_contract"]
+read_private_configuration = _CONFIGURATION_CONTRACT_API["read_private_json"]
 
 STATE_KEY = "coordinator_findings"
 SUBSCRIPTION_HEALTH_KEY = "board_butler_subscription_health"
@@ -5758,7 +5764,26 @@ def _runtime_tool_list(
     return tools, list(risky_mutating), list(denied)
 
 
+_RUNTIME_DECLARATION_KEYS = {
+    "connector_id",
+    "enabled",
+    "transport",
+    "protocol_revision",
+    "endpoint_ref",
+    "secret_ref",
+    "tools",
+    "resources",
+    "risky_tools",
+    "denied_tools",
+    "tools_read_only",
+    "tools_risky_mutating",
+    "tools_denied",
+    "limits",
+}
+
+
 def _runtime_declaration(value: Mapping[str, Any]) -> ConnectorDeclaration:
+    _connector_keys(value, _RUNTIME_DECLARATION_KEYS, "connector")
     tools, risky, denied = _runtime_tool_list(value)
     default_limits = {
         "timeout_ms": 30_000,
@@ -5864,6 +5889,58 @@ def _runtime_stdio_endpoint(
     )
 
 
+def _runtime_config_document(raw: bytes) -> Mapping[str, Any]:
+    try:
+        document = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError):
+        raise ConnectorConfigError("connector config is invalid JSON") from None
+    if not isinstance(document, Mapping) or document.get("schema_version") != 1:
+        raise ConnectorConfigError("connector config schema is invalid")
+    allowed = {
+        "schema_version",
+        "approved_connector_ids",
+        "envelope",
+        "declarations",
+        "connectors",
+        "declaration",
+        "connector",
+        "endpoints",
+        "endpoint",
+        "secrets",
+        "board_id",
+        "project_id",
+        "actor_id",
+        "policy_digest_sha256",
+        "sources",
+        # Legacy single-connector form.
+        "connector_id",
+        "enabled",
+        "transport",
+        "protocol_revision",
+        "endpoint_ref",
+        "secret_ref",
+        "tools",
+        "resources",
+        "risky_tools",
+        "denied_tools",
+        "tools_read_only",
+        "tools_risky_mutating",
+        "tools_denied",
+        "limits",
+        "url",
+        "secret_header",
+        "secret_prefix",
+        "secret_headers",
+        "static_headers",
+    }
+    unknown = sorted(set(document) - allowed)
+    if unknown:
+        raise ConnectorConfigError(
+            "connector config has unknown keys: " + ", ".join(unknown)
+        )
+    return document
+
+
 def load_connector_runtimes(
     path: Path,
     *,
@@ -5873,19 +5950,20 @@ def load_connector_runtimes(
 ) -> tuple[ConnectorRuntime, ...]:
     """Load private runtime bindings without copying endpoints or keys to results."""
     raw = _read_connector_private_file(path, "connector config", 1_048_576)
-    try:
-        document = json.loads(raw)
-    except (UnicodeError, json.JSONDecodeError):
-        raise ConnectorConfigError("connector config is invalid JSON") from None
-    if not isinstance(document, Mapping) or document.get("schema_version") != 1:
-        raise ConnectorConfigError("connector config schema is invalid")
+    document = _runtime_config_document(raw)
     declarations = document.get("declarations", document.get("connectors"))
     if declarations is None:
         singular = document.get("declaration", document.get("connector"))
         if singular is not None:
             declarations = [singular]
         elif "connector_id" in document:
-            declarations = [document]
+            declarations = [
+                {
+                    key: document[key]
+                    for key in _RUNTIME_DECLARATION_KEYS
+                    if key in document
+                }
+            ]
     if not isinstance(declarations, list) or not 1 <= len(declarations) <= 32:
         raise ConnectorConfigError("connector config declarations are invalid")
     endpoints = document.get("endpoints")
@@ -6035,17 +6113,164 @@ def load_connector_sources(
 ) -> tuple[SourceDeclaration, ...]:
     """Load bounded source declarations against the resolved connectors."""
     raw = _read_connector_private_file(path, "connector config", 1_048_576)
-    try:
-        document = json.loads(raw)
-    except (UnicodeError, json.JSONDecodeError):
-        raise ConnectorConfigError("connector config is invalid JSON") from None
-    if not isinstance(document, Mapping) or document.get("schema_version") != 1:
-        raise ConnectorConfigError("connector config schema is invalid")
+    document = _runtime_config_document(raw)
     sources = document.get("sources", [])
     declarations = {
         runtime.declaration.connector_id: runtime.declaration for runtime in runtimes
     }
     return parse_source_declarations(sources, declarations)
+
+
+def _public_connector_declaration(value: ConnectorDeclaration) -> dict[str, Any]:
+    return {
+        "connector_id": value.connector_id,
+        "enabled": value.enabled,
+        "transport": value.transport,
+        "protocol_revision": value.protocol_revision,
+        "endpoint_ref": value.endpoint_ref,
+        "secret_ref": value.secret_ref,
+        "tools": [
+            {
+                "name": tool.name,
+                "effect": tool.effect,
+                "replay": tool.replay,
+                "stable_call_id_field": tool.stable_call_id_field,
+            }
+            for tool in value.tools
+        ],
+        "resources": list(value.resources),
+        "risky_tools": sorted(value.risky_tools),
+        "denied_tools": sorted(value.denied_tools),
+        "limits": {
+            "timeout_ms": value.limits.timeout_ms,
+            "max_input_bytes": value.limits.max_input_bytes,
+            "max_output_bytes": value.limits.max_output_bytes,
+            "max_concurrency": value.limits.max_concurrency,
+            "calls_per_minute": value.limits.calls_per_minute,
+        },
+    }
+
+
+def _public_source_declaration(value: SourceDeclaration) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "source_id": value.source_id,
+        "connector_id": value.connector_id,
+        "enabled": value.enabled,
+        "list_tool": value.list_tool,
+        "fixed_args": copy.deepcopy(dict(value.fixed_args)),
+        "items_path": value.items_path,
+        "field_map": {
+            name: getattr(value.field_map, name)
+            for name in (
+                "external_id",
+                "revision",
+                "title",
+                "body",
+                "link",
+                "project_hint",
+            )
+        },
+        "routing": {
+            "project_map": dict(value.routing.project_map),
+            "project_hint_is_registry_key": value.routing.project_hint_is_registry_key,
+        },
+        "mode": value.mode,
+        "content_type": value.content_type,
+        "max_pages": value.max_pages,
+    }
+    if value.page_arg is not None:
+        result["page_arg"] = value.page_arg
+    if value.observation is not None:
+        result["observation"] = {
+            "read_tool": value.observation.read_tool,
+            "arguments": copy.deepcopy(dict(value.observation.arguments)),
+            "count_path": value.observation.count_path,
+            "max_age_s": value.observation.max_age_s,
+        }
+    if value.grouping is not None:
+        result["grouping"] = copy.deepcopy(dict(value.grouping))
+    if value.writeback is not None:
+        result["writeback"] = {
+            "on": value.writeback.on,
+            "tool": value.writeback.tool,
+            "arg_template": copy.deepcopy(dict(value.writeback.arg_template)),
+        }
+        if value.writeback.preflight is not None:
+            result["writeback"]["preflight"] = copy.deepcopy(
+                dict(value.writeback.preflight)
+            )
+    return result
+
+
+def inspect_connector_source_configuration(
+    path: Path,
+    *,
+    default_board_id: str,
+    default_project_id: str,
+    default_actor_id: str,
+    root: Path | None = None,
+) -> ConfigurationContract:
+    """Validate and expose connector/source configuration without side effects.
+
+    This reads only the configuration file.  It does not resolve a referenced
+    credential, connect to an endpoint, probe a tool, or mutate intake state.
+    Legacy connector spellings accepted by the runtime are normalized in the
+    effective view so callers can migrate without breaking existing installs.
+    """
+    desired = read_private_configuration(path, root=root)
+    runtimes = load_connector_runtimes(
+        path,
+        default_board_id=default_board_id,
+        default_project_id=default_project_id,
+        default_actor_id=default_actor_id,
+    )
+    sources = load_connector_sources(path, runtimes)
+    effective = copy.deepcopy(desired)
+    for key in ("declaration", "connector"):
+        effective.pop(key, None)
+    effective.pop("declarations", None)
+    effective["schema_version"] = 1
+    effective["board_id"] = runtimes[0].board_id
+    effective["project_id"] = runtimes[0].project_id
+    effective["actor_id"] = runtimes[0].actor_id
+    effective["connectors"] = [
+        _public_connector_declaration(runtime.declaration) for runtime in runtimes
+    ]
+    effective["sources"] = [_public_source_declaration(source) for source in sources]
+    approved = desired.get(
+        "approved_connector_ids",
+        desired.get("envelope", {}).get("approved_connector_ids")
+        if isinstance(desired.get("envelope"), Mapping)
+        else None,
+    )
+    if approved is not None:
+        effective["approved_connector_ids"] = copy.deepcopy(approved)
+    return build_configuration_contract(
+        kind="connector_source",
+        desired=desired,
+        effective=effective,
+        capabilities={
+            "schema_versions": [1],
+            "protocol_revisions": sorted(SUPPORTED_MCP_PROTOCOL_REVISIONS),
+            "transports": sorted(SUPPORTED_MCP_TRANSPORTS),
+            "source_modes": ["ask", "auto"],
+            "content_types": ["free_text", "structured"],
+            "grouping_kinds": ["sonar"],
+            "writeback_events": ["approved", "closed"],
+            "writeback_placeholders": sorted(SOURCE_WRITEBACK_PLACEHOLDERS),
+            "limits": {
+                "connectors": 32,
+                "sources": SOURCE_INTAKE_MAX_SOURCES,
+                "max_pages": SOURCE_INTAKE_MAX_PAGES,
+            },
+        },
+        unsupported=(
+            "automatic_connector_enablement",
+            "secret_value_export",
+            "tool_execution",
+            "undeclared_adapter_capabilities",
+        ),
+    )
 
 
 async def run_connector_probe(runtimes: Sequence[ConnectorRuntime]) -> int:

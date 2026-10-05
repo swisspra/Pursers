@@ -48,6 +48,13 @@ def _free_port() -> int:
         listener.close()
 
 
+def _stable_active_time() -> datetime:
+    """Keep simulated hold expiry inside the fixture's UTC active window."""
+    return datetime.now(timezone.utc).replace(
+        hour=12, minute=0, second=0, microsecond=0
+    )
+
+
 def _credential(root: Path, issuer: str, audience: str) -> tuple[str, str]:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     public_key = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
@@ -645,7 +652,7 @@ def test_butler_reaches_first_working_state_against_real_central(
             options.drafts_per_ticket = 10
             options.drafts_per_board = 20
             options.provider_secrets_dir = None
-            drafted_at = butler.utc_now()
+            drafted_at = _stable_active_time()
             pending = await backend.pending_questions()
             answerable = next(row for row in pending if row["question_id"] == "CQ-answer")
             result = await butler.process_question(
@@ -972,7 +979,7 @@ def test_real_central_multiboard_operations_keep_exact_board_context(
             options.drafts_per_ticket = 10
             options.drafts_per_board = 20
             options.provider_secrets_dir = None
-            drafted_at = butler.utc_now()
+            drafted_at = _stable_active_time()
             away_row = await backend.question(
                 away_ticket, away_question, board_id="butler-away"
             )
