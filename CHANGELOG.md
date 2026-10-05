@@ -41,6 +41,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Reconnect a persistent wait-bridge process after transient Central transport
+  failures instead of reusing the failed MCP session on every re-arm. Cursors
+  remain unchanged, authentication/configuration failures remain fail-closed,
+  and three-board push waits recover without enabling polling. Butler registry
+  refreshes now reuse their bounded coordinator snapshot, removing the duplicate
+  1,000-item/750-KiB snapshot and ticket-list pass per active board.
 - Apply saved ACP `configOptions` selections after session creation and before
   the first prompt, failing closed when a model, mode, or reasoning choice is no
   longer advertised.

@@ -1724,6 +1724,36 @@ class DeferredBoardConnection:
             raise RuntimeError("deferred board join returned no client")
         return client
 
+    async def recycle(self, client: MeteredBoardClient) -> bool:
+        """Close one failed owned transport so the next call joins afresh.
+
+        The caller classifies the failure first. Authentication, authorization,
+        and configuration failures must never reach this method: only a
+        transient transport failure may discard the process-owned client.
+        """
+        async with self._lock:
+            if self._client is not client:
+                return False
+            task = self._task
+            stop = self._stop
+            self._client = None
+            self._task = None
+            self._ready = None
+            self._stop = None
+            self._failure_logged = False
+        if stop is not None:
+            stop.set()
+        if task is None or task is asyncio.current_task():
+            return True
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=self.CLOSE_TIMEOUT_S
+            )
+        except TimeoutError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        return True
+
     async def close(self) -> None:
         async with self._lock:
             task = self._task
@@ -3356,6 +3386,29 @@ async def _client_for_tool(ctx: Context) -> BoardClient:
     client = await connection.client()
     lifespan["lease_keepalive"].start()
     return client
+
+
+async def _recycle_failed_tool_connection(
+    ctx: Context, client: BoardClient, exc: BaseException
+) -> bool:
+    """Recycle the owned lifespan client after a classified transport fault."""
+    cause_class, _exception_classes = _wait_failure_class(exc)
+    if cause_class != "transport":
+        return False
+    lifespan = ctx.request_context.lifespan_context
+    if lifespan.get("client") is not None:
+        return False
+    connection = lifespan.get("connection")
+    recycle = getattr(connection, "recycle", None)
+    if not callable(recycle):
+        return False
+    recycled = bool(await recycle(client))
+    if recycled:
+        _log(
+            "discarded failed Central transport; next wait will reconnect "
+            "from the caller's unchanged cursor"
+        )
+    return recycled
 
 
 async def _engine_for_tool(ctx: Context) -> OrchestratorEngine:
@@ -6278,6 +6331,7 @@ async def a2a_wait(
                 report_push_unavailable,
             )
         except Exception as exc:
+            await _recycle_failed_tool_connection(ctx, client, exc)
             result = _structured_wait_error(
                 exc=exc,
                 since_seq=since_seq,
