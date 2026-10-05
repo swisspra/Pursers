@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.2.0] - 2026-10-05
+
+This release includes `pursers-central==0.1.8`,
+`pursers-client==0.1.9`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.2.0`, `pursers==5.2.0`,
+`pursers-wait-bridge==0.1.7`, and
+`pursers-acp==0.1.8`.
+
+Upgrade Central, clients, Personal, the wait bridge, managed runners, and ACP
+as one compatible cohort. Preserve live leases and positive cursors, and follow
+the [5.2.0 upgrade and configuration guide](docs/releases/UPGRADE-v5.2.0.md).
+
+At release-train preparation time, the Settings layout/browser regression gate
+from PR 83 was still a release prerequisite, not verified deployed behavior.
+The final release candidate must integrate its independently approved source
+and pass the full strict CI and browser gate before tagging or publication.
+
 ### Added
 
 - Add a guarded Fleet setup flow for native Codex/Goose and exact-version ACP
