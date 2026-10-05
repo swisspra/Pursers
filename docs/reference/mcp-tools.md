@@ -821,7 +821,7 @@ Required authorization: `board:write`, or restricted `board:coordinate`/`board:i
 | `expected_sha256` | `string | null` | optional | `null` |
 | `expected_absent` | `boolean` | optional | `false` |
 
-Response fields: `ok, key, state, release_events, implicitly_renewed`.
+Response fields: `ok, key, state, duplicate, release_events, implicitly_renewed`.
 
 ### `board_state_get`
 
