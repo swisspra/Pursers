@@ -471,6 +471,8 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
 
             async def __aexit__(self, *_args: object) -> None:
                 closed.append(self)
+                if self is constructed[0]:
+                    raise ConnectionError("synthetic close transport failure")
 
             async def board_join(self, **_kwargs: object) -> dict[str, object]:
                 self.identity = JoinedIdentity(

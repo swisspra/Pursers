@@ -1752,6 +1752,11 @@ class DeferredBoardConnection:
         except TimeoutError:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        except Exception:
+            # The poisoned transport may also fail while its context manager
+            # closes. Recycling is best-effort: teardown must not mask the
+            # original wait failure that caused this client to be discarded.
+            pass
         return True
 
     async def close(self) -> None:
