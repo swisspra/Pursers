@@ -115,8 +115,12 @@ async function geometry(page, label) {
     const sectionsOrdered = sectionRects.every((value, index) => index === 0 || value.top >= sectionRects[index - 1].bottom - 1);
     const circularNav = [...nav.querySelectorAll("a")].filter(visible).filter(node => {
       const value = rect(node);
+      // CSS zoom scales DOMRects, while offsetHeight remains in layout CSS pixels.
+      // Judge the component's authored geometry so 200% reflow does not turn a
+      // healthy 35px navigation link into a false 70px "pill" failure.
+      const layoutHeight = node.offsetHeight || value.height;
       const radius = Number.parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0;
-      return value.height > 54 || radius >= value.height / 2;
+      return layoutHeight > 54 || radius >= layoutHeight / 2;
     }).map(node => node.textContent.trim());
     const clippedActions = [...root.querySelectorAll("button,.button,.primary-action")].filter(visible).filter(node => node.scrollWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1).map(node => node.textContent.trim()).slice(0, 20);
     const internalScrollers = [...root.querySelectorAll(".table-scroll,.settings-plan pre")].filter(visible).map(node => ({ className: node.className, scrollWidth: node.scrollWidth, clientWidth: node.clientWidth }));

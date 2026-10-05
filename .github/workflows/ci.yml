@@ -184,6 +184,12 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install fixture runtime dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --no-input \
+            --editable packages/client \
+            --editable packages/central
+
       - name: Install pinned browser gate
         working-directory: tools/fleet-dashboard/browser-tests
         run: |

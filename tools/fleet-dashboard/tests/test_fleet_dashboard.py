@@ -131,6 +131,8 @@ def test_settings_layout_has_full_width_container_and_required_browser_gate() ->
     root = MODULE_PATH.parents[2]
     workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     browser_job = workflow.split("  fleet-settings-browser:\n", 1)[1]
+    assert "--editable packages/client" in browser_job
+    assert "--editable packages/central" in browser_job
     assert "npm --prefix tools/fleet-dashboard/browser-tests test" in browser_job
     assert "npx playwright install --with-deps chromium" in browser_job
     assert "PURSERS_EGO_TASK_SPACE_ID" not in browser_job
@@ -142,6 +144,8 @@ def test_settings_layout_has_full_width_container_and_required_browser_gate() ->
     assert '["light", "dark"]' in browser_gate
     assert '["simple", "advanced"]' in browser_gate
     assert 'document.documentElement.style.zoom = "200%"' in browser_gate
+    assert "const layoutHeight = node.offsetHeight || value.height" in browser_gate
+    assert "layoutHeight > 54 || radius >= layoutHeight / 2" in browser_gate
 
 
 def test_home_pending_coverage_never_renders_false_zero_totals() -> None:
