@@ -454,6 +454,109 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_transport_failure_recycles_once_and_three_rearms_recover(
+        self,
+    ) -> None:
+        constructed: list[object] = []
+        closed: list[object] = []
+
+        class ReconnectClient:
+            def __init__(self, *_args: object, **kwargs: object) -> None:
+                self.meter = kwargs["meter"]
+                self.identity: JoinedIdentity | None = None
+                constructed.append(self)
+
+            async def __aenter__(self) -> "ReconnectClient":
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                closed.append(self)
+                if self is constructed[0]:
+                    raise ConnectionError("synthetic close transport failure")
+
+            async def board_join(self, **_kwargs: object) -> dict[str, object]:
+                self.identity = JoinedIdentity(
+                    "pursers", "AI-test", "PR-test", "startup-test", "worker"
+                )
+                return {
+                    "agent_id": "AI-test",
+                    "agent_name": "startup-test",
+                    "principal_id": "PR-test",
+                    "role": "worker",
+                }
+
+        class Keepalive:
+            def start(self) -> None:
+                return None
+
+        async def wait_once(
+            client: ReconnectClient,
+            since_seq: dict[str, int],
+            *_args: object,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            if client is constructed[0]:
+                raise ConnectionError("synthetic Central handshake timeout")
+            return {
+                "new_seq": dict(since_seq),
+                "events": [],
+                "waited_s": 1.0,
+                "timed_out": True,
+                "mode": "push",
+                "mode_by_board": {"pursers": "push"},
+                "reason": "timeout",
+                "resynced": {"pursers": False},
+                "skipped_boards": {},
+            }
+
+        with tempfile.TemporaryDirectory() as raw:
+            meter = wait_server.BridgeStats(Path(raw) / "stats.json")
+            connection = wait_server.DeferredBoardConnection(meter)
+            context = type("Context", (), {})()
+            context.request_context = type("RequestContext", (), {})()
+            context.request_context.lifespan_context = {
+                "connection": connection,
+                "lease_keepalive": Keepalive(),
+                "meter": meter,
+            }
+            cursor = {"pursers": 48_476}
+            results = []
+            with (
+                patch.object(wait_server, "MeteredBoardClient", ReconnectClient),
+                patch.object(wait_server, "_a2a_wait_impl", wait_once),
+                patch.object(wait_server, "WAIT_MODE", "push"),
+            ):
+                for _ in range(4):
+                    result = await wait_server.a2a_wait(
+                        context,
+                        since_seq=cursor,
+                        timeout_s=1,
+                        boards=["pursers"],
+                        agent_name="startup-test",
+                        wait_for="claimable",
+                    )
+                    results.append(result)
+                    cursor = dict(result["new_seq"])
+                await connection.close()
+
+        self.assertEqual(results[0]["reason"], "push_unavailable")
+        self.assertEqual(results[0]["error"]["cause_class"], "transport")
+        self.assertEqual(
+            [result["mode"] for result in results[1:]],
+            ["push", "push", "push"],
+        )
+        self.assertEqual(
+            [result["new_seq"] for result in results],
+            [
+                {"pursers": 48_476},
+                {"pursers": 48_476},
+                {"pursers": 48_476},
+                {"pursers": 48_476},
+            ],
+        )
+        self.assertEqual(len(constructed), 2)
+        self.assertEqual(closed, constructed)
+
     async def test_board_join_rejection_has_board_cause_class(self) -> None:
         failure = wait_server._classify_board_join_failure(
             BoardClientError("board does not exist")

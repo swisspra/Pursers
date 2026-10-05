@@ -2006,6 +2006,67 @@ def test_daemon_cue_recomputes_only_selected_board(
     assert published == [{"board-a", "board-b"}, {"board-a"}]
 
 
+def test_once_reuses_preloaded_bounded_large_board_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = tmp_path / "token"
+    token.write_text("opaque", encoding="utf-8")
+    project = coordinator.Project("large", "board-large", tmp_path)
+    tickets = [
+        {"ticket_id": f"TK-{index:04d}", "status": "closed"}
+        for index in range(coordinator.MAX_SNAPSHOT_ITEMS)
+    ]
+    snapshots = {
+        "board-large": {
+            "board": {"board_id": "board-large"},
+            "tickets": tickets,
+            "latest_seq": 7_001,
+        }
+    }
+    analyzed: list[tuple[int, set[str]]] = []
+
+    class ForbiddenReader:
+        def __init__(self, *_args: Any) -> None:
+            raise AssertionError("preloaded once cycle must not reopen RawReader")
+
+    def fake_analyze(
+        _projects: Any,
+        current_snapshots: Mapping[str, Mapping[str, Any]],
+        _previous: Any,
+        _terms: Any,
+        now: datetime,
+        **kwargs: Any,
+    ) -> dict[str, dict[str, Any]]:
+        analyzed.append(
+            (
+                len(current_snapshots["board-large"]["tickets"]),
+                set(kwargs["selected_boards"]),
+            )
+        )
+        return {"board-large": coordinator.bound_findings_state([], now)}
+
+    monkeypatch.setattr(coordinator, "RawReader", ForbiddenReader)
+    monkeypatch.setattr(coordinator, "scope_preflight", lambda *_args: [])
+    monkeypatch.setattr(coordinator, "load_privacy_terms", lambda *_args: ())
+    monkeypatch.setattr(coordinator, "analyze_cycle", fake_analyze)
+    monkeypatch.setattr(coordinator, "plan_actions", lambda *_args, **_kwargs: [])
+    args = coordinator.parse_args(
+        [
+            "--token-path",
+            str(token),
+            "--home-board",
+            "board-large",
+            "--once",
+            "--dry-run",
+        ]
+    )
+    args._preloaded_cycle = ([project], snapshots, {"board-large": {}})
+
+    asyncio.run(coordinator.run(args))
+
+    assert analyzed == [(coordinator.MAX_SNAPSHOT_ITEMS, {"board-large"})]
+
+
 def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

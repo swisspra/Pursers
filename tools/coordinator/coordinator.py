@@ -4109,19 +4109,25 @@ async def run(args: argparse.Namespace) -> None:
     previous: dict[str, dict[str, Any]] = {}
     state_cache: dict[str, dict[str, Any]] = {}
 
-    async def refresh(selected: set[str] | None) -> set[str]:
+    def install_cycle(
+        cycle: tuple[
+            Sequence[Project],
+            Mapping[str, Mapping[str, Any]],
+            Mapping[str, Mapping[str, Any]],
+        ]
+    ) -> set[str]:
+        """Install one already-bounded read cycle without reading Central again."""
         nonlocal projects
-        async with RawReader(args.url, token) as reader:
-            if selected is None:
-                projects, fresh_snapshots, fresh_previous = await read_cycle(
-                    reader, args.home_board
-                )
-            else:
-                projects, fresh_snapshots, fresh_previous = (
-                    await read_selected_boards(
-                        reader, projects, selected, args.home_board
-                    )
-                )
+        raw_projects, raw_snapshots, raw_previous = cycle
+        projects = list(raw_projects)
+        fresh_snapshots = {
+            board_id: dict(snapshot)
+            for board_id, snapshot in raw_snapshots.items()
+        }
+        fresh_previous = {
+            board_id: dict(state)
+            for board_id, state in raw_previous.items()
+        }
         active = {project.board_id for project in projects}
         for stale in set(snapshots) - active:
             snapshots.pop(stale, None)
@@ -4145,6 +4151,16 @@ async def run(args: argparse.Namespace) -> None:
                     )
                 failure_logger.report(board_id, str(reason or "unavailable"))
         return set(fresh_snapshots)
+
+    async def refresh(selected: set[str] | None) -> set[str]:
+        async with RawReader(args.url, token) as reader:
+            if selected is None:
+                cycle = await read_cycle(reader, args.home_board)
+            else:
+                cycle = await read_selected_boards(
+                    reader, projects, selected, args.home_board
+                )
+        return install_cycle(cycle)
 
     async def process(selected: set[str]) -> None:
         now = utc_now()
@@ -4284,7 +4300,12 @@ async def run(args: argparse.Namespace) -> None:
 
     async def initial_cycle() -> set[str]:
         try:
-            selected = await refresh(None)
+            preloaded = getattr(args, "_preloaded_cycle", None)
+            selected = (
+                install_cycle(preloaded)
+                if preloaded is not None
+                else await refresh(None)
+            )
         except Exception as exc:
             raise HomeBoardUnreachable(
                 args.home_board, safe_failure_reason(exc)
