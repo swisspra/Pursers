@@ -126,6 +126,9 @@ def test_settings_layout_has_full_width_container_and_required_browser_gate() ->
     assert ".settings-page{display:grid;grid-template-columns:minmax(0,1fr)" in settings_css
     assert "container:settings-page/inline-size" in settings_css
     assert "@container settings-page (max-width:900px)" in settings_css
+    assert "@container settings-page (max-width:700px)" in settings_css
+    assert ".settings-section .autonomous-card{grid-template-columns:minmax(0,1fr)" in settings_css
+    assert ".settings-section .autonomous-state .meta" in settings_css
     assert ".settings-section-nav{display:flex;flex-wrap:wrap" in settings_css
 
     root = MODULE_PATH.parents[2]
@@ -144,6 +147,9 @@ def test_settings_layout_has_full_width_container_and_required_browser_gate() ->
     assert '["light", "dark"]' in browser_gate
     assert '["simple", "advanced"]' in browser_gate
     assert 'document.documentElement.style.zoom = "200%"' in browser_gate
+    assert 'document.documentElement.style.scrollbarGutter = "stable"' in browser_gate
+    assert "row.autonomousCards !== 1" in browser_gate
+    assert "row.approvedTemplates !== 10" in browser_gate
     assert "const layoutHeight = node.offsetHeight || value.height" in browser_gate
     assert "layoutHeight > 54 || radius >= layoutHeight / 2" in browser_gate
 

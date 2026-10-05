@@ -469,6 +469,105 @@ class AcceptanceCache:
             "expected_sha256": "a" * 64,
         }
 
+    def get_autonomous_butler(
+        self, board_id: str, central: str | None = None
+    ) -> dict:
+        """Return a populated, public-safe policy for responsive browser coverage."""
+        self.resolve_central(central)
+        if board_id != "fixture-board":
+            raise KeyError(board_id)
+        template_ids = [
+            f"template:synthetic-workflow-{index:02d}:bounded-runner"
+            for index in range(1, 11)
+        ]
+        capacity = {
+            role: {"min": 0, "target": 1, "max": 2}
+            for role in ("worker", "reviewer", "acp_worker")
+        }
+        return {
+            "schema_version": 1,
+            "board_id": board_id,
+            "revision": 7,
+            "effective_state": "shadow",
+            "config": {
+                "schema": "autonomous_butler_config_v1",
+                "schema_version": 1,
+                "board_id": board_id,
+                "revision": 7,
+                "enabled": False,
+                "desired": {
+                    "mode": "shadow",
+                    "runner": "direct_api",
+                    "capacity": capacity,
+                    "host_concurrency": 4,
+                    "board_concurrency": 3,
+                    "cooldowns": {
+                        "scale_up_s": 30,
+                        "scale_down_s": 60,
+                        "failure_backoff_s": 10,
+                    },
+                    "budget": {
+                        "period": "day",
+                        "max_tokens": 10000,
+                        "max_cost_microunits": 1000000,
+                        "max_external_calls": 100,
+                    },
+                    "connectors": [
+                        {
+                            "connector_id": "connector:synthetic-issue-tracker",
+                            "enabled": True,
+                            "transport": "streamable_http",
+                            "protocol_revision": "2026-07-28",
+                            "secret_configured": True,
+                            "tools": [
+                                {"name": "synthetic_issue_list"},
+                                {"name": "synthetic_issue_read"},
+                            ],
+                            "resources": [
+                                "resource:synthetic-project:issues",
+                                "resource:synthetic-project:milestones",
+                            ],
+                        }
+                    ],
+                },
+                "envelope": {
+                    "approved_template_ids": template_ids,
+                    "approved_connector_ids": [
+                        "connector:synthetic-issue-tracker"
+                    ],
+                    "max_capacity": {
+                        "worker": 4,
+                        "reviewer": 4,
+                        "acp_worker": 4,
+                    },
+                    "max_host_concurrency": 8,
+                    "max_board_concurrency": 8,
+                    "max_budget": {
+                        "period": "day",
+                        "max_tokens": 100000,
+                        "max_cost_microunits": 10000000,
+                        "max_external_calls": 1000,
+                    },
+                },
+            },
+            "actual_state": {
+                "config_revision": 7,
+                "observed_at": "2030-01-02T11:59:00Z",
+                "capacity": capacity,
+                "connectors": [
+                    {
+                        "connector_id": "connector:synthetic-issue-tracker",
+                        "status": "healthy",
+                    }
+                ],
+            },
+            "actual_state_available": True,
+            "actual_state_stale": False,
+            "actual_state_revision_mismatch": False,
+            "actual_state_status": "current",
+            "commands": [],
+        }
+
     def get_overhead_thresholds(
         self, central: str | None = None
     ) -> dict[str, int | float]:
