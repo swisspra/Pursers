@@ -41,6 +41,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Clear a failed wait-bridge connection even when transport teardown raises
+  or is cancelled, so the next call can join with a fresh client instead of
+  reusing the closed transport. Teardown errors remain visible to callers.
 - Preserve active seat turns across transient HTTP timeouts whose exception
   chains reach the underlying transport library. Bounded recovery now recognizes
   those typed causes while mixed authorization or validation failures still stop.

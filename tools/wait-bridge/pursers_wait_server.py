@@ -1681,10 +1681,15 @@ class DeferredBoardConnection:
                         ),
                     )
                 )
-            if entered:
-                await client.__aexit__(None, None, None)
-            if self._client is client:
-                self._client = None
+            try:
+                if entered:
+                    await client.__aexit__(None, None, None)
+            finally:
+                # Teardown can fail or be cancelled after closing the raw
+                # transport. Never publish that closed client to the next
+                # caller, and never clear a newer replacement owner's client.
+                if self._client is client:
+                    self._client = None
 
     async def client(self) -> MeteredBoardClient:
         try:
