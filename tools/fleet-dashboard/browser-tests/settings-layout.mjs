@@ -74,6 +74,8 @@ function assertGeometry(row) {
   if (!row.sectionsOrdered) failures.push("sections are not vertically ordered");
   if (row.circularNav.length) failures.push(`pill/circular navigation: ${row.circularNav.join(", ")}`);
   if (row.clippedActions.length) failures.push(`clipped actions: ${row.clippedActions.join(", ")}`);
+  if (row.autonomousCards !== 1) failures.push(`configured autonomous cards: ${row.autonomousCards}`);
+  if (row.approvedTemplates !== 10) failures.push(`approved template fixture count: ${row.approvedTemplates}`);
   if (failures.length) throw new Error(`${failures.join("; ")}\n${JSON.stringify(row, null, 2)}`);
 }
 
@@ -104,11 +106,11 @@ async function geometry(page, label) {
         if (width > 1 && height > 1) overlaps.push(`${left}:${right}`);
       }
     }
-    const candidates = [...root.querySelectorAll("button,input,select,textarea,.settings-section,.settings-section-nav")].filter(visible);
+    const candidates = [...root.querySelectorAll("button,input,select,textarea,.settings-section,.settings-section-nav,.autonomous-card,.autonomous-card .section-title,.autonomous-state,.autonomous-config-form,.settings-command-row")].filter(visible);
     const outside = candidates.filter(node => {
       const value = rect(node);
       return value.left < rootRect.left - 1 || value.right > rootRect.right + 1;
-    }).map(node => node.getAttribute("name") || node.dataset.settingsMode || node.id || node.tagName.toLowerCase()).slice(0, 20);
+    }).map(node => node.getAttribute("name") || node.dataset.settingsMode || node.id || node.className || node.tagName.toLowerCase()).slice(0, 20);
     const sections = [...root.querySelectorAll(":scope > .settings-section")].filter(visible);
     const sectionRects = sections.map(rect);
     const narrowSections = sections.filter(node => rect(node).width < root.clientWidth - 1).map(node => node.id || node.getAttribute("aria-labelledby") || "section");
@@ -124,6 +126,9 @@ async function geometry(page, label) {
     }).map(node => node.textContent.trim());
     const clippedActions = [...root.querySelectorAll("button,.button,.primary-action")].filter(visible).filter(node => node.scrollWidth > node.clientWidth + 1 || node.scrollHeight > node.clientHeight + 1).map(node => node.textContent.trim()).slice(0, 20);
     const internalScrollers = [...root.querySelectorAll(".table-scroll,.settings-plan pre")].filter(visible).map(node => ({ className: node.className, scrollWidth: node.scrollWidth, clientWidth: node.clientWidth }));
+    const autonomousCards = root.querySelectorAll('.autonomous-card[data-pursers-autonomous-board="fixture-board"] .autonomous-config-form').length;
+    const templateText = root.querySelector(".autonomous-state .meta:last-child")?.textContent || "";
+    const approvedTemplates = (templateText.match(/template:synthetic-workflow-/g) || []).length;
     return {
       label: currentLabel,
       layoutClass: root.className,
@@ -140,6 +145,8 @@ async function geometry(page, label) {
       sectionsOrdered,
       circularNav,
       clippedActions,
+      autonomousCards,
+      approvedTemplates,
       internalScrollers,
       sectionWidths: sectionRects.map(value => value.width),
     };
@@ -218,7 +225,10 @@ try {
 
   await page.setViewportSize({ width: 768, height: 900 });
   await openSettings(page, url);
-  await page.evaluate(() => { document.documentElement.style.zoom = "200%"; });
+  await page.evaluate(() => {
+    document.documentElement.style.scrollbarGutter = "stable";
+    document.documentElement.style.zoom = "200%";
+  });
   for (const theme of ["light", "dark"]) {
     await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
     for (const mode of ["simple", "advanced"]) {
@@ -228,10 +238,20 @@ try {
       assertGeometry(row);
       results.push(row);
       await page.screenshot({ path: resolve(artifactDir, `${label}.png`) });
+      const screenshotStyle = await page.addStyleTag({
+        content: ".mobile-shell-bar,.sidebar,.skip-link{display:none!important}",
+      });
+      await page.locator('.autonomous-card[data-pursers-autonomous-board="fixture-board"]').screenshot({
+        path: resolve(artifactDir, `${label}-automation.png`),
+      });
+      await screenshotStyle.evaluate(node => node.remove());
     }
   }
 
-  await page.evaluate(() => { document.documentElement.style.zoom = ""; });
+  await page.evaluate(() => {
+    document.documentElement.style.zoom = "";
+    document.documentElement.style.scrollbarGutter = "";
+  });
   await page.setViewportSize({ width: 1116, height: 900 });
   await openSettings(page, url);
   const interactions = await exerciseInteractions(page);

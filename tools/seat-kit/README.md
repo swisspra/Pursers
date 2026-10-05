@@ -1,6 +1,6 @@
 # seat-kit
 
-<!-- release-train: product=5.2.0 bridge=0.1.7 client=0.1.9 -->
+<!-- release-train: product=5.2.1 bridge=0.1.7 client=0.1.9 -->
 
 Generate a ready-to-use Pursers worker or reviewer seat in one command:
 

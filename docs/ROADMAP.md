@@ -1,6 +1,6 @@
 # Pursers roadmap
 
-Pursers 5.2.0 is the current release train. This page separates released
+Pursers 5.2.1 is the current release train. This page separates released
 work, near-term candidates, and research so that an experiment is never
 mistaken for a commitment. Items move only after implementation, independent
 review, and the applicable release gates pass.
@@ -8,11 +8,18 @@ review, and the applicable release gates pass.
 Release artifacts and their checksum manifests are available from the generic
 [GitHub Releases page](https://github.com/swisspra/Pursers/releases).
 
-## `v5.2.0` release train
+## `v5.2.1` release train
 
-The release cohort contains `pursers==5.2.0` and
-`pursers-personal==5.2.0`, with Central `0.1.8`, Client `0.1.9`, Personal
-Import `5.0.0`, Wait Bridge `0.1.7`, and ACP `0.1.8`.
+The release cohort contains `pursers==5.2.1` and
+`pursers-personal==5.2.1`, with Central `0.1.8`, Client `0.1.9`, Personal
+Import `5.0.0`, Wait Bridge `0.1.7`, and ACP `0.1.9`.
+
+This patch preserves the 5.2.0 feature set while correcting a live Fleet
+Settings reflow defect in populated Automation policy cards at 200% zoom. The
+browser gate now exercises the configured card with long synthetic template
+and connector data at scrollbar-reduced width in both themes and both settings
+modes. Central, Client, Personal Import, and Wait Bridge source and published
+artifacts remain unchanged.
 
 Planned release highlights, subject to the final prerequisite below:
 
@@ -30,10 +37,8 @@ Planned release highlights, subject to the final prerequisite below:
 - The supplied Pursers brand is included in public repository and Fleet
   surfaces, and dashboard dependency updates are covered by type and bundle CI.
 
-At release-train preparation time, PR 83's Settings layout/browser regression
-gate remained a prerequisite rather than verified deployed behavior. The final
-tag requires its independently approved source plus full strict CI and browser
-acceptance on the integrated candidate.
+The final tag requires full strict CI and the strengthened 24-case Settings
+browser acceptance gate on the integrated candidate.
 
 Central binds to loopback by default. Remote access requires an
 operator-supplied TLS certificate and key plus an allowed host. macOS is the

@@ -7,6 +7,32 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.2.1] - 2026-10-05
+
+This release includes `pursers-central==0.1.8`,
+`pursers-client==0.1.9`, `pursers-personal-import==5.0.0`,
+`pursers-personal==5.2.1`, `pursers==5.2.1`,
+`pursers-wait-bridge==0.1.7`, and
+`pursers-acp==0.1.9`.
+
+Upgrade `pursers`, Personal, and ACP together and follow the
+[5.2.1 patch upgrade guide](docs/releases/UPGRADE-v5.2.1.md). Central, Client,
+Personal Import, and Wait Bridge are unchanged and retain their published
+versions and artifact bytes.
+
+### Fixed
+
+- Reflow the populated Fleet Automation policy card at 200% browser zoom when
+  a platform scrollbar reduces the available CSS width. Container-driven
+  command stacking and bounded intrinsic tracks keep the title, state,
+  configured fields, connector details, and all actions inside the page
+  without hiding horizontal overflow.
+- Strengthen the hermetic Settings browser gate with a realistic configured
+  automation policy, ten synthetic approved-template identifiers, connector
+  state, scrollbar-equivalent narrow width, and direct geometry checks for the
+  policy card and its nested content in light/dark and Simple/Advanced modes.
+  The original 24-case layout and interaction gate remains intact.
+
 ## [5.2.0] - 2026-10-05
 
 This release includes `pursers-central==0.1.8`,
