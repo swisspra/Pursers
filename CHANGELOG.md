@@ -41,6 +41,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Preserve active seat turns across transient HTTP timeouts whose exception
+  chains reach the underlying transport library. Bounded recovery now recognizes
+  those typed causes while mixed authorization or validation failures still stop.
+
 - Keep idle Butler refreshes from repeatedly rewriting unchanged observation
   and Fleet state. Observer freshness remains bounded by a five-minute durable
   heartbeat, while Central now returns exact coordinator state duplicates

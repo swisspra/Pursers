@@ -551,6 +551,7 @@ def test_preflight_transport_recovery_preserves_cursor_and_launches_once(tmp_pat
 
 
 def test_active_model_survives_nested_transport_recovery_without_relaunch(tmp_path,monkeypatch):
+    import httpcore2
     import httpx2
 
     module=api();runner=module['EventSeatRunner'](codex_config(tmp_path))
@@ -559,7 +560,9 @@ def test_active_model_survives_nested_transport_recovery_without_relaunch(tmp_pa
         nonlocal refreshes
         refreshes+=1
         if refreshes in {2,3}:
-            raise ExceptionGroup('transport',[httpx2.RemoteProtocolError('closed')])
+            wrapped = httpx2.ConnectTimeout('TLS handshake timed out')
+            wrapped.__cause__ = httpcore2.ConnectTimeout('TLS handshake timed out')
+            raise ExceptionGroup('transport', [wrapped])
     async def no_delay(_seconds):pass
     runner.refresh_presence=refresh
     runner.monotonic=lambda:next(iter_clock)
@@ -707,3 +710,17 @@ def test_registry_root_guard_rejects_wrong_boundary_and_symlink_escape(tmp_path)
     registry['projects']['p']['work_dir'] = str(link)
     with pytest.raises(ValueError, match='repository_root'):
         module['validate_registry_roots'](registry, str(root))
+
+
+def test_chained_httpcore_timeouts_retry_without_hiding_mixed_failures():
+    import httpcore2
+    import httpx2
+
+    classify = api()['transient_wait_failure']
+    cause = httpcore2.ConnectTimeout('TLS handshake timed out')
+    wrapped = httpx2.ConnectTimeout('TLS handshake timed out')
+    wrapped.__cause__ = cause
+    grouped = ExceptionGroup('transport', [wrapped])
+    assert classify(grouped) is True
+    assert classify(ExceptionGroup('mixed', [wrapped, ValueError('invalid response')])) is False
+    assert classify(ExceptionGroup('auth', [wrapped, RuntimeError('HTTP 401 Unauthorized')])) is False

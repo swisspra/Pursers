@@ -18,6 +18,7 @@ import sys
 import time
 
 import anyio
+import httpcore2
 import httpx2
 
 HELPERS = runpy.run_path(str(Path(__file__).resolve().parents[1]/'ado-connector/git_credential.py'))
@@ -146,6 +147,7 @@ def transient_wait_failure(exc):
     """Retry only when every nested leaf is a recognized transport failure."""
     leaves=exception_leaves(exc)
     retryable=(ConnectionError,TimeoutError,subprocess.TimeoutExpired,httpx2.TransportError,
+               httpcore2.TimeoutException,httpcore2.NetworkError,httpcore2.ProtocolError,
                anyio.BrokenResourceError,anyio.ClosedResourceError,anyio.EndOfStream)
     return bool(leaves) and all(
         isinstance(item,retryable)
