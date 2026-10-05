@@ -41,6 +41,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Preserve the exact Central and board identity when changing Fleet Settings
+  scope in browser-parsed HTML, including duplicate board names across Centrals,
+  and cancel any pending plan when that scope changes.
 - Apply saved ACP `configOptions` selections after session creation and before
   the first prompt, failing closed when a model, mode, or reasoning choice is no
   longer advertised.

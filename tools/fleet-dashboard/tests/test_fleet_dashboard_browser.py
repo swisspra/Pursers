@@ -373,6 +373,180 @@ console.log(JSON.stringify({{globalBefore, globalAfter, groupLayer, repositoryAf
     ]
 
 
+def test_settings_scope_round_trips_exact_central_and_board_in_real_browser() -> None:
+    """Use Chromium HTML parsing; all requests stay inside the fixture server."""
+    task_space_id = os.environ.get("PURSERS_EGO_TASK_SPACE_ID")
+    ego_browser = shutil.which("ego-browser")
+    if not task_space_id or not ego_browser:
+        pytest.skip("requires PURSERS_EGO_TASK_SPACE_ID and ego-browser")
+
+    reads: list[tuple[str, str, str]] = []
+    plans: list[tuple[str, dict]] = []
+    applies: list[tuple[str, str, str]] = []
+
+    class Cache:
+        @staticmethod
+        def labels() -> list[str]:
+            return ["central-a", "central-b"]
+
+        @staticmethod
+        def resolve_central(value: str | None) -> str:
+            central = value or "central-a"
+            if central not in {"central-a", "central-b"}:
+                raise KeyError(central)
+            return central
+
+        @classmethod
+        def get(cls, central: str | None = None) -> dict:
+            central = cls.resolve_central(central)
+            boards = {
+                "central-a": [("same-a", "Same Board"), ("other-a", "Other Board")],
+                "central-b": [("same-b", "Same Board"), ("other-b", "Other Board")],
+            }[central]
+            return {
+                "central": central,
+                "generated_at": "2030-01-01T00:00:00Z",
+                "boards": [
+                    {"board_id": board_id, "label": label, "status": "ready", "counts": {}}
+                    for board_id, label in boards
+                ],
+                "agents": [],
+                "pool_summary": {},
+            }
+
+        @classmethod
+        def get_project_registry(cls, central: str | None = None) -> dict:
+            cls.resolve_central(central)
+            return {"registry": {"schema_version": 1, "projects": {}}, "expected_sha256": "a" * 64}
+
+        @classmethod
+        def get_managed_configuration(cls, board_id: str, central: str | None = None) -> dict:
+            central = cls.resolve_central(central)
+            reads.append(("managed", central, board_id))
+            return {"families": {"board_policy": {
+                "status": "configurable", "expected_sha256": "b" * 64,
+                "values": {"review_policy": "strict", "stale_after_days": 30},
+            }}}
+
+        @classmethod
+        def get_dispatch(cls, board_id: str, central: str | None = None) -> dict:
+            central = cls.resolve_central(central)
+            reads.append(("dispatch", central, board_id))
+            return {"board_id": board_id, "claim_ttl_s": 900, "offer_ttl_s": 180,
+                    "broadcast_reoffer_s": 300, "second_opinion": False,
+                    "fallback_broadcast": False}
+
+        @classmethod
+        def get_project_delivery_settings(cls, central: str | None = None) -> dict:
+            central = cls.resolve_central(central)
+            return {"central": central, "projects": []}
+
+        @classmethod
+        def plan_managed_configuration(cls, request: dict, central: str | None = None) -> dict:
+            central = cls.resolve_central(central)
+            plans.append((central, json.loads(json.dumps(request))))
+            return {"family": request["family"], "plan_id": "fixture-plan",
+                    "digest": "c" * 64, "preview": {"comparison": {"changes": []}}}
+
+        @classmethod
+        def apply_managed_configuration(
+            cls, plan_id: str, digest: str, central: str | None = None
+        ) -> dict:
+            central = cls.resolve_central(central)
+            applies.append((central, plan_id, digest))
+            return {"readback": True}
+
+    class Seats:
+        @staticmethod
+        def seats() -> dict:
+            return {"schema_version": 1, "seats": []}
+
+        @staticmethod
+        def bridge() -> dict:
+            return {"status": "ready"}
+
+        @staticmethod
+        def registry(_fleet: dict, _registry: dict) -> dict:
+            return {"boards": [], "projects": [], "seats": {}}
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=Seats())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/#/settings"
+    try:
+        script = f"""
+const task = await taskSpace({int(task_space_id)});
+const page = task.page("p1");
+await page.goto({json.dumps(url)});
+await page.waitForFunction(() => document.querySelectorAll('[data-settings-scope] option').length === 4, undefined, {{timeout: 20000}});
+const before = await page.evaluate(() => [...document.querySelectorAll('[data-settings-scope] option')].map(option => ({{
+  value: option.value, central: option.dataset.central, board: option.dataset.board,
+  label: option.textContent, replacement: option.value.includes('\uFFFD'),
+}})));
+await page.selectOption('[data-settings-scope]', {{label: 'Same Board · central-b · same-b'}});
+await page.waitForFunction(() =>
+  document.querySelector('[data-settings-scope]')?.selectedOptions[0]?.dataset.central === 'central-b'
+  && document.querySelector('[data-settings-scope]')?.selectedOptions[0]?.dataset.board === 'same-b'
+  && Boolean(document.querySelector('[data-settings-family="board_policy"]'))
+  && document.querySelector('#settings-projects-sources .settings-section-head > p')?.textContent.includes('same-b · central-b'),
+  undefined, {{timeout: 20000}});
+const selectedAfterReadback = await page.evaluate(() => {{
+  const option = document.querySelector('[data-settings-scope]').selectedOptions[0];
+  return {{value: option.value, central: option.dataset.central, board: option.dataset.board}};
+}});
+await page.evaluate(() => document.querySelector('[data-settings-family="board_policy"]').requestSubmit());
+await page.waitForSelector('[data-settings-apply]', {{state: 'attached', timeout: 10000}});
+await page.selectOption('[data-settings-scope]', {{label: 'Other Board · central-a · other-a'}});
+await page.waitForFunction(() =>
+  document.querySelector('[data-settings-scope]')?.selectedOptions[0]?.dataset.board === 'other-a'
+  && Boolean(document.querySelector('[data-settings-family="board_policy"]'))
+  && !document.querySelector('[data-settings-apply]'),
+  undefined, {{timeout: 20000}});
+const afterScopeChange = await page.evaluate(() => ({{
+  central: document.querySelector('[data-settings-scope]').selectedOptions[0].dataset.central,
+  board: document.querySelector('[data-settings-scope]').selectedOptions[0].dataset.board,
+  hasApply: Boolean(document.querySelector('[data-settings-apply]')),
+}}));
+console.log(JSON.stringify({{before, selectedAfterReadback, afterScopeChange}}));
+"""
+        completed = subprocess.run(
+            [ego_browser, "nodejs", "-e", script], check=False, capture_output=True,
+            text=True, timeout=45,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert completed.returncode == 0, completed.stderr
+    evidence = json.loads(completed.stderr.strip().splitlines()[-1])
+    assert evidence["before"] == [
+        {"value": "scope-0", "central": "central-a", "board": "same-a",
+         "label": "Same Board · central-a · same-a", "replacement": False},
+        {"value": "scope-1", "central": "central-a", "board": "other-a",
+         "label": "Other Board · central-a · other-a", "replacement": False},
+        {"value": "scope-2", "central": "central-b", "board": "same-b",
+         "label": "Same Board · central-b · same-b", "replacement": False},
+        {"value": "scope-3", "central": "central-b", "board": "other-b",
+         "label": "Other Board · central-b · other-b", "replacement": False},
+    ]
+    assert evidence["selectedAfterReadback"] == {
+        "value": "scope-2", "central": "central-b", "board": "same-b",
+    }
+    assert evidence["afterScopeChange"] == {
+        "central": "central-a", "board": "other-a", "hasApply": False,
+    }
+    assert ("managed", "central-b", "same-b") in reads
+    assert ("dispatch", "central-b", "same-b") in reads
+    assert plans == [("central-b", {
+        "board_id": "same-b", "family": "board_policy", "expected_sha256": "b" * 64,
+        "changes": {"review_policy": "strict", "stale_after_days": 30},
+    })]
+    assert applies == []
+
+
 def test_projects_route_loads_owned_css_in_real_browser() -> None:
     task_space_id = os.environ.get("PURSERS_EGO_TASK_SPACE_ID")
     ego_browser = shutil.which("ego-browser")

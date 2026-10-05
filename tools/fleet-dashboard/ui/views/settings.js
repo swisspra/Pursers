@@ -19,6 +19,7 @@
   let settingsMode = 'simple';
   let settingsSearch = '';
   let pendingPlan = null;
+  let pendingPlanScopeKey = '';
   let settingsNotice = '';
   let settingsError = '';
   let loadingKey = '';
@@ -173,7 +174,7 @@
       ['Seats & dispatch', 'capacity concurrent seats rates token budget role host runner profiles IDE', `<div class="settings-stack">${renderSeatSetup()}${renderDispatchPolicy()}${renderMemberships(data)}</div>`],
       ['Board policy & retention', 'review stale archive history journal maintenance release rollback', `<div class="settings-stack">${renderBoardPolicy(data)}${renderRetention(data)}</div>`],
     ];
-    const scopeOptions = boardScopes().map(({central, board}) => `<option value="${esc(keyFor(central, board.board_id))}" ${central === selectedCentral && board.board_id === selectedBoard ? 'selected' : ''}>${esc(board.label)} · ${esc(central)} · ${esc(board.board_id)}</option>`).join('');
+    const scopeOptions = boardScopes().map(({central, board}, index) => `<option value="scope-${index}" data-central="${esc(central)}" data-board="${esc(board.board_id)}" ${central === selectedCentral && board.board_id === selectedBoard ? 'selected' : ''}>${esc(board.label)} · ${esc(central)} · ${esc(board.board_id)}</option>`).join('');
     return `<section class="settings-control-bar" aria-label="Settings controls"><label>Scope<select data-settings-scope>${scopeOptions}</select></label><label class="settings-search">Search settings<input type="search" data-settings-search value="${esc(settingsSearch)}" placeholder="Search fields and sections"></label><div class="settings-mode" role="group" aria-label="Settings detail"><button type="button" data-settings-mode="simple" aria-pressed="${settingsMode === 'simple'}">Simple</button><button type="button" data-settings-mode="advanced" aria-pressed="${settingsMode === 'advanced'}">Advanced</button></div><button type="button" data-settings-reload>Reload readback</button></section>${settingsNotice ? `<p class="status" role="status">${esc(settingsNotice)}</p>` : ''}${settingsError ? `<p class="error" role="alert">${esc(settingsError)}</p>` : ''}${planPanel()}${loadingKey === keyFor(selectedCentral, selectedBoard) && !data ? '<section class="settings-loading" aria-busy="true"><p>Loading source-backed settings…</p></section>' : ''}<nav class="settings-section-nav" aria-label="Settings sections">${sections.filter(([title, terms]) => visibleSection(title, terms)).map(([title]) => `<a href="#settings-${title.toLowerCase().replaceAll(/[^a-z]+/g, '-')}">${esc(title)}</a>`).join('')}</nav>${sections.filter(([title, terms]) => visibleSection(title, terms)).map(([title, _terms, content], index) => `<section class="settings-section" id="settings-${title.toLowerCase().replaceAll(/[^a-z]+/g, '-')}" data-detail="${index > 1 ? 'advanced' : 'simple'}"><div class="settings-section-head"><div><p class="settings-section-kicker">${index + 1} / ${sections.length}</p><h2>${esc(title)}</h2></div><p>Scope: ${esc(selectedBoard)} · ${esc(selectedCentral)}</p></div>${content}</section>`).join('')}`;
   }
 
@@ -414,6 +415,7 @@
   }
 
   async function previewManaged(form) {
+    const scopeKey = keyFor(selectedCentral, selectedBoard);
     const family = form.dataset.settingsFamily;
     const payload = {board_id: selectedBoard, family, expected_sha256: form.dataset.expected};
     if (family === 'board_policy') payload.changes = {review_policy: form.elements.review_policy.value, stale_after_days: Number(form.elements.stale_after_days.value)};
@@ -422,7 +424,10 @@
       payload.change = {operation: form.elements.operation.value, principal_id: form.elements.principal_id.value.trim()};
       if (payload.change.operation !== 'remove') payload.change.role = form.elements.role.value;
     } else payload.document = updateSourceDocument(form, family);
-    pendingPlan = await api(`/api/config/managed/plan?central=${encodeURIComponent(selectedCentral)}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    const plan = await api(`/api/config/managed/plan?central=${encodeURIComponent(selectedCentral)}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    if (scopeKey !== keyFor(selectedCentral, selectedBoard)) return;
+    pendingPlan = plan;
+    pendingPlanScopeKey = scopeKey;
     settingsNotice = 'Preview ready. Review the exact bounded plan before apply.';
     settingsError = '';
     renderHub?.();
@@ -453,34 +458,48 @@
   }
 
   async function previewDelivery(form, reset = false) {
+    const scopeKey = keyFor(selectedCentral, selectedBoard);
     const payload = {action: 'delivery', scope: form.elements.scope.value, name: form.elements.name.value, delivery_policy_group: form.elements.delivery_policy_group.value.trim() || null, ...(reset ? {reset_to_inherit: true} : {activate: form.elements.scope.value === 'repository' && form.elements.activate.checked, delivery_policy: deliveryPolicy(form)})};
-    pendingPlan = await api(`/api/lifecycle/plan?central=${encodeURIComponent(selectedCentral)}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
-    pendingPlan.family = 'delivery';
+    const plan = await api(`/api/lifecycle/plan?central=${encodeURIComponent(selectedCentral)}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    if (scopeKey !== keyFor(selectedCentral, selectedBoard)) return;
+    pendingPlan = {...plan, family: 'delivery'};
+    pendingPlanScopeKey = scopeKey;
     settingsNotice = 'Delivery preview ready. Unsupported combinations remain draft-only.';
     renderHub?.();
   }
 
   async function previewSeat(form) {
+    const scopeKey = keyFor(selectedCentral, selectedBoard);
     const fields = new FormData(form);
     const payload = Object.fromEntries(fields.entries());
     for (const name of ['can_work', 'can_review']) payload[name] = form.elements[name].checked;
     payload.tier_max = Number(payload.tier_max);
     payload.skills = String(payload.skills || '').split(',').map(value => value.trim()).filter(Boolean);
     for (const name of ['seat_dir', 'repository', 'ca_file', 'home_board', 'bridge_name', 'board_connector_name', 'provider', 'model']) if (!payload[name]) payload[name] = null;
-    pendingPlan = await api('/api/config/plan', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
-    pendingPlan.family = 'seat';
+    const plan = await api('/api/config/plan', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+    if (scopeKey !== keyFor(selectedCentral, selectedBoard)) return;
+    pendingPlan = {...plan, family: 'seat'};
+    pendingPlanScopeKey = scopeKey;
     settingsNotice = 'Seat plan ready. Host files are not changed until apply.';
     renderHub?.();
   }
 
   async function applyPending() {
     if (!pendingPlan) return;
+    if (pendingPlanScopeKey !== keyFor(selectedCentral, selectedBoard)) {
+      pendingPlan = null;
+      pendingPlanScopeKey = '';
+      settingsNotice = 'Plan cancelled because the Settings scope changed.';
+      renderHub?.();
+      return;
+    }
     const plan = pendingPlan;
     let receipt;
     if (plan.family === 'delivery') receipt = await api(`/api/lifecycle/apply?central=${encodeURIComponent(selectedCentral)}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({plan_id: plan.plan_id, plan_digest: plan.plan_digest, confirmation: plan.confirmation})});
     else if (plan.family === 'seat') receipt = await api('/api/config/apply', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({plan_id: plan.plan_id, digest: plan.digest})});
     else receipt = await api(`/api/config/managed/apply?central=${encodeURIComponent(selectedCentral)}`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({plan_id: plan.plan_id, digest: plan.digest})});
     pendingPlan = null;
+    pendingPlanScopeKey = '';
     settingsNotice = `Applied ${plan.family.replaceAll('_', ' ')}. Readback ${receipt.readback ? 'verified' : 'completed'}${receipt.restart_required ? '; restart required and not performed' : ''}.`;
     await loadSettings(true);
   }
@@ -515,8 +534,12 @@
     useContext(context);
     root.addEventListener('submit', settingsSubmit);
     root.querySelector('[data-settings-scope]')?.addEventListener('change', event => {
-      [selectedCentral, selectedBoard] = event.target.value.split('\u0000');
+      const option = event.target.selectedOptions[0];
+      if (!option) return;
+      selectedCentral = option.dataset.central;
+      selectedBoard = option.dataset.board;
       pendingPlan = null;
+      pendingPlanScopeKey = '';
       renderHub?.();
       void loadSettings();
     });
@@ -525,8 +548,8 @@
       setSettingsMode(root, button.dataset.settingsMode);
     }));
     root.querySelector('[data-settings-reload]')?.addEventListener('click', () => void loadSettings(true));
-    root.querySelector('[data-settings-cancel]')?.addEventListener('click', () => { pendingPlan = null; settingsNotice = 'Plan cancelled; no changes applied.'; renderHub?.(); });
-    root.querySelector('[data-settings-apply]')?.addEventListener('click', () => void applyPending().catch(error => { settingsError = `Apply failed: ${error.message}`; pendingPlan = null; renderHub?.(); }));
+    root.querySelector('[data-settings-cancel]')?.addEventListener('click', () => { pendingPlan = null; pendingPlanScopeKey = ''; settingsNotice = 'Plan cancelled; no changes applied.'; renderHub?.(); });
+    root.querySelector('[data-settings-apply]')?.addEventListener('click', () => void applyPending().catch(error => { settingsError = `Apply failed: ${error.message}`; pendingPlan = null; pendingPlanScopeKey = ''; renderHub?.(); }));
     root.querySelector('[data-delivery-reset]')?.addEventListener('click', event => void previewDelivery(event.target.closest('form'), true).catch(error => { settingsError = error.message; renderHub?.(); }));
     root.querySelector('form[data-settings-family="delivery"] select[name="name"]')?.addEventListener('change', event => { selectedProject = event.target.value; renderHub?.(); });
     root.querySelectorAll('[data-settings-job]').forEach(button => button.addEventListener('click', async () => {
