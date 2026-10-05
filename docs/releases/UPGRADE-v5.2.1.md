@@ -5,7 +5,9 @@ Settings Automation policy layout and prevents cold browser loads from
 overflowing Python's five-connection default listen queue while the shell and
 route modules are fetched concurrently. The listener permits up to 64 queued
 connections and 32 active request threads, so load is bounded while a complete
-dashboard resource burst fits without connection resets.
+dashboard resource burst fits without connection resets. Requests beyond the
+active limit are refused without blocking the accept loop, which keeps
+dashboard shutdown responsive even when all handler slots are occupied.
 
 No board schema, authentication rule, or automation policy changes in this
 patch. Installing packages does not deploy, restart, migrate, or modify a

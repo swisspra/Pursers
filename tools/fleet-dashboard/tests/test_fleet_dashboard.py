@@ -116,6 +116,76 @@ def test_fleet_listener_serves_complete_cold_load_burst() -> None:
     ]
 
 
+def test_fleet_listener_shutdown_does_not_wait_for_saturated_handlers() -> None:
+    release_handlers = threading.Event()
+    entered_handlers = threading.Condition()
+    active_handlers = 0
+
+    class BlockingHandler(dashboard.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            nonlocal active_handlers
+            with entered_handlers:
+                active_handlers += 1
+                entered_handlers.notify_all()
+            release_handlers.wait(timeout=10)
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format: str, *args: object) -> None:
+            pass
+
+    class ObservedServer(dashboard.FleetDashboardHTTPServer):
+        overload_closed = threading.Event()
+
+        def shutdown_request(self, request: socket.socket) -> None:
+            if not release_handlers.is_set():
+                self.overload_closed.set()
+            super().shutdown_request(request)
+
+    server = ObservedServer(("127.0.0.1", 0), BlockingHandler)
+    serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    serve_thread.start()
+    address = ("127.0.0.1", server.server_port)
+    clients: list[socket.socket] = []
+    shutdown_thread: threading.Thread | None = None
+
+    try:
+        for _ in range(server.max_active_requests):
+            client = socket.create_connection(address, timeout=5)
+            client.sendall(b"GET /hold HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            clients.append(client)
+
+        with entered_handlers:
+            assert entered_handlers.wait_for(
+                lambda: active_handlers == server.max_active_requests,
+                timeout=5,
+            )
+
+        extra_client = socket.create_connection(address, timeout=5)
+        extra_client.sendall(b"GET /overflow HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        clients.append(extra_client)
+        assert server.overload_closed.wait(timeout=2)
+
+        shutdown_thread = threading.Thread(target=server.shutdown)
+        shutdown_thread.start()
+        shutdown_thread.join(timeout=2)
+
+        assert not shutdown_thread.is_alive()
+        assert not release_handlers.is_set()
+    finally:
+        release_handlers.set()
+        if shutdown_thread is None or shutdown_thread.is_alive():
+            server.shutdown()
+        server.server_close()
+        serve_thread.join(timeout=5)
+        if shutdown_thread is not None:
+            shutdown_thread.join(timeout=5)
+        for client in clients:
+            client.close()
+
+    assert not serve_thread.is_alive()
+
+
 def test_ui_shell_loads_packaged_assets_and_route_modules() -> None:
     assert "<style>" not in dashboard.HTML_SHELL
     assert "<script>" not in dashboard.HTML_SHELL

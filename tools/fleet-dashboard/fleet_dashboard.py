@@ -56,7 +56,14 @@ class FleetDashboardHTTPServer(ThreadingHTTPServer):
         super().__init__(*args, **kwargs)
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        self._request_slots.acquire()
+        if not self._request_slots.acquire(blocking=False):
+            # ``process_request`` runs on ``serve_forever``'s accept-loop
+            # thread. Waiting here would prevent ``shutdown`` from observing
+            # the shutdown flag while every handler slot is occupied. Refuse
+            # only the request beyond the explicit active-work limit; the
+            # listen queue still absorbs a complete browser cold load.
+            self.shutdown_request(request)
+            return
         try:
             super().process_request(request, client_address)
         except BaseException:

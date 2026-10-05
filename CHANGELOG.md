@@ -25,7 +25,9 @@ versions and artifact bytes.
 - Prevent Fleet cold loads from overflowing Python's five-connection default
   listen queue while Chromium fetches the shell and route modules. The
   dashboard listener now admits a bounded 64 queued connections and 32 active
-  request threads; an actual-listener burst test and 12 uncached Chromium
+  request threads. Requests beyond the active limit are refused without
+  blocking the accept loop, so shutdown remains responsive under saturation;
+  actual-listener burst and saturation tests plus 12 uncached Chromium
   Settings reloads verify every required script and stylesheet arrives.
 - Reflow the populated Fleet Automation policy card at 200% browser zoom when
   a platform scrollbar reduces the available CSS width. Container-driven
