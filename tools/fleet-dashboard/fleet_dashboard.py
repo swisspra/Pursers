@@ -2700,10 +2700,8 @@ def board_id_from_api_path(path: str) -> str | None:
     return board_id if BOARD_ID_RE.fullmatch(board_id) else None
 
 
-def parse_project_registry(
-    result: dict[str, Any], home_board: str
-) -> list[tuple[str, str]]:
-    """Return the home board followed by unique active registry boards."""
+def parse_registered_projects(result: dict[str, Any]) -> list[dict[str, str]]:
+    """Project identity comes from the registry, not readable board discovery."""
     state = result.get("state")
     if not isinstance(state, dict) or not isinstance(state.get("value"), str):
         raise TypeError("project registry state is missing")
@@ -2717,20 +2715,28 @@ def parse_project_registry(
     if not isinstance(projects, dict):
         raise TypeError("project registry projects are missing")
 
+    return [
+        {"name": name, "board_id": project["board_id"]}
+        for name, project in projects.items()
+        if isinstance(name, str)
+        and isinstance(project, dict)
+        and project.get("status") == "active"
+        and project.get("fleet", True)
+        and isinstance(project.get("board_id"), str)
+        and project["board_id"]
+    ]
+
+
+def parse_project_registry(
+    result: dict[str, Any], home_board: str
+) -> list[tuple[str, str]]:
+    """Return the home board followed by unique active registry boards."""
     boards = [(home_board, home_board)]
     seen = {home_board}
-    for name, project in projects.items():
-        if not isinstance(name, str) or not isinstance(project, dict):
-            continue
-        board_id = project.get("board_id")
-        if (
-            project.get("status") == "active"
-            and project.get("fleet", True)
-            and isinstance(board_id, str)
-            and board_id
-            and board_id not in seen
-        ):
-            boards.append((_clip(name, MAX_LABEL_CHARS), board_id))
+    for project in parse_registered_projects(result):
+        board_id = project["board_id"]
+        if board_id not in seen:
+            boards.append((_clip(project["name"], MAX_LABEL_CHARS), board_id))
             seen.add(board_id)
         if len(boards) >= MAX_BOARDS:
             break
@@ -5104,6 +5110,7 @@ class FleetFetcher:
         self._excluded_readable_boards: list[dict[str, str]] = []
         self._configured_but_unreadable: list[str] = []
         self._active_registry_boards: list[str] = [config.home_board]
+        self._registered_projects: list[dict[str, str]] | None = None
         self._seat_definitions: dict[str, dict[str, Any]] = {}
         self._door_plans: dict[str, dict[str, Any]] = {}
         self._door_plan_lock = threading.Lock()
@@ -5152,6 +5159,7 @@ class FleetFetcher:
             registry, self.config.home_board
         )
         registry_boards = parse_project_registry(registry, self.config.home_board)
+        self._registered_projects = parse_registered_projects(registry)
         self._active_registry_boards = sorted(
             {board_id for _label, board_id in registry_boards}
         )
@@ -5209,6 +5217,7 @@ class FleetFetcher:
             registry, self.config.home_board
         )
         boards = parse_project_registry(registry, self.config.home_board)[:MAX_BOARDS]
+        self._registered_projects = parse_registered_projects(registry)
         self._active_registry_boards = sorted({board_id for _label, board_id in boards})
         self._readable_boards = list(boards)
         self._excluded_readable_boards = []
@@ -5683,6 +5692,7 @@ class FleetFetcher:
             for row in rows
             if isinstance(row, dict) and row.get("pending")
         )
+        result["registered_projects"] = copy.deepcopy(self._registered_projects)
         result["pool_scope"] = {
             "readable_boards": [board_id for _label, board_id in self._readable_boards],
             "covered_boards": sorted(board_id for board_id in covered if board_id),
@@ -5701,6 +5711,7 @@ class FleetFetcher:
     async def fetch_summary(self) -> dict[str, Any]:
         """Return bounded, useful Home data without optional enrichment."""
         discovery_pending = False
+        self._registered_projects = None
         try:
             boards = await asyncio.wait_for(
                 self._summary_boards(),

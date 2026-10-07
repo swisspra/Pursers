@@ -679,11 +679,18 @@ const context = {{
   pageHead:(kicker,title,copy,action='')=>`<header><b>${{esc(kicker)}}</b><h2>${{esc(title)}}</h2><p>${{esc(copy)}}</p>${{action}}</header>`,
   warmTruthStrip:()=>'<div class="truth-strip"></div>',
   warmBoards:()=>boards,
+  get fleetData() {{
+    return Object.fromEntries([...new Set(boards.map(row=>row.central))].map(central=>[central, {{
+      boards:boards.filter(row=>row.central===central).map(row=>row.board),
+      registered_projects:boards.filter(row=>row.central===central).map(row=>({{name:row.board.label,board_id:row.board.board_id}})),
+    }}]));
+  }},
   numberCount:value=>Number(String(value??0).replace('>=',''))||0,
   boardHref:(central,board,tab='summary')=>`#/${{central}}/${{board}}/${{tab}}`,
 }};
 const html = globalThis.FleetViewModules.render('projects', context);
 boards.length = 0;
+Object.defineProperty(context, 'fleetData', {{value: {{default: {{boards:[],registered_projects:[]}}}}}});
 const empty = globalThis.FleetViewModules.render('projects', context);
 console.log(JSON.stringify({{html,empty}}));
 """
@@ -13724,6 +13731,7 @@ def test_fetch_summary_bounds_registry_discovery_and_marks_lower_bound(
         "total_board_count_is_lower_bound": True,
     }
     assert result["pool_scope"]["discovery"] == "pending"
+    assert result["registered_projects"] is None
 
 
 def test_timed_cache_raises_refresh_error_once_the_value_is_too_old() -> None:

@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Fleet Projects now follows active Fleet-enabled project registry entries rather
+  than readable board discovery. Shared-board projects retain separate cards and
+  correct removal targets; shared work totals count once. Unregistered test boards
+  no longer appear as projects, and unavailable registry/summary data is explicit.
+
 ## [5.2.1] - 2026-10-05
 
 This release includes `pursers-central==0.1.8`,

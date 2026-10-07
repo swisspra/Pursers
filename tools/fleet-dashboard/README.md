@@ -9,6 +9,20 @@ worker directories are created only when worker state is first written. If the
 host denies process inspection, status and Doctor surfaces report `process
 inspection unavailable` instead of failing the dashboard.
 
+## Projects and board discovery
+
+The Projects page lists active entries in the home board's `project_registry`
+with Fleet enabled (`fleet` defaults to true). A readable board alone is not a
+registered project. Test, probe, and other unregistered boards are excluded from
+this page without deleting them or changing their tickets or access.
+
+Each registry name gets its own card, even when multiple projects share a board.
+Card links use the mapped `board_id`; removal previews use the registry name.
+Ticket counts are board totals, explicitly labeled when shared, and the summary
+counts each board once. A registered project without a loaded board summary stays
+visible with pending counts. Missing registry data produces an unavailable state,
+not a fallback to board discovery. No new configuration is required.
+
 ## Decline queued intake
 
 Open a project's board and find its intake queue. **Decline** remains available
