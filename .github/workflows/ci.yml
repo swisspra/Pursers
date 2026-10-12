@@ -201,7 +201,7 @@ jobs:
 
       - name: Preserve Settings visual evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: fleet-settings-layout
           path: .artifacts/settings-layout
