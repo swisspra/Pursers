@@ -19,7 +19,8 @@ gates every change on evidence, and nothing is lost when a chat ends.
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)
 
 <sub>main: <code>5.2.1</code></sub>
-<p align="center"> [![Pursers MCP server](https://mcprush.com/badge/pursers-mcp/card.svg)](https://mcprush.com/to/pursers-mcp?ref=badge)</p>
+
+  [![Pursers MCP server](https://mcprush.com/badge/pursers-mcp/card.svg)](https://mcprush.com/to/pursers-mcp?ref=badge)
 
 </div>
 
