@@ -19,6 +19,7 @@ gates every change on evidence, and nothing is lost when a chat ends.
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/)
 
 <sub>main: <code>5.2.1</code></sub>
+<p align="center"> [![Pursers MCP server](https://mcprush.com/badge/pursers-mcp/card.svg)](https://mcprush.com/to/pursers-mcp?ref=badge)</p>
 
 </div>
 
@@ -83,6 +84,7 @@ sequenceDiagram
 | **Worker** | Claims an offered ticket, builds under a renewable lease, submits exact evidence |
 | **Reviewer** | A separate principal that approves or rejects on that evidence — never the seat that built it |
 | **You** | Set intent, answer questions, merge approved work. The final call is yours |
+
 
 ### Why it sticks
 
