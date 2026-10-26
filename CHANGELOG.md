@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Add a portable `pursers-install` skill and deterministic plan/apply/doctor
+  helper for a new private installation using `pursers==5.2.1`. The helper
+  preserves existing roots, records resumable progress without credential
+  contents, and reports service, board, and Fleet/harness readiness separately;
+  service activation and host/MCP configuration remain deferred.
+
 ## [5.2.1] - 2026-10-05
 
 This release includes `pursers-central==0.1.8`,

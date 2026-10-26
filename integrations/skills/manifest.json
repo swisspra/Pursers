@@ -2,7 +2,7 @@
   "schema_version": 1,
   "bundle_name": "pursers",
   "bundle_version": "1.0.0",
-  "description": "Portable, role-scoped workflows for connecting to and operating Pursers.",
+  "description": "Portable, role-scoped workflows for installing, connecting to, and operating Pursers.",
   "discovery": {
     "schema_version": 1,
     "index_uri": "pursers://help/index",
@@ -29,27 +29,60 @@
   },
   "skills": [
     {
+      "name": "pursers-install",
+      "path": "pursers-install",
+      "roles": [
+        "user"
+      ],
+      "files": [
+        "SKILL.md",
+        "scripts/bootstrap.py"
+      ]
+    },
+    {
       "name": "pursers-start",
       "path": "pursers-start",
-      "roles": ["coordinator", "operator", "reviewer", "worker"],
-      "files": ["SKILL.md", "references/hosts.md"]
+      "roles": [
+        "coordinator",
+        "operator",
+        "reviewer",
+        "worker"
+      ],
+      "files": [
+        "SKILL.md",
+        "references/hosts.md"
+      ]
     },
     {
       "name": "pursers-work",
       "path": "pursers-work",
-      "roles": ["worker"],
-      "files": ["SKILL.md", "references/evidence-and-recovery.md"]
+      "roles": [
+        "worker"
+      ],
+      "files": [
+        "SKILL.md",
+        "references/evidence-and-recovery.md"
+      ]
     },
     {
       "name": "pursers-review",
       "path": "pursers-review",
-      "roles": ["reviewer"],
-      "files": ["SKILL.md", "references/reviewer-scenarios.md"]
+      "roles": [
+        "reviewer"
+      ],
+      "files": [
+        "SKILL.md",
+        "references/reviewer-scenarios.md"
+      ]
     },
     {
       "name": "pursers-operate",
       "path": "pursers-operate",
-      "roles": ["coordinator", "butler", "release-operator"],
+      "roles": [
+        "coordinator",
+        "butler",
+        "release-operator"
+      ],
       "files": [
         "SKILL.md",
         "references/butler.md",

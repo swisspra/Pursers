@@ -1,9 +1,10 @@
 # Portable Pursers skills
 
-Pursers ships four small Agent Skills for role-specific workflows:
+Pursers ships five small Agent Skills for installation and role-specific workflows:
 
 | Skill | Use it for | Does not grant |
 | --- | --- | --- |
+| `pursers-install` | Plan and create a new private local installation from the pinned release | Service activation, host configuration, board authorization, or work readiness |
 | `pursers-start` | Connect, choose an authorized board and role, verify identity and capabilities, and make a harmless read | Credentials, board membership, or write access |
 | `pursers-work` | Claim an offered ticket, maintain its lease, validate an isolated branch, and submit exact evidence | Self-assignment, review, merge, or delivery |
 | `pursers-review` | Independently verify an exact submission and record a verdict | Self-review, merge, or release authority |
@@ -13,6 +14,30 @@ The bundle manifest is `integrations/skills/manifest.json`. It carries its own
 schema and bundle version; it is not a Pursers product-version declaration.
 Each `SKILL.md` stays focused and links to role-specific references or canonical
 guides instead of copying the full manuals into every model context.
+
+## Fresh local installation
+
+Use `pursers-install` for a new private instance. Its bundled helper plans
+without writing, then applies only to a new or receipt-owned root. It creates a
+private virtual environment, installs `pursers==5.2.1`, and initializes Central
+without starting a service or editing host/MCP configuration:
+
+```sh
+python integrations/skills/pursers-install/scripts/bootstrap.py plan \
+  --root /PATH/TO/private/pursers
+python integrations/skills/pursers-install/scripts/bootstrap.py apply \
+  --root /PATH/TO/private/pursers --apply
+python integrations/skills/pursers-install/scripts/bootstrap.py doctor \
+  --root /PATH/TO/private/pursers
+```
+
+Review the JSON plan before applying it. Existing, foreign, or symlinked roots
+are preserved. `doctor` reports package installation and Central initialization separately;
+runtime state is `unknown` because it does not probe or start a service. Installation remains `ready_for_work: false`; Fleet and autonomous
+harness activation, service start, host/MCP configuration, board authorization,
+and first connection are deferred. Use `pursers-start` for an existing
+installation and for the authorized connection and identity workflow. Skill
+presence alone is not readiness.
 
 ## Zed first: preview, install, and verify
 
