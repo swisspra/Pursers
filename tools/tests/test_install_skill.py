@@ -189,3 +189,47 @@ def test_skill_bundle_install_check_remove_includes_install_skill(tmp_path: Path
     removed = manage("remove", "--apply")
     assert removed.returncode == 0, removed.stderr
     assert not (target / "pursers-install").exists()
+
+
+def test_installed_skill_helper_runs_from_an_unrelated_working_directory(
+    tmp_path: Path,
+) -> None:
+    manager = ROOT / "integrations/skills/manage.py"
+    caller = tmp_path / "unrelated-cwd"
+    caller.mkdir()
+    scopes = {
+        "project": tmp_path / "project" / ".agents" / "skills",
+        "user": tmp_path / "user-home" / ".agents" / "skills",
+    }
+    for scope, target in scopes.items():
+        installed = subprocess.run(
+            [
+                sys.executable,
+                str(manager),
+                "install",
+                "--host",
+                "codex",
+                "--scope",
+                scope,
+                "--target",
+                str(target),
+                "--apply",
+            ],
+            cwd=caller,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert installed.returncode == 0, installed.stderr
+        helper = target / "pursers-install" / "scripts" / "bootstrap.py"
+        plan_root = tmp_path / f"{scope}-planned-root"
+        result = subprocess.run(
+            [sys.executable, str(helper), "plan", "--root", str(plan_root)],
+            cwd=caller,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["root"] == str(plan_root)
+        assert not plan_root.exists()

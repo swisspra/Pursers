@@ -5,14 +5,24 @@ description: Plan and create a new private local Pursers installation from the p
 
 # Install Pursers
 
-Use the bundled `scripts/bootstrap.py` helper for a fresh local installation. It does not connect to a board, start Central, configure an IDE, or grant authority. A completed installation is not ready for work until an authorized connection and identity are verified with `pursers-start`.
+Use the installed helper by its skill installation path; do not resolve `scripts/` against the shell working directory. The bundle manager installs project-scoped copies at `.agents/skills/pursers-install` and user-scoped copies at `$HOME/.agents/skills/pursers-install`. It does not connect to a board, start Central, configure an IDE, or grant authority. A completed installation is not ready for work until an authorized connection and identity are verified with `pursers-start`.
 
 Choose one explicit private directory that does not already exist. Keep credentials and SQLite data there; do not place it in a shared checkout or a host configuration directory.
 
+For a project-scoped skill, run these commands from that project's root:
+
 ```sh
-python scripts/bootstrap.py plan --root /PATH/TO/private/pursers
-python scripts/bootstrap.py apply --root /PATH/TO/private/pursers --apply
-python scripts/bootstrap.py doctor --root /PATH/TO/private/pursers
+python .agents/skills/pursers-install/scripts/bootstrap.py plan --root /PATH/TO/private/pursers
+python .agents/skills/pursers-install/scripts/bootstrap.py apply --root /PATH/TO/private/pursers --apply
+python .agents/skills/pursers-install/scripts/bootstrap.py doctor --root /PATH/TO/private/pursers
+```
+
+For a user-scoped skill, the absolute helper path works from any working directory:
+
+```sh
+python "$HOME/.agents/skills/pursers-install/scripts/bootstrap.py" plan --root /PATH/TO/private/pursers
+python "$HOME/.agents/skills/pursers-install/scripts/bootstrap.py" apply --root /PATH/TO/private/pursers --apply
+python "$HOME/.agents/skills/pursers-install/scripts/bootstrap.py" doctor --root /PATH/TO/private/pursers
 ```
 
 Review the JSON plan before applying it. `plan` is read-only. `apply` requires the explicit `--apply` flag and creates a private virtual environment, installs `pursers==5.2.1`, and runs the released `pursers-central init` command for a fresh Central instance. The helper records progress in a private receipt so an owned installation can resume safely. It preserves existing, foreign, and symlinked roots; do not delete or replace a blocker to make the plan pass.
