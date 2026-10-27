@@ -17,6 +17,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Add finite read-only AG-UI 1.0 capability and SSE observation routes backed
   only by already-loaded bounded Fleet detail caches. Mutation, run, resume,
   and live journal streaming remain unavailable or deferred.
+- Refresh Fleet Projects around work, current stage, next action, publication,
+  final QA, and security evidence. Integration alone is never reported as ready
+  for team merge; missing facts and bounded coverage remain unknown.
+- Add an optional finite AG-UI observation consumer on the existing dashboard
+  refresh cadence, with abortable project scopes and fallback to the loaded Fleet
+  snapshot. A failed Central snapshot now shows connection recovery guidance
+  instead of first-project setup.
 - Fleet Projects now follows active Fleet-enabled project registry entries rather
   than readable board discovery. Shared-board projects retain separate cards and
   correct removal targets; shared work totals count once. Unregistered test boards

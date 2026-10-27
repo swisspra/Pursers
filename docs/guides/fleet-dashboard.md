@@ -172,10 +172,23 @@ they do not send the draft, answer the question, or release the hold.
 
 ### Projects
 
-Projects lists the active registry boards and their visible ticket counts.
-**Workspace** opens the board. Shortcut buttons open **Ticket Flow**,
-**Timeline**, **Changes**, and **Routes**. A bounded or truncated snapshot is
-labelled; missing rows are never inferred.
+Projects lists active Fleet-enabled registry boards. Cards show the project name,
+Central connection, and concise work counts; **Add work** opens the existing
+board intent path. Expand **Project identifiers, ticket details, and all reported
+states** for the board ID, complete returned state counts, and per-ticket details.
+Each returned ticket separates its current stage and next action from publication,
+final QA, and security. An integration-branch merge alone never means that final
+QA or security is ready. Missing evidence and unknown ticket coverage stay
+labelled unknown, and omitted bounded records are not inferred.
+
+Projects uses the finite read-only AG-UI observation endpoint when available and
+falls back to the already-loaded Fleet snapshot when an older server or cold cache
+cannot provide one. Observation does not run a model, start work, or create a
+request. The view follows the dashboard refresh cadence and cancels stale project
+responses. If any configured Central has not returned a source-backed snapshot,
+Projects shows connection recovery guidance instead of first-project setup. The
+first-project message appears only after the configured Centrals return empty
+snapshots. **Add project** remains the guarded preview-first lifecycle flow.
 
 ### Work
 

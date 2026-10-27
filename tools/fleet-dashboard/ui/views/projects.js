@@ -2,7 +2,9 @@
 (function registerProjectsView() {
   'use strict';
 
-  let esc, pageHead, warmTruthStrip, warmBoards, numberCount, boardHref, centralLabels;
+  let esc, pageHead, warmTruthStrip, warmBoards, numberCount, boardHref, centralLabels, fleetData, refreshCentral;
+  let observationGeneration = 0;
+  const observationControllers = new Set();
   let lifecyclePlan = null;
   let lifecycleResult = null;
   let lifecycleError = '';
@@ -22,7 +24,7 @@
   }
 
   function useContext(context) {
-    ({esc, pageHead, warmTruthStrip, warmBoards, numberCount, boardHref, centralLabels} = context);
+    ({esc, pageHead, warmTruthStrip, warmBoards, numberCount, boardHref, centralLabels, fleetData, refreshCentral} = context);
     centralLabels = centralLabels || [...new Set(warmBoards().map(row => row.central))];
     if (!centralLabels.length) centralLabels = ['default'];
   }
@@ -38,9 +40,52 @@
     const source = String(board.status || 'unknown');
     const unavailable = Boolean(board.error) || ['error', 'unavailable'].includes(source);
     return {
-      label: unavailable ? 'needs attention' : source.replaceAll('_', ' '),
+      label: unavailable ? 'connection needs attention' : source === 'ready' ? 'connected' : source.replaceAll('_', ' '),
       tone: unavailable ? 'danger' : source === 'ready' ? 'ready' : 'neutral',
     };
+  }
+
+  function readiness(ticket, key) {
+    const blocker = String(ticket.activity?.blocking_reason || '');
+    const match = key === 'qa'
+      ? blocker.match(/(?:final\s+)?qa\s+(?:is\s+|remains\s+)?(held|pending|incomplete|failed|missing)/i)
+      : blocker.match(/security\s+(?:is\s+|remains\s+)?(held|pending|incomplete|failed|missing)/i);
+    return match ? `Held · ${match[1].toLowerCase()}` : 'Unknown';
+  }
+
+  function publication(ticket) {
+    const state = ticket.delivery?.state;
+    if (state === 'integration_merged') return 'Integrated on the delivery branch';
+    if (state === 'pr_pending') return 'Publication pending';
+    if (state === 'failed') return 'Publication failed';
+    return 'Unknown';
+  }
+
+  function ticketDetails(tickets, coverage = null) {
+    const visible = Array.isArray(tickets) ? tickets : [];
+    const total = coverage?.ticket_total;
+    const returned = coverage?.ticket_returned;
+    const omitted = coverage?.ticket_omitted;
+    const hasKnownCoverage = Number.isInteger(total) && Number.isInteger(returned);
+    const truncated = coverage?.truncated === true || (Number.isInteger(omitted) && omitted > 0)
+      || (hasKnownCoverage && returned < total);
+    const coverageText = hasKnownCoverage
+      ? `${returned} of ${total} tickets observed${truncated ? `; ${Math.max(omitted || 0, total - returned)} omitted` : ''}.`
+      : 'Ticket coverage unknown; this bounded view may omit records.';
+    const records = visible.map(ticket => {
+      const id = ticket.id || ticket.ticket_id || 'Ticket ID unknown';
+      const activity = ticket.activity || {};
+      const stage = activity.stage ? activity.stage.replaceAll('_', ' ') : 'Unknown';
+      const next = activity.next_action || 'Not reported';
+      const state = ticket.status_label || ticket.status || 'Unknown';
+      const blocker = activity.blocking_reason ? `<p class="projects-ticket-blocker"><b>Blocker reported:</b> ${esc(activity.blocking_reason)}</p>` : '';
+      const refs = Array.isArray(activity.evidence_refs) ? activity.evidence_refs.filter(ref => typeof ref === 'string') : [];
+      const evidence = `<details class="projects-evidence" data-state-key="${esc(`project-evidence:${id}`)}" data-project-disclosure="evidence:${esc(id)}"><summary>Evidence references</summary>${refs.length ? `<ul>${refs.map(ref => `<li><code>${esc(ref)}</code></li>`).join('')}</ul>` : '<p class="meta">No evidence references reported.</p>'}</details>`;
+      return `<details class="projects-ticket" data-state-key="${esc(`project-ticket:${id}`)}" data-project-disclosure="ticket:${esc(id)}"><summary><code>${esc(id)}</code> · ${esc(ticket.title || 'Untitled work')} <span class="meta">${esc(state)}</span></summary>
+        <dl><div><dt>Current stage</dt><dd>${esc(stage)}</dd></div><div><dt>Next action</dt><dd>${esc(next)}</dd></div><div><dt>Publication</dt><dd>${esc(publication(ticket))}</dd></div><div><dt>Final QA</dt><dd>${esc(readiness(ticket, 'qa'))}</dd></div><div><dt>Security</dt><dd>${esc(readiness(ticket, 'security'))}</dd></div></dl>${blocker}${evidence}
+      </details>`;
+    }).join('');
+    return `<p class="projects-coverage meta">${esc(coverageText)} Final QA and security readiness require explicit evidence.</p>${records || '<p class="projects-no-state">No ticket records returned in this snapshot.</p>'}`;
   }
 
   function statePills(counts) {
@@ -51,6 +96,17 @@
     )).join('');
   }
 
+  function legacyCoverage(board) {
+    const truncation = board.snapshot_truncation;
+    if (!truncation || !Number.isInteger(truncation.total) || !Number.isInteger(truncation.returned)) return null;
+    return {
+      ticket_total: truncation.total,
+      ticket_returned: truncation.returned,
+      ticket_omitted: Math.max(0, truncation.total - truncation.returned),
+      truncated: truncation.total > truncation.returned,
+    };
+  }
+
   function projectCard(central, board) {
     const counts = board.counts || {};
     const total = Object.values(counts).reduce((sum, value) => sum + numberCount(value), 0);
@@ -58,12 +114,6 @@
     const review = sumStates(counts, REVIEW_STATES);
     const open = numberCount(counts.open);
     const health = projectHealth(board);
-    const ready = (board.tickets || []).filter(ticket => ticket.delivery?.state === 'integration_merged').length;
-    const truncation = board.snapshot_truncation;
-    const limited = truncation && truncation.total > truncation.returned;
-    const scope = limited
-      ? `Showing ${esc(truncation.returned)} of ${esc(truncation.total)} tickets in this bounded snapshot.`
-      : `${esc(total)} tickets visible in this bounded snapshot.`;
     const error = board.error
       ? `<p class="projects-error error">Connection detail: ${esc(board.error)}</p>`
       : '';
@@ -71,10 +121,7 @@
     return `<article class="board-card" data-board-id="${esc(board.board_id)}" data-projects-card data-central="${esc(central)}" data-pursers-board="${esc(board.board_id)}" data-pursers-status="${esc(board.status || 'unknown')}">
       <header class="projects-board-heading">
         <span class="projects-signal" data-tone="${esc(health.tone)}" aria-hidden="true"></span>
-        <div>
-          <h3>${esc(board.label)}</h3>
-          <p class="projects-route"><span>${esc(central)}</span><span aria-hidden="true">/</span><code>${esc(board.board_id)}</code></p>
-        </div>
+        <div><h3>${esc(board.label)}</h3><p class="projects-route">Central connection · ${esc(central)}</p></div>
         <span class="status projects-health" data-tone="${esc(health.tone)}">${esc(health.label)}</span>
       </header>
       <dl class="projects-work" aria-label="Work snapshot for ${esc(board.label)}">
@@ -82,38 +129,54 @@
         <div><dt>In progress</dt><dd>${esc(active)}</dd></div>
         <div><dt>Review ready</dt><dd>${esc(review)}</dd></div>
       </dl>
-      ${ready ? `<p><b>${esc(ready)}</b> visible ticket${ready === 1 ? '' : 's'} ready for your team on the delivery branch.</p>` : ''}
-      <div class="projects-board-detail">
-        <div>
-          <p class="projects-detail-label">All reported states</p>
-          <div class="counts projects-state-list">${statePills(counts)}</div>
-        </div>
-        <div class="projects-board-actions">
-          <a class="primary-action" href="${boardHref(central, board.board_id)}">New intent</a>
-          <a class="button" href="${boardHref(central, board.board_id)}">Open project</a>
-          <a class="button" href="${boardHref(central, board.board_id, 'routes')}">View routes</a>
-          <button class="button projects-remove" type="button" data-project-remove="${esc(board.label)}" data-central="${esc(central)}">Remove from Fleet</button>
-        </div>
+      <details class="projects-records" data-project-records data-state-key="${esc(`project-records:${central}:${board.board_id}`)}">
+        <summary>Project identifiers, ticket details, and all reported states</summary>
+        <p class="projects-identifiers">Central: <code>${esc(central)}</code> · Board ID: <code>${esc(board.board_id)}</code> · ${esc(total)} ticket states counted in the Fleet summary.</p>
+        <div class="counts projects-state-list">${statePills(counts)}</div>
+        <div data-ag-ui-observation>${ticketDetails(board.tickets || [], legacyCoverage(board))}</div>
+      </details>
+      <div class="projects-board-actions">
+        <a class="primary-action" href="${boardHref(central, board.board_id)}">Add work</a>
+        <a class="button" href="${boardHref(central, board.board_id)}">Open project</a>
+        <a class="button" href="${boardHref(central, board.board_id, 'routes')}">View routes</a>
+        <details class="projects-more-actions"><summary>More actions</summary><button class="button projects-remove" type="button" data-project-remove="${esc(board.label)}" data-central="${esc(central)}">Remove from Fleet</button></details>
       </div>
-      ${error}<p class="projects-scope meta">${scope}</p>
+      ${error}<p class="projects-scope meta">${esc(total)} tickets in the Fleet summary.</p>
     </article>`;
   }
 
   function centralGroup(central, boards) {
     return `<section class="projects-central">
       <header class="projects-central-heading">
-        <div>
-          <p class="projects-detail-label">Coordinator</p>
-          <h3>${esc(central)}</h3>
-        </div>
+        <div><p class="projects-detail-label">Central connection</p><h3>${esc(central)}</h3></div>
         <span class="status">${esc(boards.length)} ${boards.length === 1 ? 'project' : 'projects'}</span>
       </header>
       <div class="boards-list">${boards.map(board => projectCard(central, board)).join('')}</div>
     </section>`;
   }
 
+  function dashboardSourceState() {
+    const text = typeof document !== 'undefined' ? document.querySelector('#state')?.textContent || '' : '';
+    if (/source unavailable/i.test(text)) return 'unavailable';
+    const missing = centralLabels.some(label => !fleetData?.[label] || fleetData[label].refresh?.complete === false);
+    if (!missing) return 'ready';
+    const banner = typeof document !== 'undefined' ? document.querySelector('#connection-banner') : null;
+    return banner && !banner.hidden ? 'unavailable' : 'loading';
+  }
+
   function emptyProjects() {
-    return `<section class="empty-guidance projects-empty">
+    const sourceState = dashboardSourceState();
+    if (sourceState === 'unavailable') return `<section class="empty-guidance projects-empty" data-state="unavailable">
+      <span class="projects-empty-mark" aria-hidden="true">!</span>
+      <h3>Central connection unavailable</h3>
+      <p>Fleet has not returned a source-backed project snapshot for every Central. Check the Central URL and token scope, then retry. No empty or ready state is inferred.</p>
+      <div class="card-actions"><button class="primary-action" type="button" data-project-retry>Retry connection</button><a class="button" href="#/settings">Open Settings</a></div>
+    </section>`;
+    if (sourceState === 'loading') return `<section class="empty-guidance projects-empty" data-state="loading" aria-busy="true">
+      <div class="skeleton" aria-hidden="true"></div><h3>Checking Central connection</h3>
+      <p>Waiting for a source-backed project snapshot. Fleet will show first-project setup only after every configured Central responds.</p>
+    </section>`;
+    return `<section class="empty-guidance projects-empty" data-state="empty">
       <div class="projects-empty-mark" aria-hidden="true">+</div>
       <h3>Connect your first project</h3>
       <p>Add project uses the existing guarded Connections flow. You will review the board, protected doors, policy defaults, and Fleet clone before work begins.</p>
@@ -126,7 +189,7 @@
       <div class="projects-lifecycle-head"><div><p class="projects-detail-label">Guarded lifecycle</p><h2 id="project-lifecycle-title">Add a project</h2></div><span class="status">Preview first</span></div>
       <p class="muted">Choose a local folder and optional Git source. Planning is read-only; apply runs once only after you review board, registry, clone, and permission effects.</p>
       <form id="project-lifecycle-form" class="projects-lifecycle-form">
-        <label>Coordinator<select name="central">${centralLabels.map(label => `<option value="${esc(label)}">${esc(label)}</option>`).join('')}</select></label>
+        <label>Central connection<select name="central">${centralLabels.map(label => `<option value="${esc(label)}">${esc(label)}</option>`).join('')}</select></label>
         <label>Project name<input name="name" required maxlength="120" placeholder="my-service"></label>
         <label>Board ID<input name="board_id" required pattern="[A-Za-z0-9._-]{1,80}" placeholder="my-service"></label>
         <label class="projects-wide">Local folder (absolute path)<input name="work_dir" required placeholder="/PATH/TO/project" autocomplete="off"></label>
@@ -252,7 +315,7 @@
       <div class="projects-lifecycle-head"><div><h2 id="delivery-title">Delivery policy</h2><p>Choose how reviewed work is handed off. Your team owns the final merge. Unsupported runtime choices remain drafts and never fall back silently.</p></div><span class="status ${runtime.ready ? 'ready' : 'warning'}">${runtimeLabel}</span></div>
       ${deliveryLoadError ? `<p role="alert" class="error">${esc(deliveryLoadError)}</p>` : ''}
       <form id="project-delivery-form" class="projects-lifecycle-form">
-        <label>Coordinator<select name="central">${centralLabels.map(label => `<option value="${esc(label)}" ${label === central ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+        <label>Central connection<select name="central">${centralLabels.map(label => `<option value="${esc(label)}" ${label === central ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
         <label>Repository project<select name="name" required>${rows.map(row => `<option value="${esc(row.name)}" ${row === selected ? 'selected' : ''}>${esc(row.name)}</option>`).join('') || '<option value="">Load registered repositories</option>'}</select></label>
         <label>Control level<select name="scope"><option value="repository" ${scope === 'repository' ? 'selected' : ''}>Repository override</option><option value="group" ${scope === 'group' ? 'selected' : ''}>Named group default</option><option value="global" ${scope === 'global' ? 'selected' : ''}>Global default</option></select></label>
         <label>Preset<select name="preset"><option value="custom" ${preset === 'custom' ? 'selected' : ''}>Custom</option><option value="review-each-ticket" ${preset === 'review-each-ticket' ? 'selected' : ''}>Review each ticket</option><option value="receive-batches" ${preset === 'receive-batches' ? 'selected' : ''}>Receive batches</option><option value="branch-only" ${preset === 'branch-only' ? 'selected' : ''}>Branch only</option></select></label>
@@ -437,14 +500,15 @@
     );
     const action = '<button class="primary-action projects-add" type="button" data-project-add-open>+ Add project</button>';
     const summary = rows.length ? `<section class="projects-summary" aria-label="Projects summary">
-      <p><strong>${esc(rows.length)} ${rows.length === 1 ? 'project' : 'projects'}</strong> connected through <strong>${esc(groups.size)} ${groups.size === 1 ? 'coordinator' : 'coordinators'}</strong>.</p>
+      <p><strong>${esc(rows.length)} ${rows.length === 1 ? 'project' : 'projects'}</strong> connected through <strong>${esc(groups.size)} ${groups.size === 1 ? 'Central connection' : 'Central connections'}</strong>.</p>
       <dl><div><dt>In progress</dt><dd>${esc(active)}</dd></div><div><dt>Review ready</dt><dd>${esc(review)}</dd></div></dl>
     </section>` : '';
     const content = rows.length
       ? [...groups.entries()].map(([central, boards]) => centralGroup(central, boards)).join('')
       : emptyProjects();
 
-    return `${pageHead('Projects', 'Your project map', 'See which coordinator owns each board, where work is moving, and what needs attention.', action)}${warmTruthStrip()}${lifecycleOutcome()}${lifecyclePreview()}${deliveryEditor()}${addProjectForm()}${summary}<div class="projects-map">${content}</div>`;
+    const setup = `<details class="projects-tools" data-project-tools data-state-key="projects-tools"><summary>Project setup and delivery policy</summary>${deliveryEditor()}${addProjectForm()}</details>`;
+    return `${pageHead('Projects', 'Your project map', 'See each project’s Central connection, current work, and next action.', action)}${warmTruthStrip()}${lifecycleOutcome()}${lifecyclePreview()}${summary}<div class="projects-map">${content}</div>${setup}`;
   }
 
   async function postLifecycle(path, central, payload) {
@@ -488,8 +552,51 @@
     }
   }
 
+  function observationIsCurrent(root, card, scope, generation) {
+    if (generation !== observationGeneration || !card.isConnected) return false;
+    if (typeof location !== 'undefined' && location.hash && !location.hash.startsWith('#/projects')) return false;
+    return [...root.querySelectorAll('[data-projects-card]')].some(item =>
+      item.dataset.central === scope.central && item.dataset.boardId === scope.board_id
+    );
+  }
+
+  function bindProjectObservation(root) {
+    observationGeneration += 1;
+    const generation = observationGeneration;
+    for (const controller of observationControllers) controller.abort();
+    observationControllers.clear();
+    if (typeof globalThis.PursersAgUi?.observe !== 'function') return;
+    for (const card of root.querySelectorAll('[data-projects-card]')) {
+      const scope = {central: card.dataset.central, board_id: card.dataset.boardId};
+      const controller = new AbortController();
+      observationControllers.add(controller);
+      globalThis.PursersAgUi.observe(scope, {signal: controller.signal}).then(snapshot => {
+        if (!observationIsCurrent(root, card, scope, generation)) return;
+        const host = card.querySelector('[data-ag-ui-observation]');
+        if (host) {
+          const openDetails = new Map([...host.querySelectorAll('[data-project-disclosure]')].map(item => [item.dataset.projectDisclosure, item.open]));
+          host.innerHTML = `<p class="projects-observation-status" role="status">Read-only snapshot received. Delivery readiness requires explicit evidence.</p>${ticketDetails(snapshot.tickets, snapshot.coverage)}`;
+          for (const item of host.querySelectorAll('[data-project-disclosure]')) item.open = openDetails.get(item.dataset.projectDisclosure) === true;
+        }
+      }).catch(error => {
+        if (error?.name === 'AbortError' || controller.signal.aborted) return;
+        if (!observationIsCurrent(root, card, scope, generation)) return;
+        const host = card.querySelector('[data-ag-ui-observation]');
+        if (host) host.insertAdjacentHTML('afterbegin', '<p class="projects-observation-status" role="status">Live observation unavailable; showing the existing Fleet snapshot.</p>');
+      }).finally(() => observationControllers.delete(controller));
+    }
+  }
+
   function bindProjects(_context, root) {
+    const empty = root.querySelector('.projects-empty');
+    const sourceState = dashboardSourceState();
+    const expectedState = sourceState === 'ready' ? 'empty' : sourceState;
+    if (empty && empty.dataset.state !== expectedState) empty.outerHTML = emptyProjects();
     bindDelivery(root);
+    bindProjectObservation(root);
+    root.querySelector('[data-project-retry]')?.addEventListener('click', () => {
+      for (const central of centralLabels) refreshCentral?.(central);
+    });
     const addForm = root.querySelector('#project-lifecycle-form');
     if (addForm) {
       syncGitMode(addForm);
@@ -510,7 +617,12 @@
         requestPlan(payload, form.elements.central.value);
       });
     }
-    root.querySelectorAll('[data-project-add-open]').forEach(button => button.addEventListener('click', () => root.querySelector('#project-lifecycle')?.scrollIntoView({behavior: 'smooth'})));
+    root.querySelectorAll('[data-project-add-open]').forEach(button => button.addEventListener('click', () => {
+      const setup = root.querySelector('[data-project-tools]');
+      if (setup) setup.open = true;
+      const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+      root.querySelector('#project-lifecycle')?.scrollIntoView({behavior: reduced ? 'auto' : 'smooth'});
+    }));
     root.querySelectorAll('[data-project-remove]').forEach(button => button.addEventListener('click', () => requestPlan({action: 'remove', name: button.dataset.projectRemove}, button.dataset.central)));
     root.querySelector('[data-project-plan-cancel]')?.addEventListener('click', () => { lifecyclePlan = null; lifecycleError = ''; rerender(); });
     root.querySelector('#project-lifecycle-apply')?.addEventListener('submit', async event => {
@@ -538,6 +650,12 @@
   }
 
   loadStyles();
+  if (typeof window !== 'undefined') window.addEventListener('hashchange', () => {
+    observationGeneration += 1;
+    for (const controller of observationControllers) controller.abort();
+    observationControllers.clear();
+  });
+
   globalThis.FleetViewModules.register({
     id: 'projects',
     owns: [

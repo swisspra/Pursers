@@ -10688,6 +10688,7 @@ UI_ASSET_PATHS = {
         UI_ROOT / "assets" / "brand" / "pursers-wordmark.png",
     ),
     "/ui/view-registry.js": ("text/javascript; charset=utf-8", UI_ROOT / "view-registry.js"),
+    "/ui/ag-ui-client.js": ("text/javascript; charset=utf-8", UI_ROOT / "ag-ui-client.js"),
     **{
         f"/ui/views/{name}.js": (
             "text/javascript; charset=utf-8",

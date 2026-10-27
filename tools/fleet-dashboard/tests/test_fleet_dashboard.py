@@ -679,6 +679,7 @@ const context = {{
   pageHead:(kicker,title,copy,action='')=>`<header><b>${{esc(kicker)}}</b><h2>${{esc(title)}}</h2><p>${{esc(copy)}}</p>${{action}}</header>`,
   warmTruthStrip:()=>'<div class="truth-strip"></div>',
   warmBoards:()=>boards,
+  centralLabels:['central-a','central-b'],fleetData:{{'central-a':{{}},'central-b':{{}}}},
   numberCount:value=>Number(String(value??0).replace('>=',''))||0,
   boardHref:(central,board,tab='summary')=>`#/${{central}}/${{board}}/${{tab}}`,
 }};
@@ -695,8 +696,8 @@ console.log(JSON.stringify({{html,empty}}));
     html = result["html"]
 
     assert "3 projects" in html
-    assert "2 coordinators" in html
-    assert html.count('projects-detail-label">Coordinator') == 2
+    assert "2 Central connections" in html
+    assert html.count('projects-detail-label">Central connection') == 2
     assert "In progress</dt><dd>3" in html
     assert "Review ready</dt><dd>3" in html
     for state in ("open", "claimed", "in progress", "submitted", "closed", "reviewing"):
@@ -710,6 +711,8 @@ console.log(JSON.stringify({{html,empty}}));
     assert 'data-project-add-open>Add project</button>' in result["empty"]
     assert "existing guarded Connections flow" in result["empty"]
     assert 'id="project-lifecycle-form"' in html
+    assert '<details class="projects-tools" data-project-tools data-state-key="projects-tools">' in html
+    assert '<summary>Project setup and delivery policy</summary>' in html
     assert 'data-project-remove="Alpha"' in html
 
 
