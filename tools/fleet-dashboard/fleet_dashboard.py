@@ -9,6 +9,7 @@ import copy
 import difflib
 import hashlib
 import hmac
+import importlib.util
 import ipaddress
 import json
 import os
@@ -36,6 +37,30 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import tomllib
+
+
+def _load_ag_ui_sibling() -> Any:
+    """Load the observation helper beside this file for script and spec loaders."""
+    path = Path(__file__).resolve().with_name("ag_ui.py")
+    name = "_pursers_fleet_dashboard_ag_ui"
+    existing = sys.modules.get(name)
+    if existing is not None and Path(existing.__file__).resolve() == path:
+        return existing
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"unable to load Fleet AG-UI helper: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        if sys.modules.get(name) is module:
+            del sys.modules[name]
+        raise
+    return module
+
+
+ag_ui = _load_ag_ui_sibling()
 
 
 class FleetDashboardHTTPServer(ThreadingHTTPServer):
@@ -503,6 +528,7 @@ class FleetClient(Protocol):
         cursor: int | None = None,
         limit: int = 100,
         ack: bool = True,
+        touch: bool | None = None,
         agent_name: str | None = None,
         max_events: int | None = None,
         max_bytes: int | None = None,
@@ -2700,10 +2726,8 @@ def board_id_from_api_path(path: str) -> str | None:
     return board_id if BOARD_ID_RE.fullmatch(board_id) else None
 
 
-def parse_project_registry(
-    result: dict[str, Any], home_board: str
-) -> list[tuple[str, str]]:
-    """Return the home board followed by unique active registry boards."""
+def parse_registered_projects(result: dict[str, Any]) -> list[dict[str, str]]:
+    """Return active Fleet-enabled projects without collapsing shared boards."""
     state = result.get("state")
     if not isinstance(state, dict) or not isinstance(state.get("value"), str):
         raise TypeError("project registry state is missing")
@@ -2717,20 +2741,28 @@ def parse_project_registry(
     if not isinstance(projects, dict):
         raise TypeError("project registry projects are missing")
 
+    return [
+        {"name": name, "board_id": project["board_id"]}
+        for name, project in projects.items()
+        if isinstance(name, str)
+        and isinstance(project, dict)
+        and project.get("status") == "active"
+        and project.get("fleet", True)
+        and isinstance(project.get("board_id"), str)
+        and project["board_id"]
+    ]
+
+
+def parse_project_registry(
+    result: dict[str, Any], home_board: str
+) -> list[tuple[str, str]]:
+    """Return the home board followed by unique active registry boards."""
     boards = [(home_board, home_board)]
     seen = {home_board}
-    for name, project in projects.items():
-        if not isinstance(name, str) or not isinstance(project, dict):
-            continue
-        board_id = project.get("board_id")
-        if (
-            project.get("status") == "active"
-            and project.get("fleet", True)
-            and isinstance(board_id, str)
-            and board_id
-            and board_id not in seen
-        ):
-            boards.append((_clip(name, MAX_LABEL_CHARS), board_id))
+    for project in parse_registered_projects(result):
+        board_id = project["board_id"]
+        if board_id not in seen:
+            boards.append((_clip(project["name"], MAX_LABEL_CHARS), board_id))
             seen.add(board_id)
         if len(boards) >= MAX_BOARDS:
             break
@@ -5104,6 +5136,7 @@ class FleetFetcher:
         self._excluded_readable_boards: list[dict[str, str]] = []
         self._configured_but_unreadable: list[str] = []
         self._active_registry_boards: list[str] = [config.home_board]
+        self._registered_projects: list[dict[str, str]] | None = None
         self._seat_definitions: dict[str, dict[str, Any]] = {}
         self._door_plans: dict[str, dict[str, Any]] = {}
         self._door_plan_lock = threading.Lock()
@@ -5151,6 +5184,7 @@ class FleetFetcher:
         self._board_work_dirs = parse_project_work_dirs(
             registry, self.config.home_board
         )
+        self._registered_projects = parse_registered_projects(registry)
         registry_boards = parse_project_registry(registry, self.config.home_board)
         self._active_registry_boards = sorted(
             {board_id for _label, board_id in registry_boards}
@@ -5208,6 +5242,7 @@ class FleetFetcher:
         self._board_work_dirs = parse_project_work_dirs(
             registry, self.config.home_board
         )
+        self._registered_projects = parse_registered_projects(registry)
         boards = parse_project_registry(registry, self.config.home_board)[:MAX_BOARDS]
         self._active_registry_boards = sorted({board_id for _label, board_id in boards})
         self._readable_boards = list(boards)
@@ -5292,6 +5327,7 @@ class FleetFetcher:
             cursor=max(0, latest_seq - event_limit),
             limit=event_limit,
             ack=False,
+            touch=False,
             max_events=event_limit,
             max_bytes=EVENT_MAX_BYTES,
         )
@@ -5696,11 +5732,13 @@ class FleetFetcher:
             "covered_board_count": len(covered),
             "total_board_count": len(rows),
         }
+        result["registered_projects"] = copy.deepcopy(self._registered_projects)
         return result
 
     async def fetch_summary(self) -> dict[str, Any]:
         """Return bounded, useful Home data without optional enrichment."""
         discovery_pending = False
+        self._registered_projects = None
         try:
             boards = await asyncio.wait_for(
                 self._summary_boards(),
@@ -8331,6 +8369,18 @@ class TimedCache:
                 }
             return value
 
+    def peek(self) -> dict[str, Any] | None:
+        """Return an already-loaded value without refresh, loader, or thread work."""
+        with self._lock:
+            if self._value is None:
+                return None
+            age = max(0.0, time.monotonic() - self._loaded_at)
+            return {
+                "value": self._value,
+                "age_seconds": age,
+                "fresh": age < self.ttl_seconds,
+            }
+
 
 class SeatConfigManager:
     """Secret-safe orchestration layer for the dashboard Config page."""
@@ -10197,6 +10247,61 @@ class DashboardCache:
                     self._details.pop(key, None)
             raise
 
+    def get_cached_board(
+        self, board_id: str, central: str | None = None
+    ) -> dict[str, Any] | None:
+        """Peek at loaded detail or fleet summary without joining Central."""
+        label = self.resolve_central(central)
+        key = (label, board_id)
+        with self._detail_lock:
+            cache = self._details.get(key)
+        cached = cache.peek() if cache is not None else None
+        if cached is not None and isinstance(cached.get("value"), dict):
+            return {
+                "value": self._labeled(cached["value"], label),
+                "age_seconds": cached["age_seconds"],
+                "fresh": cached["fresh"],
+                "source": "board_detail",
+            }
+
+        summary = self._fleets[label].peek()
+        if summary is None or not isinstance(summary.get("value"), dict):
+            return None
+        fleet = summary["value"]
+        boards = fleet.get("boards")
+        board = next(
+            (
+                row
+                for row in boards
+                if isinstance(row, dict) and row.get("board_id") == board_id
+            ),
+            None,
+        ) if isinstance(boards, list) else None
+        if not isinstance(board, dict) or board.get("status") != "ready":
+            return None
+        tickets = board.get("tickets")
+        tickets = tickets if isinstance(tickets, list) else []
+        return {
+            "value": {
+                "board": {"board_id": board_id, "label": board.get("label")},
+                "tickets": tickets,
+                "ticket_total": None,
+                "ticket_returned": len(tickets),
+                "ticket_omitted": None,
+                "truncated": board.get("truncated"),
+                "snapshot_truncation": board.get("snapshot_truncation"),
+                "event_window_truncated": None,
+                "event_resync_required": None,
+                "coordinator_findings_stale": board.get(
+                    "coordinator_findings_stale"
+                ),
+                "source_coverage": board.get("coverage"),
+            },
+            "age_seconds": summary["age_seconds"],
+            "fresh": summary["fresh"],
+            "source": "fleet_summary",
+        }
+
     def get_config(self, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
@@ -10618,6 +10723,7 @@ UI_ASSET_PATHS = {
         UI_ROOT / "assets" / "brand" / "pursers-wordmark.png",
     ),
     "/ui/view-registry.js": ("text/javascript; charset=utf-8", UI_ROOT / "view-registry.js"),
+    "/ui/ag-ui-client.js": ("text/javascript; charset=utf-8", UI_ROOT / "ag-ui-client.js"),
     **{
         f"/ui/views/{name}.js": (
             "text/javascript; charset=utf-8",
@@ -10999,6 +11105,23 @@ def make_handler(
         def do_GET(self) -> None:
             route = urlsplit(self.path).path
             self._prepare_evidence("GET", route)
+            if route == "/api/ag-ui/capabilities":
+                try:
+                    central = requested_central(self.path)
+                    central_label(central)
+                except (KeyError, ValueError):
+                    self._send(
+                        404,
+                        "application/json; charset=utf-8",
+                        b'{"error":"central not found"}',
+                    )
+                    return
+                self._send(
+                    200,
+                    "application/json; charset=utf-8",
+                    _json_bytes(ag_ui.capabilities()),
+                )
+                return
             if route == "/":
                 self._send(200, "text/html; charset=utf-8", HTML_SHELL.encode("utf-8"))
                 return
@@ -11483,6 +11606,7 @@ def make_handler(
                 "/api/projects/add",
                 "/api/lifecycle/plan",
                 "/api/lifecycle/apply",
+                "/api/ag-ui/observe",
             }
             worker_action = re.fullmatch(
                 r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)", route
@@ -11515,6 +11639,98 @@ def make_handler(
                     status, body = guard_error
                     self._send(status, "application/json; charset=utf-8", body)
                     return
+            if route == "/api/ag-ui/observe":
+                try:
+                    central = requested_central(self.path)
+                    label = central_label(central)
+                    board_id = requested_board(self.path)
+                except ValueError as exc:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc)}),
+                    )
+                    return
+                except KeyError:
+                    self._send(
+                        404,
+                        "application/json; charset=utf-8",
+                        b'{"error":"central not found"}',
+                    )
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", ""))
+                except ValueError:
+                    length = -1
+                if not 1 <= length <= ag_ui.MAX_INPUT_BYTES:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        b'{"error":"invalid body size"}',
+                    )
+                    return
+                try:
+                    raw_request = self.rfile.read(length)
+                    request = json.loads(raw_request)
+                    thread_id, run_id = ag_ui.validate_run_input(request)
+                except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc) or "invalid RunAgentInput"}),
+                    )
+                    return
+                try:
+                    peek = getattr(cache, "get_cached_board", None)
+                    cached = (
+                        cache_call("get_cached_board", board_id, central=central)
+                        if callable(peek)
+                        else None
+                    )
+                    if cached is None:
+                        self._send(
+                            503,
+                            "application/json; charset=utf-8",
+                            b'{"error":"observation cache unavailable"}',
+                        )
+                        return
+                    snapshot = cached["value"]
+                except KeyError:
+                    self._send(
+                        404,
+                        "application/json; charset=utf-8",
+                        b'{"error":"board not found"}',
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - transport errors are not run events.
+                    self._send(
+                        503,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": type(exc).__name__}),
+                    )
+                    return
+                try:
+                    state = ag_ui.project_observation(
+                        snapshot,
+                        central=label,
+                        board_id=board_id,
+                        cache_age_seconds=cached.get("age_seconds"),
+                        cache_fresh=cached.get("fresh"),
+                        cache_source=cached.get("source"),
+                    )
+                    events = ag_ui.observation_events(
+                        state, thread_id=thread_id, run_id=run_id
+                    )
+                    body = ag_ui.encode_sse(events)
+                except ValueError as exc:
+                    self._send(
+                        413,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc)}),
+                    )
+                    return
+                self._send(200, "text/event-stream; charset=utf-8", body)
+                return
             try:
                 central = requested_central(self.path)
                 label = central_label(central)

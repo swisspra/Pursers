@@ -172,10 +172,23 @@ they do not send the draft, answer the question, or release the hold.
 
 ### Projects
 
-Projects lists the active registry boards and their visible ticket counts.
-**Workspace** opens the board. Shortcut buttons open **Ticket Flow**,
-**Timeline**, **Changes**, and **Routes**. A bounded or truncated snapshot is
-labelled; missing rows are never inferred.
+Projects lists active Fleet-enabled registry boards. Cards show the project name,
+Central connection, and concise work counts; **Add work** opens the existing
+board intent path. Expand **Project identifiers, ticket details, and all reported
+states** for the board ID, complete returned state counts, and per-ticket details.
+Each returned ticket separates its current stage and next action from publication,
+final QA, and security. An integration-branch merge alone never means that final
+QA or security is ready. Missing evidence and unknown ticket coverage stay
+labelled unknown, and omitted bounded records are not inferred.
+
+Projects uses the finite read-only AG-UI observation endpoint when available and
+falls back to the already-loaded Fleet snapshot when an older server or cold cache
+cannot provide one. Observation does not run a model, start work, or create a
+request. The view follows the dashboard refresh cadence and cancels stale project
+responses. If any configured Central has not returned a source-backed snapshot,
+Projects shows connection recovery guidance instead of first-project setup. The
+first-project message appears only after the configured Centrals return empty
+snapshots. **Add project** remains the guarded preview-first lifecycle flow.
 
 ### Work
 
@@ -475,12 +488,46 @@ not reveal or delete bearer tokens already issued through another principal.
 Fleet and the open board detail refresh every five seconds. The server also
 caches its Central snapshot for up to five seconds, so two quick reads may show
 the same generation. Long Config jobs have their own one-second progress poll.
+Detail event catchup is a passive read: it does not touch member activity or
+acknowledge a consumer cursor. An admitted but stale dashboard identity can
+therefore read board detail without being reactivated or changing member or
+lease state. This does not restore work capability or change membership.
 
 When a refresh fails, the last successful snapshot remains visible and a
 connection banner reports the affected source, last success, error class, and
 recovery hint. Treat the banner as stale-data disclosure, not proof that the
 displayed state is current. The browser uses no-store requests; pressing reload
 does not turn an old server snapshot into new Central evidence.
+
+## AG-UI observation
+
+`GET /api/ag-ui/capabilities` reports the read-only HTTP/SSE snapshot support.
+`POST /api/ag-ui/observe?central=<label>&board_id=<id>` accepts AG-UI 1.0
+`RunAgentInput` with non-empty `threadId`, `runId`, and `messages: []`;
+`tools`, `context`, and `state` may be absent or empty. Non-empty messages,
+tools, context, or state and unsupported fields are rejected before any event
+stream opens. The request uses the same loopback, Host, Origin, and JSON checks
+as guarded Config actions.
+
+Observation only peeks at an already-loaded, bounded board-detail cache or
+Fleet board-summary cache. It
+does not trigger a cache refresh, create a Central client, join a board, call a
+model, renew a lease, or create work. A cold cache returns HTTP 503; a zero
+ticket count is reported only when present in the cached snapshot. The finite
+`text/event-stream` response contains `RUN_STARTED`, `STATE_SNAPSHOT`, zero or
+more `ACTIVITY_SNAPSHOT` events, and `RUN_FINISHED`. State includes the selected
+scope, cache age/freshness, bounded ticket summaries, source coverage flags,
+activity freshness, independent-review evidence, and distinct delivery
+states. Ticket histories, submission output, annotations, and Central
+credentials/configuration are excluded. Existing detail pages remain the path
+to full records and evidence.
+
+This is finite cached observation, not live journal streaming. Mutation,
+command, run, and resume capabilities are explicitly unavailable. Live journal
+push and mutation/resume adapters remain deferred until the autonomous harness
+is frozen. See the [AG-UI 1.0 specification](https://docs.ag-ui.com/spec/1.0),
+its [HTTP/SSE transport guidance](https://docs.ag-ui.com/basic/transports/http-sse),
+and the [RunAgentInput definition](https://docs.ag-ui.com/spec/1.0/basic/run-input).
 
 ## Board Butler
 

@@ -206,6 +206,15 @@ evidence = ["docs/guides/portable-skills.md"]
 evidence_contains = ["integrations/skills/manage.py plan", "integrations/skills/manage.py install", "integrations/skills/manage.py check", "integrations/skills/manage.py remove"]
 
 [[artifacts]]
+id = "operator-tool:integrations/skills/pursers-install/scripts/bootstrap.py"
+kind = "operator-tool"
+source = "integrations/skills/pursers-install/scripts/bootstrap.py"
+state = "delivered"
+channel = "documented source command for planning and applying a new private local installation and checking its readiness facts"
+evidence = ["docs/guides/portable-skills.md"]
+evidence_contains = ["integrations/skills/pursers-install/scripts/bootstrap.py plan", "integrations/skills/pursers-install/scripts/bootstrap.py apply", "integrations/skills/pursers-install/scripts/bootstrap.py doctor"]
+
+[[artifacts]]
 id = "web-surface:packages/personal/src/pursers_personal/resources/dashboard.html"
 kind = "web-surface"
 source = "packages/personal/src/pursers_personal/resources/dashboard.html"

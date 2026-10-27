@@ -160,11 +160,15 @@ integration:
   confirmation. Follow [managed runner setup](guides/managed-runners.md). The
   flow does not copy native accounts into ACP or grant an ACP process access to
   the operator home directory.
-- The optional portable Agent Skills bundle provides narrow onboarding, work,
-  review, and operator workflows for Zed, Codex, and goose. Preview a
-  project-scoped install and verify host support with the
-  [portable skills guide](guides/portable-skills.md). Installing a skill does
-  not configure MCP, create credentials, or grant board authority.
+- The optional portable Agent Skills bundle provides installation, onboarding,
+  work, review, and operator workflows for Zed, Codex, and goose. The
+  `pursers-install` helper can plan and create a new private instance from the
+  pinned `pursers==5.2.1` release; it does not start Central or activate the
+  Fleet/autonomous harness. Use `pursers-start` for an existing installation
+  and authorized connection and identity setup. Preview a project-scoped skill
+  install and verify host support with the
+  [portable skills guide](guides/portable-skills.md). Skill presence alone is
+  not readiness.
 
 From a source checkout, the documented loopback Central default is explicit:
 

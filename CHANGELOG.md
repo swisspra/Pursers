@@ -7,6 +7,31 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Add a portable `pursers-install` skill and deterministic plan/apply/doctor
+  helper for a new private installation using `pursers==5.2.1`. The helper
+  preserves existing roots, records resumable progress without credential
+  contents, and reports service, board, and Fleet/harness readiness separately;
+  service activation and host/MCP configuration remain deferred.
+- Add finite read-only AG-UI 1.0 capability and SSE observation routes backed
+  only by already-loaded bounded Fleet detail caches. Mutation, run, resume,
+  and live journal streaming remain unavailable or deferred.
+- Refresh Fleet Projects around work, current stage, next action, publication,
+  final QA, and security evidence. Integration alone is never reported as ready
+  for team merge; missing facts and bounded coverage remain unknown.
+- Add an optional finite AG-UI observation consumer on the existing dashboard
+  refresh cadence, with abortable project scopes and fallback to the loaded Fleet
+  snapshot. A failed Central snapshot now shows connection recovery guidance
+  instead of first-project setup.
+- Fleet Projects now follows active Fleet-enabled project registry entries rather
+  than readable board discovery. Shared-board projects retain separate cards and
+  correct removal targets; shared work totals count once. Unregistered test boards
+  no longer appear as projects, and unavailable registry/summary data is explicit.
+- Fleet's detail event refresh now explicitly disables catchup activity touches
+  and cursor acknowledgements, so an admitted stale dashboard identity can read
+  without being reactivated or changing lease/member activity state.
+
 ## [5.2.1] - 2026-10-05
 
 This release includes `pursers-central==0.1.8`,

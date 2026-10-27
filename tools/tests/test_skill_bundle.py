@@ -37,6 +37,7 @@ def test_manifest_names_files_frontmatter_and_canonical_guides() -> None:
     assert MANIFEST["schema_version"] == 1
     assert MANIFEST["bundle_version"] == "1.0.0"
     assert [item["name"] for item in MANIFEST["skills"]] == [
+        "pursers-install",
         "pursers-start",
         "pursers-work",
         "pursers-review",
