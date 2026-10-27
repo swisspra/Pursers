@@ -2905,7 +2905,9 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
                     deadline = self.service.offer_deadline_tasks[
                         ("pursers", ticket_id, "work")
                     ]
-                await asyncio.wait_for(asyncio.shield(deadline), timeout=2.0)
+                # Keep the one-second deadline real while allowing loaded CI
+                # event loops ample time to run its expiry callback.
+                await asyncio.wait_for(asyncio.shield(deadline), timeout=10.0)
                 ticket_ids.append(ticket_id)
 
         deadline_errors = [

@@ -1,11 +1,3 @@
-> **Sonar–ADO VM source repository.** This repository combines upstream Pursers
-> 5.2.1 with the source captured from the existing VM on 2026-10-25.
-> The original snapshot preserves the observed VM state. The current source
-> includes the [projection recovery](docs/operations/PROJECTION-RECOVERY-5.2.1.md).
-> See the [VM source and operations guide](docs/operations/SONAR-ADO-VM.md)
-> for provenance, configuration boundaries, and the recovery backlog.
-> The upstream badges below describe upstream Pursers, not this VM fork's checks.
-
 <div align="center">
 
 # Chat dies. The board doesn't.
