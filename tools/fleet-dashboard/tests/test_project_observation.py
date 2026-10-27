@@ -58,13 +58,19 @@ globalThis.document = {{querySelector: selector => selector === '#state' ? dashb
 eval({json.dumps(registry)});
 eval({json.dumps(projects)});
 const escape = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;');
-const render = (fleetData, tickets = [], centrals = ['fixture']) => FleetViewModules.render('projects', {{
-  esc: escape, pageHead: () => '', warmTruthStrip: () => '', numberCount: Number,
-  boardHref: () => '#/board', centralLabels: centrals, fleetData,
-  warmBoards: () => tickets.length ? [{{central: 'fixture', board: {{
-    label: 'Demo', board_id: 'demo-board', status: 'ready', counts: {{}}, tickets,
-  }}}}] : [],
-}});
+const render = (fleetData, tickets = [], centrals = ['fixture']) => {{
+  if (tickets.length) fleetData.fixture = {{...fleetData.fixture,
+    registered_projects: [{{name: 'Demo', board_id: 'demo-board'}}],
+    boards: [{{label: 'Demo', board_id: 'demo-board', status: 'ready', counts: {{}}, tickets}}],
+  }};
+  return FleetViewModules.render('projects', {{
+    esc: escape, pageHead: () => '', warmTruthStrip: () => '', numberCount: Number,
+    boardHref: () => '#/board', centralLabels: centrals, fleetData,
+    warmBoards: () => tickets.length ? [{{central: 'fixture', board: {{
+      label: 'Demo', board_id: 'demo-board', status: 'ready', counts: {{}}, tickets,
+    }}}}] : [],
+  }});
+}};
 const unavailable = render({{}}, [], ['fixture']);
 dashboardState.textContent = 'Connecting to centrals…';
 const loading = render({{}}, [], ['fixture']);
@@ -72,7 +78,7 @@ const zeroCentrals = render({{default: {{generated_at: '2030-01-02', boards: []}
 const missingCompletion = render({{fixture: {{generated_at: '2030-01-02', boards: []}}}}, [], ['fixture']);
 const completionWithoutSnapshot = render({{fixture: {{refresh: {{complete: true}}}}}}, [], ['fixture']);
 dashboardState.textContent = 'Updated 2030-01-02';
-const confirmedEmpty = render({{fixture: {{generated_at: '2030-01-02', boards: [], refresh: {{complete: true}}}}}}, [], ['fixture']);
+const confirmedEmpty = render({{fixture: {{generated_at: '2030-01-02', boards: [], registered_projects: [], refresh: {{complete: true}}}}}}, [], ['fixture']);
 const draft = render({{fixture: {{generated_at: '2030-01-02', boards: [], refresh: {{complete: true}}}}}}, [{{
   id: 'TK-draft', title: 'Draft', status: 'closed', status_label: 'Approved · delivery pending',
   activity: {{stage: 'delivery', state: 'blocked', next_action: 'Complete final QA', blocking_reason: 'QA held; security pending', evidence_refs: ['ticket://demo/evidence']}},

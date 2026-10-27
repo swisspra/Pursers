@@ -61,7 +61,7 @@ python3 integrations/skills/manage.py install \
   --apply
 ```
 
-Open **AI > Skills** in Zed, select the Project scope, and confirm all four
+Open **AI > Skills** in Zed, select the Project scope, and confirm all five
 skills. A new worktree must be trusted before Zed loads its project skills.
 Use a native **Zed Agent** thread: external ACP agents have their own skill
 discovery and do not inherit Zed Agent skills.

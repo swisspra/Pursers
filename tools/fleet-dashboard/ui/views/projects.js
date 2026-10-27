@@ -108,6 +108,7 @@
 
   function projectCard(central, board) {
     const counts = board.counts || {};
+    const pending = board.status === 'pending' || !board.counts;
     const total = Object.values(counts).reduce((sum, value) => sum + numberCount(value), 0);
     const active = sumStates(counts, ACTIVE_STATES);
     const review = sumStates(counts, REVIEW_STATES);
@@ -117,21 +118,22 @@
       ? `<p class="projects-error error">Connection detail: ${esc(board.error)}</p>`
       : '';
 
-    return `<article class="board-card" data-board-id="${esc(board.board_id)}" data-projects-card data-central="${esc(central)}" data-pursers-board="${esc(board.board_id)}" data-pursers-status="${esc(board.status || 'unknown')}">
+    return `<article class="board-card" data-board-id="${esc(board.board_id)}" data-projects-card data-project-name="${esc(board.label)}" data-central="${esc(central)}" data-pursers-board="${esc(board.board_id)}" data-pursers-status="${esc(board.status || 'unknown')}">
       <header class="projects-board-heading">
         <span class="projects-signal" data-tone="${esc(health.tone)}" aria-hidden="true"></span>
         <div><h3>${esc(board.label)}</h3><p class="projects-route">Central connection · ${esc(central)}</p></div>
         <span class="status projects-health" data-tone="${esc(health.tone)}">${esc(health.label)}</span>
       </header>
+      ${board.shared ? '<p class="meta">Shared board totals; these counts cover all projects on this board.</p>' : ''}
       <dl class="projects-work" aria-label="Work snapshot for ${esc(board.label)}">
-        <div><dt>Ready to start</dt><dd>${esc(open)}</dd></div>
-        <div><dt>In progress</dt><dd>${esc(active)}</dd></div>
-        <div><dt>Review ready</dt><dd>${esc(review)}</dd></div>
+        <div><dt>Ready to start</dt><dd>${pending ? '—' : esc(open)}</dd></div>
+        <div><dt>In progress</dt><dd>${pending ? '—' : esc(active)}</dd></div>
+        <div><dt>Review ready</dt><dd>${pending ? '—' : esc(review)}</dd></div>
       </dl>
       <details class="projects-records" data-project-records data-state-key="${esc(`project-records:${central}:${board.board_id}`)}">
         <summary>Project identifiers, ticket details, and all reported states</summary>
-        <p class="projects-identifiers">Central: <code>${esc(central)}</code> · Board ID: <code>${esc(board.board_id)}</code> · ${esc(total)} ticket states counted in the Fleet summary.</p>
-        <div class="counts projects-state-list">${statePills(counts)}</div>
+        <p class="projects-identifiers">Central: <code>${esc(central)}</code> · Board ID: <code>${esc(board.board_id)}</code> · ${pending ? 'Summary pending' : `${esc(total)} ticket states counted in the Fleet summary.`}</p>
+        <div class="counts projects-state-list">${pending ? '<span>Summary pending</span>' : statePills(counts)}</div>
         <div data-ag-ui-observation>${ticketDetails(board.tickets || [], legacyCoverage(board))}</div>
       </details>
       <div class="projects-board-actions">
@@ -485,18 +487,40 @@
   }
 
   function renderWarmProjects() {
-    const rows = warmBoards();
+    const rows = [];
+    const unavailable = [];
+    const loading = [];
+    for (const central of centralLabels) {
+      const data = fleetData?.[central];
+      if (!Array.isArray(data?.registered_projects)) {
+        const sourceBacked = Boolean(data && typeof data.generated_at === 'string'
+          && Array.isArray(data.boards) && data.refresh?.complete === true);
+        if (!sourceBacked || data.refresh?.discovery_complete === false) loading.push(central);
+        else unavailable.push(central);
+        continue;
+      }
+      const projects = data.registered_projects;
+      const boards = new Map((data.boards || []).map(board => [board.board_id, board]));
+      const membership = new Map();
+      for (const project of projects) membership.set(project.board_id, (membership.get(project.board_id) || 0) + 1);
+      for (const project of projects) {
+        const board = boards.get(project.board_id) || {board_id: project.board_id, status: 'pending'};
+        rows.push({central, board: {...board, label: project.name, shared: membership.get(project.board_id) > 1}});
+      }
+    }
+    // Ticket totals belong to boards, so shared-board projects count once here.
+    const uniqueBoards = [...new Map(rows.map(row => [JSON.stringify([row.central, row.board.board_id]), row])).values()];
     const groups = new Map();
     for (const {central, board} of rows) {
       const boards = groups.get(central) || [];
       boards.push(board);
       groups.set(central, boards);
     }
-    const active = rows.reduce(
+    const active = uniqueBoards.reduce(
       (sum, {board}) => sum + sumStates(board.counts || {}, ACTIVE_STATES),
       0,
     );
-    const review = rows.reduce(
+    const review = uniqueBoards.reduce(
       (sum, {board}) => sum + sumStates(board.counts || {}, REVIEW_STATES),
       0,
     );
@@ -507,10 +531,12 @@
     </section>` : '';
     const content = rows.length
       ? [...groups.entries()].map(([central, boards]) => centralGroup(central, boards)).join('')
-      : emptyProjects();
+      : unavailable.length ? '' : emptyProjects();
+    const registryNotice = unavailable.length ? `<p class="error" role="status">Project registry unavailable: ${unavailable.map(esc).join(', ')}. Registered projects will appear when the registry is available.</p>` : '';
+    const loadingNotice = loading.length && rows.length ? `<p class="meta" role="status">Waiting for a source-backed project snapshot from ${loading.map(esc).join(', ')}.</p>` : '';
 
     const setup = `<details class="projects-tools" data-project-tools data-state-key="projects-tools"><summary>Project setup and delivery policy</summary>${deliveryEditor()}${addProjectForm()}</details>`;
-    return `${pageHead('Projects', 'Your project map', 'See each project’s Central connection, current work, and next action.', action)}${warmTruthStrip()}${lifecycleOutcome()}${lifecyclePreview()}${summary}<div class="projects-map">${content}</div>${setup}`;
+    return `${pageHead('Projects', 'Your project map', 'Active registered projects and their boards. Work counts are board totals; shared boards count once in the summary.', action)}${warmTruthStrip()}${lifecycleOutcome()}${lifecyclePreview()}${registryNotice}${loadingNotice}${summary}<div class="projects-map">${content}</div>${setup}`;
   }
 
   async function postLifecycle(path, central, payload) {
