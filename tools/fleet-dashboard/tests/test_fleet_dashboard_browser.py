@@ -280,7 +280,7 @@ const page = task.page("p1");
 let stage = 'load';
 try {{
 await page.goto({json.dumps(url)});
-await page.locator('[data-project-tools] > summary').focus();
+await page.focus('[data-project-tools] > summary');
 await page.keyboard.press('Enter');
 await page.waitForFunction(() => document.querySelector('[data-project-tools]')?.open === true, undefined, {{timeout: 10000}});
 await page.waitForFunction(() => document.querySelector('#project-delivery-form select[name="name"]')?.value === 'alpha', undefined, {{timeout: 10000}});
