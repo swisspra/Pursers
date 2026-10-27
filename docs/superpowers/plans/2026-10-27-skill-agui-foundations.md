@@ -1,6 +1,6 @@
 # Skill-first installation and AG-UI foundations Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Deliver an install Skill with deterministic bootstrap, a read-only AG-UI observation seam, and a calmer human project journey without waiting for autonomous harness patches.
 
@@ -46,11 +46,11 @@
 - Produces: bundled helper CLI `python scripts/bootstrap.py plan|apply|doctor --root PATH` with machine-readable JSON. plan is read-only; apply requires `--apply` and only operates under a plan-owned private root. doctor is read-only and reports central initialization separately from runtime/agent readiness. Include clear capabilities/deferred components.
 - Plan fields: schema_version, root, release, steps, blockers, next_action, ready_for_work=false. Never include credential contents.
 
-- [ ] Read skill-creator SKILL and current manager/manifest/tests. Preserve scoped host installation semantics.
-- [ ] Write failing meaningful tests for plan no writes, new apply with controlled subprocess runner, repeat apply, existing foreign root, symlink refusal, failed initialization, secret-free results and skill bundle install/check/remove.
-- [ ] Implement a self-contained install Skill and helper. Use pinned package in a private venv, canonical Central init only for a fresh owned instance, and atomic receipt for resumability. Do not start services or edit MCP/global host config. Existing installations route to pursers-start rather than reset.
-- [ ] Test actual temporary bootstrap CLI plan/doctor and manager preview/install/repeat/check/remove. Mock only network/package subprocesses in unit tests; use real filesystem receipts.
-- [ ] Update guides/changelog with exact available commands and honestly deferred Fleet/harness activation. Commit and write full report with red/green commands/output.
+- [x] Read skill-creator SKILL and current manager/manifest/tests. Preserve scoped host installation semantics.
+- [x] Write failing meaningful tests for plan no writes, new apply with controlled subprocess runner, repeat apply, existing foreign root, symlink refusal, failed initialization, secret-free results and skill bundle install/check/remove.
+- [x] Implement a self-contained install Skill and helper. Use pinned package in a private venv, canonical Central init only for a fresh owned instance, and atomic receipt for resumability. Do not start services or edit MCP/global host config. Existing installations route to pursers-start rather than reset.
+- [x] Test actual temporary bootstrap CLI plan/doctor and manager preview/install/repeat/check/remove. Mock only network/package subprocesses in unit tests; use real filesystem receipts.
+- [x] Update guides/changelog with exact available commands and honestly deferred Fleet/harness activation. Commit and write full report with red/green commands/output.
 
 ### Task 2: Harness-independent read-only AG-UI observation
 
@@ -62,14 +62,14 @@
 - Modify: CHANGELOG.md
 
 **Interfaces:**
-- Consumes: existing Fleet cached bounded project/ticket activity and existing loopback/same-origin guards; no new Central client identity or provider.
+- Consumes: existing Fleet cached bounded project/ticket activity and existing loopback/same-origin guards; no new Central client identity or provider. Add a locked peek-only TimedCache/DashboardCache accessor that never calls get/load/runner or starts refresh; cold cache returns explicit unavailable. Prefer already-warm detail, otherwise an existing fleet summary for that board.
 - Produces: GET /api/ag-ui/capabilities, POST /api/ag-ui/observe. A finite response uses application/json capabilities and text/event-stream observation with RUN_STARTED(protocolVersion=1.0), bounded STATE_SNAPSHOT, ACTIVITY_SNAPSHOT where available, RUN_FINISHED. Raw state retains existing authority/coverage/freshness flags and distinct delivery states. Mutation/run/resume capabilities explicitly false/deferred; existing mutation APIs unchanged.
 - Observation scope uses the existing query selectors `central` and required `board_id`; RunAgentInput contains threadId, runId, messages=[], tools=[], context=[], state={} (empty or absent optional values). Reject nonempty client messages/tools/state for this read-only endpoint. Unsupported IDs/scope/input must reject before opening SSE. No per-ticket stream, background threads, new dependency, or unbounded history. Validate runId/threadId and read-only scope; client-supplied state/tools never cause actions. Transport failure is not domain failure.
 
-- [ ] Write failing tests for lifecycle/schema/order, correct scope, loopback/origin guards, invalid and oversized inputs, unknown versus zero, escaping/secret exclusion, no provider/lease mutations, and finite connection release.
-- [ ] Add small pure event projection/encoding module and thin HTTP routes using current cache/guard methods. Never emit raw full ticket histories or credential/config dumps.
-- [ ] Verify with real throwaway HTTP server requests and exact event payloads, including a held Draft fixture. Observation completes without asserting workflow completion.
-- [ ] Run affected Fleet tests once and document finite observation versus deferred live journal streaming honestly. Commit/report for independent review.
+- [x] Write failing tests for lifecycle/schema/order, correct scope, loopback/origin guards, invalid and oversized inputs, unknown versus zero, escaping/secret exclusion, no provider/lease mutations, finite connection release, and a real DashboardCache accessor test proving no loader/client constructor runs on warm or cold observation.
+- [x] Add small pure event projection/encoding module and thin HTTP routes using current cache/guard methods. Never emit raw full ticket histories or credential/config dumps.
+- [x] Verify with real throwaway HTTP server requests and exact event payloads, including a held Draft fixture. Observation completes without asserting workflow completion.
+- [x] Run affected Fleet tests once and document finite observation versus deferred live journal streaming honestly. Commit/report for independent review.
 
 ### Task 3: Human project and delivery UX with observation consumer
 
@@ -88,10 +88,10 @@
 - Consumes: Task 2 finite observation endpoint and existing boardHref, guarded project lifecycle/intake, cache refresh and typed activity.
 - Produces: optional scoped `PursersAgUi.observe` consumer returning validated view data with AbortSignal; no independent periodic timer. Integrate into existing refresh cadence only. Abort/ignore old-scope responses and preserve legacy read API fallback.
 
-- [ ] Write meaningful tests for observer lifecycle/error handling, stale project response rejection and Draft+QA-held/security-pending not-ready labels. Add cases for integration_merged without final QA evidence and unknown/missing coverage. Real browser BASELINE reproduces unavailable Central + zero visible boards incorrectly showing Connect your first project; pin and fix this state, with an actionable connection-recovery label rather than false first-run.
-- [ ] Clarify Projects: Add work label, explicit current stage/next action, separate publication/QA/security readiness, calm empty-project install guidance. Reuse existing guarded intake entry; do not invent a second submission API or mark a queued request started.
-- [ ] Move technical identifiers and all-reported-states into discoverable details; retain important project identity and all controls. Label Central as connection rather than coordinator. Keep removal in secondary actions with existing preview/confirmation.
-- [ ] Add minimal responsive layout and focus/press feedback respecting effective theme tokens and reduced motion; mutations remain click/key-triggered. No new UI framework.
+- [x] Write meaningful tests for observer lifecycle/error handling, stale project response rejection and Draft+QA-held/security-pending not-ready labels. Add cases for integration_merged without final QA evidence and unknown/missing coverage. Real browser BASELINE reproduces unavailable Central + zero visible boards incorrectly showing Connect your first project; pin and fix this state, with an actionable connection-recovery label rather than false first-run.
+- [x] Clarify Projects: Add work label, explicit current stage/next action, separate publication/QA/security readiness, calm empty-project install guidance. Reuse existing guarded intake entry; do not invent a second submission API or mark a queued request started.
+- [x] Move technical identifiers and all-reported-states into discoverable details; retain important project identity and all controls. Label Central as connection rather than coordinator. Keep removal in secondary actions with existing preview/confirmation.
+- [x] Add minimal responsive layout and focus/press feedback respecting effective theme tokens and reduced motion; mutations remain click/key-triggered. No new UI framework.
 - [ ] Validate DOM behavior and actual rendered desktop/200% zoom/light/dark screens via available browser harness. No fake passing state or model calls. Run affected tests/typecheck, update docs, commit/report.
 
 ## Integration and gates
