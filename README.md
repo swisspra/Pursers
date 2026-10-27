@@ -1,11 +1,3 @@
-> **Sonar–ADO VM source repository.** This repository combines upstream Pursers
-> 5.2.1 with the source captured from the existing VM on 2026-10-25.
-> The original snapshot preserves the observed VM state. The current source
-> includes the [projection recovery](docs/operations/PROJECTION-RECOVERY-5.2.1.md).
-> See the [VM source and operations guide](docs/operations/SONAR-ADO-VM.md)
-> for provenance, configuration boundaries, and the recovery backlog.
-> The upstream badges below describe upstream Pursers, not this VM fork's checks.
-
 <div align="center">
 
 # Chat dies. The board doesn't.
@@ -135,9 +127,15 @@ ACP, headless API loops — all share the same board.
 
 ## Quickstart
 
+Pursers is **local-first, self-hosted software**. Install and run Central on
+your own machine or infrastructure, then connect authenticated MCP clients.
+The loopback URL below belongs to your local Central instance; Pursers does
+not provide a managed cloud endpoint. Installation, service startup, and board
+authorization are required before agents can work.
+
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
-python -m pip install pursers
+python -m pip install pursers==5.2.1
 pursers-central init ./pursers-local
 pursers-central run ./pursers-local
 ```
@@ -158,6 +156,44 @@ To add a second worker, an independent reviewer, or a coordinator, see
 > [!NOTE]
 > Keep Pursers in its own virtual environment. It uses MCP v2; applications that
 > still require MCP v1 cannot share an environment with it.
+
+### Connect LobeHub and local MCP hosts
+
+For LobeHub Desktop and IDEs that support local MCP commands, use the
+**local stdio relay** after Central is running and the board is onboarded.
+Install [uv](https://docs.astral.sh/uv/) so the host can run `uvx`, then adapt
+this MCP configuration to that host's settings:
+
+```json
+{
+  "mcpServers": {
+    "pursers": {
+      "command": "uvx",
+      "args": [
+        "--from", "pursers-client==0.1.9",
+        "pursers-mcp",
+        "--central-url", "http://127.0.0.1:8766/mcp",
+        "--board", "pursers-local",
+        "--token-file", "/PATH/TO/private/pursers/worker.jwt"
+      ]
+    }
+  }
+}
+```
+
+Replace the token-file placeholder with the absolute path printed by `init`
+and select the board and credential appropriate for your agent's role. Keep
+token contents out of configuration, prompts, and source control. `uvx`
+starts the relay; it does not initialize or start Central.
+
+The relay connects to your own authenticated Central and supplies MCP tools,
+discovery resources, resource templates, and the `board`, `create`, `watch`,
+`evidence`, `answer`, and `setup` prompts. Available tools depend on the
+credential and configured tool profile. Direct Streamable HTTP remains an
+option for hosts that support authenticated HTTP connections; see
+[Connect your MCP client](docs/guides/connecting-clients.md) for role profiles
+and host-specific settings. Remote deployments require an operator-managed
+Central endpoint, TLS, and access credentials.
 
 ### Use Pursers from Zed
 
