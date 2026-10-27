@@ -19,6 +19,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Preserve validated workflow and recovery metadata when reading or extending an existing project registry, so dispatch-policy maintenance and new Sonar project onboarding remain compatible with existing workflows.
+
 - Make CI fixtures independent of operator Git identity and host interpreter site-packages, regenerate the Python 3.12 CLI reference, and give the one-second Central dispatch-deadline regression test a bounded allowance for loaded event loops without changing runtime timing.
 - Remove an obsolete VM-fork notice from the upstream README.
 

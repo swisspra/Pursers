@@ -93,6 +93,7 @@ async def _seed_board(
     principal_id: str,
     *,
     butler_membership_role: str = "admin",
+    runtime_metadata: bool = False,
 ) -> None:
     mcp, service = central.build_server("127.0.0.1", port, data_root)
     admin = central.Principal(
@@ -180,6 +181,12 @@ async def _seed_board(
                             "work_dir": "/PATH/TO/SecondProject",
                             "status": "active",
                         },
+                        **({"workflow-metadata": {
+                            "board_id": "other-workflow-board",
+                            "work_dir": "/PATH/TO/WorkflowProject",
+                            "status": "paused",
+                            "butler_recovery_policy": {"schema_version": 1, "enabled": False},
+                        }} if runtime_metadata else {}),
                     },
                 },
             ),
@@ -948,7 +955,7 @@ def test_existing_dispatch_policy_maintenance_uses_existing_central_board(
     previous = os.environ.copy()
     os.environ.update(environment)
     try:
-        asyncio.run(_seed_board(data_root, port, principal_id))
+        asyncio.run(_seed_board(data_root, port, principal_id, runtime_metadata=True))
     finally:
         os.environ.clear()
         os.environ.update(previous)
@@ -991,6 +998,7 @@ def test_existing_dispatch_policy_maintenance_uses_existing_central_board(
     async def exercise(url: str) -> None:
         write_policy(include_tier=True, models={"1": ["model-a"]})
         async with butler.CentralBackend(options(url), token) as backend:
+            registry_before = await backend.client.board_state_get("project_registry")
             before = (await backend.client._call("board_status", {}))["dispatch_policy"]
             assert await backend.apply_existing_dispatch_policy(dry_run=True) == 0
             preview = json.loads(capsys.readouterr().out)
@@ -1017,6 +1025,8 @@ def test_existing_dispatch_policy_maintenance_uses_existing_central_board(
             assert await backend.apply_existing_dispatch_policy(dry_run=False) == 0
             no_op = json.loads(capsys.readouterr().out)
             assert all(row["status"] == "unchanged" for row in no_op["results"])
+            registry_after = await backend.client.board_state_get("project_registry")
+            assert registry_after["state"]["value"] == registry_before["state"]["value"]
 
         write_policy(include_tier=False, models={}, include_second=False)
         async with butler.CentralBackend(options(url), token) as backend:

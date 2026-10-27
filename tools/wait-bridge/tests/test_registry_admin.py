@@ -789,3 +789,43 @@ def test_registry_loaders_reject_malformed_delivery_activation():
         registry_admin.validate_registry(raw)
     with pytest.raises(registry_doctor.DoctorError, match='delivery_policy_activation'):
         registry_doctor.parse_registry({'state': {'value': raw}})
+
+
+def test_registry_writer_preserves_existing_workflow_metadata():
+    from pursers_client.project_workflow import parse_project_workflow, policy_digest
+    document = json.loads(json.dumps(INITIAL))
+    workflow = {
+        "schema_version": 1, "workflow_id": "workflow:alpha", "project_id": "alpha",
+        "board_id": "alpha-board", "cohort_id": "cohort:alpha", "sealed": True,
+        "nodes": [{"node_id": "fix", "ticket_id": "TK-fix", "requires": [],
+                   "acceptance_checks": ["independent review"]}],
+        "final_validation": {"title": "Validate cohort", "acceptance_checks": ["configured checks"]},
+    }
+    normalized = parse_project_workflow(workflow, project_id="alpha", board_id="alpha-board")
+    entry = document["projects"]["alpha"]
+    entry["butler_workflow"] = workflow
+    entry["butler_workflow_activation"] = {
+        "schema_version": 1, "state": "active", "activation_id": "activation-alpha",
+        "policy_sha256": policy_digest(normalized),
+    }
+    entry["butler_recovery_policy"] = {"schema_version": 1, "project_id": "alpha", "enabled": False}
+    assert registry_admin.validate_registry(document) == document
+    # Adding an unrelated source project must retain the existing policy envelope.
+    document["projects"]["new-source"] = {
+        "board_id": "new-board", "work_dir": "/synthetic/new", "status": "active",
+    }
+    assert registry_admin.validate_registry(document)["projects"]["alpha"] == entry
+    entry["butler_workflow_activation"]["policy_sha256"] = "0" * 64
+    with pytest.raises(registry_admin.RegistryError):
+        registry_admin.validate_registry(document)
+
+
+@pytest.mark.parametrize("recovery", [None, [], {"schema_version": 2},
+    {"schema_version": 1, "project_id": "other"},
+    {"schema_version": 1, "enabled": "yes"},
+    {"schema_version": 1, "payload": "x" * 65537}])
+def test_registry_writer_rejects_invalid_recovery_metadata(recovery):
+    document = json.loads(json.dumps(INITIAL))
+    document["projects"]["alpha"]["butler_recovery_policy"] = recovery
+    with pytest.raises(registry_admin.RegistryError):
+        registry_admin.validate_registry(document)

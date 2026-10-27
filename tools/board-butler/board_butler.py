@@ -14546,7 +14546,11 @@ class CentralBackend:
 
     async def apply_existing_dispatch_policy(self, *, dry_run: bool) -> int:
         """Apply one fully validated source-policy plan to existing boards only."""
-        registry, _registry_digest = await CentralProjectRegistry(self).snapshot()
+        # This is a read-only routing projection, like ordinary source intake.
+        # Writer schema validation would reject unrelated workflow/recovery metadata.
+        from pursers_client.project_registry import parse_project_registry
+
+        registry = parse_project_registry(await self.client.board_state_get("project_registry"))
         plans, skipped, failures = plan_existing_dispatch_policy(
             self._project_onboarding_policies, registry
         )
